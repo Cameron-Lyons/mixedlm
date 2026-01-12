@@ -1,17 +1,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Callable
-import warnings
+from typing import TYPE_CHECKING
 
 import numpy as np
 from numpy.typing import NDArray
 from scipy import stats
 
 if TYPE_CHECKING:
-    import pandas as pd
-    from mixedlm.models.lmer import LmerResult
     from mixedlm.models.glmer import GlmerResult
+    from mixedlm.models.lmer import LmerResult
 
 
 @dataclass
@@ -97,8 +95,9 @@ def bootstrap_lmer(
     parallel: bool = False,
     verbose: bool = False,
 ) -> BootstrapResult:
-    from mixedlm.models.lmer import LmerMod
     import pandas as pd
+
+    from mixedlm.models.lmer import LmerMod
 
     if seed is not None:
         np.random.seed(seed)
@@ -178,17 +177,15 @@ def _simulate_lmer(result: LmerResult) -> NDArray[np.floating]:
             n_levels = struct.n_levels
             n_terms = struct.n_terms
 
-            from mixedlm.estimation.reml import _build_lambda
             theta_start = sum(
                 s.n_terms * (s.n_terms + 1) // 2 if s.correlated else s.n_terms
-                for s in result.matrices.random_structures[:result.matrices.random_structures.index(struct)]
+                for s in result.matrices.random_structures[
+                    : result.matrices.random_structures.index(struct)
+                ]
             )
-            if struct.correlated:
-                n_theta = n_terms * (n_terms + 1) // 2
-            else:
-                n_theta = n_terms
+            n_theta = n_terms * (n_terms + 1) // 2 if struct.correlated else n_terms
 
-            theta_block = result.theta[theta_start:theta_start + n_theta]
+            theta_block = result.theta[theta_start : theta_start + n_theta]
 
             if struct.correlated:
                 L = np.zeros((n_terms, n_terms))
@@ -227,8 +224,9 @@ def bootstrap_glmer(
     type: str = "parametric",
     verbose: bool = False,
 ) -> BootstrapResult:
-    from mixedlm.models.glmer import GlmerMod
     import pandas as pd
+
+    from mixedlm.models.glmer import GlmerMod
 
     if seed is not None:
         np.random.seed(seed)
@@ -293,8 +291,6 @@ def bootstrap_glmer(
 
 
 def _simulate_glmer(result: GlmerResult) -> NDArray[np.floating]:
-    from mixedlm.estimation.laplace import _build_lambda
-
     n = result.matrices.n_obs
     q = result.matrices.n_random
 
@@ -308,14 +304,13 @@ def _simulate_glmer(result: GlmerResult) -> NDArray[np.floating]:
 
             theta_start = sum(
                 s.n_terms * (s.n_terms + 1) // 2 if s.correlated else s.n_terms
-                for s in result.matrices.random_structures[:result.matrices.random_structures.index(struct)]
+                for s in result.matrices.random_structures[
+                    : result.matrices.random_structures.index(struct)
+                ]
             )
-            if struct.correlated:
-                n_theta = n_terms * (n_terms + 1) // 2
-            else:
-                n_theta = n_terms
+            n_theta = n_terms * (n_terms + 1) // 2 if struct.correlated else n_terms
 
-            theta_block = result.theta[theta_start:theta_start + n_theta]
+            theta_block = result.theta[theta_start : theta_start + n_theta]
 
             if struct.correlated:
                 L = np.zeros((n_terms, n_terms))

@@ -5,7 +5,6 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 from numpy.typing import NDArray
-from scipy import linalg
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -26,7 +25,9 @@ class NlmerVarCorr:
             for i, (name, var) in enumerate(terms.items()):
                 grp_name = group if i == 0 else ""
                 lines.append(f" {grp_name:11} {name:12} {var:9.4f}  {np.sqrt(var):.4f}")
-        lines.append(f" {'Residual':11} {' ':12} {self.residual:9.4f}  {np.sqrt(self.residual):.4f}")
+        lines.append(
+            f" {'Residual':11} {' ':12} {self.residual:9.4f}  {np.sqrt(self.residual):.4f}"
+        )
         return "\n".join(lines)
 
 
@@ -48,10 +49,10 @@ class NlmerResult:
     group_levels: list[str]
 
     def fixef(self) -> dict[str, float]:
-        return dict(zip(self.model.param_names, self.phi))
+        return dict(zip(self.model.param_names, self.phi, strict=False))
 
     def ranef(self) -> dict[str, dict[str, NDArray[np.floating]]]:
-        n_groups = self.b.shape[0]
+        self.b.shape[0]
         random_param_names = [self.model.param_names[i] for i in self.random_params]
 
         term_ranefs: dict[str, NDArray[np.floating]] = {}
@@ -62,7 +63,7 @@ class NlmerResult:
 
     def coef(self) -> dict[str, dict[str, NDArray[np.floating]]]:
         n_groups = self.b.shape[0]
-        random_param_names = [self.model.param_names[i] for i in self.random_params]
+        [self.model.param_names[i] for i in self.random_params]
 
         group_coef: dict[str, NDArray[np.floating]] = {}
         for j, p_idx in enumerate(self.random_params):
@@ -146,7 +147,7 @@ class NlmerResult:
         return NlmerVarCorr(groups=groups, residual=self.sigma**2)
 
     def logLik(self) -> float:
-        n = len(self.y)
+        len(self.y)
         return -0.5 * self.deviance
 
     def AIC(self) -> float:
@@ -160,12 +161,14 @@ class NlmerResult:
 
     def summary(self) -> str:
         lines = []
-        lines.append(f"Nonlinear mixed model fit by maximum likelihood")
+        lines.append("Nonlinear mixed model fit by maximum likelihood")
         lines.append(f" Model: {self.model.name}")
         lines.append("")
 
-        lines.append(f"     AIC      BIC   logLik deviance")
-        lines.append(f"{self.AIC():8.1f} {self.BIC():8.1f} {self.logLik():8.1f} {self.deviance:8.1f}")
+        lines.append("     AIC      BIC   logLik deviance")
+        lines.append(
+            f"{self.AIC():8.1f} {self.BIC():8.1f} {self.logLik():8.1f} {self.deviance:8.1f}"
+        )
         lines.append("")
 
         lines.append(str(self.VarCorr()))

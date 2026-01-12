@@ -97,9 +97,7 @@ def build_fixed_matrix(
     return X, names
 
 
-def _encode_variable(
-    name: str, data: pd.DataFrame
-) -> tuple[list[NDArray[np.floating]], list[str]]:
+def _encode_variable(name: str, data: pd.DataFrame) -> tuple[list[NDArray[np.floating]], list[str]]:
     col = data[name]
 
     if col.dtype == object or col.dtype.name == "category":
@@ -109,10 +107,9 @@ def _encode_variable(
 
 
 def _encode_categorical(
-    name: str, col: pd.Series  # type: ignore[type-arg]
+    name: str,
+    col: pd.Series,  # type: ignore[type-arg]
 ) -> tuple[list[NDArray[np.floating]], list[str]]:
-    import pandas as pd
-
     if col.dtype.name == "category":
         categories = col.cat.categories.tolist()
     else:
@@ -154,7 +151,7 @@ def _encode_interaction(
             return
 
         cols, nms = encoded_vars[idx]
-        for col, nm in zip(cols, nms):
+        for col, nm in zip(cols, nms, strict=False):
             new_col = current_col * col
             new_name = f"{current_name}:{nm}" if current_name else nm
             _product(idx + 1, new_col, new_name)

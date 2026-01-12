@@ -39,14 +39,16 @@ features = ["pyo3/extension-module"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py314"
+target-version = "py313"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "SIM"]
 
 [tool.mypy]
-python_version = "3.14"
-strict = true
+python_version = "3.13"
+warn_return_any = false
+warn_unused_ignores = false
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -1,11 +1,11 @@
 from mixedlm.nlme.models import (
     NonlinearModel,
     SSasymp,
-    SSlogis,
-    SSmicmen,
+    SSbiexp,
     SSfpl,
     SSgompertz,
-    SSbiexp,
+    SSlogis,
+    SSmicmen,
 )
 
 __all__ = [

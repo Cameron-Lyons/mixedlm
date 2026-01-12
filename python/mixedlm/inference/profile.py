@@ -6,11 +6,11 @@ from typing import TYPE_CHECKING
 import numpy as np
 from numpy.typing import NDArray
 from scipy import stats
-from scipy.optimize import brentq, minimize_scalar
+from scipy.optimize import brentq
 
 if TYPE_CHECKING:
-    from mixedlm.models.lmer import LmerResult
     from mixedlm.models.glmer import GlmerResult
+    from mixedlm.models.lmer import LmerResult
 
 
 @dataclass
@@ -30,9 +30,6 @@ def profile_lmer(
     n_points: int = 20,
     level: float = 0.95,
 ) -> dict[str, ProfileResult]:
-    from mixedlm.estimation.reml import profiled_deviance, _build_lambda, _count_theta
-    from mixedlm.matrices.design import ModelMatrices
-
     if which is None:
         which = result.matrices.fixed_names
     elif isinstance(which, str):
@@ -61,13 +58,11 @@ def profile_lmer(
         zeta_values = np.zeros(n_points)
 
         for i, val in enumerate(param_values):
-            dev = _profile_deviance_at_beta(
-                result, idx, val
-            )
+            dev = _profile_deviance_at_beta(result, idx, val)
             sign = 1 if val >= mle else -1
             zeta_values[i] = sign * np.sqrt(max(0, dev - dev_mle))
 
-        def zeta_func(val: float) -> float:
+        def zeta_func(val: float, idx: int = idx, mle: float = mle) -> float:
             dev = _profile_deviance_at_beta(result, idx, val)
             sign = 1 if val >= mle else -1
             return sign * np.sqrt(max(0, dev - dev_mle))
@@ -108,8 +103,9 @@ def _profile_deviance_at_beta(
     idx: int,
     value: float,
 ) -> float:
-    from mixedlm.estimation.reml import profiled_deviance, _build_lambda
     from scipy import linalg, sparse
+
+    from mixedlm.estimation.reml import _build_lambda
 
     matrices = result.matrices
     theta = result.theta
@@ -187,10 +183,7 @@ def _profile_deviance_at_beta(
 
     pwrss = np.dot(resid, resid) + np.dot(u_star, u_star)
 
-    if result.REML:
-        denom = n - p
-    else:
-        denom = n
+    denom = n - p if result.REML else n
 
     sigma2 = pwrss / denom
 

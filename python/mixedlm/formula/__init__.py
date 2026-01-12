@@ -1,10 +1,10 @@
 from mixedlm.formula.parser import parse_formula
 from mixedlm.formula.terms import (
-    Formula,
     FixedTerm,
-    RandomTerm,
-    InterceptTerm,
+    Formula,
     InteractionTerm,
+    InterceptTerm,
+    RandomTerm,
 )
 
 __all__ = [

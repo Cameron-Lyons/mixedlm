@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-import re
+from collections.abc import Iterator
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import Iterator
 
 from mixedlm.formula.terms import (
     FixedTerm,
@@ -106,8 +105,7 @@ class Lexer:
             elif ch.isalpha() or ch == "_" or ch == ".":
                 ident = ""
                 while (
-                    self.peek() is not None
-                    and (self.peek().isalnum() or self.peek() in "_.")  # type: ignore[union-attr]
+                    self.peek() is not None and (self.peek().isalnum() or self.peek() in "_.")  # type: ignore[union-attr]
                 ):
                     ident += self.advance()  # type: ignore[operator]
                 yield Token(TokenType.IDENTIFIER, ident, start_pos)
@@ -148,7 +146,7 @@ class Parser:
         for term in fixed_terms:
             if isinstance(term, tuple) and term[0] == "no_intercept":
                 has_intercept = False
-            elif isinstance(term, (InterceptTerm, VariableTerm, InteractionTerm)):
+            elif isinstance(term, InterceptTerm | VariableTerm | InteractionTerm):
                 filtered_terms.append(term)
 
         fixed = FixedTerm(terms=tuple(filtered_terms), has_intercept=has_intercept)
@@ -236,10 +234,7 @@ class Parser:
         else:
             left_vars = left.variables
 
-        if isinstance(right, VariableTerm):
-            right_vars = (right.name,)
-        else:
-            right_vars = right.variables
+        right_vars = (right.name,) if isinstance(right, VariableTerm) else right.variables
 
         return InteractionTerm(left_vars + right_vars)
 

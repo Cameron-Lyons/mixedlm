@@ -46,7 +46,7 @@ class GlmerResult:
     nAGQ: int
 
     def fixef(self) -> dict[str, float]:
-        return dict(zip(self.matrices.fixed_names, self.beta))
+        return dict(zip(self.matrices.fixed_names, self.beta, strict=False))
 
     def ranef(self) -> dict[str, dict[str, NDArray[np.floating]]]:
         result: dict[str, dict[str, NDArray[np.floating]]] = {}
@@ -233,8 +233,9 @@ class GlmerResult:
         seed: int | None = None,
     ) -> dict[str, tuple[float, float]]:
         from scipy import stats
-        from mixedlm.inference.profile import profile_glmer
+
         from mixedlm.inference.bootstrap import bootstrap_glmer
+        from mixedlm.inference.profile import profile_glmer
 
         if parm is None:
             parm = self.matrices.fixed_names
@@ -270,13 +271,17 @@ class GlmerResult:
 
     def summary(self) -> str:
         lines = []
-        lines.append(f"Generalized linear mixed model fit by maximum likelihood (Laplace)")
-        lines.append(f" Family: {self.family.__class__.__name__} ({self.family.link.__class__.__name__})")
+        lines.append("Generalized linear mixed model fit by maximum likelihood (Laplace)")
+        lines.append(
+            f" Family: {self.family.__class__.__name__} ({self.family.link.__class__.__name__})"
+        )
         lines.append(f"Formula: {self.formula}")
         lines.append("")
 
-        lines.append(f"     AIC      BIC   logLik deviance")
-        lines.append(f"{self.AIC():8.1f} {self.BIC():8.1f} {self.logLik():8.1f} {self.deviance:8.1f}")
+        lines.append("     AIC      BIC   logLik deviance")
+        lines.append(
+            f"{self.AIC():8.1f} {self.BIC():8.1f} {self.logLik():8.1f} {self.deviance:8.1f}"
+        )
         lines.append("")
 
         lines.append(str(self.VarCorr()))
@@ -293,6 +298,7 @@ class GlmerResult:
         for i, name in enumerate(self.matrices.fixed_names):
             z_val = self.beta[i] / se[i] if se[i] > 0 else np.nan
             from scipy import stats
+
             p_val = 2 * (1 - stats.norm.cdf(np.abs(z_val)))
             sig = ""
             if p_val < 0.001:
@@ -303,7 +309,9 @@ class GlmerResult:
                 sig = "*"
             elif p_val < 0.1:
                 sig = "."
-            lines.append(f"{name:12} {self.beta[i]:10.4f}  {se[i]:10.4f}  {z_val:7.3f}  {p_val:.4f} {sig}")
+            lines.append(
+                f"{name:12} {self.beta[i]:10.4f}  {se[i]:10.4f}  {z_val:7.3f}  {p_val:.4f} {sig}"
+            )
 
         lines.append("---")
         lines.append("Signif. codes:  0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1 ' ' 1")
@@ -320,7 +328,10 @@ class GlmerResult:
         return self.summary()
 
     def __repr__(self) -> str:
-        return f"GlmerResult(formula={self.formula}, family={self.family.__class__.__name__}, deviance={self.deviance:.4f})"
+        return (
+            f"GlmerResult(formula={self.formula}, "
+            f"family={self.family.__class__.__name__}, deviance={self.deviance:.4f})"
+        )
 
 
 class GlmerMod:

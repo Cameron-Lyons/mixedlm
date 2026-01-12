@@ -1,8 +1,3 @@
-from mixedlm.estimation.reml import (
-    LMMOptimizer,
-    profiled_deviance,
-    profiled_reml,
-)
 from mixedlm.estimation.laplace import (
     GLMMOptimizer,
     laplace_deviance,
@@ -12,6 +7,11 @@ from mixedlm.estimation.nlmm import (
     NLMMOptimizer,
     nlmm_deviance,
     pnls_step,
+)
+from mixedlm.estimation.reml import (
+    LMMOptimizer,
+    profiled_deviance,
+    profiled_reml,
 )
 
 __all__ = [

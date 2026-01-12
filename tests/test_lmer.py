@@ -1,38 +1,215 @@
 import numpy as np
 import pandas as pd
 import pytest
-
-from mixedlm import lmer, glmer, nlmer, parse_formula, families, nlme
+from mixedlm import families, glmer, lmer, nlme, nlmer, parse_formula
 from mixedlm.matrices import build_model_matrices
-
 
 SLEEPSTUDY = pd.DataFrame(
     {
         "Reaction": [
-            249.56, 258.70, 250.80, 321.44, 356.85, 414.69, 382.20, 290.15, 430.59, 466.35,
-            222.73, 205.27, 202.98, 204.71, 207.72, 215.94, 213.63, 217.73, 224.30, 237.31,
-            199.05, 194.33, 234.32, 232.84, 229.31, 220.46, 235.42, 255.75, 261.01, 247.52,
-            321.42, 300.01, 283.86, 285.13, 285.80, 297.59, 280.24, 318.26, 305.35, 354.04,
-            287.60, 285.00, 301.80, 320.12, 316.28, 293.32, 290.08, 334.82, 293.70, 371.58,
-            234.92, 242.81, 272.95, 309.17, 317.96, 310.00, 454.16, 346.82, 330.30, 253.92,
-            283.84, 289.00, 276.77, 299.80, 297.50, 338.10, 340.80, 305.55, 354.10, 357.70,
-            265.35, 276.37, 243.43, 254.72, 279.59, 284.26, 305.60, 331.84, 335.45, 377.32,
-            241.58, 273.94, 254.44, 270.04, 251.47, 254.38, 245.37, 235.70, 235.98, 249.55,
-            312.17, 313.59, 291.64, 346.12, 365.16, 391.84, 404.29, 416.56, 455.86, 458.96,
-            292.63, 308.52, 324.28, 320.90, 305.30, 350.56, 300.01, 327.33, 335.63, 392.03,
-            290.14, 262.46, 253.66, 267.51, 296.00, 304.56, 350.78, 369.47, 364.88, 370.63,
-            263.99, 289.65, 276.77, 299.09, 297.43, 310.73, 287.17, 329.61, 334.48, 343.22,
-            237.45, 301.79, 311.90, 282.73, 285.05, 240.09, 275.19, 238.49, 266.54, 207.72,
-            286.95, 288.54, 245.18, 276.11, 266.42, 250.13, 269.84, 281.05, 284.78, 306.72,
-            271.98, 268.70, 257.72, 266.66, 310.04, 309.18, 327.21, 347.79, 341.82, 373.73,
-            346.00, 344.00, 358.00, 399.00, 363.00, 400.00, 416.00, 376.00, 441.00, 466.00,
-            269.41, 273.47, 297.60, 310.63, 287.17, 329.61, 334.48, 343.22, 369.14, 364.06,
+            249.56,
+            258.70,
+            250.80,
+            321.44,
+            356.85,
+            414.69,
+            382.20,
+            290.15,
+            430.59,
+            466.35,
+            222.73,
+            205.27,
+            202.98,
+            204.71,
+            207.72,
+            215.94,
+            213.63,
+            217.73,
+            224.30,
+            237.31,
+            199.05,
+            194.33,
+            234.32,
+            232.84,
+            229.31,
+            220.46,
+            235.42,
+            255.75,
+            261.01,
+            247.52,
+            321.42,
+            300.01,
+            283.86,
+            285.13,
+            285.80,
+            297.59,
+            280.24,
+            318.26,
+            305.35,
+            354.04,
+            287.60,
+            285.00,
+            301.80,
+            320.12,
+            316.28,
+            293.32,
+            290.08,
+            334.82,
+            293.70,
+            371.58,
+            234.92,
+            242.81,
+            272.95,
+            309.17,
+            317.96,
+            310.00,
+            454.16,
+            346.82,
+            330.30,
+            253.92,
+            283.84,
+            289.00,
+            276.77,
+            299.80,
+            297.50,
+            338.10,
+            340.80,
+            305.55,
+            354.10,
+            357.70,
+            265.35,
+            276.37,
+            243.43,
+            254.72,
+            279.59,
+            284.26,
+            305.60,
+            331.84,
+            335.45,
+            377.32,
+            241.58,
+            273.94,
+            254.44,
+            270.04,
+            251.47,
+            254.38,
+            245.37,
+            235.70,
+            235.98,
+            249.55,
+            312.17,
+            313.59,
+            291.64,
+            346.12,
+            365.16,
+            391.84,
+            404.29,
+            416.56,
+            455.86,
+            458.96,
+            292.63,
+            308.52,
+            324.28,
+            320.90,
+            305.30,
+            350.56,
+            300.01,
+            327.33,
+            335.63,
+            392.03,
+            290.14,
+            262.46,
+            253.66,
+            267.51,
+            296.00,
+            304.56,
+            350.78,
+            369.47,
+            364.88,
+            370.63,
+            263.99,
+            289.65,
+            276.77,
+            299.09,
+            297.43,
+            310.73,
+            287.17,
+            329.61,
+            334.48,
+            343.22,
+            237.45,
+            301.79,
+            311.90,
+            282.73,
+            285.05,
+            240.09,
+            275.19,
+            238.49,
+            266.54,
+            207.72,
+            286.95,
+            288.54,
+            245.18,
+            276.11,
+            266.42,
+            250.13,
+            269.84,
+            281.05,
+            284.78,
+            306.72,
+            271.98,
+            268.70,
+            257.72,
+            266.66,
+            310.04,
+            309.18,
+            327.21,
+            347.79,
+            341.82,
+            373.73,
+            346.00,
+            344.00,
+            358.00,
+            399.00,
+            363.00,
+            400.00,
+            416.00,
+            376.00,
+            441.00,
+            466.00,
+            269.41,
+            273.47,
+            297.60,
+            310.63,
+            287.17,
+            329.61,
+            334.48,
+            343.22,
+            369.14,
+            364.06,
         ],
         "Days": list(range(10)) * 18,
-        "Subject": [str(i) for i in [308] * 10 + [309] * 10 + [310] * 10 + [330] * 10 +
-                    [331] * 10 + [332] * 10 + [333] * 10 + [334] * 10 + [335] * 10 +
-                    [337] * 10 + [349] * 10 + [350] * 10 + [351] * 10 + [352] * 10 +
-                    [369] * 10 + [370] * 10 + [371] * 10 + [372] * 10],
+        "Subject": [
+            str(i)
+            for i in [308] * 10
+            + [309] * 10
+            + [310] * 10
+            + [330] * 10
+            + [331] * 10
+            + [332] * 10
+            + [333] * 10
+            + [334] * 10
+            + [335] * 10
+            + [337] * 10
+            + [349] * 10
+            + [350] * 10
+            + [351] * 10
+            + [352] * 10
+            + [369] * 10
+            + [370] * 10
+            + [371] * 10
+            + [372] * 10
+        ],
     }
 )
 
@@ -160,15 +337,140 @@ class TestLmer:
 
 CBPP = pd.DataFrame(
     {
-        "incidence": [2, 3, 4, 0, 3, 1, 3, 2, 0, 2, 0, 1, 1, 2, 0, 0, 1, 0, 2, 0,
-                      4, 3, 0, 2, 1, 0, 0, 1, 0, 0, 1, 0, 0, 0, 2, 1, 2, 0, 1, 0,
-                      3, 0, 0, 1, 0, 0, 1, 1, 0, 1, 1, 0, 1, 0, 0, 0],
-        "size": [14, 12, 9, 5, 22, 18, 21, 22, 16, 16, 20, 10, 10, 9, 6, 18,
-                 25, 24, 13, 11, 10, 5, 6, 8, 3, 3, 5, 3, 2, 2, 10, 8, 4, 2,
-                 14, 11, 9, 8, 4, 5, 7, 3, 7, 8, 4, 4, 2, 4, 6, 5, 5, 3, 3, 2, 2, 2],
+        "incidence": [
+            2,
+            3,
+            4,
+            0,
+            3,
+            1,
+            3,
+            2,
+            0,
+            2,
+            0,
+            1,
+            1,
+            2,
+            0,
+            0,
+            1,
+            0,
+            2,
+            0,
+            4,
+            3,
+            0,
+            2,
+            1,
+            0,
+            0,
+            1,
+            0,
+            0,
+            1,
+            0,
+            0,
+            0,
+            2,
+            1,
+            2,
+            0,
+            1,
+            0,
+            3,
+            0,
+            0,
+            1,
+            0,
+            0,
+            1,
+            1,
+            0,
+            1,
+            1,
+            0,
+            1,
+            0,
+            0,
+            0,
+        ],
+        "size": [
+            14,
+            12,
+            9,
+            5,
+            22,
+            18,
+            21,
+            22,
+            16,
+            16,
+            20,
+            10,
+            10,
+            9,
+            6,
+            18,
+            25,
+            24,
+            13,
+            11,
+            10,
+            5,
+            6,
+            8,
+            3,
+            3,
+            5,
+            3,
+            2,
+            2,
+            10,
+            8,
+            4,
+            2,
+            14,
+            11,
+            9,
+            8,
+            4,
+            5,
+            7,
+            3,
+            7,
+            8,
+            4,
+            4,
+            2,
+            4,
+            6,
+            5,
+            5,
+            3,
+            3,
+            2,
+            2,
+            2,
+        ],
         "period": ["1", "2", "3", "4"] * 14,
-        "herd": [str(i) for i in [1]*4 + [2]*4 + [3]*4 + [4]*4 + [5]*4 + [6]*4 +
-                 [7]*4 + [8]*4 + [9]*4 + [10]*4 + [11]*4 + [12]*4 + [13]*4 + [14]*4],
+        "herd": [
+            str(i)
+            for i in [1] * 4
+            + [2] * 4
+            + [3] * 4
+            + [4] * 4
+            + [5] * 4
+            + [6] * 4
+            + [7] * 4
+            + [8] * 4
+            + [9] * 4
+            + [10] * 4
+            + [11] * 4
+            + [12] * 4
+            + [13] * 4
+            + [14] * 4
+        ],
     }
 )
 CBPP["y"] = CBPP["incidence"] / CBPP["size"]
@@ -176,22 +478,14 @@ CBPP["y"] = CBPP["incidence"] / CBPP["size"]
 
 class TestGlmer:
     def test_binomial_random_intercept(self) -> None:
-        result = glmer(
-            "y ~ period + (1 | herd)",
-            CBPP,
-            family=families.Binomial()
-        )
+        result = glmer("y ~ period + (1 | herd)", CBPP, family=families.Binomial())
 
         assert result.converged
         assert len(result.fixef()) == 4
         assert "(Intercept)" in result.fixef()
 
     def test_binomial_fitted_values(self) -> None:
-        result = glmer(
-            "y ~ period + (1 | herd)",
-            CBPP,
-            family=families.Binomial()
-        )
+        result = glmer("y ~ period + (1 | herd)", CBPP, family=families.Binomial())
 
         fitted = result.fitted(type="response")
         assert len(fitted) == len(CBPP)
@@ -201,11 +495,7 @@ class TestGlmer:
         assert len(fitted_link) == len(CBPP)
 
     def test_binomial_residuals(self) -> None:
-        result = glmer(
-            "y ~ period + (1 | herd)",
-            CBPP,
-            family=families.Binomial()
-        )
+        result = glmer("y ~ period + (1 | herd)", CBPP, family=families.Binomial())
 
         resid_response = result.residuals(type="response")
         resid_pearson = result.residuals(type="pearson")
@@ -216,11 +506,7 @@ class TestGlmer:
         assert len(resid_deviance) == len(CBPP)
 
     def test_binomial_summary(self) -> None:
-        result = glmer(
-            "y ~ period + (1 | herd)",
-            CBPP,
-            family=families.Binomial()
-        )
+        result = glmer("y ~ period + (1 | herd)", CBPP, family=families.Binomial())
 
         summary = result.summary()
         assert "Generalized linear mixed model" in summary
@@ -228,11 +514,7 @@ class TestGlmer:
         assert "(Intercept)" in summary
 
     def test_binomial_vcov(self) -> None:
-        result = glmer(
-            "y ~ period + (1 | herd)",
-            CBPP,
-            family=families.Binomial()
-        )
+        result = glmer("y ~ period + (1 | herd)", CBPP, family=families.Binomial())
 
         vcov = result.vcov()
         assert vcov.shape == (4, 4)
@@ -250,27 +532,15 @@ class TestGlmer:
         eta = 0.5 + 0.3 * x + group_effects[group]
         y = np.random.poisson(np.exp(eta))
 
-        data = pd.DataFrame({
-            "y": y,
-            "x": x,
-            "group": [str(g) for g in group]
-        })
+        data = pd.DataFrame({"y": y, "x": x, "group": [str(g) for g in group]})
 
-        result = glmer(
-            "y ~ x + (1 | group)",
-            data,
-            family=families.Poisson()
-        )
+        result = glmer("y ~ x + (1 | group)", data, family=families.Poisson())
 
         assert result.converged
         assert len(result.fixef()) == 2
 
     def test_glmer_aic_bic(self) -> None:
-        result = glmer(
-            "y ~ period + (1 | herd)",
-            CBPP,
-            family=families.Binomial()
-        )
+        result = glmer("y ~ period + (1 | herd)", CBPP, family=families.Binomial())
 
         aic = result.AIC()
         bic = result.BIC()
@@ -301,11 +571,13 @@ def generate_nlme_data() -> pd.DataFrame:
             y_true = Asym_i + (R0_i - Asym_i) * np.exp(-np.exp(lrc_pop) * time)
             y = y_true + np.random.randn() * 5
 
-            data_rows.append({
-                "y": y,
-                "time": time,
-                "subject": str(subj),
-            })
+            data_rows.append(
+                {
+                    "y": y,
+                    "time": time,
+                    "subject": str(subj),
+                }
+            )
 
     return pd.DataFrame(data_rows)
 
@@ -348,11 +620,13 @@ class TestNlmer:
                 y_true = Asym_i / (1 + np.exp((xmid_i - time) / scal))
                 y = y_true + np.random.randn() * 3
 
-                data_rows.append({
-                    "y": max(y, 0.1),
-                    "time": time,
-                    "subject": str(subj),
-                })
+                data_rows.append(
+                    {
+                        "y": max(y, 0.1),
+                        "time": time,
+                        "subject": str(subj),
+                    }
+                )
 
         data = pd.DataFrame(data_rows)
         model = nlme.SSlogis()
@@ -384,11 +658,13 @@ class TestNlmer:
                 y_true = Vm_i * conc / (K + conc)
                 y = y_true + np.random.randn() * 5
 
-                data_rows.append({
-                    "y": max(y, 0.1),
-                    "conc": conc,
-                    "subject": str(subj),
-                })
+                data_rows.append(
+                    {
+                        "y": max(y, 0.1),
+                        "conc": conc,
+                        "subject": str(subj),
+                    }
+                )
 
         data = pd.DataFrame(data_rows)
         model = nlme.SSmicmen()
@@ -543,22 +819,14 @@ class TestInference:
         assert "Days" in ci_normal
 
     def test_glmer_confint_wald(self) -> None:
-        result = glmer(
-            "y ~ period + (1 | herd)",
-            CBPP,
-            family=families.Binomial()
-        )
+        result = glmer("y ~ period + (1 | herd)", CBPP, family=families.Binomial())
 
         ci = result.confint(method="Wald")
         assert "(Intercept)" in ci
         assert ci["(Intercept)"][0] < result.fixef()["(Intercept)"] < ci["(Intercept)"][1]
 
     def test_glmer_confint_profile(self) -> None:
-        result = glmer(
-            "y ~ period + (1 | herd)",
-            CBPP,
-            family=families.Binomial()
-        )
+        result = glmer("y ~ period + (1 | herd)", CBPP, family=families.Binomial())
 
         ci = result.confint(parm="(Intercept)", method="profile")
         assert "(Intercept)" in ci
@@ -567,11 +835,7 @@ class TestInference:
     def test_bootstrap_glmer(self) -> None:
         from mixedlm.inference import bootstrap_glmer
 
-        result = glmer(
-            "y ~ period + (1 | herd)",
-            CBPP,
-            family=families.Binomial()
-        )
+        result = glmer("y ~ period + (1 | herd)", CBPP, family=families.Binomial())
 
         boot_result = bootstrap_glmer(result, n_boot=20, seed=42)
         assert boot_result.n_boot == 20

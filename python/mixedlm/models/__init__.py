@@ -1,6 +1,6 @@
-from mixedlm.models.lmer import lmer, LmerMod, LmerResult
-from mixedlm.models.glmer import glmer, GlmerMod, GlmerResult
-from mixedlm.models.nlmer import nlmer, NlmerMod, NlmerResult
+from mixedlm.models.glmer import GlmerMod, GlmerResult, glmer
+from mixedlm.models.lmer import LmerMod, LmerResult, lmer
+from mixedlm.models.nlmer import NlmerMod, NlmerResult, nlmer
 
 __all__ = [
     "lmer",

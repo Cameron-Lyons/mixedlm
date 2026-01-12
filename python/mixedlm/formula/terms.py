@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Sequence
 
 
 @dataclass(frozen=True)
@@ -84,10 +83,7 @@ class Formula:
     @property
     def all_variables(self) -> set[str]:
         return (
-            {self.response}
-            | self.fixed_variables
-            | self.random_variables
-            | self.grouping_factors
+            {self.response} | self.fixed_variables | self.random_variables | self.grouping_factors
         )
 
     def __str__(self) -> str:
@@ -121,10 +117,7 @@ def _format_random(random: RandomTerm) -> str:
         expr_parts = ["1"] + expr_parts
     expr_str = " + ".join(expr_parts) if expr_parts else "1"
 
-    if isinstance(random.grouping, tuple):
-        group_str = "/".join(random.grouping)
-    else:
-        group_str = random.grouping
+    group_str = "/".join(random.grouping) if isinstance(random.grouping, tuple) else random.grouping
 
     bar = "|" if random.correlated else "||"
     return f"({expr_str} {bar} {group_str})"

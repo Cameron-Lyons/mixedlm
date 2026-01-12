@@ -28,7 +28,9 @@ class VarCorr:
             for i, (name, var) in enumerate(terms.items()):
                 grp_name = group if i == 0 else ""
                 lines.append(f" {grp_name:11} {name:12} {var:9.4f}  {np.sqrt(var):.4f}")
-        lines.append(f" {'Residual':11} {' ':12} {self.residual:9.4f}  {np.sqrt(self.residual):.4f}")
+        lines.append(
+            f" {'Residual':11} {' ':12} {self.residual:9.4f}  {np.sqrt(self.residual):.4f}"
+        )
         return "\n".join(lines)
 
 
@@ -46,7 +48,7 @@ class LmerResult:
     n_iter: int
 
     def fixef(self) -> dict[str, float]:
-        return dict(zip(self.matrices.fixed_names, self.beta))
+        return dict(zip(self.matrices.fixed_names, self.beta, strict=False))
 
     def ranef(self) -> dict[str, dict[str, NDArray[np.floating]]]:
         result: dict[str, dict[str, NDArray[np.floating]]] = {}
@@ -60,7 +62,7 @@ class LmerResult:
             u_block = self.u[u_idx : u_idx + n_u].reshape(n_levels, n_terms)
             u_idx += n_u
 
-            levels = sorted(struct.level_map.keys(), key=lambda x: struct.level_map[x])
+            sorted(struct.level_map.keys(), key=lambda x: struct.level_map[x])
 
             term_ranefs: dict[str, NDArray[np.floating]] = {}
             for j, term_name in enumerate(struct.term_names):
@@ -116,8 +118,6 @@ class LmerResult:
         return fixed_part
 
     def vcov(self) -> NDArray[np.floating]:
-        n = self.matrices.n_obs
-        p = self.matrices.n_fixed
         q = self.matrices.n_random
 
         if q == 0:
@@ -207,8 +207,8 @@ class LmerResult:
         n_boot: int = 1000,
         seed: int | None = None,
     ) -> dict[str, tuple[float, float]]:
-        from mixedlm.inference.profile import profile_lmer
         from mixedlm.inference.bootstrap import bootstrap_lmer
+        from mixedlm.inference.profile import profile_lmer
 
         if parm is None:
             parm = self.matrices.fixed_names
@@ -259,9 +259,9 @@ class LmerResult:
         se = np.sqrt(np.diag(vcov))
 
         if self.REML:
-            df_resid = self.matrices.n_obs - self.matrices.n_fixed
+            self.matrices.n_obs - self.matrices.n_fixed
         else:
-            df_resid = self.matrices.n_obs - self.matrices.n_fixed
+            self.matrices.n_obs - self.matrices.n_fixed
 
         lines.append("             Estimate  Std. Error  t value")
         for i, name in enumerate(self.matrices.fixed_names):

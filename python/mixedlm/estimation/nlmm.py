@@ -1,11 +1,11 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable
 
 import numpy as np
 from numpy.typing import NDArray
-from scipy import linalg, sparse
+from scipy import linalg
 from scipy.optimize import minimize
 
 from mixedlm.nlme.models import NonlinearModel
@@ -34,10 +34,7 @@ def _build_psi_matrix(
 
     if q * (q + 1) // 2 != n_theta:
         q = int(np.sqrt(n_theta))
-        if q * q == n_theta:
-            L = theta.reshape(q, q)
-        else:
-            L = np.diag(theta[:n_random])
+        L = theta.reshape(q, q) if q * q == n_theta else np.diag(theta[:n_random])
     else:
         L = np.zeros((q, q), dtype=np.float64)
         idx = 0
@@ -70,7 +67,7 @@ def pnls_step(
     phi_new = phi.copy()
     b_new = b.copy()
 
-    for iteration in range(10):
+    for _iteration in range(10):
         resid_total = np.zeros(n, dtype=np.float64)
         grad_total = np.zeros((n, n_phi), dtype=np.float64)
 
@@ -78,7 +75,7 @@ def pnls_step(
             mask = groups == g
             x_g = x[mask]
             y_g = y[mask]
-            n_g = np.sum(mask)
+            np.sum(mask)
 
             params_g = phi.copy()
             for j, p_idx in enumerate(random_params):
@@ -165,9 +162,7 @@ def nlmm_deviance(
 
     Psi = _build_psi_matrix(theta, n_random)
 
-    phi_new, b_new, sigma_new = pnls_step(
-        y, x, groups, model, phi, b, Psi, sigma, random_params
-    )
+    phi_new, b_new, sigma_new = pnls_step(y, x, groups, model, phi, b, Psi, sigma, random_params)
 
     rss = 0.0
     for g in range(n_groups):

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable
 
 import numpy as np
 from numpy.typing import NDArray
@@ -154,10 +154,7 @@ def profiled_deviance(
 
     pwrss = np.dot(resid, resid) + np.dot(u_star, u_star)
 
-    if REML:
-        denom = n - p
-    else:
-        denom = n
+    denom = n - p if REML else n
 
     sigma2 = pwrss / denom
 

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable
 
 import numpy as np
 from numpy.typing import NDArray
@@ -105,15 +105,12 @@ def pirls(
     else:
         beta = beta_start.copy()
 
-    if u_start is None:
-        u = np.zeros(q, dtype=np.float64)
-    else:
-        u = u_start.copy()
+    u = np.zeros(q, dtype=np.float64) if u_start is None else u_start.copy()
 
     Lambda = _build_lambda(theta, matrices.random_structures)
 
     converged = False
-    for iteration in range(maxiter):
+    for _iteration in range(maxiter):
         eta = matrices.X @ beta + matrices.Z @ u
         mu = family.link.inverse(eta)
 
@@ -125,7 +122,7 @@ def pirls(
         z = eta + family.link.deriv(mu) * (matrices.y - mu)
 
         W_diag = sparse.diags(W, format="csc")
-        sqrt_W = sparse.diags(np.sqrt(W), format="csc")
+        sparse.diags(np.sqrt(W), format="csc")
 
         XtWX = matrices.X.T @ W_diag @ matrices.X
         XtWZ = matrices.X.T @ W_diag @ matrices.Z
@@ -139,10 +136,7 @@ def pirls(
         XtWz = matrices.X.T @ (W * z)
         ZtWz = matrices.Z.T @ (W * z)
 
-        if sparse.issparse(ZtWZ):
-            ZtWZ_dense = ZtWZ.toarray()
-        else:
-            ZtWZ_dense = ZtWZ
+        ZtWZ_dense = ZtWZ.toarray() if sparse.issparse(ZtWZ) else ZtWZ
 
         C = ZtWZ_dense + LambdatLambda
 
@@ -152,10 +146,7 @@ def pirls(
             C += 1e-6 * np.eye(q)
             L_C = linalg.cholesky(C, lower=True)
 
-        if sparse.issparse(ZtWX):
-            ZtWX_dense = ZtWX.toarray()
-        else:
-            ZtWX_dense = ZtWX
+        ZtWX_dense = ZtWX.toarray() if sparse.issparse(ZtWX) else ZtWX
 
         RZX = linalg.solve_triangular(L_C, ZtWX_dense, lower=True)
         cu = linalg.solve_triangular(L_C, ZtWz, lower=True)

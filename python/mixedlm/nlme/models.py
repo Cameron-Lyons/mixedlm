@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable
 
 import numpy as np
 from numpy.typing import NDArray
@@ -36,9 +36,7 @@ class NonlinearModel(ABC):
     ) -> NDArray[np.floating]:
         pass
 
-    def get_start(
-        self, x: NDArray[np.floating], y: NDArray[np.floating]
-    ) -> NDArray[np.floating]:
+    def get_start(self, x: NDArray[np.floating], y: NDArray[np.floating]) -> NDArray[np.floating]:
         return np.ones(self.n_params, dtype=np.float64)
 
 
@@ -72,15 +70,10 @@ class SSasymp(NonlinearModel):
 
         return grad
 
-    def get_start(
-        self, x: NDArray[np.floating], y: NDArray[np.floating]
-    ) -> NDArray[np.floating]:
+    def get_start(self, x: NDArray[np.floating], y: NDArray[np.floating]) -> NDArray[np.floating]:
         Asym = np.max(y)
         R0 = np.min(y)
-        if np.max(x) > 0:
-            lrc = np.log(1.0 / np.max(x))
-        else:
-            lrc = 0.0
+        lrc = np.log(1.0 / np.max(x)) if np.max(x) > 0 else 0.0
         return np.array([Asym, R0, lrc], dtype=np.float64)
 
 
@@ -106,18 +99,16 @@ class SSlogis(NonlinearModel):
         Asym, xmid, scal = params[0], params[1], params[2]
         exp_term = np.exp((xmid - x) / scal)
         denom = 1 + exp_term
-        denom_sq = denom ** 2
+        denom_sq = denom**2
 
         grad = np.zeros((len(x), 3), dtype=np.float64)
         grad[:, 0] = 1 / denom
         grad[:, 1] = -Asym * exp_term / (scal * denom_sq)
-        grad[:, 2] = Asym * (xmid - x) * exp_term / (scal ** 2 * denom_sq)
+        grad[:, 2] = Asym * (xmid - x) * exp_term / (scal**2 * denom_sq)
 
         return grad
 
-    def get_start(
-        self, x: NDArray[np.floating], y: NDArray[np.floating]
-    ) -> NDArray[np.floating]:
+    def get_start(self, x: NDArray[np.floating], y: NDArray[np.floating]) -> NDArray[np.floating]:
         Asym = np.max(y)
         xmid = np.median(x)
         scal = (np.max(x) - np.min(x)) / 4
@@ -147,7 +138,7 @@ class SSmicmen(NonlinearModel):
     ) -> NDArray[np.floating]:
         Vm, K = params[0], params[1]
         denom = K + x
-        denom_sq = denom ** 2
+        denom_sq = denom**2
 
         grad = np.zeros((len(x), 2), dtype=np.float64)
         grad[:, 0] = x / denom
@@ -155,9 +146,7 @@ class SSmicmen(NonlinearModel):
 
         return grad
 
-    def get_start(
-        self, x: NDArray[np.floating], y: NDArray[np.floating]
-    ) -> NDArray[np.floating]:
+    def get_start(self, x: NDArray[np.floating], y: NDArray[np.floating]) -> NDArray[np.floating]:
         Vm = np.max(y) * 1.1
         K = np.median(x)
         return np.array([Vm, K], dtype=np.float64)
@@ -185,19 +174,17 @@ class SSfpl(NonlinearModel):
         A, B, xmid, scal = params[0], params[1], params[2], params[3]
         exp_term = np.exp((xmid - x) / scal)
         denom = 1 + exp_term
-        denom_sq = denom ** 2
+        denom_sq = denom**2
 
         grad = np.zeros((len(x), 4), dtype=np.float64)
         grad[:, 0] = 1 - 1 / denom
         grad[:, 1] = 1 / denom
         grad[:, 2] = -(B - A) * exp_term / (scal * denom_sq)
-        grad[:, 3] = (B - A) * (xmid - x) * exp_term / (scal ** 2 * denom_sq)
+        grad[:, 3] = (B - A) * (xmid - x) * exp_term / (scal**2 * denom_sq)
 
         return grad
 
-    def get_start(
-        self, x: NDArray[np.floating], y: NDArray[np.floating]
-    ) -> NDArray[np.floating]:
+    def get_start(self, x: NDArray[np.floating], y: NDArray[np.floating]) -> NDArray[np.floating]:
         A = np.min(y)
         B = np.max(y)
         xmid = np.median(x)
@@ -221,13 +208,13 @@ class SSgompertz(NonlinearModel):
         self, params: NDArray[np.floating], x: NDArray[np.floating]
     ) -> NDArray[np.floating]:
         Asym, b2, b3 = params[0], params[1], params[2]
-        return Asym * np.exp(-b2 * b3 ** x)
+        return Asym * np.exp(-b2 * b3**x)
 
     def gradient(
         self, params: NDArray[np.floating], x: NDArray[np.floating]
     ) -> NDArray[np.floating]:
         Asym, b2, b3 = params[0], params[1], params[2]
-        b3_x = b3 ** x
+        b3_x = b3**x
         exp_term = np.exp(-b2 * b3_x)
 
         grad = np.zeros((len(x), 3), dtype=np.float64)
@@ -237,9 +224,7 @@ class SSgompertz(NonlinearModel):
 
         return grad
 
-    def get_start(
-        self, x: NDArray[np.floating], y: NDArray[np.floating]
-    ) -> NDArray[np.floating]:
+    def get_start(self, x: NDArray[np.floating], y: NDArray[np.floating]) -> NDArray[np.floating]:
         Asym = np.max(y)
         b2 = 1.0
         b3 = 0.5
@@ -277,9 +262,7 @@ class SSbiexp(NonlinearModel):
 
         return grad
 
-    def get_start(
-        self, x: NDArray[np.floating], y: NDArray[np.floating]
-    ) -> NDArray[np.floating]:
+    def get_start(self, x: NDArray[np.floating], y: NDArray[np.floating]) -> NDArray[np.floating]:
         A1 = np.max(y) / 2
         A2 = np.max(y) / 2
         lrc1 = np.log(0.1)
@@ -291,10 +274,12 @@ class CustomModel(NonlinearModel):
     def __init__(
         self,
         predict_fn: Callable[[NDArray[np.floating], NDArray[np.floating]], NDArray[np.floating]],
-        gradient_fn: Callable[[NDArray[np.floating], NDArray[np.floating]], NDArray[np.floating]] | None,
+        gradient_fn: Callable[[NDArray[np.floating], NDArray[np.floating]], NDArray[np.floating]]
+        | None,
         param_names: list[str],
         name: str = "custom",
-        start_fn: Callable[[NDArray[np.floating], NDArray[np.floating]], NDArray[np.floating]] | None = None,
+        start_fn: Callable[[NDArray[np.floating], NDArray[np.floating]], NDArray[np.floating]]
+        | None = None,
     ) -> None:
         self._predict_fn = predict_fn
         self._gradient_fn = gradient_fn
@@ -331,13 +316,13 @@ class CustomModel(NonlinearModel):
             params_plus[j] += eps
             params_minus = params.copy()
             params_minus[j] -= eps
-            grad[:, j] = (self._predict_fn(params_plus, x) - self._predict_fn(params_minus, x)) / (2 * eps)
+            grad[:, j] = (self._predict_fn(params_plus, x) - self._predict_fn(params_minus, x)) / (
+                2 * eps
+            )
 
         return grad
 
-    def get_start(
-        self, x: NDArray[np.floating], y: NDArray[np.floating]
-    ) -> NDArray[np.floating]:
+    def get_start(self, x: NDArray[np.floating], y: NDArray[np.floating]) -> NDArray[np.floating]:
         if self._start_fn is not None:
             return self._start_fn(x, y)
         return np.ones(self.n_params, dtype=np.float64)

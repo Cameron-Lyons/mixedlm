@@ -1,10 +1,8 @@
-from mixedlm.models.lmer import lmer, LmerMod
-from mixedlm.models.glmer import glmer, GlmerMod
-from mixedlm.models.nlmer import nlmer, NlmerMod
+from mixedlm import families, inference, nlme
 from mixedlm.formula.parser import parse_formula
-from mixedlm import families
-from mixedlm import nlme
-from mixedlm import inference
+from mixedlm.models.glmer import GlmerMod, glmer
+from mixedlm.models.lmer import LmerMod, lmer
+from mixedlm.models.nlmer import NlmerMod, nlmer
 
 __version__ = "0.1.0"
 
