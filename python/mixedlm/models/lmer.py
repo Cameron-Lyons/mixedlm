@@ -242,6 +242,80 @@ class LmerResult:
         else:
             raise ValueError(f"Unknown method: {method}. Use 'Wald', 'profile', or 'boot'.")
 
+    def simulate(
+        self,
+        nsim: int = 1,
+        seed: int | None = None,
+        use_re: bool = True,
+        re_form: str | None = None,
+    ) -> NDArray[np.floating]:
+        if seed is not None:
+            np.random.seed(seed)
+
+        n = self.matrices.n_obs
+
+        if nsim == 1:
+            return self._simulate_once(use_re, re_form)
+
+        result = np.zeros((n, nsim), dtype=np.float64)
+        for i in range(nsim):
+            result[:, i] = self._simulate_once(use_re, re_form)
+
+        return result
+
+    def _simulate_once(
+        self,
+        use_re: bool = True,
+        re_form: str | None = None,
+    ) -> NDArray[np.floating]:
+        n = self.matrices.n_obs
+        q = self.matrices.n_random
+
+        fixed_part = self.matrices.X @ self.beta
+
+        if re_form == "~0" or re_form == "NA" or not use_re or q == 0:
+            random_part = np.zeros(n)
+        else:
+            u_new = np.zeros(q, dtype=np.float64)
+            u_idx = 0
+
+            for struct in self.matrices.random_structures:
+                n_levels = struct.n_levels
+                n_terms = struct.n_terms
+
+                theta_start = sum(
+                    s.n_terms * (s.n_terms + 1) // 2 if s.correlated else s.n_terms
+                    for s in self.matrices.random_structures[
+                        : self.matrices.random_structures.index(struct)
+                    ]
+                )
+                n_theta = n_terms * (n_terms + 1) // 2 if struct.correlated else n_terms
+                theta_block = self.theta[theta_start : theta_start + n_theta]
+
+                if struct.correlated:
+                    L = np.zeros((n_terms, n_terms))
+                    idx = 0
+                    for i in range(n_terms):
+                        for j in range(i + 1):
+                            L[i, j] = theta_block[idx]
+                            idx += 1
+                    cov = L @ L.T * self.sigma**2
+                else:
+                    cov = np.diag(theta_block**2) * self.sigma**2
+
+                for g in range(n_levels):
+                    b_g = np.random.multivariate_normal(np.zeros(n_terms), cov)
+                    for j in range(n_terms):
+                        u_new[u_idx + g * n_terms + j] = b_g[j]
+
+                u_idx += n_levels * n_terms
+
+            random_part = self.matrices.Z @ u_new
+
+        noise = np.random.randn(n) * self.sigma
+
+        return fixed_part + random_part + noise
+
     def summary(self) -> str:
         lines = []
         lines.append("Linear mixed model fit by " + ("REML" if self.REML else "ML"))

@@ -3,12 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-import numpy as np
 from scipy import stats
 
 if TYPE_CHECKING:
-    from mixedlm.models.lmer import LmerResult
     from mixedlm.models.glmer import GlmerResult
+    from mixedlm.models.lmer import LmerResult
 
 
 @dataclass
@@ -32,7 +31,10 @@ class AnovaResult:
             lines.append(f"  {i + 1}: {name}")
         lines.append("")
 
-        header = f"{'':8} {'npar':>6} {'AIC':>10} {'BIC':>10} {'logLik':>10} {'deviance':>10} {'Chisq':>8} {'Df':>4} {'Pr(>Chisq)':>12}"
+        header = (
+            f"{'':8} {'npar':>6} {'AIC':>10} {'BIC':>10} {'logLik':>10} "
+            f"{'deviance':>10} {'Chisq':>8} {'Df':>4} {'Pr(>Chisq)':>12}"
+        )
         lines.append(header)
 
         for i in range(len(self.models)):
@@ -48,10 +50,7 @@ class AnovaResult:
                 chi_df = f"{self.chi_df[i]:4d}"
                 p_val = self.p_value[i]
                 if p_val is not None:
-                    if p_val < 0.001:
-                        p_str = f"{p_val:12.2e}"
-                    else:
-                        p_str = f"{p_val:12.4f}"
+                    p_str = f"{p_val:12.2e}" if p_val < 0.001 else f"{p_val:12.4f}"
                 else:
                     p_str = ""
             else:
@@ -59,9 +58,11 @@ class AnovaResult:
                 chi_df = ""
                 p_str = ""
 
-            lines.append(
-                f"{name:8} {npar:6d} {aic:10.2f} {bic:10.2f} {loglik:10.2f} {dev:10.2f} {chi_sq:>8} {chi_df:>4} {p_str:>12}"
+            line = (
+                f"{name:8} {npar:6d} {aic:10.2f} {bic:10.2f} {loglik:10.2f} "
+                f"{dev:10.2f} {chi_sq:>8} {chi_df:>4} {p_str:>12}"
             )
+            lines.append(line)
 
         return "\n".join(lines)
 
@@ -108,16 +109,13 @@ def anova(
     loglik_list = []
     deviance_list = []
 
-    for i, m in enumerate(model_list):
+    for m in model_list:
         model_names.append(str(m.formula))
         n_obs.append(m.matrices.n_obs)
 
         n_fixed = m.matrices.n_fixed
         n_theta = len(m.theta)
-        if isinstance(m, LmerResult):
-            n_params = n_fixed + n_theta + 1
-        else:
-            n_params = n_fixed + n_theta
+        n_params = n_fixed + n_theta + 1 if isinstance(m, LmerResult) else n_fixed + n_theta
 
         df_list.append(n_params)
         aic_list.append(m.AIC())

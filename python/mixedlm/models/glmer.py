@@ -269,6 +269,104 @@ class GlmerResult:
         else:
             raise ValueError(f"Unknown method: {method}. Use 'Wald', 'profile', or 'boot'.")
 
+    def simulate(
+        self,
+        nsim: int = 1,
+        seed: int | None = None,
+        use_re: bool = True,
+        re_form: str | None = None,
+    ) -> NDArray[np.floating]:
+        if seed is not None:
+            np.random.seed(seed)
+
+        n = self.matrices.n_obs
+
+        if nsim == 1:
+            return self._simulate_once(use_re, re_form)
+
+        result = np.zeros((n, nsim), dtype=np.float64)
+        for i in range(nsim):
+            result[:, i] = self._simulate_once(use_re, re_form)
+
+        return result
+
+    def _simulate_once(
+        self,
+        use_re: bool = True,
+        re_form: str | None = None,
+    ) -> NDArray[np.floating]:
+        n = self.matrices.n_obs
+        q = self.matrices.n_random
+
+        if re_form == "~0" or re_form == "NA" or not use_re or q == 0:
+            eta = self.matrices.X @ self.beta
+        else:
+            u_new = np.zeros(q, dtype=np.float64)
+            u_idx = 0
+
+            for struct in self.matrices.random_structures:
+                n_levels = struct.n_levels
+                n_terms = struct.n_terms
+
+                theta_start = sum(
+                    s.n_terms * (s.n_terms + 1) // 2 if s.correlated else s.n_terms
+                    for s in self.matrices.random_structures[
+                        : self.matrices.random_structures.index(struct)
+                    ]
+                )
+                n_theta = n_terms * (n_terms + 1) // 2 if struct.correlated else n_terms
+                theta_block = self.theta[theta_start : theta_start + n_theta]
+
+                if struct.correlated:
+                    L = np.zeros((n_terms, n_terms))
+                    idx = 0
+                    for i in range(n_terms):
+                        for j in range(i + 1):
+                            L[i, j] = theta_block[idx]
+                            idx += 1
+                    cov = L @ L.T
+                else:
+                    cov = np.diag(theta_block**2)
+
+                for g in range(n_levels):
+                    b_g = np.random.multivariate_normal(
+                        np.zeros(n_terms), cov + 1e-8 * np.eye(n_terms)
+                    )
+                    for j in range(n_terms):
+                        u_new[u_idx + g * n_terms + j] = b_g[j]
+
+                u_idx += n_levels * n_terms
+
+            eta = self.matrices.X @ self.beta + self.matrices.Z @ u_new
+
+        mu = self.family.link.inverse(eta)
+
+        family_name = self.family.__class__.__name__
+
+        if family_name == "Binomial":
+            mu = np.clip(mu, 1e-6, 1 - 1e-6)
+            y_sim = np.random.binomial(1, mu).astype(np.float64)
+        elif family_name == "Poisson":
+            mu = np.clip(mu, 1e-6, 1e15)
+            y_sim = np.random.poisson(mu).astype(np.float64)
+        elif family_name == "NegativeBinomial":
+            mu = np.clip(mu, 1e-6, 1e10)
+            theta = self.family.theta
+            y_sim = np.random.negative_binomial(theta, theta / (mu + theta)).astype(np.float64)
+        elif family_name == "Gamma":
+            mu = np.clip(mu, 1e-6, 1e10)
+            shape = 1.0
+            y_sim = np.random.gamma(shape, mu / shape, n)
+        elif family_name == "InverseGaussian":
+            mu = np.clip(mu, 1e-6, 1e10)
+            y_sim = np.random.wald(mu, 1.0, n)
+        elif family_name == "Gaussian":
+            y_sim = np.random.normal(mu, 1.0)
+        else:
+            y_sim = mu + np.random.randn(n) * 0.1
+
+        return y_sim
+
     def summary(self) -> str:
         lines = []
         lines.append("Generalized linear mixed model fit by maximum likelihood (Laplace)")

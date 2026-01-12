@@ -966,6 +966,67 @@ class TestInference:
         assert result.chi_sq[1] is not None
         assert result.chi_df[1] == 3
 
+    def test_lmer_simulate_single(self) -> None:
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+
+        y_sim = result.simulate(nsim=1, seed=42)
+
+        assert y_sim.shape == (180,)
+        assert np.isfinite(y_sim).all()
+
+    def test_lmer_simulate_multiple(self) -> None:
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+
+        y_sim = result.simulate(nsim=10, seed=42)
+
+        assert y_sim.shape == (180, 10)
+        assert np.isfinite(y_sim).all()
+
+    def test_lmer_simulate_no_re(self) -> None:
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+
+        y_sim_re = result.simulate(nsim=1, seed=42, use_re=True)
+        y_sim_no_re = result.simulate(nsim=1, seed=42, use_re=False)
+
+        assert not np.allclose(y_sim_re, y_sim_no_re)
+
+    def test_lmer_simulate_reproducible(self) -> None:
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+
+        y_sim1 = result.simulate(nsim=1, seed=123)
+        y_sim2 = result.simulate(nsim=1, seed=123)
+
+        assert np.allclose(y_sim1, y_sim2)
+
+    def test_glmer_simulate_binomial(self) -> None:
+        result = glmer("y ~ period + (1 | herd)", CBPP, family=families.Binomial())
+
+        y_sim = result.simulate(nsim=5, seed=42)
+
+        assert y_sim.shape == (56, 5)
+        assert np.all((y_sim == 0) | (y_sim == 1))
+
+    def test_glmer_simulate_poisson(self) -> None:
+        np.random.seed(42)
+        n_groups = 10
+        n_per_group = 20
+        n = n_groups * n_per_group
+
+        group = np.repeat(np.arange(n_groups), n_per_group)
+        x = np.random.randn(n)
+        group_effects = np.random.randn(n_groups) * 0.5
+        eta = 0.5 + 0.3 * x + group_effects[group]
+        y = np.random.poisson(np.exp(eta))
+
+        data = pd.DataFrame({"y": y, "x": x, "group": [str(g) for g in group]})
+        result = glmer("y ~ x + (1 | group)", data, family=families.Poisson())
+
+        y_sim = result.simulate(nsim=1, seed=42)
+
+        assert y_sim.shape == (n,)
+        assert np.all(y_sim >= 0)
+        assert np.all(y_sim == y_sim.astype(int))
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
