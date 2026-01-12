@@ -35,19 +35,20 @@ class AllFitResult:
         lines.append("allFit summary:")
         lines.append("")
 
-        lines.append(f"{'Optimizer':<15} {'Converged':>10} {'Deviance':>12} {'AIC':>12} {'Singular':>10}")
+        header = f"{'Optimizer':<15} {'Converged':>10} {'Deviance':>12} {'AIC':>12}"
+        header += f" {'Singular':>10}"
+        lines.append(header)
         lines.append("-" * 65)
 
         for opt_name, fit in self.fits.items():
             if fit is None:
-                error_msg = self.errors.get(opt_name, "Unknown error")[:20]
                 lines.append(f"{opt_name:<15} {'FAILED':>10} {'-':>12} {'-':>12} {'-':>10}")
             else:
                 converged = "Yes" if fit.converged else "No"
                 singular = "Yes" if fit.isSingular() else "No"
-                lines.append(
-                    f"{opt_name:<15} {converged:>10} {fit.deviance:>12.4f} {fit.AIC():>12.2f} {singular:>10}"
-                )
+                row = f"{opt_name:<15} {converged:>10} {fit.deviance:>12.4f}"
+                row += f" {fit.AIC():>12.2f} {singular:>10}"
+                lines.append(row)
 
         if self.errors:
             lines.append("")
@@ -102,7 +103,7 @@ class AllFitResult:
 def _allfit_lmer_worker(
     args: tuple[Any, ...],
 ) -> tuple[str, LmerResult | None, str | None, list[str]]:
-    from mixedlm.models.lmer import LmerMod, LmerResult
+    from mixedlm.models.lmer import LmerMod
 
     opt_name, formula, data, REML, weights, offset = args
 
@@ -131,7 +132,7 @@ def _allfit_lmer_worker(
 def _allfit_glmer_worker(
     args: tuple[Any, ...],
 ) -> tuple[str, GlmerResult | None, str | None, list[str]]:
-    from mixedlm.models.glmer import GlmerMod, GlmerResult
+    from mixedlm.models.glmer import GlmerMod
 
     opt_name, formula, data, family, weights, offset, nAGQ = args
 

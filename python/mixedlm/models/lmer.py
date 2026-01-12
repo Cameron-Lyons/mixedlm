@@ -71,7 +71,6 @@ class VarCorr:
         lines = ["Random effects:"]
         lines.append(f" {'Groups':<11} {'Name':<12} {'Variance':>10} {'Std.Dev.':>10} {'Corr':>6}")
         for group_name, group in self.groups.items():
-            n_terms = len(group.term_names)
             for i, term in enumerate(group.term_names):
                 grp = group_name if i == 0 else ""
                 var = group.variance[term]
@@ -81,7 +80,8 @@ class VarCorr:
                 else:
                     corr_vals = " ".join(f"{group.corr[i, j]:>6.2f}" for j in range(i))
                     lines.append(f" {grp:<11} {term:<12} {var:>10.4f} {sd:>10.4f} {corr_vals}")
-        lines.append(f" {'Residual':<11} {'':<12} {self.residual:>10.4f} {np.sqrt(self.residual):>10.4f}")
+        resid_sd = np.sqrt(self.residual)
+        lines.append(f" {'Residual':<11} {'':<12} {self.residual:>10.4f} {resid_sd:>10.4f}")
         return "\n".join(lines)
 
     def __repr__(self) -> str:
@@ -280,7 +280,6 @@ class LmerResult:
         if re_form == "NA" or re_form == "~0":
             return pred
 
-        ranefs = self.ranef()
         u_idx = 0
 
         for struct in self.matrices.random_structures:
@@ -615,10 +614,9 @@ class LmerResult:
                 "The original data is not stored in the result object."
             )
 
-        if formula is not None:
-            new_formula = update_formula(self.formula, formula)
-        else:
-            new_formula = self.formula
+        new_formula = (
+            update_formula(self.formula, formula) if formula is not None else self.formula
+        )
 
         new_REML = REML if REML is not None else self.REML
 

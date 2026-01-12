@@ -90,7 +90,9 @@ class BootstrapResult:
         return "\n".join(lines)
 
 
-def _lmer_bootstrap_worker(args: tuple[Any, ...]) -> tuple[int, NDArray | None, NDArray | None, float | None]:
+def _lmer_bootstrap_worker(
+    args: tuple[Any, ...],
+) -> tuple[int, NDArray | None, NDArray | None, float | None]:
     import pandas as pd
 
     from mixedlm.models.lmer import LmerMod

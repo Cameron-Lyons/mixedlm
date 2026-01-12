@@ -319,10 +319,7 @@ def update_formula(old_formula: Formula, new_formula_str: str) -> Formula:
     lhs = lhs.strip()
     rhs = rhs.strip()
 
-    if lhs == ".":
-        response = old_formula.response
-    else:
-        response = lhs
+    response = old_formula.response if lhs == "." else lhs
 
     if rhs == ".":
         return Formula(

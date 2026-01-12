@@ -47,10 +47,7 @@ class Drop1Result:
 
             if lrt is not None and p_val is not None:
                 lrt_str = f"{lrt:10.4f}"
-                if p_val < 0.001:
-                    p_str = f"{p_val:12.2e}"
-                else:
-                    p_str = f"{p_val:12.4f}"
+                p_str = f"{p_val:12.2e}" if p_val < 0.001 else f"{p_val:12.4f}"
             else:
                 lrt_str = " " * 10
                 p_str = " " * 12

@@ -632,10 +632,9 @@ class GlmerResult:
                 "The original data is not stored in the result object."
             )
 
-        if formula is not None:
-            new_formula = update_formula(self.formula, formula)
-        else:
-            new_formula = self.formula
+        new_formula = (
+            update_formula(self.formula, formula) if formula is not None else self.formula
+        )
 
         new_family = family if family is not None else self.family
         new_nAGQ = nAGQ if nAGQ is not None else self.nAGQ

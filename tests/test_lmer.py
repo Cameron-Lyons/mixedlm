@@ -1795,8 +1795,8 @@ class TestIsSingular:
         assert isinstance(result.isSingular(), bool)
 
     def test_isSingular_detects_near_zero_theta(self) -> None:
-        from mixedlm.models.lmer import LmerResult
         from mixedlm.matrices.design import ModelMatrices, RandomEffectStructure
+        from mixedlm.models.lmer import LmerResult
         from scipy import sparse
 
         matrices = ModelMatrices(
@@ -1905,7 +1905,7 @@ class TestAllFit:
         fixef_table = allfit_result.fixef_table()
         assert isinstance(fixef_table, dict)
         assert len(fixef_table) > 0
-        for opt_name, fixefs in fixef_table.items():
+        for _opt_name, fixefs in fixef_table.items():
             assert "(Intercept)" in fixefs
             assert "Days" in fixefs
 
@@ -1916,7 +1916,7 @@ class TestAllFit:
         theta_table = allfit_result.theta_table()
         assert isinstance(theta_table, dict)
         assert len(theta_table) > 0
-        for opt_name, thetas in theta_table.items():
+        for _opt_name, thetas in theta_table.items():
             assert isinstance(thetas, list)
 
     def test_allfit_str_repr(self):

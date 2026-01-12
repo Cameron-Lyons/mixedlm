@@ -13,7 +13,6 @@ from mixedlm.matrices.design import ModelMatrices, RandomEffectStructure
 
 try:
     from mixedlm._rust import laplace_deviance as _rust_laplace_deviance
-    from mixedlm._rust import pirls as _rust_pirls
 
     _HAS_RUST = True
 except ImportError:
