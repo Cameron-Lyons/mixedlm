@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from mixedlm import lmer, glmer, parse_formula, families
+from mixedlm import lmer, glmer, nlmer, parse_formula, families, nlme
 from mixedlm.matrices import build_model_matrices
 
 
@@ -270,6 +270,206 @@ class TestGlmer:
             "y ~ period + (1 | herd)",
             CBPP,
             family=families.Binomial()
+        )
+
+        aic = result.AIC()
+        bic = result.BIC()
+
+        assert np.isfinite(aic)
+        assert np.isfinite(bic)
+
+
+def generate_nlme_data() -> pd.DataFrame:
+    np.random.seed(42)
+    n_subjects = 8
+    n_times = 10
+
+    Asym_pop = 200
+    R0_pop = 50
+    lrc_pop = -2
+
+    Asym_sd = 20
+    R0_sd = 10
+
+    data_rows = []
+    for subj in range(n_subjects):
+        Asym_i = Asym_pop + np.random.randn() * Asym_sd
+        R0_i = R0_pop + np.random.randn() * R0_sd
+
+        for t in range(n_times):
+            time = t * 0.5
+            y_true = Asym_i + (R0_i - Asym_i) * np.exp(-np.exp(lrc_pop) * time)
+            y = y_true + np.random.randn() * 5
+
+            data_rows.append({
+                "y": y,
+                "time": time,
+                "subject": str(subj),
+            })
+
+    return pd.DataFrame(data_rows)
+
+
+NLME_DATA = generate_nlme_data()
+
+
+class TestNlmer:
+    def test_ssasymp_model(self) -> None:
+        model = nlme.SSasymp()
+
+        result = nlmer(
+            model=model,
+            data=NLME_DATA,
+            x_var="time",
+            y_var="y",
+            group_var="subject",
+            random_params=["Asym", "R0"],
+        )
+
+        assert result.converged or result.n_iter > 0
+        assert len(result.fixef()) == 3
+        assert "Asym" in result.fixef()
+        assert "R0" in result.fixef()
+        assert "lrc" in result.fixef()
+
+    def test_sslogis_model(self) -> None:
+        np.random.seed(123)
+        n_subjects = 6
+        n_times = 12
+
+        data_rows = []
+        for subj in range(n_subjects):
+            Asym_i = 100 + np.random.randn() * 10
+            xmid_i = 5 + np.random.randn() * 0.5
+            scal = 1.0
+
+            for t in range(n_times):
+                time = t * 1.0
+                y_true = Asym_i / (1 + np.exp((xmid_i - time) / scal))
+                y = y_true + np.random.randn() * 3
+
+                data_rows.append({
+                    "y": max(y, 0.1),
+                    "time": time,
+                    "subject": str(subj),
+                })
+
+        data = pd.DataFrame(data_rows)
+        model = nlme.SSlogis()
+
+        result = nlmer(
+            model=model,
+            data=data,
+            x_var="time",
+            y_var="y",
+            group_var="subject",
+            random_params=["Asym"],
+            start={"Asym": 100, "xmid": 5, "scal": 1},
+        )
+
+        assert len(result.fixef()) == 3
+
+    def test_ssmicmen_model(self) -> None:
+        np.random.seed(456)
+        n_subjects = 5
+        n_conc = 8
+
+        data_rows = []
+        for subj in range(n_subjects):
+            Vm_i = 200 + np.random.randn() * 20
+            K = 0.5
+
+            for c in range(n_conc):
+                conc = 0.1 * (c + 1)
+                y_true = Vm_i * conc / (K + conc)
+                y = y_true + np.random.randn() * 5
+
+                data_rows.append({
+                    "y": max(y, 0.1),
+                    "conc": conc,
+                    "subject": str(subj),
+                })
+
+        data = pd.DataFrame(data_rows)
+        model = nlme.SSmicmen()
+
+        result = nlmer(
+            model=model,
+            data=data,
+            x_var="conc",
+            y_var="y",
+            group_var="subject",
+            random_params=["Vm"],
+        )
+
+        assert len(result.fixef()) == 2
+        assert "Vm" in result.fixef()
+        assert "K" in result.fixef()
+
+    def test_nlmer_fitted_residuals(self) -> None:
+        model = nlme.SSasymp()
+
+        result = nlmer(
+            model=model,
+            data=NLME_DATA,
+            x_var="time",
+            y_var="y",
+            group_var="subject",
+            random_params=["Asym"],
+        )
+
+        fitted = result.fitted()
+        residuals = result.residuals()
+
+        assert len(fitted) == len(NLME_DATA)
+        assert len(residuals) == len(NLME_DATA)
+        assert np.allclose(fitted + residuals, NLME_DATA["y"].values)
+
+    def test_nlmer_ranef(self) -> None:
+        model = nlme.SSasymp()
+
+        result = nlmer(
+            model=model,
+            data=NLME_DATA,
+            x_var="time",
+            y_var="y",
+            group_var="subject",
+            random_params=["Asym", "R0"],
+        )
+
+        ranefs = result.ranef()
+        assert "subject" in ranefs
+        assert "Asym" in ranefs["subject"]
+        assert "R0" in ranefs["subject"]
+        assert len(ranefs["subject"]["Asym"]) == 8
+
+    def test_nlmer_summary(self) -> None:
+        model = nlme.SSasymp()
+
+        result = nlmer(
+            model=model,
+            data=NLME_DATA,
+            x_var="time",
+            y_var="y",
+            group_var="subject",
+            random_params=["Asym"],
+        )
+
+        summary = result.summary()
+        assert "Nonlinear mixed model" in summary
+        assert "SSasymp" in summary
+        assert "Asym" in summary
+
+    def test_nlmer_aic_bic(self) -> None:
+        model = nlme.SSasymp()
+
+        result = nlmer(
+            model=model,
+            data=NLME_DATA,
+            x_var="time",
+            y_var="y",
+            group_var="subject",
+            random_params=["Asym"],
         )
 
         aic = result.AIC()

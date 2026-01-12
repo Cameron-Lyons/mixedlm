@@ -8,6 +8,11 @@ from mixedlm.estimation.laplace import (
     laplace_deviance,
     pirls,
 )
+from mixedlm.estimation.nlmm import (
+    NLMMOptimizer,
+    nlmm_deviance,
+    pnls_step,
+)
 
 __all__ = [
     "LMMOptimizer",
@@ -16,4 +21,7 @@ __all__ = [
     "GLMMOptimizer",
     "laplace_deviance",
     "pirls",
+    "NLMMOptimizer",
+    "nlmm_deviance",
+    "pnls_step",
 ]
