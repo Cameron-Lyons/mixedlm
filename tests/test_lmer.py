@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from mixedlm import lmer, parse_formula
+from mixedlm import lmer, glmer, parse_formula, families
 from mixedlm.matrices import build_model_matrices
 
 
@@ -156,6 +156,127 @@ class TestLmer:
         assert aic > 0
         assert bic > 0
         assert bic > aic
+
+
+CBPP = pd.DataFrame(
+    {
+        "incidence": [2, 3, 4, 0, 3, 1, 3, 2, 0, 2, 0, 1, 1, 2, 0, 0, 1, 0, 2, 0,
+                      4, 3, 0, 2, 1, 0, 0, 1, 0, 0, 1, 0, 0, 0, 2, 1, 2, 0, 1, 0,
+                      3, 0, 0, 1, 0, 0, 1, 1, 0, 1, 1, 0, 1, 0, 0, 0],
+        "size": [14, 12, 9, 5, 22, 18, 21, 22, 16, 16, 20, 10, 10, 9, 6, 18,
+                 25, 24, 13, 11, 10, 5, 6, 8, 3, 3, 5, 3, 2, 2, 10, 8, 4, 2,
+                 14, 11, 9, 8, 4, 5, 7, 3, 7, 8, 4, 4, 2, 4, 6, 5, 5, 3, 3, 2, 2, 2],
+        "period": ["1", "2", "3", "4"] * 14,
+        "herd": [str(i) for i in [1]*4 + [2]*4 + [3]*4 + [4]*4 + [5]*4 + [6]*4 +
+                 [7]*4 + [8]*4 + [9]*4 + [10]*4 + [11]*4 + [12]*4 + [13]*4 + [14]*4],
+    }
+)
+CBPP["y"] = CBPP["incidence"] / CBPP["size"]
+
+
+class TestGlmer:
+    def test_binomial_random_intercept(self) -> None:
+        result = glmer(
+            "y ~ period + (1 | herd)",
+            CBPP,
+            family=families.Binomial()
+        )
+
+        assert result.converged
+        assert len(result.fixef()) == 4
+        assert "(Intercept)" in result.fixef()
+
+    def test_binomial_fitted_values(self) -> None:
+        result = glmer(
+            "y ~ period + (1 | herd)",
+            CBPP,
+            family=families.Binomial()
+        )
+
+        fitted = result.fitted(type="response")
+        assert len(fitted) == len(CBPP)
+        assert np.all(fitted >= 0) and np.all(fitted <= 1)
+
+        fitted_link = result.fitted(type="link")
+        assert len(fitted_link) == len(CBPP)
+
+    def test_binomial_residuals(self) -> None:
+        result = glmer(
+            "y ~ period + (1 | herd)",
+            CBPP,
+            family=families.Binomial()
+        )
+
+        resid_response = result.residuals(type="response")
+        resid_pearson = result.residuals(type="pearson")
+        resid_deviance = result.residuals(type="deviance")
+
+        assert len(resid_response) == len(CBPP)
+        assert len(resid_pearson) == len(CBPP)
+        assert len(resid_deviance) == len(CBPP)
+
+    def test_binomial_summary(self) -> None:
+        result = glmer(
+            "y ~ period + (1 | herd)",
+            CBPP,
+            family=families.Binomial()
+        )
+
+        summary = result.summary()
+        assert "Generalized linear mixed model" in summary
+        assert "Binomial" in summary
+        assert "(Intercept)" in summary
+
+    def test_binomial_vcov(self) -> None:
+        result = glmer(
+            "y ~ period + (1 | herd)",
+            CBPP,
+            family=families.Binomial()
+        )
+
+        vcov = result.vcov()
+        assert vcov.shape == (4, 4)
+        assert np.all(np.diag(vcov) > 0)
+
+    def test_poisson_model(self) -> None:
+        np.random.seed(42)
+        n_groups = 10
+        n_per_group = 20
+        n = n_groups * n_per_group
+
+        group = np.repeat(np.arange(n_groups), n_per_group)
+        x = np.random.randn(n)
+        group_effects = np.random.randn(n_groups) * 0.5
+        eta = 0.5 + 0.3 * x + group_effects[group]
+        y = np.random.poisson(np.exp(eta))
+
+        data = pd.DataFrame({
+            "y": y,
+            "x": x,
+            "group": [str(g) for g in group]
+        })
+
+        result = glmer(
+            "y ~ x + (1 | group)",
+            data,
+            family=families.Poisson()
+        )
+
+        assert result.converged
+        assert len(result.fixef()) == 2
+
+    def test_glmer_aic_bic(self) -> None:
+        result = glmer(
+            "y ~ period + (1 | herd)",
+            CBPP,
+            family=families.Binomial()
+        )
+
+        aic = result.AIC()
+        bic = result.BIC()
+
+        assert np.isfinite(aic)
+        assert np.isfinite(bic)
 
 
 if __name__ == "__main__":

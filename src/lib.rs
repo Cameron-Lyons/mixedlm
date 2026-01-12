@@ -2,6 +2,7 @@ use numpy::{PyArray1, PyArray2, PyReadonlyArray1, PyReadonlyArray2};
 use pyo3::prelude::*;
 
 mod linalg;
+mod quadrature;
 
 #[pyfunction]
 fn sparse_cholesky_solve(
@@ -65,5 +66,7 @@ fn _rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(sparse_cholesky_solve, m)?)?;
     m.add_function(wrap_pyfunction!(sparse_cholesky_logdet, m)?)?;
     m.add_function(wrap_pyfunction!(update_cholesky_factor, m)?)?;
+    m.add_function(wrap_pyfunction!(quadrature::gauss_hermite, m)?)?;
+    m.add_function(wrap_pyfunction!(quadrature::adaptive_gauss_hermite_1d, m)?)?;
     Ok(())
 }
