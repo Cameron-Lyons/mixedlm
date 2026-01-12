@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 from mixedlm.estimation.laplace import GLMMOptimizer, _build_lambda, _count_theta
 from mixedlm.families.base import Family
 from mixedlm.families.binomial import Binomial
-from mixedlm.formula.parser import parse_formula
+from mixedlm.formula.parser import parse_formula, update_formula
 from mixedlm.formula.terms import Formula
 from mixedlm.matrices.design import ModelMatrices, build_model_matrices
 from mixedlm.models.lmer import RanefResult
@@ -510,6 +510,38 @@ class GlmerResult:
             n_iter=opt_result.n_iter,
             nAGQ=self.nAGQ,
         )
+
+    def update(
+        self,
+        formula: str | None = None,
+        data: pd.DataFrame | None = None,
+        family: Family | None = None,
+        weights: NDArray[np.floating] | None = None,
+        offset: NDArray[np.floating] | None = None,
+        nAGQ: int | None = None,
+    ) -> GlmerResult:
+        if data is None:
+            raise ValueError(
+                "data must be provided to update(). "
+                "The original data is not stored in the result object."
+            )
+
+        if formula is not None:
+            new_formula = update_formula(self.formula, formula)
+        else:
+            new_formula = self.formula
+
+        new_family = family if family is not None else self.family
+        new_nAGQ = nAGQ if nAGQ is not None else self.nAGQ
+
+        model = GlmerMod(
+            new_formula,
+            data,
+            family=new_family,
+            weights=weights,
+            offset=offset,
+        )
+        return model.fit(nAGQ=new_nAGQ)
 
     def summary(self) -> str:
         lines = []

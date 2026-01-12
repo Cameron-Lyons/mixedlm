@@ -307,3 +307,150 @@ def parse_formula(formula: str) -> Formula:
     tokens = list(lexer.tokenize())
     parser = Parser(tokens)
     return parser.parse()
+
+
+def update_formula(old_formula: Formula, new_formula_str: str) -> Formula:
+    new_formula_str = new_formula_str.strip()
+
+    if "~" not in new_formula_str:
+        raise ValueError("Formula must contain '~'")
+
+    lhs, rhs = new_formula_str.split("~", 1)
+    lhs = lhs.strip()
+    rhs = rhs.strip()
+
+    if lhs == ".":
+        response = old_formula.response
+    else:
+        response = lhs
+
+    if rhs == ".":
+        return Formula(
+            response=response,
+            fixed=old_formula.fixed,
+            random=old_formula.random,
+        )
+
+    additions: list[str] = []
+    removals: list[str] = []
+    random_additions: list[str] = []
+    random_removals: list[str] = []
+    keep_old_rhs = False
+
+    i = 0
+    rhs_clean = rhs.replace(" ", "")
+
+    while i < len(rhs_clean):
+        if rhs_clean[i] == ".":
+            keep_old_rhs = True
+            i += 1
+        elif rhs_clean[i] == "+":
+            i += 1
+            if i < len(rhs_clean) and rhs_clean[i] == "(":
+                paren_count = 1
+                start = i
+                i += 1
+                while i < len(rhs_clean) and paren_count > 0:
+                    if rhs_clean[i] == "(":
+                        paren_count += 1
+                    elif rhs_clean[i] == ")":
+                        paren_count -= 1
+                    i += 1
+                random_additions.append(rhs_clean[start:i])
+            else:
+                term_start = i
+                while i < len(rhs_clean) and rhs_clean[i] not in "+-":
+                    i += 1
+                term = rhs_clean[term_start:i]
+                if term:
+                    additions.append(term)
+        elif rhs_clean[i] == "-":
+            i += 1
+            if i < len(rhs_clean) and rhs_clean[i] == "(":
+                paren_count = 1
+                start = i
+                i += 1
+                while i < len(rhs_clean) and paren_count > 0:
+                    if rhs_clean[i] == "(":
+                        paren_count += 1
+                    elif rhs_clean[i] == ")":
+                        paren_count -= 1
+                    i += 1
+                random_removals.append(rhs_clean[start:i])
+            else:
+                term_start = i
+                while i < len(rhs_clean) and rhs_clean[i] not in "+-":
+                    i += 1
+                term = rhs_clean[term_start:i]
+                if term:
+                    removals.append(term)
+        elif rhs_clean[i] == "(":
+            paren_count = 1
+            start = i
+            i += 1
+            while i < len(rhs_clean) and paren_count > 0:
+                if rhs_clean[i] == "(":
+                    paren_count += 1
+                elif rhs_clean[i] == ")":
+                    paren_count -= 1
+                i += 1
+            random_additions.append(rhs_clean[start:i])
+        else:
+            term_start = i
+            while i < len(rhs_clean) and rhs_clean[i] not in "+-":
+                i += 1
+            term = rhs_clean[term_start:i]
+            if term:
+                additions.append(term)
+
+    if not keep_old_rhs and not additions and not random_additions:
+        return parse_formula(new_formula_str.replace(".", response))
+
+    if keep_old_rhs:
+        new_fixed_terms = list(old_formula.fixed.terms)
+        has_intercept = old_formula.fixed.has_intercept
+        new_random = list(old_formula.random)
+    else:
+        new_fixed_terms = []
+        has_intercept = True
+        new_random = []
+
+    for term_str in additions:
+        if term_str == "1":
+            has_intercept = True
+        elif term_str == "0":
+            has_intercept = False
+        elif ":" in term_str:
+            vars_tuple = tuple(term_str.split(":"))
+            new_term = InteractionTerm(vars_tuple)
+            if new_term not in new_fixed_terms:
+                new_fixed_terms.append(new_term)
+        else:
+            new_term = VariableTerm(term_str)
+            if new_term not in new_fixed_terms:
+                new_fixed_terms.append(new_term)
+
+    for term_str in removals:
+        if term_str == "1":
+            has_intercept = False
+        elif ":" in term_str:
+            vars_tuple = tuple(term_str.split(":"))
+            term_to_remove = InteractionTerm(vars_tuple)
+            new_fixed_terms = [t for t in new_fixed_terms if t != term_to_remove]
+        else:
+            term_to_remove = VariableTerm(term_str)
+            new_fixed_terms = [t for t in new_fixed_terms if t != term_to_remove]
+
+    for random_str in random_additions:
+        temp_formula = parse_formula(f"y ~ 1 + {random_str}")
+        for rt in temp_formula.random:
+            if rt not in new_random:
+                new_random.append(rt)
+
+    for random_str in random_removals:
+        temp_formula = parse_formula(f"y ~ 1 + {random_str}")
+        for rt in temp_formula.random:
+            new_random = [r for r in new_random if r != rt]
+
+    new_fixed = FixedTerm(terms=tuple(new_fixed_terms), has_intercept=has_intercept)
+    return Formula(response=response, fixed=new_fixed, random=tuple(new_random))

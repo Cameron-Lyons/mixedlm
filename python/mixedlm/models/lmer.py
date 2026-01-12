@@ -11,7 +11,7 @@ if TYPE_CHECKING:
     import pandas as pd
 
 from mixedlm.estimation.reml import LMMOptimizer, _build_lambda, _count_theta
-from mixedlm.formula.parser import parse_formula
+from mixedlm.formula.parser import parse_formula, update_formula
 from mixedlm.formula.terms import Formula
 from mixedlm.matrices.design import ModelMatrices, build_model_matrices
 
@@ -467,6 +467,36 @@ class LmerResult:
             converged=opt_result.converged,
             n_iter=opt_result.n_iter,
         )
+
+    def update(
+        self,
+        formula: str | None = None,
+        data: pd.DataFrame | None = None,
+        REML: bool | None = None,
+        weights: NDArray[np.floating] | None = None,
+        offset: NDArray[np.floating] | None = None,
+    ) -> LmerResult:
+        if data is None:
+            raise ValueError(
+                "data must be provided to update(). "
+                "The original data is not stored in the result object."
+            )
+
+        if formula is not None:
+            new_formula = update_formula(self.formula, formula)
+        else:
+            new_formula = self.formula
+
+        new_REML = REML if REML is not None else self.REML
+
+        model = LmerMod(
+            new_formula,
+            data,
+            REML=new_REML,
+            weights=weights,
+            offset=offset,
+        )
+        return model.fit()
 
     def summary(self) -> str:
         lines = []

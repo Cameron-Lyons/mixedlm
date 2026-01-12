@@ -1544,5 +1544,119 @@ class TestCondVar:
         assert all(v >= 0 for v in cond_var)
 
 
+class TestUpdate:
+    def test_lmer_update_add_term(self) -> None:
+        result1 = lmer("Reaction ~ 1 + (1 | Subject)", SLEEPSTUDY)
+
+        result2 = result1.update(". ~ . + Days", data=SLEEPSTUDY)
+
+        assert "Days" in result2.fixef()
+        assert "(Intercept)" in result2.fixef()
+        assert len(result2.fixef()) == 2
+
+    def test_lmer_update_remove_term(self) -> None:
+        result1 = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+
+        result2 = result1.update(". ~ . - Days", data=SLEEPSTUDY)
+
+        assert "Days" not in result2.fixef()
+        assert "(Intercept)" in result2.fixef()
+        assert len(result2.fixef()) == 1
+
+    def test_lmer_update_replace_formula(self) -> None:
+        result1 = lmer("Reaction ~ 1 + (1 | Subject)", SLEEPSTUDY)
+
+        result2 = result1.update("Reaction ~ Days + (Days | Subject)", data=SLEEPSTUDY)
+
+        assert "Days" in result2.fixef()
+        assert "(Intercept)" in result2.fixef()
+
+    def test_lmer_update_change_REML(self) -> None:
+        result1 = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY, REML=True)
+        assert result1.REML is True
+
+        result2 = result1.update(data=SLEEPSTUDY, REML=False)
+        assert result2.REML is False
+
+    def test_lmer_update_keep_response(self) -> None:
+        result1 = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+
+        result2 = result1.update(". ~ 1 + (1 | Subject)", data=SLEEPSTUDY)
+
+        assert result2.formula.response == "Reaction"
+        assert "Days" not in result2.fixef()
+
+    def test_glmer_update_add_term(self) -> None:
+        result1 = glmer("y ~ 1 + (1 | herd)", CBPP, family=families.Binomial())
+
+        result2 = result1.update(". ~ . + period", data=CBPP)
+
+        assert any("period" in k for k in result2.fixef())
+        assert "(Intercept)" in result2.fixef()
+
+    def test_glmer_update_change_family(self) -> None:
+        np.random.seed(42)
+        n_groups = 8
+        n_per_group = 15
+        n = n_groups * n_per_group
+
+        group = np.repeat(np.arange(n_groups), n_per_group)
+        x = np.random.randn(n)
+        group_effects = np.random.randn(n_groups) * 0.3
+        eta = 0.5 + 0.3 * x + group_effects[group]
+        mu = np.exp(eta)
+        y = np.random.poisson(mu)
+
+        data = pd.DataFrame({"y": y, "x": x, "group": [str(g) for g in group]})
+        result1 = glmer("y ~ x + (1 | group)", data, family=families.Poisson())
+
+        result2 = result1.update(data=data, family=families.Poisson())
+        assert result2.family.__class__.__name__ == "Poisson"
+
+    def test_update_requires_data(self) -> None:
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+
+        with pytest.raises(ValueError, match="data must be provided"):
+            result.update(". ~ . + 1")
+
+
+class TestUpdateFormula:
+    def test_update_formula_add_variable(self) -> None:
+        from mixedlm.formula.parser import parse_formula, update_formula
+
+        old = parse_formula("y ~ x + (1 | group)")
+        new = update_formula(old, ". ~ . + z")
+
+        assert str(new) == "y ~ x + z + (1 | group)"
+
+    def test_update_formula_remove_variable(self) -> None:
+        from mixedlm.formula.parser import parse_formula, update_formula
+
+        old = parse_formula("y ~ x + z + (1 | group)")
+        new = update_formula(old, ". ~ . - z")
+
+        assert "z" not in str(new)
+        assert "x" in str(new)
+
+    def test_update_formula_change_response(self) -> None:
+        from mixedlm.formula.parser import parse_formula, update_formula
+
+        old = parse_formula("y ~ x + (1 | group)")
+        new = update_formula(old, "z ~ .")
+
+        assert new.response == "z"
+
+    def test_update_formula_replace_rhs(self) -> None:
+        from mixedlm.formula.parser import parse_formula, update_formula
+
+        old = parse_formula("y ~ x + (1 | group)")
+        new = update_formula(old, ". ~ a + b + (1 | subject)")
+
+        assert "a" in str(new)
+        assert "b" in str(new)
+        assert "subject" in str(new)
+        assert new.response == "y"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
