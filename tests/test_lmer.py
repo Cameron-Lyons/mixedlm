@@ -588,6 +588,26 @@ class TestGlmer:
         assert len(result.fixef()) == 2
         assert np.all(result.fitted(type="response") >= 0)
 
+    def test_inverse_gaussian_model(self) -> None:
+        np.random.seed(321)
+        n_groups = 8
+        n_per_group = 20
+        n = n_groups * n_per_group
+
+        group = np.repeat(np.arange(n_groups), n_per_group)
+        x = np.random.uniform(0.5, 1.5, n)
+        group_effects = np.random.randn(n_groups) * 0.1
+        mu = np.exp(0.5 + 0.3 * x + group_effects[group])
+        lam = 10.0
+        y = np.random.wald(mu, lam, n)
+
+        data = pd.DataFrame({"y": y, "x": x, "group": [str(g) for g in group]})
+
+        result = glmer("y ~ x + (1 | group)", data, family=families.InverseGaussian())
+
+        assert len(result.fixef()) == 2
+        assert np.all(result.fitted(type="response") > 0)
+
 
 def generate_nlme_data() -> pd.DataFrame:
     np.random.seed(42)
