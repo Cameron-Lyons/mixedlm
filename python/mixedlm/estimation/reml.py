@@ -87,32 +87,40 @@ def profiled_deviance(
     p = matrices.n_fixed
     q = matrices.n_random
 
+    w = matrices.weights
+    y_adj = matrices.y - matrices.offset
+
+    sqrtW = sparse.diags(np.sqrt(w), format="csc")
+
     if q == 0:
-        XtX = matrices.X.T @ matrices.X
-        Xty = matrices.X.T @ matrices.y
+        WX = sqrtW @ matrices.X
+        Wy = sqrtW @ y_adj
+        XtWX = WX.T @ WX
+        XtWy = WX.T @ Wy
         try:
-            beta = linalg.solve(XtX, Xty, assume_a="pos")
+            beta = linalg.solve(XtWX, XtWy, assume_a="pos")
         except linalg.LinAlgError:
-            beta = linalg.lstsq(matrices.X, matrices.y)[0]
+            beta = linalg.lstsq(WX, Wy)[0]
 
-        resid = matrices.y - matrices.X @ beta
-        rss = np.dot(resid, resid)
-        sigma2 = rss / (n - p if REML else n)
+        resid = y_adj - matrices.X @ beta
+        wrss = np.dot(w * resid, resid)
+        sigma2 = wrss / (n - p if REML else n)
 
-        logdet_XtX = np.linalg.slogdet(XtX)[1] if REML else 0.0
-        dev = n * np.log(2 * np.pi * sigma2) + rss / sigma2
+        logdet_XtWX = np.linalg.slogdet(XtWX)[1] if REML else 0.0
+        dev = n * np.log(2 * np.pi * sigma2) + wrss / sigma2
         if REML:
-            dev += logdet_XtX - p * np.log(sigma2)
+            dev += logdet_XtWX - p * np.log(sigma2)
         return float(dev)
 
     Lambda = _build_lambda(theta, matrices.random_structures)
 
     Zt = matrices.Zt
-    ZtZ = Zt @ Zt.T
-    LambdatZtZLambda = Lambda.T @ ZtZ @ Lambda
+    WZ = sqrtW @ matrices.Z
+    ZtWZ = WZ.T @ WZ
+    LambdatZtWZLambda = Lambda.T @ ZtWZ @ Lambda
 
     I_q = sparse.eye(q, format="csc")
-    V_factor = LambdatZtZLambda + I_q
+    V_factor = LambdatZtWZLambda + I_q
 
     try:
         V_factor_dense = V_factor.toarray()
@@ -122,19 +130,20 @@ def profiled_deviance(
 
     logdet_V = 2.0 * np.sum(np.log(np.diag(L_V)))
 
-    Zty = Zt @ matrices.y
-    cu = Lambda.T @ Zty
+    ZtWy = Zt @ (w * y_adj)
+    cu = Lambda.T @ ZtWy
     cu_star = linalg.solve_triangular(L_V, cu, lower=True)
 
-    ZtX = Zt @ matrices.X
-    Lambdat_ZtX = Lambda.T @ ZtX
-    RZX = linalg.solve_triangular(L_V, Lambdat_ZtX, lower=True)
+    WX = sqrtW @ matrices.X
+    ZtWX = Zt @ (sqrtW.T @ WX)
+    Lambdat_ZtWX = Lambda.T @ ZtWX
+    RZX = linalg.solve_triangular(L_V, Lambdat_ZtWX, lower=True)
 
-    XtX = matrices.X.T @ matrices.X
-    Xty = matrices.X.T @ matrices.y
+    XtWX = WX.T @ WX
+    XtWy = WX.T @ (sqrtW @ y_adj)
 
     RZX_tRZX = RZX.T @ RZX
-    XtVinvX = XtX - RZX_tRZX
+    XtVinvX = XtWX - RZX_tRZX
 
     try:
         L_XtVinvX = linalg.cholesky(XtVinvX, lower=True)
@@ -144,15 +153,15 @@ def profiled_deviance(
     logdet_XtVinvX = 2.0 * np.sum(np.log(np.diag(L_XtVinvX)))
 
     cu_star_RZX_beta_term = RZX.T @ cu_star
-    Xty_adj = Xty - cu_star_RZX_beta_term
+    Xty_adj = XtWy - cu_star_RZX_beta_term
     beta = linalg.cho_solve((L_XtVinvX, True), Xty_adj)
 
-    resid = matrices.y - matrices.X @ beta
-    Zt_resid = Zt @ resid
+    resid = y_adj - matrices.X @ beta
+    Zt_resid = Zt @ (w * resid)
     Lambda_t_Zt_resid = Lambda.T @ Zt_resid
     u_star = linalg.cho_solve((L_V, True), Lambda_t_Zt_resid)
 
-    pwrss = np.dot(resid, resid) + np.dot(u_star, u_star)
+    pwrss = np.dot(w * resid, resid) + np.dot(u_star, u_star)
 
     denom = n - p if REML else n
 
@@ -251,57 +260,65 @@ class LMMOptimizer:
         p = self.matrices.n_fixed
         q = self.matrices.n_random
 
+        w = self.matrices.weights
+        y_adj = self.matrices.y - self.matrices.offset
+        sqrtW = sparse.diags(np.sqrt(w), format="csc")
+
         if q == 0:
-            XtX = self.matrices.X.T @ self.matrices.X
-            Xty = self.matrices.X.T @ self.matrices.y
+            WX = sqrtW @ self.matrices.X
+            Wy = sqrtW @ y_adj
+            XtWX = WX.T @ WX
+            XtWy = WX.T @ Wy
             try:
-                beta = linalg.solve(XtX, Xty, assume_a="pos")
+                beta = linalg.solve(XtWX, XtWy, assume_a="pos")
             except linalg.LinAlgError:
-                beta = linalg.lstsq(self.matrices.X, self.matrices.y)[0]
-            resid = self.matrices.y - self.matrices.X @ beta
-            rss = np.dot(resid, resid)
-            sigma = np.sqrt(rss / (n - p if self.REML else n))
+                beta = linalg.lstsq(WX, Wy)[0]
+            resid = y_adj - self.matrices.X @ beta
+            wrss = np.dot(w * resid, resid)
+            sigma = np.sqrt(wrss / (n - p if self.REML else n))
             return beta, sigma, np.array([])
 
         Lambda = _build_lambda(theta, self.matrices.random_structures)
 
         Zt = self.matrices.Zt
-        ZtZ = Zt @ Zt.T
-        LambdatZtZLambda = Lambda.T @ ZtZ @ Lambda
+        WZ = sqrtW @ self.matrices.Z
+        ZtWZ = WZ.T @ WZ
+        LambdatZtWZLambda = Lambda.T @ ZtWZ @ Lambda
 
         I_q = sparse.eye(q, format="csc")
-        V_factor = LambdatZtZLambda + I_q
+        V_factor = LambdatZtWZLambda + I_q
 
         V_factor_dense = V_factor.toarray()
         L_V = linalg.cholesky(V_factor_dense, lower=True)
 
-        Zty = Zt @ self.matrices.y
-        cu = Lambda.T @ Zty
+        ZtWy = Zt @ (w * y_adj)
+        cu = Lambda.T @ ZtWy
         cu_star = linalg.solve_triangular(L_V, cu, lower=True)
 
-        ZtX = Zt @ self.matrices.X
-        Lambdat_ZtX = Lambda.T @ ZtX
-        RZX = linalg.solve_triangular(L_V, Lambdat_ZtX, lower=True)
+        WX = sqrtW @ self.matrices.X
+        ZtWX = Zt @ (sqrtW.T @ WX)
+        Lambdat_ZtWX = Lambda.T @ ZtWX
+        RZX = linalg.solve_triangular(L_V, Lambdat_ZtWX, lower=True)
 
-        XtX = self.matrices.X.T @ self.matrices.X
-        Xty = self.matrices.X.T @ self.matrices.y
+        XtWX = WX.T @ WX
+        XtWy = WX.T @ (sqrtW @ y_adj)
 
         RZX_tRZX = RZX.T @ RZX
-        XtVinvX = XtX - RZX_tRZX
+        XtVinvX = XtWX - RZX_tRZX
         L_XtVinvX = linalg.cholesky(XtVinvX, lower=True)
 
         cu_star_RZX_beta_term = RZX.T @ cu_star
-        Xty_adj = Xty - cu_star_RZX_beta_term
+        Xty_adj = XtWy - cu_star_RZX_beta_term
         beta = linalg.cho_solve((L_XtVinvX, True), Xty_adj)
 
-        resid = self.matrices.y - self.matrices.X @ beta
-        Zt_resid = Zt @ resid
+        resid = y_adj - self.matrices.X @ beta
+        Zt_resid = Zt @ (w * resid)
         Lambda_t_Zt_resid = Lambda.T @ Zt_resid
         u_star = linalg.cho_solve((L_V, True), Lambda_t_Zt_resid)
 
         u = Lambda @ u_star
 
-        pwrss = np.dot(resid, resid) + np.dot(u_star, u_star)
+        pwrss = np.dot(w * resid, resid) + np.dot(u_star, u_star)
         denom = n - p if self.REML else n
         sigma = np.sqrt(pwrss / denom)
 

@@ -91,7 +91,7 @@ class LmerResult:
     def fitted(self) -> NDArray[np.floating]:
         fixed_part = self.matrices.X @ self.beta
         random_part = self.matrices.Z @ self.u
-        return fixed_part + random_part
+        return fixed_part + random_part + self.matrices.offset
 
     def residuals(self, type: str = "response") -> NDArray[np.floating]:
         if type == "response":
@@ -105,6 +105,7 @@ class LmerResult:
         self,
         newdata: pd.DataFrame | None = None,
         re_form: str | None = None,
+        offset: NDArray[np.floating] | None = None,
     ) -> NDArray[np.floating]:
         if newdata is None:
             return self.fitted()
@@ -112,10 +113,13 @@ class LmerResult:
         new_matrices = build_model_matrices(self.formula, newdata)
         fixed_part = new_matrices.X @ self.beta
 
-        if re_form == "NA" or re_form == "~0":
-            return fixed_part
+        if offset is None:
+            offset = np.zeros(len(newdata), dtype=np.float64)
 
-        return fixed_part
+        if re_form == "NA" or re_form == "~0":
+            return fixed_part + offset
+
+        return fixed_part + offset
 
     def vcov(self) -> NDArray[np.floating]:
         q = self.matrices.n_random
@@ -364,6 +368,8 @@ class LmerMod:
         data: pd.DataFrame,
         REML: bool = True,
         verbose: int = 0,
+        weights: NDArray[np.floating] | None = None,
+        offset: NDArray[np.floating] | None = None,
     ) -> None:
         if isinstance(formula, str):
             self.formula = parse_formula(formula)
@@ -374,7 +380,9 @@ class LmerMod:
         self.REML = REML
         self.verbose = verbose
 
-        self.matrices = build_model_matrices(self.formula, self.data)
+        self.matrices = build_model_matrices(
+            self.formula, self.data, weights=weights, offset=offset
+        )
 
     def fit(
         self,
@@ -413,7 +421,9 @@ def lmer(
     data: pd.DataFrame,
     REML: bool = True,
     verbose: int = 0,
+    weights: NDArray[np.floating] | None = None,
+    offset: NDArray[np.floating] | None = None,
     **kwargs,
 ) -> LmerResult:
-    model = LmerMod(formula, data, REML=REML, verbose=verbose)
+    model = LmerMod(formula, data, REML=REML, verbose=verbose, weights=weights, offset=offset)
     return model.fit(**kwargs)

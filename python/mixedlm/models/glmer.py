@@ -87,7 +87,7 @@ class GlmerResult:
     def linear_predictor(self) -> NDArray[np.floating]:
         fixed_part = self.matrices.X @ self.beta
         random_part = self.matrices.Z @ self.u
-        return fixed_part + random_part
+        return fixed_part + random_part + self.matrices.offset
 
     def fitted(self, type: str = "response") -> NDArray[np.floating]:
         eta = self.linear_predictor()
@@ -105,9 +105,7 @@ class GlmerResult:
             var = self.family.variance(mu)
             return (self.matrices.y - mu) / np.sqrt(var)
         elif type == "deviance":
-            dev_resids = self.family.deviance_resids(
-                self.matrices.y, mu, np.ones(self.matrices.n_obs)
-            )
+            dev_resids = self.family.deviance_resids(self.matrices.y, mu, self.matrices.weights)
             signs = np.sign(self.matrices.y - mu)
             return signs * np.sqrt(np.abs(dev_resids))
         else:
@@ -118,12 +116,18 @@ class GlmerResult:
         newdata: pd.DataFrame | None = None,
         type: str = "response",
         re_form: str | None = None,
+        offset: NDArray[np.floating] | None = None,
     ) -> NDArray[np.floating]:
         if newdata is None:
             return self.fitted(type=type)
 
         new_matrices = build_model_matrices(self.formula, newdata)
         eta = new_matrices.X @ self.beta
+
+        if offset is None:
+            offset = np.zeros(len(newdata), dtype=np.float64)
+
+        eta = eta + offset
 
         if re_form != "NA" and re_form != "~0":
             pass
@@ -439,6 +443,8 @@ class GlmerMod:
         data: pd.DataFrame,
         family: Family | None = None,
         verbose: int = 0,
+        weights: NDArray[np.floating] | None = None,
+        offset: NDArray[np.floating] | None = None,
     ) -> None:
         if isinstance(formula, str):
             self.formula = parse_formula(formula)
@@ -449,7 +455,9 @@ class GlmerMod:
         self.family = family if family is not None else Binomial()
         self.verbose = verbose
 
-        self.matrices = build_model_matrices(self.formula, self.data)
+        self.matrices = build_model_matrices(
+            self.formula, self.data, weights=weights, offset=offset
+        )
 
     def fit(
         self,
@@ -493,7 +501,9 @@ def glmer(
     family: Family | None = None,
     verbose: int = 0,
     nAGQ: int = 1,
+    weights: NDArray[np.floating] | None = None,
+    offset: NDArray[np.floating] | None = None,
     **kwargs,
 ) -> GlmerResult:
-    model = GlmerMod(formula, data, family=family, verbose=verbose)
+    model = GlmerMod(formula, data, family=family, verbose=verbose, weights=weights, offset=offset)
     return model.fit(nAGQ=nAGQ, **kwargs)

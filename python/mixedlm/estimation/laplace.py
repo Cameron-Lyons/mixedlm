@@ -87,13 +87,15 @@ def pirls(
     maxiter: int = 25,
     tol: float = 1e-6,
 ) -> tuple[NDArray[np.floating], NDArray[np.floating], float, bool]:
-    n = matrices.n_obs
     p = matrices.n_fixed
     q = matrices.n_random
 
+    prior_weights = matrices.weights
+    offset = matrices.offset
+
     if beta_start is None:
         beta = np.zeros(p, dtype=np.float64)
-        eta = matrices.X @ beta
+        eta = matrices.X @ beta + offset
         mu = family.link.inverse(eta)
         y_work = eta + family.link.deriv(mu) * (matrices.y - mu)
         XtWX = matrices.X.T @ matrices.X
@@ -111,18 +113,17 @@ def pirls(
 
     converged = False
     for _iteration in range(maxiter):
-        eta = matrices.X @ beta + matrices.Z @ u
+        eta = matrices.X @ beta + matrices.Z @ u + offset
         mu = family.link.inverse(eta)
 
         mu = np.clip(mu, 1e-10, 1 - 1e-10)
 
-        W = family.weights(mu)
+        W = family.weights(mu) * prior_weights
         W = np.maximum(W, 1e-10)
 
-        z = eta + family.link.deriv(mu) * (matrices.y - mu)
+        z = eta - offset + family.link.deriv(mu) * (matrices.y - mu)
 
         W_diag = sparse.diags(W, format="csc")
-        sparse.diags(np.sqrt(W), format="csc")
 
         XtWX = matrices.X.T @ W_diag @ matrices.X
         XtWZ = matrices.X.T @ W_diag @ matrices.Z
@@ -172,11 +173,11 @@ def pirls(
             converged = True
             break
 
-    eta = matrices.X @ beta + matrices.Z @ u
+    eta = matrices.X @ beta + matrices.Z @ u + offset
     mu = family.link.inverse(eta)
     mu = np.clip(mu, 1e-10, 1 - 1e-10)
 
-    dev_resids = family.deviance_resids(matrices.y, mu, np.ones(n))
+    dev_resids = family.deviance_resids(matrices.y, mu, prior_weights)
     deviance = np.sum(dev_resids)
 
     deviance += np.dot(u, linalg.solve(LambdatLambda + 1e-10 * np.eye(q), u))
@@ -191,22 +192,24 @@ def laplace_deviance(
     beta_start: NDArray[np.floating] | None = None,
     u_start: NDArray[np.floating] | None = None,
 ) -> tuple[float, NDArray[np.floating], NDArray[np.floating]]:
-    n = matrices.n_obs
     q = matrices.n_random
+
+    prior_weights = matrices.weights
+    offset = matrices.offset
 
     if q == 0:
         beta, _, deviance, _ = pirls(matrices, family, theta, beta_start, u_start)
         return deviance, beta, np.array([])
 
-    beta, u, _, converged = pirls(matrices, family, theta, beta_start, u_start)
+    beta, u, _, _ = pirls(matrices, family, theta, beta_start, u_start)
 
     Lambda = _build_lambda(theta, matrices.random_structures)
 
-    eta = matrices.X @ beta + matrices.Z @ u
+    eta = matrices.X @ beta + matrices.Z @ u + offset
     mu = family.link.inverse(eta)
     mu = np.clip(mu, 1e-10, 1 - 1e-10)
 
-    dev_resids = family.deviance_resids(matrices.y, mu, np.ones(n))
+    dev_resids = family.deviance_resids(matrices.y, mu, prior_weights)
     deviance = np.sum(dev_resids)
 
     LambdatLambda = Lambda.T @ Lambda
@@ -216,7 +219,7 @@ def laplace_deviance(
     u_penalty = np.dot(u, linalg.solve(LambdatLambda + 1e-10 * np.eye(q), u))
     deviance += u_penalty
 
-    W = family.weights(mu)
+    W = family.weights(mu) * prior_weights
     W = np.maximum(W, 1e-10)
     W_diag = sparse.diags(W, format="csc")
 

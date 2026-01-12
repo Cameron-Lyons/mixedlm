@@ -39,16 +39,29 @@ class ModelMatrices:
     n_obs: int
     n_fixed: int
     n_random: int
+    weights: NDArray[np.floating]
+    offset: NDArray[np.floating]
 
     @property
     def Zt(self) -> sparse.csc_matrix:
         return self.Z.T.tocsc()
 
 
-def build_model_matrices(formula: Formula, data: pd.DataFrame) -> ModelMatrices:
+def build_model_matrices(
+    formula: Formula,
+    data: pd.DataFrame,
+    weights: NDArray[np.floating] | None = None,
+    offset: NDArray[np.floating] | None = None,
+) -> ModelMatrices:
     y = _build_response(formula, data)
     X, fixed_names = build_fixed_matrix(formula, data)
     Z, random_structures = build_random_matrix(formula, data)
+
+    n = len(y)
+    if weights is None:
+        weights = np.ones(n, dtype=np.float64)
+    if offset is None:
+        offset = np.zeros(n, dtype=np.float64)
 
     return ModelMatrices(
         y=y,
@@ -56,9 +69,11 @@ def build_model_matrices(formula: Formula, data: pd.DataFrame) -> ModelMatrices:
         Z=Z,
         fixed_names=fixed_names,
         random_structures=random_structures,
-        n_obs=len(y),
+        n_obs=n,
         n_fixed=X.shape[1],
         n_random=Z.shape[1],
+        weights=weights,
+        offset=offset,
     )
 
 

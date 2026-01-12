@@ -1028,5 +1028,120 @@ class TestInference:
         assert np.all(y_sim == y_sim.astype(int))
 
 
+class TestWeightsOffset:
+    def test_lmer_weights(self) -> None:
+        np.random.seed(42)
+        n_groups = 10
+        n_per_group = 20
+        n = n_groups * n_per_group
+
+        group = np.repeat(np.arange(n_groups), n_per_group)
+        x = np.random.randn(n)
+        group_effects = np.random.randn(n_groups) * 0.5
+        y = 2.0 + 1.5 * x + group_effects[group] + np.random.randn(n) * 0.5
+
+        weights = np.abs(np.random.randn(n)) + 0.1
+
+        data = pd.DataFrame({"y": y, "x": x, "group": [str(g) for g in group]})
+
+        result_unweighted = lmer("y ~ x + (1 | group)", data)
+        result_weighted = lmer("y ~ x + (1 | group)", data, weights=weights)
+
+        assert result_weighted.converged
+        assert result_weighted.fixef()["x"] != result_unweighted.fixef()["x"]
+        assert len(result_weighted.fitted()) == n
+        assert len(result_weighted.residuals()) == n
+
+    def test_lmer_offset(self) -> None:
+        np.random.seed(42)
+        n_groups = 10
+        n_per_group = 20
+        n = n_groups * n_per_group
+
+        group = np.repeat(np.arange(n_groups), n_per_group)
+        x = np.random.randn(n)
+        offset_vals = np.random.randn(n) * 0.5
+        group_effects = np.random.randn(n_groups) * 0.5
+        y = 2.0 + 1.5 * x + offset_vals + group_effects[group] + np.random.randn(n) * 0.5
+
+        data = pd.DataFrame({"y": y, "x": x, "group": [str(g) for g in group]})
+
+        result = lmer("y ~ x + (1 | group)", data, offset=offset_vals)
+
+        assert result.converged
+        fitted = result.fitted()
+        assert len(fitted) == n
+
+    def test_glmer_weights(self) -> None:
+        np.random.seed(42)
+        n_groups = 10
+        n_per_group = 20
+        n = n_groups * n_per_group
+
+        group = np.repeat(np.arange(n_groups), n_per_group)
+        x = np.random.randn(n)
+        group_effects = np.random.randn(n_groups) * 0.3
+        eta = -0.5 + 0.5 * x + group_effects[group]
+        p = 1 / (1 + np.exp(-eta))
+        y = np.random.binomial(1, p)
+
+        weights = np.abs(np.random.randn(n)) + 0.1
+
+        data = pd.DataFrame({"y": y, "x": x, "group": [str(g) for g in group]})
+
+        result = glmer("y ~ x + (1 | group)", data, family=families.Binomial(), weights=weights)
+
+        assert result.converged
+        assert len(result.fitted()) == n
+        assert len(result.residuals()) == n
+
+    def test_glmer_offset(self) -> None:
+        np.random.seed(42)
+        n_groups = 10
+        n_per_group = 20
+        n = n_groups * n_per_group
+
+        group = np.repeat(np.arange(n_groups), n_per_group)
+        x = np.random.randn(n)
+        log_exposure = np.random.randn(n) * 0.5
+        group_effects = np.random.randn(n_groups) * 0.3
+        eta = 0.5 + 0.3 * x + log_exposure + group_effects[group]
+        y = np.random.poisson(np.exp(eta))
+
+        data = pd.DataFrame({"y": y, "x": x, "group": [str(g) for g in group]})
+
+        result = glmer(
+            "y ~ x + (1 | group)",
+            data,
+            family=families.Poisson(),
+            offset=log_exposure,
+        )
+
+        assert result.converged
+        fitted = result.fitted()
+        assert len(fitted) == n
+        assert np.all(fitted > 0)
+
+    def test_lmer_weights_and_offset(self) -> None:
+        np.random.seed(42)
+        n_groups = 10
+        n_per_group = 20
+        n = n_groups * n_per_group
+
+        group = np.repeat(np.arange(n_groups), n_per_group)
+        x = np.random.randn(n)
+        offset_vals = np.random.randn(n) * 0.5
+        weights = np.abs(np.random.randn(n)) + 0.1
+        group_effects = np.random.randn(n_groups) * 0.5
+        y = 2.0 + 1.5 * x + offset_vals + group_effects[group] + np.random.randn(n) * 0.5
+
+        data = pd.DataFrame({"y": y, "x": x, "group": [str(g) for g in group]})
+
+        result = lmer("y ~ x + (1 | group)", data, weights=weights, offset=offset_vals)
+
+        assert result.converged
+        assert len(result.fitted()) == n
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
