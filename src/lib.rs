@@ -1,7 +1,10 @@
 use numpy::{PyArray1, PyArray2, PyReadonlyArray1, PyReadonlyArray2};
 use pyo3::prelude::*;
 
+mod glmm;
 mod linalg;
+mod lmm;
+mod nlmm;
 mod quadrature;
 
 #[pyfunction]
@@ -68,5 +71,10 @@ fn _rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(update_cholesky_factor, m)?)?;
     m.add_function(wrap_pyfunction!(quadrature::gauss_hermite, m)?)?;
     m.add_function(wrap_pyfunction!(quadrature::adaptive_gauss_hermite_1d, m)?)?;
+    m.add_function(wrap_pyfunction!(lmm::profiled_deviance, m)?)?;
+    m.add_function(wrap_pyfunction!(glmm::pirls, m)?)?;
+    m.add_function(wrap_pyfunction!(glmm::laplace_deviance, m)?)?;
+    m.add_function(wrap_pyfunction!(nlmm::pnls_step, m)?)?;
+    m.add_function(wrap_pyfunction!(nlmm::nlmm_deviance, m)?)?;
     Ok(())
 }

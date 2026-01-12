@@ -6,7 +6,7 @@ use pyo3::exceptions::PyValueError;
 use pyo3::PyResult;
 use thiserror::Error;
 
-#[derive(Error, Debug)]
+#[derive(Error, Debug, Clone)]
 pub enum LinalgError {
     #[error("Matrix is not positive definite")]
     NotPositiveDefinite,

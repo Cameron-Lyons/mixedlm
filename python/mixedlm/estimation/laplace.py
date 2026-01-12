@@ -11,6 +11,36 @@ from scipy.optimize import minimize
 from mixedlm.families.base import Family
 from mixedlm.matrices.design import ModelMatrices, RandomEffectStructure
 
+try:
+    from mixedlm._rust import laplace_deviance as _rust_laplace_deviance
+    from mixedlm._rust import pirls as _rust_pirls
+
+    _HAS_RUST = True
+except ImportError:
+    _HAS_RUST = False
+
+
+def _get_family_name(family: Family) -> str:
+    class_name = family.__class__.__name__.lower()
+    if "binomial" in class_name:
+        return "binomial"
+    elif "poisson" in class_name:
+        return "poisson"
+    elif "gaussian" in class_name:
+        return "gaussian"
+    return "gaussian"
+
+
+def _get_link_name(family: Family) -> str:
+    link_name = family.link.__class__.__name__.lower()
+    if "logit" in link_name:
+        return "logit"
+    elif "log" in link_name and "logit" not in link_name:
+        return "log"
+    elif "identity" in link_name:
+        return "identity"
+    return "identity"
+
 
 @dataclass
 class GLMMOptimizationResult:
@@ -93,6 +123,8 @@ def pirls(
     prior_weights = matrices.weights
     offset = matrices.offset
 
+    Zt = matrices.Zt
+
     if beta_start is None:
         beta = np.zeros(p, dtype=np.float64)
         eta = matrices.X @ beta + offset
@@ -111,6 +143,10 @@ def pirls(
 
     Lambda = _build_lambda(theta, matrices.random_structures)
 
+    LambdatLambda = Lambda.T @ Lambda
+    if sparse.issparse(LambdatLambda):
+        LambdatLambda = LambdatLambda.toarray()
+
     converged = False
     for _iteration in range(maxiter):
         eta = matrices.X @ beta + matrices.Z @ u + offset
@@ -127,15 +163,10 @@ def pirls(
 
         XtWX = matrices.X.T @ W_diag @ matrices.X
         XtWZ = matrices.X.T @ W_diag @ matrices.Z
-        ZtWX = XtWZ.T
-        ZtWZ = matrices.Z.T @ W_diag @ matrices.Z
-
-        LambdatLambda = Lambda.T @ Lambda
-        if sparse.issparse(LambdatLambda):
-            LambdatLambda = LambdatLambda.toarray()
+        ZtWZ = Zt @ W_diag @ matrices.Z
 
         XtWz = matrices.X.T @ (W * z)
-        ZtWz = matrices.Z.T @ (W * z)
+        ZtWz = Zt @ (W * z)
 
         ZtWZ_dense = ZtWZ.toarray() if sparse.issparse(ZtWZ) else ZtWZ
 
@@ -147,7 +178,7 @@ def pirls(
             C += 1e-6 * np.eye(q)
             L_C = linalg.cholesky(C, lower=True)
 
-        ZtWX_dense = ZtWX.toarray() if sparse.issparse(ZtWX) else ZtWX
+        ZtWX_dense = XtWZ.T.toarray() if sparse.issparse(XtWZ) else XtWZ.T
 
         RZX = linalg.solve_triangular(L_C, ZtWX_dense, lower=True)
         cu = linalg.solve_triangular(L_C, ZtWz, lower=True)
@@ -223,7 +254,8 @@ def laplace_deviance(
     W = np.maximum(W, 1e-10)
     W_diag = sparse.diags(W, format="csc")
 
-    ZtWZ = matrices.Z.T @ W_diag @ matrices.Z
+    Zt = matrices.Zt
+    ZtWZ = Zt @ W_diag @ matrices.Z
     if sparse.issparse(ZtWZ):
         ZtWZ = ZtWZ.toarray()
 
@@ -240,6 +272,54 @@ def laplace_deviance(
     deviance += logdet_H
 
     return deviance, beta, u
+
+
+def _laplace_deviance_rust(
+    theta: NDArray[np.floating],
+    matrices: ModelMatrices,
+    family: Family,
+) -> tuple[float, NDArray[np.floating], NDArray[np.floating]]:
+    n_levels = [s.n_levels for s in matrices.random_structures]
+    n_terms = [s.n_terms for s in matrices.random_structures]
+    correlated = [s.correlated for s in matrices.random_structures]
+
+    z_csc = matrices.Z.tocsc()
+
+    family_name = _get_family_name(family)
+    link_name = _get_link_name(family)
+
+    deviance, beta, u = _rust_laplace_deviance(
+        matrices.y,
+        matrices.X,
+        z_csc.data,
+        z_csc.indices.astype(np.int64),
+        z_csc.indptr.astype(np.int64),
+        (z_csc.shape[0], z_csc.shape[1]),
+        matrices.weights,
+        matrices.offset,
+        theta,
+        n_levels,
+        n_terms,
+        correlated,
+        family_name,
+        link_name,
+    )
+
+    return deviance, np.array(beta), np.array(u)
+
+
+def laplace_deviance_fast(
+    theta: NDArray[np.floating],
+    matrices: ModelMatrices,
+    family: Family,
+    beta_start: NDArray[np.floating] | None = None,
+    u_start: NDArray[np.floating] | None = None,
+) -> tuple[float, NDArray[np.floating], NDArray[np.floating]]:
+    if _HAS_RUST and beta_start is None and u_start is None:
+        family_name = _get_family_name(family)
+        if family_name in ("binomial", "poisson", "gaussian"):
+            return _laplace_deviance_rust(theta, matrices, family)
+    return laplace_deviance(theta, matrices, family, beta_start, u_start)
 
 
 class GLMMOptimizer:

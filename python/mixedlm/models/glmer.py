@@ -109,20 +109,22 @@ class GlmerResult:
         W = np.maximum(W, 1e-10)
         W_diag = sparse.diags(W, format="csc")
 
-        ZtWZ = self.matrices.Z.T @ W_diag @ self.matrices.Z
+        Zt = self.matrices.Zt
+        ZtWZ = Zt @ W_diag @ self.matrices.Z
         LambdatZtWZLambda = Lambda.T @ ZtWZ @ Lambda
 
         I_q = sparse.eye(q, format="csc")
         V = LambdatZtWZLambda + I_q
 
         V_dense = V.toarray() if sparse.issparse(V) else V
-        try:
-            V_inv = linalg.inv(V_dense)
-        except linalg.LinAlgError:
-            V_inv = linalg.pinv(V_dense)
-
         Lambda_dense = Lambda.toarray() if sparse.issparse(Lambda) else Lambda
-        cond_cov = Lambda_dense @ V_inv @ Lambda_dense.T
+
+        try:
+            V_inv_Lambda_t = linalg.solve(V_dense, Lambda_dense.T, assume_a="pos")
+        except linalg.LinAlgError:
+            V_inv_Lambda_t = linalg.lstsq(V_dense, Lambda_dense.T)[0]
+
+        cond_cov = Lambda_dense @ V_inv_Lambda_t
 
         result: dict[str, dict[str, NDArray[np.floating]]] = {}
         u_idx = 0
@@ -318,8 +320,9 @@ class GlmerResult:
         XtWX = self.matrices.X.T @ W_diag @ self.matrices.X
 
         if q > 0:
+            Zt = self.matrices.Zt
             XtWZ = self.matrices.X.T @ W_diag @ self.matrices.Z
-            ZtWZ = self.matrices.Z.T @ W_diag @ self.matrices.Z
+            ZtWZ = Zt @ W_diag @ self.matrices.Z
 
             LambdatLambda = Lambda.T @ Lambda
             if sparse.issparse(LambdatLambda):
@@ -342,10 +345,15 @@ class GlmerResult:
         else:
             XtVinvX = XtWX
 
+        p = XtVinvX.shape[0]
         try:
-            return linalg.inv(XtVinvX)
+            L = linalg.cholesky(XtVinvX, lower=True)
+            return linalg.cho_solve((L, True), np.eye(p))
         except linalg.LinAlgError:
-            return linalg.pinv(XtVinvX)
+            try:
+                return linalg.solve(XtVinvX, np.eye(p))
+            except linalg.LinAlgError:
+                return linalg.pinv(XtVinvX)
 
     def VarCorr(self) -> GlmerVarCorr:
         groups: dict[str, VarCorrGroup] = {}

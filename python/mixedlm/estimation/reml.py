@@ -10,6 +10,13 @@ from scipy.optimize import minimize
 
 from mixedlm.matrices.design import ModelMatrices, RandomEffectStructure
 
+try:
+    from mixedlm._rust import profiled_deviance as _rust_profiled_deviance
+
+    _HAS_RUST = True
+except ImportError:
+    _HAS_RUST = False
+
 
 @dataclass
 class OptimizationResult:
@@ -174,6 +181,44 @@ def profiled_deviance(
     return float(dev)
 
 
+def _profiled_deviance_rust(
+    theta: NDArray[np.floating],
+    matrices: ModelMatrices,
+    REML: bool = True,
+) -> float:
+    n_levels = [s.n_levels for s in matrices.random_structures]
+    n_terms = [s.n_terms for s in matrices.random_structures]
+    correlated = [s.correlated for s in matrices.random_structures]
+
+    z_csc = matrices.Z.tocsc()
+
+    return _rust_profiled_deviance(
+        theta,
+        matrices.y,
+        matrices.X,
+        z_csc.data,
+        z_csc.indices.astype(np.int64),
+        z_csc.indptr.astype(np.int64),
+        (z_csc.shape[0], z_csc.shape[1]),
+        matrices.weights,
+        matrices.offset,
+        n_levels,
+        n_terms,
+        correlated,
+        REML,
+    )
+
+
+def profiled_deviance_fast(
+    theta: NDArray[np.floating],
+    matrices: ModelMatrices,
+    REML: bool = True,
+) -> float:
+    if _HAS_RUST:
+        return _profiled_deviance_rust(theta, matrices, REML)
+    return profiled_deviance(theta, matrices, REML)
+
+
 def profiled_reml(
     theta: NDArray[np.floating],
     matrices: ModelMatrices,
@@ -187,17 +232,21 @@ class LMMOptimizer:
         matrices: ModelMatrices,
         REML: bool = True,
         verbose: int = 0,
+        use_rust: bool = False,
     ) -> None:
         self.matrices = matrices
         self.REML = REML
         self.verbose = verbose
         self.n_theta = _count_theta(matrices.random_structures)
+        self.use_rust = use_rust and _HAS_RUST
 
     def get_start_theta(self) -> NDArray[np.floating]:
         theta = np.ones(self.n_theta, dtype=np.float64)
         return theta
 
     def objective(self, theta: NDArray[np.floating]) -> float:
+        if self.use_rust:
+            return _profiled_deviance_rust(theta, self.matrices, self.REML)
         return profiled_deviance(theta, self.matrices, self.REML)
 
     def optimize(

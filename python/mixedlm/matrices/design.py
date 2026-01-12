@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from functools import cached_property
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -42,7 +43,7 @@ class ModelMatrices:
     weights: NDArray[np.floating]
     offset: NDArray[np.floating]
 
-    @property
+    @cached_property
     def Zt(self) -> sparse.csc_matrix:
         return self.Z.T.tocsc()
 

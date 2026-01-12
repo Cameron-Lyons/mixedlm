@@ -155,10 +155,10 @@ class LmerResult:
         V = LambdatZtZLambda + I_q
 
         V_dense = V.toarray()
-        V_inv = linalg.inv(V_dense)
 
         Lambda_dense = Lambda.toarray() if sparse.issparse(Lambda) else Lambda
-        cond_cov = self.sigma**2 * Lambda_dense @ V_inv @ Lambda_dense.T
+        V_inv_Lambda_t = linalg.solve(V_dense, Lambda_dense.T, assume_a="pos")
+        cond_cov = self.sigma**2 * Lambda_dense @ V_inv_Lambda_t
 
         cond_var_result: dict[str, dict[str, NDArray[np.floating]]] = {}
         u_idx = 0
@@ -324,7 +324,13 @@ class LmerResult:
 
         if q == 0:
             XtX = self.matrices.X.T @ self.matrices.X
-            return self.sigma**2 * linalg.inv(XtX)
+            p = XtX.shape[0]
+            try:
+                L = linalg.cholesky(XtX, lower=True)
+                XtX_inv = linalg.cho_solve((L, True), np.eye(p))
+            except linalg.LinAlgError:
+                XtX_inv = linalg.solve(XtX, np.eye(p))
+            return self.sigma**2 * XtX_inv
 
         Lambda = _build_lambda(self.theta, self.matrices.random_structures)
 
@@ -345,7 +351,13 @@ class LmerResult:
         RZX_tRZX = RZX.T @ RZX
         XtVinvX = XtX - RZX_tRZX
 
-        return self.sigma**2 * linalg.inv(XtVinvX)
+        p = XtVinvX.shape[0]
+        try:
+            L = linalg.cholesky(XtVinvX, lower=True)
+            XtVinvX_inv = linalg.cho_solve((L, True), np.eye(p))
+        except linalg.LinAlgError:
+            XtVinvX_inv = linalg.solve(XtVinvX, np.eye(p))
+        return self.sigma**2 * XtVinvX_inv
 
     def VarCorr(self) -> VarCorr:
         groups: dict[str, VarCorrGroup] = {}

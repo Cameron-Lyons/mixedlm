@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 import numpy as np
@@ -9,6 +11,17 @@ from scipy import linalg
 from scipy.optimize import minimize
 
 from mixedlm.nlme.models import NonlinearModel
+
+try:
+    from mixedlm._rust import nlmm_deviance as _rust_nlmm_deviance
+    from mixedlm._rust import pnls_step as _rust_pnls_step
+
+    _HAS_RUST = True
+except ImportError:
+    _HAS_RUST = False
+
+
+_SUPPORTED_RUST_MODELS = {"ssasymp", "sslogis", "ssmicmen", "ssfpl", "ssgompertz", "ssbiexp"}
 
 
 @dataclass
@@ -46,6 +59,90 @@ def _build_psi_matrix(
     return L @ L.T
 
 
+def _compute_group_resid_grad(
+    g: int,
+    groups: NDArray,
+    x: NDArray,
+    y: NDArray,
+    phi: NDArray,
+    b: NDArray,
+    random_params: list[int],
+    model: NonlinearModel,
+) -> tuple[int, NDArray, NDArray, NDArray]:
+    mask = groups == g
+    x_g = x[mask]
+    y_g = y[mask]
+
+    params_g = phi.copy()
+    for j, p_idx in enumerate(random_params):
+        params_g[p_idx] += b[g, j]
+
+    pred_g = model.predict(params_g, x_g)
+    grad_g = model.gradient(params_g, x_g)
+
+    return (g, mask, y_g - pred_g, grad_g)
+
+
+def _update_group_random_effects(
+    g: int,
+    groups: NDArray,
+    x: NDArray,
+    y: NDArray,
+    phi: NDArray,
+    b: NDArray,
+    random_params: list[int],
+    model: NonlinearModel,
+    Psi_inv: NDArray,
+    sigma: float,
+) -> tuple[int, NDArray]:
+    mask = groups == g
+    x_g = x[mask]
+    y_g = y[mask]
+
+    params_g = phi.copy()
+    for j, p_idx in enumerate(random_params):
+        params_g[p_idx] += b[g, j]
+
+    pred_g = model.predict(params_g, x_g)
+    grad_g = model.gradient(params_g, x_g)
+
+    Z_g = grad_g[:, random_params]
+    resid_g = y_g - pred_g + Z_g @ b[g, :]
+
+    ZtZ = Z_g.T @ Z_g
+    Ztr = Z_g.T @ resid_g
+
+    C = ZtZ / sigma**2 + Psi_inv
+    try:
+        b_g = linalg.solve(C, Ztr / sigma**2, assume_a="pos")
+    except linalg.LinAlgError:
+        b_g = linalg.lstsq(C, Ztr / sigma**2)[0]
+
+    return (g, b_g)
+
+
+def _compute_group_rss(
+    g: int,
+    groups: NDArray,
+    x: NDArray,
+    y: NDArray,
+    phi: NDArray,
+    b: NDArray,
+    random_params: list[int],
+    model: NonlinearModel,
+) -> float:
+    mask = groups == g
+    x_g = x[mask]
+    y_g = y[mask]
+
+    params_g = phi.copy()
+    for j, p_idx in enumerate(random_params):
+        params_g[p_idx] += b[g, j]
+
+    pred_g = model.predict(params_g, x_g)
+    return float(np.sum((y_g - pred_g) ** 2))
+
+
 def pnls_step(
     y: NDArray[np.floating],
     x: NDArray[np.floating],
@@ -56,6 +153,7 @@ def pnls_step(
     Psi: NDArray[np.floating],
     sigma: float,
     random_params: list[int],
+    n_jobs: int = 1,
 ) -> tuple[NDArray[np.floating], NDArray[np.floating], float]:
     n = len(y)
     n_groups = len(np.unique(groups))
@@ -67,25 +165,43 @@ def pnls_step(
     phi_new = phi.copy()
     b_new = b.copy()
 
+    if n_jobs == -1:
+        n_jobs = os.cpu_count() or 1
+
+    use_parallel = n_jobs > 1 and n_groups >= n_jobs
+
     for _iteration in range(10):
         resid_total = np.zeros(n, dtype=np.float64)
         grad_total = np.zeros((n, n_phi), dtype=np.float64)
 
-        for g in range(n_groups):
-            mask = groups == g
-            x_g = x[mask]
-            y_g = y[mask]
-            np.sum(mask)
+        if use_parallel:
+            with ThreadPoolExecutor(max_workers=n_jobs) as executor:
+                futures = [
+                    executor.submit(
+                        _compute_group_resid_grad,
+                        g, groups, x, y, phi, b, random_params, model
+                    )
+                    for g in range(n_groups)
+                ]
+                for future in futures:
+                    g, mask, resid_g, grad_g = future.result()
+                    resid_total[mask] = resid_g
+                    grad_total[mask, :] = grad_g
+        else:
+            for g in range(n_groups):
+                mask = groups == g
+                x_g = x[mask]
+                y_g = y[mask]
 
-            params_g = phi.copy()
-            for j, p_idx in enumerate(random_params):
-                params_g[p_idx] += b[g, j]
+                params_g = phi.copy()
+                for j, p_idx in enumerate(random_params):
+                    params_g[p_idx] += b[g, j]
 
-            pred_g = model.predict(params_g, x_g)
-            grad_g = model.gradient(params_g, x_g)
+                pred_g = model.predict(params_g, x_g)
+                grad_g = model.gradient(params_g, x_g)
 
-            resid_total[mask] = y_g - pred_g
-            grad_total[mask, :] = grad_g
+                resid_total[mask] = y_g - pred_g
+                grad_total[mask, :] = grad_g
 
         GtG = grad_total.T @ grad_total
         Gtr = grad_total.T @ resid_total
@@ -97,29 +213,42 @@ def pnls_step(
 
         phi_new = phi + 0.5 * delta_phi
 
-        for g in range(n_groups):
-            mask = groups == g
-            x_g = x[mask]
-            y_g = y[mask]
+        if use_parallel:
+            with ThreadPoolExecutor(max_workers=n_jobs) as executor:
+                futures = [
+                    executor.submit(
+                        _update_group_random_effects,
+                        g, groups, x, y, phi_new, b, random_params, model, Psi_inv, sigma
+                    )
+                    for g in range(n_groups)
+                ]
+                for future in futures:
+                    g, b_g = future.result()
+                    b_new[g, :] = b_g
+        else:
+            for g in range(n_groups):
+                mask = groups == g
+                x_g = x[mask]
+                y_g = y[mask]
 
-            params_g = phi_new.copy()
-            for j, p_idx in enumerate(random_params):
-                params_g[p_idx] += b[g, j]
+                params_g = phi_new.copy()
+                for j, p_idx in enumerate(random_params):
+                    params_g[p_idx] += b[g, j]
 
-            pred_g = model.predict(params_g, x_g)
-            grad_g = model.gradient(params_g, x_g)
+                pred_g = model.predict(params_g, x_g)
+                grad_g = model.gradient(params_g, x_g)
 
-            Z_g = grad_g[:, random_params]
-            resid_g = y_g - pred_g + Z_g @ b[g, :]
+                Z_g = grad_g[:, random_params]
+                resid_g = y_g - pred_g + Z_g @ b[g, :]
 
-            ZtZ = Z_g.T @ Z_g
-            Ztr = Z_g.T @ resid_g
+                ZtZ = Z_g.T @ Z_g
+                Ztr = Z_g.T @ resid_g
 
-            C = ZtZ / sigma**2 + Psi_inv
-            try:
-                b_new[g, :] = linalg.solve(C, Ztr / sigma**2, assume_a="pos")
-            except linalg.LinAlgError:
-                b_new[g, :] = linalg.lstsq(C, Ztr / sigma**2)[0]
+                C = ZtZ / sigma**2 + Psi_inv
+                try:
+                    b_new[g, :] = linalg.solve(C, Ztr / sigma**2, assume_a="pos")
+                except linalg.LinAlgError:
+                    b_new[g, :] = linalg.lstsq(C, Ztr / sigma**2)[0]
 
         if np.max(np.abs(phi_new - phi)) < 1e-6:
             break
@@ -127,18 +256,29 @@ def pnls_step(
         phi = phi_new
         b = b_new
 
-    rss = 0.0
-    for g in range(n_groups):
-        mask = groups == g
-        x_g = x[mask]
-        y_g = y[mask]
+    if use_parallel:
+        with ThreadPoolExecutor(max_workers=n_jobs) as executor:
+            futures = [
+                executor.submit(
+                    _compute_group_rss,
+                    g, groups, x, y, phi_new, b_new, random_params, model
+                )
+                for g in range(n_groups)
+            ]
+            rss = sum(future.result() for future in futures)
+    else:
+        rss = 0.0
+        for g in range(n_groups):
+            mask = groups == g
+            x_g = x[mask]
+            y_g = y[mask]
 
-        params_g = phi_new.copy()
-        for j, p_idx in enumerate(random_params):
-            params_g[p_idx] += b_new[g, j]
+            params_g = phi_new.copy()
+            for j, p_idx in enumerate(random_params):
+                params_g[p_idx] += b_new[g, j]
 
-        pred_g = model.predict(params_g, x_g)
-        rss += np.sum((y_g - pred_g) ** 2)
+            pred_g = model.predict(params_g, x_g)
+            rss += np.sum((y_g - pred_g) ** 2)
 
     sigma_new = np.sqrt(rss / n)
 
@@ -155,6 +295,7 @@ def nlmm_deviance(
     b: NDArray[np.floating],
     random_params: list[int],
     sigma: float,
+    n_jobs: int = 1,
 ) -> tuple[float, NDArray[np.floating], NDArray[np.floating], float]:
     n = len(y)
     n_groups = len(np.unique(groups))
@@ -162,20 +303,38 @@ def nlmm_deviance(
 
     Psi = _build_psi_matrix(theta, n_random)
 
-    phi_new, b_new, sigma_new = pnls_step(y, x, groups, model, phi, b, Psi, sigma, random_params)
+    phi_new, b_new, sigma_new = pnls_step(
+        y, x, groups, model, phi, b, Psi, sigma, random_params, n_jobs=n_jobs
+    )
 
-    rss = 0.0
-    for g in range(n_groups):
-        mask = groups == g
-        x_g = x[mask]
-        y_g = y[mask]
+    if n_jobs == -1:
+        n_jobs = os.cpu_count() or 1
 
-        params_g = phi_new.copy()
-        for j, p_idx in enumerate(random_params):
-            params_g[p_idx] += b_new[g, j]
+    use_parallel = n_jobs > 1 and n_groups >= n_jobs
 
-        pred_g = model.predict(params_g, x_g)
-        rss += np.sum((y_g - pred_g) ** 2)
+    if use_parallel:
+        with ThreadPoolExecutor(max_workers=n_jobs) as executor:
+            futures = [
+                executor.submit(
+                    _compute_group_rss,
+                    g, groups, x, y, phi_new, b_new, random_params, model
+                )
+                for g in range(n_groups)
+            ]
+            rss = sum(future.result() for future in futures)
+    else:
+        rss = 0.0
+        for g in range(n_groups):
+            mask = groups == g
+            x_g = x[mask]
+            y_g = y[mask]
+
+            params_g = phi_new.copy()
+            for j, p_idx in enumerate(random_params):
+                params_g[p_idx] += b_new[g, j]
+
+            pred_g = model.predict(params_g, x_g)
+            rss += np.sum((y_g - pred_g) ** 2)
 
     deviance = n * np.log(2 * np.pi * sigma_new**2) + rss / sigma_new**2
 
@@ -190,6 +349,99 @@ def nlmm_deviance(
     return deviance, phi_new, b_new, sigma_new
 
 
+def _pnls_step_rust(
+    y: NDArray[np.floating],
+    x: NDArray[np.floating],
+    groups: NDArray[np.integer],
+    model: NonlinearModel,
+    phi: NDArray[np.floating],
+    b: NDArray[np.floating],
+    theta: NDArray[np.floating],
+    sigma: float,
+    random_params: list[int],
+) -> tuple[NDArray[np.floating], NDArray[np.floating], float]:
+    phi_out, b_out, sigma_out = _rust_pnls_step(
+        y.astype(np.float64),
+        x.astype(np.float64),
+        groups.astype(np.int64),
+        model.name.lower(),
+        phi.astype(np.float64),
+        b.astype(np.float64),
+        theta.astype(np.float64),
+        float(sigma),
+        list(random_params),
+    )
+    return np.array(phi_out), np.array(b_out), sigma_out
+
+
+def _nlmm_deviance_rust(
+    theta: NDArray[np.floating],
+    y: NDArray[np.floating],
+    x: NDArray[np.floating],
+    groups: NDArray[np.integer],
+    model: NonlinearModel,
+    phi: NDArray[np.floating],
+    b: NDArray[np.floating],
+    random_params: list[int],
+    sigma: float,
+) -> tuple[float, NDArray[np.floating], NDArray[np.floating], float]:
+    dev, phi_out, b_out, sigma_out = _rust_nlmm_deviance(
+        theta.astype(np.float64),
+        y.astype(np.float64),
+        x.astype(np.float64),
+        groups.astype(np.int64),
+        model.name.lower(),
+        phi.astype(np.float64),
+        b.astype(np.float64),
+        list(random_params),
+        float(sigma),
+    )
+    return dev, np.array(phi_out), np.array(b_out), sigma_out
+
+
+def pnls_step_fast(
+    y: NDArray[np.floating],
+    x: NDArray[np.floating],
+    groups: NDArray[np.integer],
+    model: NonlinearModel,
+    phi: NDArray[np.floating],
+    b: NDArray[np.floating],
+    Psi: NDArray[np.floating],
+    sigma: float,
+    random_params: list[int],
+    n_jobs: int = 1,
+) -> tuple[NDArray[np.floating], NDArray[np.floating], float]:
+    if _HAS_RUST and model.name.lower() in _SUPPORTED_RUST_MODELS:
+        n_random = len(random_params)
+        n_theta = n_random * (n_random + 1) // 2
+        theta = np.zeros(n_theta, dtype=np.float64)
+        idx = 0
+        for i in range(n_random):
+            for j in range(i + 1):
+                if i == j:
+                    theta[idx] = 1.0
+                idx += 1
+        return _pnls_step_rust(y, x, groups, model, phi, b, theta, sigma, random_params)
+    return pnls_step(y, x, groups, model, phi, b, Psi, sigma, random_params, n_jobs=n_jobs)
+
+
+def nlmm_deviance_fast(
+    theta: NDArray[np.floating],
+    y: NDArray[np.floating],
+    x: NDArray[np.floating],
+    groups: NDArray[np.integer],
+    model: NonlinearModel,
+    phi: NDArray[np.floating],
+    b: NDArray[np.floating],
+    random_params: list[int],
+    sigma: float,
+    n_jobs: int = 1,
+) -> tuple[float, NDArray[np.floating], NDArray[np.floating], float]:
+    if _HAS_RUST and model.name.lower() in _SUPPORTED_RUST_MODELS:
+        return _nlmm_deviance_rust(theta, y, x, groups, model, phi, b, random_params, sigma)
+    return nlmm_deviance(theta, y, x, groups, model, phi, b, random_params, sigma, n_jobs=n_jobs)
+
+
 class NLMMOptimizer:
     def __init__(
         self,
@@ -199,6 +451,8 @@ class NLMMOptimizer:
         model: NonlinearModel,
         random_params: list[int],
         verbose: int = 0,
+        use_rust: bool = True,
+        n_jobs: int = 1,
     ) -> None:
         self.y = y
         self.x = x
@@ -206,6 +460,8 @@ class NLMMOptimizer:
         self.model = model
         self.random_params = random_params
         self.verbose = verbose
+        self.use_rust = use_rust and _HAS_RUST and model.name.lower() in _SUPPORTED_RUST_MODELS
+        self.n_jobs = n_jobs
 
         self.n_groups = len(np.unique(groups))
         self.n_random = len(random_params)
@@ -234,17 +490,31 @@ class NLMMOptimizer:
         if self._b_cache is None:
             self._b_cache = np.zeros((self.n_groups, self.n_random), dtype=np.float64)
 
-        dev, phi, b, sigma = nlmm_deviance(
-            theta,
-            self.y,
-            self.x,
-            self.groups,
-            self.model,
-            self._phi_cache,
-            self._b_cache,
-            self.random_params,
-            self._sigma_cache,
-        )
+        if self.use_rust:
+            dev, phi, b, sigma = _nlmm_deviance_rust(
+                theta,
+                self.y,
+                self.x,
+                self.groups,
+                self.model,
+                self._phi_cache,
+                self._b_cache,
+                self.random_params,
+                self._sigma_cache,
+            )
+        else:
+            dev, phi, b, sigma = nlmm_deviance(
+                theta,
+                self.y,
+                self.x,
+                self.groups,
+                self.model,
+                self._phi_cache,
+                self._b_cache,
+                self.random_params,
+                self._sigma_cache,
+                n_jobs=self.n_jobs,
+            )
 
         self._phi_cache = phi
         self._b_cache = b
