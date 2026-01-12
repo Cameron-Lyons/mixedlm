@@ -21,8 +21,10 @@ jobs:
       - name: Set up Python
         run: uv python install 3.14
 
-      - name: Install dependencies
-        run: uv pip install ruff
+      - name: Create venv and install dependencies
+        run: |
+          uv venv
+          uv pip install ruff
 
       - name: Run ruff check
         run: uv run ruff check python/ tests/
@@ -44,8 +46,10 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-action@stable
 
-      - name: Install maturin
-        run: uv pip install maturin
+      - name: Create venv and install maturin
+        run: |
+          uv venv
+          uv pip install maturin
 
       - name: Build package
         run: uv run maturin develop
@@ -73,8 +77,10 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-action@stable
 
-      - name: Install maturin
-        run: uv pip install maturin
+      - name: Create venv and install maturin
+        run: |
+          uv venv
+          uv pip install maturin
 
       - name: Build wheel
         run: uv run maturin build --release
