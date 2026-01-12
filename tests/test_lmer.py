@@ -548,6 +548,46 @@ class TestGlmer:
         assert np.isfinite(aic)
         assert np.isfinite(bic)
 
+    def test_gamma_model(self) -> None:
+        np.random.seed(123)
+        n_groups = 8
+        n_per_group = 20
+        n = n_groups * n_per_group
+
+        group = np.repeat(np.arange(n_groups), n_per_group)
+        x = np.random.uniform(0.5, 2.0, n)
+        group_effects = np.random.randn(n_groups) * 0.1
+        mu = np.exp(1.0 + 0.2 * x + group_effects[group])
+        shape = 10.0
+        y = np.random.gamma(shape, mu / shape, n)
+
+        data = pd.DataFrame({"y": y, "x": x, "group": [str(g) for g in group]})
+
+        result = glmer("y ~ x + (1 | group)", data, family=families.Gamma())
+
+        assert len(result.fixef()) == 2
+        assert np.all(result.fitted(type="response") > 0)
+
+    def test_negative_binomial_model(self) -> None:
+        np.random.seed(789)
+        n_groups = 8
+        n_per_group = 25
+        n = n_groups * n_per_group
+
+        group = np.repeat(np.arange(n_groups), n_per_group)
+        x = np.random.randn(n)
+        group_effects = np.random.randn(n_groups) * 0.2
+        mu = np.exp(1.5 + 0.3 * x + group_effects[group])
+        theta = 5.0
+        y = np.random.negative_binomial(theta, theta / (mu + theta), n)
+
+        data = pd.DataFrame({"y": y, "x": x, "group": [str(g) for g in group]})
+
+        result = glmer("y ~ x + (1 | group)", data, family=families.NegativeBinomial(theta=theta))
+
+        assert len(result.fixef()) == 2
+        assert np.all(result.fitted(type="response") >= 0)
+
 
 def generate_nlme_data() -> pd.DataFrame:
     np.random.seed(42)
