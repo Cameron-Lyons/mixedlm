@@ -175,6 +175,13 @@ class GlmerResult:
         p = self.matrices.n_fixed
         return n - p
 
+    def get_sigma(self) -> float:
+        return 1.0
+
+    @property
+    def sigma(self) -> float:
+        return 1.0
+
     def getME(
         self, name: str
     ) -> (
@@ -189,6 +196,7 @@ class GlmerResult:
             "theta": self.theta,
             "u": self.u,
             "b": self.u,
+            "sigma": self.sigma,
             "deviance": self.deviance,
             "family": self.family,
             "n_obs": self.matrices.n_obs,

@@ -1307,6 +1307,8 @@ class TestAccessors:
         assert result.nobs() == n
         assert result.ngrps()["group"] == n_groups
         assert result.df_residual() == n - 2
+        assert result.sigma == 1.0
+        assert result.get_sigma() == 1.0
 
     def test_ngrps_multiple_grouping(self) -> None:
         np.random.seed(42)
