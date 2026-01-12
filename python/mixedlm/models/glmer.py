@@ -224,6 +224,50 @@ class GlmerResult:
         n = self.matrices.n_obs
         return -2 * self.logLik() + n_params * np.log(n)
 
+    def confint(
+        self,
+        parm: str | list[str] | None = None,
+        level: float = 0.95,
+        method: str = "Wald",
+        n_boot: int = 1000,
+        seed: int | None = None,
+    ) -> dict[str, tuple[float, float]]:
+        from scipy import stats
+        from mixedlm.inference.profile import profile_glmer
+        from mixedlm.inference.bootstrap import bootstrap_glmer
+
+        if parm is None:
+            parm = self.matrices.fixed_names
+        elif isinstance(parm, str):
+            parm = [parm]
+
+        if method == "Wald":
+            vcov = self.vcov()
+            alpha = 1 - level
+            z_crit = stats.norm.ppf(1 - alpha / 2)
+
+            result: dict[str, tuple[float, float]] = {}
+            for p in parm:
+                if p not in self.matrices.fixed_names:
+                    continue
+                idx = self.matrices.fixed_names.index(p)
+                se = np.sqrt(vcov[idx, idx])
+                lower = self.beta[idx] - z_crit * se
+                upper = self.beta[idx] + z_crit * se
+                result[p] = (float(lower), float(upper))
+            return result
+
+        elif method == "profile":
+            profiles = profile_glmer(self, which=parm, level=level)
+            return {p: (profiles[p].ci_lower, profiles[p].ci_upper) for p in parm if p in profiles}
+
+        elif method == "boot":
+            boot_result = bootstrap_glmer(self, n_boot=n_boot, seed=seed)
+            return boot_result.ci(level=level)
+
+        else:
+            raise ValueError(f"Unknown method: {method}. Use 'Wald', 'profile', or 'boot'.")
+
     def summary(self) -> str:
         lines = []
         lines.append(f"Generalized linear mixed model fit by maximum likelihood (Laplace)")

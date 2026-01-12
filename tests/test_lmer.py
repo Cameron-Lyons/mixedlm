@@ -479,5 +479,114 @@ class TestNlmer:
         assert np.isfinite(bic)
 
 
+class TestInference:
+    def test_lmer_confint_wald(self) -> None:
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+
+        ci = result.confint(method="Wald")
+        assert "(Intercept)" in ci
+        assert "Days" in ci
+        assert ci["(Intercept)"][0] < result.fixef()["(Intercept)"] < ci["(Intercept)"][1]
+        assert ci["Days"][0] < result.fixef()["Days"] < ci["Days"][1]
+
+    def test_lmer_confint_profile(self) -> None:
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+
+        ci = result.confint(parm="Days", method="profile")
+        assert "Days" in ci
+        assert ci["Days"][0] < result.fixef()["Days"] < ci["Days"][1]
+
+    def test_lmer_confint_boot(self) -> None:
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+
+        ci = result.confint(parm="Days", method="boot", n_boot=50, seed=42)
+        assert "Days" in ci
+        assert ci["Days"][0] < ci["Days"][1]
+
+    def test_profile_lmer(self) -> None:
+        from mixedlm.inference import profile_lmer
+
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+        profiles = profile_lmer(result, which="Days", n_points=10)
+
+        assert "Days" in profiles
+        profile = profiles["Days"]
+        assert len(profile.values) == 10
+        assert len(profile.zeta) == 10
+        assert profile.ci_lower < profile.mle < profile.ci_upper
+
+    def test_bootstrap_lmer(self) -> None:
+        from mixedlm.inference import bootstrap_lmer
+
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+        boot_result = bootstrap_lmer(result, n_boot=30, seed=42)
+
+        assert boot_result.n_boot == 30
+        assert boot_result.beta_samples.shape == (30, 2)
+        se = boot_result.se()
+        assert "(Intercept)" in se
+        assert "Days" in se
+        assert se["Days"] > 0
+
+    def test_bootstrap_lmer_ci(self) -> None:
+        from mixedlm.inference import bootstrap_lmer
+
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+        boot_result = bootstrap_lmer(result, n_boot=30, seed=42)
+
+        ci_pct = boot_result.ci(method="percentile")
+        ci_basic = boot_result.ci(method="basic")
+        ci_normal = boot_result.ci(method="normal")
+
+        assert "Days" in ci_pct
+        assert "Days" in ci_basic
+        assert "Days" in ci_normal
+
+    def test_glmer_confint_wald(self) -> None:
+        result = glmer(
+            "y ~ period + (1 | herd)",
+            CBPP,
+            family=families.Binomial()
+        )
+
+        ci = result.confint(method="Wald")
+        assert "(Intercept)" in ci
+        assert ci["(Intercept)"][0] < result.fixef()["(Intercept)"] < ci["(Intercept)"][1]
+
+    def test_glmer_confint_profile(self) -> None:
+        result = glmer(
+            "y ~ period + (1 | herd)",
+            CBPP,
+            family=families.Binomial()
+        )
+
+        ci = result.confint(parm="(Intercept)", method="profile")
+        assert "(Intercept)" in ci
+        assert ci["(Intercept)"][0] < ci["(Intercept)"][1]
+
+    def test_bootstrap_glmer(self) -> None:
+        from mixedlm.inference import bootstrap_glmer
+
+        result = glmer(
+            "y ~ period + (1 | herd)",
+            CBPP,
+            family=families.Binomial()
+        )
+
+        boot_result = bootstrap_glmer(result, n_boot=20, seed=42)
+        assert boot_result.n_boot == 20
+        assert boot_result.sigma_samples is None
+
+    def test_profile_result_summary(self) -> None:
+        from mixedlm.inference import bootstrap_lmer
+
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+        boot_result = bootstrap_lmer(result, n_boot=30, seed=42)
+
+        summary = boot_result.summary()
+        assert "Parametric bootstrap" in summary
+        assert "30 samples" in summary
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
