@@ -79,7 +79,7 @@ def drop1_lmer(
     n_theta = _count_theta(model.matrices.random_structures)
     full_n_params = model.matrices.n_fixed + n_theta + 1
     full_aic = model.AIC()
-    full_loglik = model.logLik()
+    full_loglik = model.logLik().value
 
     terms: list[str] = []
     df_list: list[int] = []
@@ -94,7 +94,7 @@ def drop1_lmer(
             reduced_n_theta = _count_theta(reduced_model.matrices.random_structures)
             reduced_n_params = reduced_model.matrices.n_fixed + reduced_n_theta + 1
             reduced_aic = reduced_model.AIC()
-            reduced_loglik = reduced_model.logLik()
+            reduced_loglik = reduced_model.logLik().value
 
             terms.append(term)
             df_list.append(reduced_n_params)
@@ -146,7 +146,7 @@ def drop1_glmer(
     n_theta = _count_theta(model.matrices.random_structures)
     full_n_params = model.matrices.n_fixed + n_theta
     full_aic = model.AIC()
-    full_loglik = model.logLik()
+    full_loglik = model.logLik().value
 
     terms: list[str] = []
     df_list: list[int] = []
@@ -161,7 +161,7 @@ def drop1_glmer(
             reduced_n_theta = _count_theta(reduced_model.matrices.random_structures)
             reduced_n_params = reduced_model.matrices.n_fixed + reduced_n_theta
             reduced_aic = reduced_model.AIC()
-            reduced_loglik = reduced_model.logLik()
+            reduced_loglik = reduced_model.logLik().value
 
             terms.append(term)
             df_list.append(reduced_n_params)

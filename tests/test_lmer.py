@@ -2023,5 +2023,88 @@ class TestVarCorr:
         assert "herd" in str_output
 
 
+class TestLogLik:
+    def test_lmer_loglik_basic(self):
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+        ll = result.logLik()
+
+        assert ll.value < 0
+        assert ll.df > 0
+        assert ll.nobs == len(SLEEPSTUDY)
+        assert ll.REML is True
+
+    def test_lmer_loglik_ml(self):
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY, REML=False)
+        ll = result.logLik()
+
+        assert ll.value < 0
+        assert ll.REML is False
+
+    def test_lmer_loglik_df(self):
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+        ll = result.logLik()
+
+        assert ll.df == 4
+
+    def test_lmer_loglik_str(self):
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+        ll = result.logLik()
+
+        str_output = str(ll)
+        assert "log Lik." in str_output
+        assert "df=" in str_output
+        assert "REML" in str_output
+
+    def test_lmer_loglik_repr(self):
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+        ll = result.logLik()
+
+        repr_output = repr(ll)
+        assert "LogLik" in repr_output
+        assert "value=" in repr_output
+        assert "df=" in repr_output
+
+    def test_lmer_loglik_float(self):
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+        ll = result.logLik()
+
+        assert float(ll) == ll.value
+
+    def test_lmer_aic_bic_consistency(self):
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+        ll = result.logLik()
+
+        expected_aic = -2 * ll.value + 2 * ll.df
+        expected_bic = -2 * ll.value + ll.df * np.log(ll.nobs)
+
+        assert np.isclose(result.AIC(), expected_aic)
+        assert np.isclose(result.BIC(), expected_bic)
+
+    def test_glmer_loglik_basic(self):
+        result = glmer("y ~ period + (1 | herd)", CBPP, family=families.Binomial())
+        ll = result.logLik()
+
+        assert ll.value < 0
+        assert ll.df > 0
+        assert ll.nobs == len(CBPP)
+        assert ll.REML is False
+
+    def test_glmer_loglik_df(self):
+        result = glmer("y ~ period + (1 | herd)", CBPP, family=families.Binomial())
+        ll = result.logLik()
+
+        assert ll.df == 5
+
+    def test_glmer_aic_bic_consistency(self):
+        result = glmer("y ~ period + (1 | herd)", CBPP, family=families.Binomial())
+        ll = result.logLik()
+
+        expected_aic = -2 * ll.value + 2 * ll.df
+        expected_bic = -2 * ll.value + ll.df * np.log(ll.nobs)
+
+        assert np.isclose(result.AIC(), expected_aic)
+        assert np.isclose(result.BIC(), expected_bic)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

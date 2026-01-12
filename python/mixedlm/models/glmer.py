@@ -16,7 +16,7 @@ from mixedlm.families.binomial import Binomial
 from mixedlm.formula.parser import parse_formula, update_formula
 from mixedlm.formula.terms import Formula
 from mixedlm.matrices.design import ModelMatrices, build_model_matrices
-from mixedlm.models.lmer import RanefResult, VarCorrGroup
+from mixedlm.models.lmer import LogLik, RanefResult, VarCorrGroup
 
 
 @dataclass
@@ -377,19 +377,21 @@ class GlmerResult:
 
         return False
 
-    def logLik(self) -> float:
-        return -0.5 * self.deviance
+    def logLik(self) -> LogLik:
+        n = self.matrices.n_obs
+        n_theta = _count_theta(self.matrices.random_structures)
+        df = self.matrices.n_fixed + n_theta
+        value = -0.5 * self.deviance
+
+        return LogLik(value=value, df=df, nobs=n, REML=False)
 
     def AIC(self) -> float:
-        n_theta = _count_theta(self.matrices.random_structures)
-        n_params = self.matrices.n_fixed + n_theta
-        return -2 * self.logLik() + 2 * n_params
+        ll = self.logLik()
+        return -2 * ll.value + 2 * ll.df
 
     def BIC(self) -> float:
-        n_theta = _count_theta(self.matrices.random_structures)
-        n_params = self.matrices.n_fixed + n_theta
-        n = self.matrices.n_obs
-        return -2 * self.logLik() + n_params * np.log(n)
+        ll = self.logLik()
+        return -2 * ll.value + ll.df * np.log(ll.nobs)
 
     def confint(
         self,
@@ -625,7 +627,7 @@ class GlmerResult:
 
         lines.append("     AIC      BIC   logLik deviance")
         lines.append(
-            f"{self.AIC():8.1f} {self.BIC():8.1f} {self.logLik():8.1f} {self.deviance:8.1f}"
+            f"{self.AIC():8.1f} {self.BIC():8.1f} {self.logLik().value:8.1f} {self.deviance:8.1f}"
         )
         lines.append("")
 

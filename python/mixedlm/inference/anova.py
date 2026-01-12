@@ -120,7 +120,7 @@ def anova(
         df_list.append(n_params)
         aic_list.append(m.AIC())
         bic_list.append(m.BIC())
-        loglik_list.append(m.logLik())
+        loglik_list.append(m.logLik().value)
         deviance_list.append(m.deviance)
 
     sorted_indices = sorted(range(len(df_list)), key=lambda i: df_list[i])

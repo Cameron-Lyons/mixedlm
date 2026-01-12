@@ -35,6 +35,24 @@ class RanefResult:
 
 
 @dataclass
+class LogLik:
+    value: float
+    df: int
+    nobs: int
+    REML: bool = False
+
+    def __float__(self) -> float:
+        return float(self.value)
+
+    def __str__(self) -> str:
+        reml_str = " (REML)" if self.REML else ""
+        return f"'log Lik.' {self.value:.4f} (df={self.df}){reml_str}"
+
+    def __repr__(self) -> str:
+        return f"LogLik(value={self.value:.4f}, df={self.df}, nobs={self.nobs}, REML={self.REML})"
+
+
+@dataclass
 class VarCorrGroup:
     name: str
     term_names: list[str]
@@ -363,25 +381,26 @@ class LmerResult:
 
         return False
 
-    def logLik(self) -> float:
+    def logLik(self) -> LogLik:
         n = self.matrices.n_obs
         p = self.matrices.n_fixed
+        n_theta = _count_theta(self.matrices.random_structures)
+        df = p + n_theta + 1
 
         if self.REML:
-            return -0.5 * (self.deviance + (n - p) * np.log(2 * np.pi))
+            value = -0.5 * (self.deviance + (n - p) * np.log(2 * np.pi))
         else:
-            return -0.5 * (self.deviance + n * np.log(2 * np.pi))
+            value = -0.5 * (self.deviance + n * np.log(2 * np.pi))
+
+        return LogLik(value=value, df=df, nobs=n, REML=self.REML)
 
     def AIC(self) -> float:
-        n_theta = _count_theta(self.matrices.random_structures)
-        n_params = self.matrices.n_fixed + n_theta + 1
-        return -2 * self.logLik() + 2 * n_params
+        ll = self.logLik()
+        return -2 * ll.value + 2 * ll.df
 
     def BIC(self) -> float:
-        n_theta = _count_theta(self.matrices.random_structures)
-        n_params = self.matrices.n_fixed + n_theta + 1
-        n = self.matrices.n_obs
-        return -2 * self.logLik() + n_params * np.log(n)
+        ll = self.logLik()
+        return -2 * ll.value + ll.df * np.log(ll.nobs)
 
     def confint(
         self,
