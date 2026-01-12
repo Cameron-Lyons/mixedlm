@@ -104,6 +104,39 @@ class LmerResult:
         p = self.matrices.n_fixed
         return n - p
 
+    def getME(
+        self, name: str
+    ) -> NDArray[np.floating] | sparse.csc_matrix | float | int | list[str] | dict[str, int]:
+        components = {
+            "X": self.matrices.X,
+            "Z": self.matrices.Z,
+            "Zt": self.matrices.Zt,
+            "y": self.matrices.y,
+            "beta": self.beta,
+            "theta": self.theta,
+            "u": self.u,
+            "b": self.u,
+            "sigma": self.sigma,
+            "deviance": self.deviance,
+            "REML": self.REML,
+            "n_obs": self.matrices.n_obs,
+            "n_fixed": self.matrices.n_fixed,
+            "n_random": self.matrices.n_random,
+            "fixef_names": self.matrices.fixed_names,
+            "weights": self.matrices.weights,
+            "offset": self.matrices.offset,
+        }
+
+        Lambda = _build_lambda(self.theta, self.matrices.random_structures)
+        components["Lambda"] = Lambda
+        components["Lambdat"] = Lambda.T
+
+        if name not in components:
+            valid = ", ".join(sorted(components.keys()))
+            raise ValueError(f"Unknown component '{name}'. Valid components: {valid}")
+
+        return components[name]
+
     def fitted(self) -> NDArray[np.floating]:
         fixed_part = self.matrices.X @ self.beta
         random_part = self.matrices.Z @ self.u

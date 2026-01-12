@@ -1342,5 +1342,142 @@ class TestAccessors:
         assert ngrps["group2"] == 5
 
 
+class TestGetME:
+    def test_lmer_getME_matrices(self) -> None:
+        np.random.seed(42)
+        n_groups = 10
+        n_per_group = 20
+        n = n_groups * n_per_group
+
+        group = np.repeat(np.arange(n_groups), n_per_group)
+        x = np.random.randn(n)
+        group_effects = np.random.randn(n_groups) * 0.5
+        y = 2.0 + 1.5 * x + group_effects[group] + np.random.randn(n) * 0.5
+
+        data = pd.DataFrame({"y": y, "x": x, "group": [str(g) for g in group]})
+        result = lmer("y ~ x + (1 | group)", data)
+
+        X = result.getME("X")
+        assert X.shape == (n, 2)
+
+        Z = result.getME("Z")
+        assert Z.shape[0] == n
+
+        y_out = result.getME("y")
+        assert len(y_out) == n
+        np.testing.assert_array_equal(y_out, y)
+
+    def test_lmer_getME_parameters(self) -> None:
+        np.random.seed(42)
+        n_groups = 10
+        n_per_group = 20
+        n = n_groups * n_per_group
+
+        group = np.repeat(np.arange(n_groups), n_per_group)
+        x = np.random.randn(n)
+        group_effects = np.random.randn(n_groups) * 0.5
+        y = 2.0 + 1.5 * x + group_effects[group] + np.random.randn(n) * 0.5
+
+        data = pd.DataFrame({"y": y, "x": x, "group": [str(g) for g in group]})
+        result = lmer("y ~ x + (1 | group)", data)
+
+        beta = result.getME("beta")
+        assert len(beta) == 2
+        np.testing.assert_array_equal(beta, result.beta)
+
+        theta = result.getME("theta")
+        np.testing.assert_array_equal(theta, result.theta)
+
+        sigma = result.getME("sigma")
+        assert sigma == result.sigma
+
+        u = result.getME("u")
+        np.testing.assert_array_equal(u, result.u)
+
+    def test_lmer_getME_lambda(self) -> None:
+        np.random.seed(42)
+        n_groups = 10
+        n_per_group = 20
+        n = n_groups * n_per_group
+
+        group = np.repeat(np.arange(n_groups), n_per_group)
+        x = np.random.randn(n)
+        group_effects = np.random.randn(n_groups) * 0.5
+        y = 2.0 + 1.5 * x + group_effects[group] + np.random.randn(n) * 0.5
+
+        data = pd.DataFrame({"y": y, "x": x, "group": [str(g) for g in group]})
+        result = lmer("y ~ x + (1 | group)", data)
+
+        Lambda = result.getME("Lambda")
+        assert Lambda.shape[0] == n_groups
+        assert Lambda.shape[1] == n_groups
+
+        Lambdat = result.getME("Lambdat")
+        assert Lambdat.shape == Lambda.T.shape
+
+    def test_lmer_getME_misc(self) -> None:
+        np.random.seed(42)
+        n_groups = 10
+        n_per_group = 20
+        n = n_groups * n_per_group
+
+        group = np.repeat(np.arange(n_groups), n_per_group)
+        x = np.random.randn(n)
+        group_effects = np.random.randn(n_groups) * 0.5
+        y = 2.0 + 1.5 * x + group_effects[group] + np.random.randn(n) * 0.5
+
+        data = pd.DataFrame({"y": y, "x": x, "group": [str(g) for g in group]})
+        result = lmer("y ~ x + (1 | group)", data)
+
+        assert result.getME("n_obs") == n
+        assert result.getME("n_fixed") == 2
+        assert result.getME("REML") is True
+        assert result.getME("fixef_names") == ["(Intercept)", "x"]
+
+    def test_lmer_getME_invalid(self) -> None:
+        np.random.seed(42)
+        n_groups = 10
+        n_per_group = 20
+        n = n_groups * n_per_group
+
+        group = np.repeat(np.arange(n_groups), n_per_group)
+        x = np.random.randn(n)
+        group_effects = np.random.randn(n_groups) * 0.5
+        y = 2.0 + 1.5 * x + group_effects[group] + np.random.randn(n) * 0.5
+
+        data = pd.DataFrame({"y": y, "x": x, "group": [str(g) for g in group]})
+        result = lmer("y ~ x + (1 | group)", data)
+
+        with pytest.raises(ValueError, match="Unknown component"):
+            result.getME("invalid_component")
+
+    def test_glmer_getME(self) -> None:
+        np.random.seed(42)
+        n_groups = 10
+        n_per_group = 20
+        n = n_groups * n_per_group
+
+        group = np.repeat(np.arange(n_groups), n_per_group)
+        x = np.random.randn(n)
+        group_effects = np.random.randn(n_groups) * 0.3
+        eta = -0.5 + 0.5 * x + group_effects[group]
+        p = 1 / (1 + np.exp(-eta))
+        y = np.random.binomial(1, p)
+
+        data = pd.DataFrame({"y": y, "x": x, "group": [str(g) for g in group]})
+        result = glmer("y ~ x + (1 | group)", data, family=families.Binomial())
+
+        X = result.getME("X")
+        assert X.shape == (n, 2)
+
+        beta = result.getME("beta")
+        np.testing.assert_array_equal(beta, result.beta)
+
+        family = result.getME("family")
+        assert family.__class__.__name__ == "Binomial"
+
+        assert result.getME("nAGQ") == 1
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
