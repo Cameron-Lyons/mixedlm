@@ -298,6 +298,31 @@ class LmerResult:
 
         return VarCorr(groups=groups, residual=self.sigma**2)
 
+    def isSingular(self, tol: float = 1e-4) -> bool:
+        theta_idx = 0
+
+        for struct in self.matrices.random_structures:
+            q = struct.n_terms
+
+            if struct.correlated:
+                n_theta = q * (q + 1) // 2
+                theta_block = self.theta[theta_idx : theta_idx + n_theta]
+                theta_idx += n_theta
+
+                diag_idx = 0
+                for i in range(q):
+                    if abs(theta_block[diag_idx]) < tol:
+                        return True
+                    diag_idx += i + 2
+            else:
+                theta_block = self.theta[theta_idx : theta_idx + q]
+                theta_idx += q
+
+                if np.any(np.abs(theta_block) < tol):
+                    return True
+
+        return False
+
     def logLik(self) -> float:
         n = self.matrices.n_obs
         p = self.matrices.n_fixed

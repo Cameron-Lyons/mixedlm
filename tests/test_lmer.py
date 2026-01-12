@@ -1733,5 +1733,120 @@ class TestDrop1:
         assert drop1_result.aic[0] > drop1_result.full_model_aic
 
 
+class TestIsSingular:
+    def test_lmer_isSingular_returns_bool(self) -> None:
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+
+        assert isinstance(result.isSingular(), bool)
+
+    def test_lmer_singular_with_high_tolerance(self) -> None:
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+
+        assert result.isSingular(tol=1e10) is True
+
+    def test_lmer_not_singular_with_real_variance(self) -> None:
+        np.random.seed(42)
+        n_groups = 10
+        n_per_group = 30
+        n = n_groups * n_per_group
+
+        group = np.repeat(np.arange(n_groups), n_per_group)
+        group_effects = np.random.randn(n_groups) * 5.0
+        x = np.random.randn(n)
+        y = 10.0 + 2.0 * x + group_effects[group] + np.random.randn(n) * 1.0
+
+        data = pd.DataFrame({"y": y, "x": x, "group": [str(g) for g in group]})
+        result = lmer("y ~ x + (1 | group)", data)
+
+        if result.theta[0] > 0.1:
+            assert result.isSingular(tol=0.01) is False
+
+    def test_lmer_singular_when_theta_zero(self) -> None:
+        np.random.seed(42)
+        n_groups = 5
+        n_per_group = 50
+        n = n_groups * n_per_group
+
+        group = np.repeat(np.arange(n_groups), n_per_group)
+        x = np.random.randn(n)
+        y = 2.0 + 1.5 * x + np.random.randn(n) * 0.5
+
+        data = pd.DataFrame({"y": y, "x": x, "group": [str(g) for g in group]})
+        result = lmer("y ~ x + (1 | group)", data)
+
+        if result.theta[0] < 1e-4:
+            assert result.isSingular() is True
+
+    def test_glmer_isSingular_returns_bool(self) -> None:
+        result = glmer("y ~ period + (1 | herd)", CBPP, family=families.Binomial())
+
+        assert isinstance(result.isSingular(), bool)
+
+    def test_glmer_singular_with_high_tolerance(self) -> None:
+        result = glmer("y ~ period + (1 | herd)", CBPP, family=families.Binomial())
+
+        assert result.isSingular(tol=1e10) is True
+
+    def test_singular_uncorrelated_random_effects(self) -> None:
+        result = lmer("Reaction ~ Days + (Days || Subject)", SLEEPSTUDY)
+
+        assert isinstance(result.isSingular(), bool)
+
+    def test_isSingular_detects_near_zero_theta(self) -> None:
+        from mixedlm.models.lmer import LmerResult
+        from mixedlm.matrices.design import ModelMatrices, RandomEffectStructure
+        from scipy import sparse
+
+        matrices = ModelMatrices(
+            y=np.array([1.0, 2.0, 3.0]),
+            X=np.array([[1.0], [1.0], [1.0]]),
+            Z=sparse.csc_matrix(np.eye(3)),
+            fixed_names=["(Intercept)"],
+            random_structures=[
+                RandomEffectStructure(
+                    grouping_factor="g",
+                    term_names=["(Intercept)"],
+                    n_levels=3,
+                    n_terms=1,
+                    correlated=False,
+                    level_map={"0": 0, "1": 1, "2": 2},
+                )
+            ],
+            n_obs=3,
+            n_fixed=1,
+            n_random=3,
+            weights=np.ones(3),
+            offset=np.zeros(3),
+        )
+
+        result_singular = LmerResult(
+            formula=parse_formula("y ~ 1 + (1 | g)"),
+            matrices=matrices,
+            theta=np.array([0.0]),
+            beta=np.array([2.0]),
+            sigma=1.0,
+            u=np.zeros(3),
+            deviance=10.0,
+            REML=True,
+            converged=True,
+            n_iter=1,
+        )
+        assert result_singular.isSingular() is True
+
+        result_not_singular = LmerResult(
+            formula=parse_formula("y ~ 1 + (1 | g)"),
+            matrices=matrices,
+            theta=np.array([1.0]),
+            beta=np.array([2.0]),
+            sigma=1.0,
+            u=np.zeros(3),
+            deviance=10.0,
+            REML=True,
+            converged=True,
+            n_iter=1,
+        )
+        assert result_not_singular.isSingular() is False
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
