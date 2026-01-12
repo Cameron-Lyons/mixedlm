@@ -4,6 +4,7 @@ from mixedlm.inference.bootstrap import (
     bootstrap_glmer,
     bootstrap_lmer,
 )
+from mixedlm.inference.drop1 import Drop1Result, drop1_glmer, drop1_lmer
 from mixedlm.inference.profile import (
     ProfileResult,
     profile_glmer,
@@ -13,6 +14,9 @@ from mixedlm.inference.profile import (
 __all__ = [
     "AnovaResult",
     "anova",
+    "Drop1Result",
+    "drop1_lmer",
+    "drop1_glmer",
     "ProfileResult",
     "profile_lmer",
     "profile_glmer",

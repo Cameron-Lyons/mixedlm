@@ -543,6 +543,11 @@ class GlmerResult:
         )
         return model.fit(nAGQ=new_nAGQ)
 
+    def drop1(self, data: pd.DataFrame, test: str = "Chisq"):
+        from mixedlm.inference.drop1 import Drop1Result, drop1_glmer
+
+        return drop1_glmer(self, data, test=test)
+
     def summary(self) -> str:
         lines = []
         lines.append("Generalized linear mixed model fit by maximum likelihood (Laplace)")

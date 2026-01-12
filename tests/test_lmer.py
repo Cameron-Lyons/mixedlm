@@ -1658,5 +1658,80 @@ class TestUpdateFormula:
         assert new.response == "y"
 
 
+class TestDrop1:
+    def test_drop1_lmer_basic(self) -> None:
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY, REML=False)
+
+        drop1_result = result.drop1(data=SLEEPSTUDY)
+
+        assert len(drop1_result.terms) == 1
+        assert "Days" in drop1_result.terms
+        assert drop1_result.lrt[0] is not None
+        assert drop1_result.lrt[0] > 0
+        assert drop1_result.p_value[0] is not None
+        assert 0 <= drop1_result.p_value[0] <= 1
+
+    def test_drop1_lmer_multiple_terms(self) -> None:
+        np.random.seed(42)
+        n_groups = 10
+        n_per_group = 20
+        n = n_groups * n_per_group
+
+        group = np.repeat(np.arange(n_groups), n_per_group)
+        x1 = np.random.randn(n)
+        x2 = np.random.randn(n)
+        group_effects = np.random.randn(n_groups) * 0.5
+        y = 2.0 + 1.5 * x1 + 0.8 * x2 + group_effects[group] + np.random.randn(n) * 0.5
+
+        data = pd.DataFrame(
+            {"y": y, "x1": x1, "x2": x2, "group": [str(g) for g in group]}
+        )
+        result = lmer("y ~ x1 + x2 + (1 | group)", data, REML=False)
+
+        drop1_result = result.drop1(data=data)
+
+        assert len(drop1_result.terms) == 2
+        assert "x1" in drop1_result.terms
+        assert "x2" in drop1_result.terms
+        assert all(lrt is not None for lrt in drop1_result.lrt)
+        assert all(p is not None for p in drop1_result.p_value)
+
+    def test_drop1_lmer_output(self) -> None:
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY, REML=False)
+
+        drop1_result = result.drop1(data=SLEEPSTUDY)
+        output = str(drop1_result)
+
+        assert "Single term deletions" in output
+        assert "AIC" in output
+        assert "LRT" in output
+        assert "Days" in output
+
+    def test_drop1_glmer_basic(self) -> None:
+        result = glmer("y ~ period + (1 | herd)", CBPP, family=families.Binomial())
+
+        drop1_result = result.drop1(data=CBPP)
+
+        assert len(drop1_result.terms) >= 1
+        assert any("period" in t for t in drop1_result.terms)
+        assert drop1_result.full_model_aic > 0
+
+    def test_drop1_via_inference_module(self) -> None:
+        from mixedlm.inference import drop1_lmer
+
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY, REML=False)
+        drop1_result = drop1_lmer(result, data=SLEEPSTUDY)
+
+        assert len(drop1_result.terms) == 1
+        assert "Days" in drop1_result.terms
+
+    def test_drop1_aic_comparison(self) -> None:
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY, REML=False)
+
+        drop1_result = result.drop1(data=SLEEPSTUDY)
+
+        assert drop1_result.aic[0] > drop1_result.full_model_aic
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
