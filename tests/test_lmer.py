@@ -1931,5 +1931,97 @@ class TestAllFit:
         assert "successful" in repr_output
 
 
+class TestVarCorr:
+    def test_lmer_varcorr_basic(self):
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+        vc = result.VarCorr()
+
+        assert "Subject" in vc.groups
+        assert "(Intercept)" in vc.groups["Subject"].variance
+        assert vc.residual > 0
+
+    def test_lmer_varcorr_random_slope(self):
+        result = lmer("Reaction ~ Days + (Days | Subject)", SLEEPSTUDY)
+        vc = result.VarCorr()
+
+        assert "Subject" in vc.groups
+        group = vc.groups["Subject"]
+        assert "(Intercept)" in group.variance
+        assert "Days" in group.variance
+        assert group.corr is not None
+        assert group.corr.shape == (2, 2)
+        assert np.allclose(np.diag(group.corr), 1.0)
+
+    def test_lmer_varcorr_uncorrelated(self):
+        result = lmer("Reaction ~ Days + (Days || Subject)", SLEEPSTUDY)
+        vc = result.VarCorr()
+
+        assert "Subject" in vc.groups
+        group = vc.groups["Subject"]
+        assert "(Intercept)" in group.variance
+        assert "Days" in group.variance
+        assert group.corr is None
+
+    def test_lmer_varcorr_cov_matrix(self):
+        result = lmer("Reaction ~ Days + (Days | Subject)", SLEEPSTUDY)
+        vc = result.VarCorr()
+
+        cov = vc.get_cov("Subject")
+        assert cov.shape == (2, 2)
+        assert np.allclose(cov, cov.T)
+        assert np.all(np.diag(cov) >= 0)
+
+    def test_lmer_varcorr_as_dict(self):
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+        vc = result.VarCorr()
+
+        d = vc.as_dict()
+        assert isinstance(d, dict)
+        assert "Subject" in d
+        assert "(Intercept)" in d["Subject"]
+
+    def test_lmer_varcorr_str(self):
+        result = lmer("Reaction ~ Days + (Days | Subject)", SLEEPSTUDY)
+        vc = result.VarCorr()
+
+        str_output = str(vc)
+        assert "Random effects:" in str_output
+        assert "Subject" in str_output
+        assert "(Intercept)" in str_output
+        assert "Days" in str_output
+        assert "Residual" in str_output
+
+    def test_lmer_varcorr_repr(self):
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+        vc = result.VarCorr()
+
+        repr_output = repr(vc)
+        assert "VarCorr" in repr_output
+        assert "1 groups" in repr_output
+
+    def test_glmer_varcorr_basic(self):
+        result = glmer("y ~ period + (1 | herd)", CBPP, family=families.Binomial())
+        vc = result.VarCorr()
+
+        assert "herd" in vc.groups
+        assert "(Intercept)" in vc.groups["herd"].variance
+
+    def test_glmer_varcorr_as_dict(self):
+        result = glmer("y ~ period + (1 | herd)", CBPP, family=families.Binomial())
+        vc = result.VarCorr()
+
+        d = vc.as_dict()
+        assert isinstance(d, dict)
+        assert "herd" in d
+
+    def test_glmer_varcorr_str(self):
+        result = glmer("y ~ period + (1 | herd)", CBPP, family=families.Binomial())
+        vc = result.VarCorr()
+
+        str_output = str(vc)
+        assert "Random effects:" in str_output
+        assert "herd" in str_output
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

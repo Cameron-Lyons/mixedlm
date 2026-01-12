@@ -35,21 +35,49 @@ class RanefResult:
 
 
 @dataclass
+class VarCorrGroup:
+    name: str
+    term_names: list[str]
+    variance: dict[str, float]
+    stddev: dict[str, float]
+    cov: NDArray[np.floating]
+    corr: NDArray[np.floating] | None
+
+
+@dataclass
 class VarCorr:
-    groups: dict[str, dict[str, float]]
+    groups: dict[str, VarCorrGroup]
     residual: float
 
     def __str__(self) -> str:
         lines = ["Random effects:"]
-        lines.append(" Groups      Name         Variance  Std.Dev.")
-        for group, terms in self.groups.items():
-            for i, (name, var) in enumerate(terms.items()):
-                grp_name = group if i == 0 else ""
-                lines.append(f" {grp_name:11} {name:12} {var:9.4f}  {np.sqrt(var):.4f}")
-        lines.append(
-            f" {'Residual':11} {' ':12} {self.residual:9.4f}  {np.sqrt(self.residual):.4f}"
-        )
+        lines.append(f" {'Groups':<11} {'Name':<12} {'Variance':>10} {'Std.Dev.':>10} {'Corr':>6}")
+        for group_name, group in self.groups.items():
+            n_terms = len(group.term_names)
+            for i, term in enumerate(group.term_names):
+                grp = group_name if i == 0 else ""
+                var = group.variance[term]
+                sd = group.stddev[term]
+                if i == 0 or group.corr is None:
+                    lines.append(f" {grp:<11} {term:<12} {var:>10.4f} {sd:>10.4f}")
+                else:
+                    corr_vals = " ".join(f"{group.corr[i, j]:>6.2f}" for j in range(i))
+                    lines.append(f" {grp:<11} {term:<12} {var:>10.4f} {sd:>10.4f} {corr_vals}")
+        lines.append(f" {'Residual':<11} {'':<12} {self.residual:>10.4f} {np.sqrt(self.residual):>10.4f}")
         return "\n".join(lines)
+
+    def __repr__(self) -> str:
+        n_groups = len(self.groups)
+        return f"VarCorr({n_groups} groups, residual={self.residual:.4f})"
+
+    def as_dict(self) -> dict[str, dict[str, float]]:
+        return {name: group.variance for name, group in self.groups.items()}
+
+    def get_cov(self, group: str) -> NDArray[np.floating]:
+        return self.groups[group].cov
+
+    def get_corr(self, group: str) -> NDArray[np.floating] | None:
+        return self.groups[group].corr
 
 
 @dataclass
@@ -265,7 +293,7 @@ class LmerResult:
         return self.sigma**2 * linalg.inv(XtVinvX)
 
     def VarCorr(self) -> VarCorr:
-        groups: dict[str, dict[str, float]] = {}
+        groups: dict[str, VarCorrGroup] = {}
         theta_idx = 0
 
         for struct in self.matrices.random_structures:
@@ -285,16 +313,28 @@ class LmerResult:
 
                 cov_scaled = L_block @ L_block.T
                 cov = cov_scaled * self.sigma**2
+
+                stddevs = np.sqrt(np.diag(cov))
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    corr = cov / np.outer(stddevs, stddevs)
+                    corr = np.where(np.isfinite(corr), corr, 0.0)
             else:
                 theta_block = self.theta[theta_idx : theta_idx + q]
                 theta_idx += q
                 cov = np.diag(theta_block**2) * self.sigma**2
+                corr = None
 
-            term_vars: dict[str, float] = {}
-            for i, term_name in enumerate(struct.term_names):
-                term_vars[term_name] = cov[i, i]
+            variance = {term: cov[i, i] for i, term in enumerate(struct.term_names)}
+            stddev = {term: np.sqrt(cov[i, i]) for i, term in enumerate(struct.term_names)}
 
-            groups[struct.grouping_factor] = term_vars
+            groups[struct.grouping_factor] = VarCorrGroup(
+                name=struct.grouping_factor,
+                term_names=list(struct.term_names),
+                variance=variance,
+                stddev=stddev,
+                cov=cov,
+                corr=corr,
+            )
 
         return VarCorr(groups=groups, residual=self.sigma**2)
 

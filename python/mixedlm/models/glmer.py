@@ -16,21 +16,40 @@ from mixedlm.families.binomial import Binomial
 from mixedlm.formula.parser import parse_formula, update_formula
 from mixedlm.formula.terms import Formula
 from mixedlm.matrices.design import ModelMatrices, build_model_matrices
-from mixedlm.models.lmer import RanefResult
+from mixedlm.models.lmer import RanefResult, VarCorrGroup
 
 
 @dataclass
 class GlmerVarCorr:
-    groups: dict[str, dict[str, float]]
+    groups: dict[str, VarCorrGroup]
 
     def __str__(self) -> str:
         lines = ["Random effects:"]
-        lines.append(" Groups      Name         Variance  Std.Dev.")
-        for group, terms in self.groups.items():
-            for i, (name, var) in enumerate(terms.items()):
-                grp_name = group if i == 0 else ""
-                lines.append(f" {grp_name:11} {name:12} {var:9.4f}  {np.sqrt(var):.4f}")
+        lines.append(f" {'Groups':<11} {'Name':<12} {'Variance':>10} {'Std.Dev.':>10} {'Corr':>6}")
+        for group_name, group in self.groups.items():
+            for i, term in enumerate(group.term_names):
+                grp = group_name if i == 0 else ""
+                var = group.variance[term]
+                sd = group.stddev[term]
+                if i == 0 or group.corr is None:
+                    lines.append(f" {grp:<11} {term:<12} {var:>10.4f} {sd:>10.4f}")
+                else:
+                    corr_vals = " ".join(f"{group.corr[i, j]:>6.2f}" for j in range(i))
+                    lines.append(f" {grp:<11} {term:<12} {var:>10.4f} {sd:>10.4f} {corr_vals}")
         return "\n".join(lines)
+
+    def __repr__(self) -> str:
+        n_groups = len(self.groups)
+        return f"GlmerVarCorr({n_groups} groups)"
+
+    def as_dict(self) -> dict[str, dict[str, float]]:
+        return {name: group.variance for name, group in self.groups.items()}
+
+    def get_cov(self, group: str) -> NDArray[np.floating]:
+        return self.groups[group].cov
+
+    def get_corr(self, group: str) -> NDArray[np.floating] | None:
+        return self.groups[group].corr
 
 
 @dataclass
@@ -289,7 +308,7 @@ class GlmerResult:
             return linalg.pinv(XtVinvX)
 
     def VarCorr(self) -> GlmerVarCorr:
-        groups: dict[str, dict[str, float]] = {}
+        groups: dict[str, VarCorrGroup] = {}
         theta_idx = 0
 
         for struct in self.matrices.random_structures:
@@ -308,16 +327,28 @@ class GlmerResult:
                         idx += 1
 
                 cov = L_block @ L_block.T
+
+                stddevs = np.sqrt(np.diag(cov))
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    corr = cov / np.outer(stddevs, stddevs)
+                    corr = np.where(np.isfinite(corr), corr, 0.0)
             else:
                 theta_block = self.theta[theta_idx : theta_idx + q]
                 theta_idx += q
                 cov = np.diag(theta_block**2)
+                corr = None
 
-            term_vars: dict[str, float] = {}
-            for i, term_name in enumerate(struct.term_names):
-                term_vars[term_name] = cov[i, i]
+            variance = {term: cov[i, i] for i, term in enumerate(struct.term_names)}
+            stddev = {term: np.sqrt(cov[i, i]) for i, term in enumerate(struct.term_names)}
 
-            groups[struct.grouping_factor] = term_vars
+            groups[struct.grouping_factor] = VarCorrGroup(
+                name=struct.grouping_factor,
+                term_names=list(struct.term_names),
+                variance=variance,
+                stddev=stddev,
+                cov=cov,
+                corr=corr,
+            )
 
         return GlmerVarCorr(groups=groups)
 
