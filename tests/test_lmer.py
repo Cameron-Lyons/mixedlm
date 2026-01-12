@@ -911,6 +911,61 @@ class TestInference:
         assert "Parametric bootstrap" in summary
         assert "30 samples" in summary
 
+    def test_anova_lmer(self) -> None:
+        from mixedlm.inference import anova
+
+        model1 = lmer("Reaction ~ 1 + (1 | Subject)", SLEEPSTUDY, REML=False)
+        model2 = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY, REML=False)
+
+        result = anova(model1, model2)
+
+        assert len(result.models) == 2
+        assert result.chi_sq[0] is None
+        assert result.chi_sq[1] is not None
+        assert result.chi_sq[1] > 0
+        assert result.chi_df[1] == 1
+        assert result.p_value[1] is not None
+        assert 0 <= result.p_value[1] <= 1
+
+    def test_anova_multiple_models(self) -> None:
+        from mixedlm.inference import anova
+
+        model1 = lmer("Reaction ~ 1 + (1 | Subject)", SLEEPSTUDY, REML=False)
+        model2 = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY, REML=False)
+        model3 = lmer("Reaction ~ Days + (Days | Subject)", SLEEPSTUDY, REML=False)
+
+        result = anova(model1, model2, model3)
+
+        assert len(result.models) == 3
+        assert all(aic > 0 for aic in result.aic)
+        assert all(bic > 0 for bic in result.bic)
+
+    def test_anova_output(self) -> None:
+        from mixedlm.inference import anova
+
+        model1 = lmer("Reaction ~ 1 + (1 | Subject)", SLEEPSTUDY, REML=False)
+        model2 = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY, REML=False)
+
+        result = anova(model1, model2)
+        output = str(result)
+
+        assert "AIC" in output
+        assert "BIC" in output
+        assert "logLik" in output
+        assert "Chisq" in output
+
+    def test_anova_glmer(self) -> None:
+        from mixedlm.inference import anova
+
+        model1 = glmer("y ~ 1 + (1 | herd)", CBPP, family=families.Binomial())
+        model2 = glmer("y ~ period + (1 | herd)", CBPP, family=families.Binomial())
+
+        result = anova(model1, model2)
+
+        assert len(result.models) == 2
+        assert result.chi_sq[1] is not None
+        assert result.chi_df[1] == 3
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
