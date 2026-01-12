@@ -1479,5 +1479,78 @@ class TestGetME:
         assert result.getME("nAGQ") == 1
 
 
+class TestCondVar:
+    def test_lmer_ranef_condVar(self) -> None:
+        np.random.seed(42)
+        n_groups = 10
+        n_per_group = 20
+        n = n_groups * n_per_group
+
+        group = np.repeat(np.arange(n_groups), n_per_group)
+        x = np.random.randn(n)
+        group_effects = np.random.randn(n_groups) * 0.5
+        y = 2.0 + 1.5 * x + group_effects[group] + np.random.randn(n) * 0.5
+
+        data = pd.DataFrame({"y": y, "x": x, "group": [str(g) for g in group]})
+        result = lmer("y ~ x + (1 | group)", data)
+
+        ranef_no_condVar = result.ranef(condVar=False)
+        assert isinstance(ranef_no_condVar, dict)
+        assert "group" in ranef_no_condVar
+
+        ranef_with_condVar = result.ranef(condVar=True)
+        assert hasattr(ranef_with_condVar, "values")
+        assert hasattr(ranef_with_condVar, "condVar")
+        assert ranef_with_condVar.condVar is not None
+        assert "group" in ranef_with_condVar.condVar
+        assert "(Intercept)" in ranef_with_condVar.condVar["group"]
+
+        cond_var = ranef_with_condVar.condVar["group"]["(Intercept)"]
+        assert len(cond_var) == n_groups
+        assert all(v >= 0 for v in cond_var)
+
+    def test_lmer_ranef_condVar_random_slope(self) -> None:
+        result = lmer("Reaction ~ Days + (Days | Subject)", SLEEPSTUDY)
+
+        ranef_with_condVar = result.ranef(condVar=True)
+        assert ranef_with_condVar.condVar is not None
+        assert "Subject" in ranef_with_condVar.condVar
+
+        assert "(Intercept)" in ranef_with_condVar.condVar["Subject"]
+        assert "Days" in ranef_with_condVar.condVar["Subject"]
+
+        for term in ["(Intercept)", "Days"]:
+            cond_var = ranef_with_condVar.condVar["Subject"][term]
+            assert len(cond_var) == 18
+            assert all(v >= 0 for v in cond_var)
+
+    def test_ranef_result_dict_like(self) -> None:
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+
+        ranef_result = result.ranef(condVar=True)
+
+        assert "Subject" in ranef_result
+        assert list(ranef_result.keys()) == ["Subject"]
+        for group, terms in ranef_result.items():
+            assert group == "Subject"
+            assert "(Intercept)" in terms
+
+    def test_glmer_ranef_condVar(self) -> None:
+        result = glmer("y ~ period + (1 | herd)", CBPP, family=families.Binomial())
+
+        ranef_no_condVar = result.ranef(condVar=False)
+        assert isinstance(ranef_no_condVar, dict)
+        assert "herd" in ranef_no_condVar
+
+        ranef_with_condVar = result.ranef(condVar=True)
+        assert ranef_with_condVar.condVar is not None
+        assert "herd" in ranef_with_condVar.condVar
+        assert "(Intercept)" in ranef_with_condVar.condVar["herd"]
+
+        cond_var = ranef_with_condVar.condVar["herd"]["(Intercept)"]
+        assert len(cond_var) == result.ngrps()["herd"]
+        assert all(v >= 0 for v in cond_var)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

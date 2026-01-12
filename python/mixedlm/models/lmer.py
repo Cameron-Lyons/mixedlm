@@ -17,6 +17,24 @@ from mixedlm.matrices.design import ModelMatrices, build_model_matrices
 
 
 @dataclass
+class RanefResult:
+    values: dict[str, dict[str, NDArray[np.floating]]]
+    condVar: dict[str, dict[str, NDArray[np.floating]]] | None = None
+
+    def __getitem__(self, key: str) -> dict[str, NDArray[np.floating]]:
+        return self.values[key]
+
+    def __iter__(self):
+        return iter(self.values)
+
+    def keys(self):
+        return self.values.keys()
+
+    def items(self):
+        return self.values.items()
+
+
+@dataclass
 class VarCorr:
     groups: dict[str, dict[str, float]]
     residual: float
@@ -50,7 +68,9 @@ class LmerResult:
     def fixef(self) -> dict[str, float]:
         return dict(zip(self.matrices.fixed_names, self.beta, strict=False))
 
-    def ranef(self) -> dict[str, dict[str, NDArray[np.floating]]]:
+    def ranef(
+        self, condVar: bool = False
+    ) -> dict[str, dict[str, NDArray[np.floating]]] | RanefResult:
         result: dict[str, dict[str, NDArray[np.floating]]] = {}
         u_idx = 0
 
@@ -62,15 +82,61 @@ class LmerResult:
             u_block = self.u[u_idx : u_idx + n_u].reshape(n_levels, n_terms)
             u_idx += n_u
 
-            sorted(struct.level_map.keys(), key=lambda x: struct.level_map[x])
-
             term_ranefs: dict[str, NDArray[np.floating]] = {}
             for j, term_name in enumerate(struct.term_names):
                 term_ranefs[term_name] = u_block[:, j]
 
             result[struct.grouping_factor] = term_ranefs
 
-        return result
+        if not condVar:
+            return result
+
+        cond_var = self._compute_condVar()
+        return RanefResult(values=result, condVar=cond_var)
+
+    def _compute_condVar(self) -> dict[str, dict[str, NDArray[np.floating]]]:
+        q = self.matrices.n_random
+        if q == 0:
+            return {}
+
+        Lambda = _build_lambda(self.theta, self.matrices.random_structures)
+
+        Zt = self.matrices.Zt
+        ZtZ = Zt @ Zt.T
+        LambdatZtZLambda = Lambda.T @ ZtZ @ Lambda
+
+        I_q = sparse.eye(q, format="csc")
+        V = LambdatZtZLambda + I_q
+
+        V_dense = V.toarray()
+        V_inv = linalg.inv(V_dense)
+
+        Lambda_dense = Lambda.toarray() if sparse.issparse(Lambda) else Lambda
+        cond_cov = self.sigma**2 * Lambda_dense @ V_inv @ Lambda_dense.T
+
+        cond_var_result: dict[str, dict[str, NDArray[np.floating]]] = {}
+        u_idx = 0
+
+        for struct in self.matrices.random_structures:
+            n_levels = struct.n_levels
+            n_terms = struct.n_terms
+            n_u = n_levels * n_terms
+
+            var_block = np.zeros((n_levels, n_terms), dtype=np.float64)
+            for i in range(n_levels):
+                for j in range(n_terms):
+                    idx = u_idx + i * n_terms + j
+                    var_block[i, j] = cond_cov[idx, idx]
+
+            u_idx += n_u
+
+            term_vars: dict[str, NDArray[np.floating]] = {}
+            for j, term_name in enumerate(struct.term_names):
+                term_vars[term_name] = var_block[:, j]
+
+            cond_var_result[struct.grouping_factor] = term_vars
+
+        return cond_var_result
 
     def coef(self) -> dict[str, dict[str, NDArray[np.floating]]]:
         ranefs = self.ranef()

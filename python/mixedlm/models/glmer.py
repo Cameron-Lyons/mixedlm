@@ -16,6 +16,7 @@ from mixedlm.families.binomial import Binomial
 from mixedlm.formula.parser import parse_formula
 from mixedlm.formula.terms import Formula
 from mixedlm.matrices.design import ModelMatrices, build_model_matrices
+from mixedlm.models.lmer import RanefResult
 
 
 @dataclass
@@ -48,7 +49,9 @@ class GlmerResult:
     def fixef(self) -> dict[str, float]:
         return dict(zip(self.matrices.fixed_names, self.beta, strict=False))
 
-    def ranef(self) -> dict[str, dict[str, NDArray[np.floating]]]:
+    def ranef(
+        self, condVar: bool = False
+    ) -> dict[str, dict[str, NDArray[np.floating]]] | RanefResult:
         result: dict[str, dict[str, NDArray[np.floating]]] = {}
         u_idx = 0
 
@@ -65,6 +68,62 @@ class GlmerResult:
                 term_ranefs[term_name] = u_block[:, j]
 
             result[struct.grouping_factor] = term_ranefs
+
+        if not condVar:
+            return result
+
+        cond_var = self._compute_condVar()
+        return RanefResult(values=result, condVar=cond_var)
+
+    def _compute_condVar(self) -> dict[str, dict[str, NDArray[np.floating]]]:
+        q = self.matrices.n_random
+        if q == 0:
+            return {}
+
+        Lambda = _build_lambda(self.theta, self.matrices.random_structures)
+
+        eta = self.linear_predictor()
+        mu = self.family.link.inverse(eta)
+        mu = np.clip(mu, 1e-10, 1 - 1e-10)
+
+        W = self.family.weights(mu)
+        W = np.maximum(W, 1e-10)
+        W_diag = sparse.diags(W, format="csc")
+
+        ZtWZ = self.matrices.Z.T @ W_diag @ self.matrices.Z
+        LambdatZtWZLambda = Lambda.T @ ZtWZ @ Lambda
+
+        I_q = sparse.eye(q, format="csc")
+        V = LambdatZtWZLambda + I_q
+
+        V_dense = V.toarray() if sparse.issparse(V) else V
+        try:
+            V_inv = linalg.inv(V_dense)
+        except linalg.LinAlgError:
+            V_inv = linalg.pinv(V_dense)
+
+        Lambda_dense = Lambda.toarray() if sparse.issparse(Lambda) else Lambda
+        cond_cov = Lambda_dense @ V_inv @ Lambda_dense.T
+
+        result: dict[str, dict[str, NDArray[np.floating]]] = {}
+        u_idx = 0
+
+        for struct in self.matrices.random_structures:
+            n_levels = struct.n_levels
+            n_terms = struct.n_terms
+            n_u = n_levels * n_terms
+
+            block_cov = cond_cov[u_idx : u_idx + n_u, u_idx : u_idx + n_u]
+
+            term_vars: dict[str, NDArray[np.floating]] = {}
+            for j, term_name in enumerate(struct.term_names):
+                variances = np.array(
+                    [block_cov[g * n_terms + j, g * n_terms + j] for g in range(n_levels)]
+                )
+                term_vars[term_name] = variances
+
+            result[struct.grouping_factor] = term_vars
+            u_idx += n_u
 
         return result
 
