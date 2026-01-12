@@ -1,5 +1,6 @@
 from mixedlm import families, inference, nlme
 from mixedlm.formula.parser import parse_formula
+from mixedlm.inference.anova import AnovaResult, anova
 from mixedlm.models.glmer import GlmerMod, glmer
 from mixedlm.models.lmer import LmerMod, lmer
 from mixedlm.models.nlmer import NlmerMod, nlmer
@@ -13,6 +14,8 @@ __all__ = [
     "GlmerMod",
     "nlmer",
     "NlmerMod",
+    "anova",
+    "AnovaResult",
     "parse_formula",
     "families",
     "nlme",

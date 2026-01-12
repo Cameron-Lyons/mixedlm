@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 import pytest
-from mixedlm import families, glmer, lmer, nlme, nlmer, parse_formula
+from mixedlm import anova, families, glmer, lmer, nlme, nlmer, parse_formula
 from mixedlm.matrices import build_model_matrices
 
 SLEEPSTUDY = pd.DataFrame(
@@ -912,8 +912,6 @@ class TestInference:
         assert "30 samples" in summary
 
     def test_anova_lmer(self) -> None:
-        from mixedlm.inference import anova
-
         model1 = lmer("Reaction ~ 1 + (1 | Subject)", SLEEPSTUDY, REML=False)
         model2 = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY, REML=False)
 
@@ -928,8 +926,6 @@ class TestInference:
         assert 0 <= result.p_value[1] <= 1
 
     def test_anova_multiple_models(self) -> None:
-        from mixedlm.inference import anova
-
         model1 = lmer("Reaction ~ 1 + (1 | Subject)", SLEEPSTUDY, REML=False)
         model2 = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY, REML=False)
         model3 = lmer("Reaction ~ Days + (Days | Subject)", SLEEPSTUDY, REML=False)
@@ -941,8 +937,6 @@ class TestInference:
         assert all(bic > 0 for bic in result.bic)
 
     def test_anova_output(self) -> None:
-        from mixedlm.inference import anova
-
         model1 = lmer("Reaction ~ 1 + (1 | Subject)", SLEEPSTUDY, REML=False)
         model2 = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY, REML=False)
 
@@ -955,8 +949,6 @@ class TestInference:
         assert "Chisq" in output
 
     def test_anova_glmer(self) -> None:
-        from mixedlm.inference import anova
-
         model1 = glmer("y ~ 1 + (1 | herd)", CBPP, family=families.Binomial())
         model2 = glmer("y ~ period + (1 | herd)", CBPP, family=families.Binomial())
 
