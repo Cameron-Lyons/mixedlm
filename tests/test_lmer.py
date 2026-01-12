@@ -1143,5 +1143,90 @@ class TestWeightsOffset:
         assert len(result.fitted()) == n
 
 
+class TestRefit:
+    def test_lmer_refit(self) -> None:
+        np.random.seed(42)
+        n_groups = 10
+        n_per_group = 20
+        n = n_groups * n_per_group
+
+        group = np.repeat(np.arange(n_groups), n_per_group)
+        x = np.random.randn(n)
+        group_effects = np.random.randn(n_groups) * 0.5
+        y1 = 2.0 + 1.5 * x + group_effects[group] + np.random.randn(n) * 0.5
+
+        data = pd.DataFrame({"y": y1, "x": x, "group": [str(g) for g in group]})
+        result1 = lmer("y ~ x + (1 | group)", data)
+
+        y2 = 3.0 + 2.0 * x + group_effects[group] + np.random.randn(n) * 0.5
+        result2 = result1.refit(y2)
+
+        assert result2.converged
+        assert result2.fixef()["(Intercept)"] != result1.fixef()["(Intercept)"]
+        assert result2.fixef()["x"] != result1.fixef()["x"]
+        assert len(result2.fitted()) == n
+        assert result2.matrices.n_obs == result1.matrices.n_obs
+
+    def test_lmer_refit_simulated(self) -> None:
+        np.random.seed(42)
+        n_groups = 10
+        n_per_group = 20
+        n = n_groups * n_per_group
+
+        group = np.repeat(np.arange(n_groups), n_per_group)
+        x = np.random.randn(n)
+        group_effects = np.random.randn(n_groups) * 0.5
+        y = 2.0 + 1.5 * x + group_effects[group] + np.random.randn(n) * 0.5
+
+        data = pd.DataFrame({"y": y, "x": x, "group": [str(g) for g in group]})
+        result = lmer("y ~ x + (1 | group)", data)
+
+        y_sim = result.simulate(nsim=1, seed=123)
+        result_refit = result.refit(y_sim)
+
+        assert result_refit.converged
+        assert len(result_refit.fitted()) == n
+
+    def test_glmer_refit(self) -> None:
+        np.random.seed(42)
+        n_groups = 10
+        n_per_group = 20
+        n = n_groups * n_per_group
+
+        group = np.repeat(np.arange(n_groups), n_per_group)
+        x = np.random.randn(n)
+        group_effects = np.random.randn(n_groups) * 0.3
+        eta = -0.5 + 0.5 * x + group_effects[group]
+        p = 1 / (1 + np.exp(-eta))
+        y1 = np.random.binomial(1, p).astype(float)
+
+        data = pd.DataFrame({"y": y1, "x": x, "group": [str(g) for g in group]})
+        result1 = glmer("y ~ x + (1 | group)", data, family=families.Binomial())
+
+        y2 = np.random.binomial(1, p).astype(float)
+        result2 = result1.refit(y2)
+
+        assert result2.converged
+        assert len(result2.fitted()) == n
+        assert result2.matrices.n_obs == result1.matrices.n_obs
+
+    def test_refit_wrong_length(self) -> None:
+        np.random.seed(42)
+        n_groups = 10
+        n_per_group = 20
+        n = n_groups * n_per_group
+
+        group = np.repeat(np.arange(n_groups), n_per_group)
+        x = np.random.randn(n)
+        group_effects = np.random.randn(n_groups) * 0.5
+        y = 2.0 + 1.5 * x + group_effects[group] + np.random.randn(n) * 0.5
+
+        data = pd.DataFrame({"y": y, "x": x, "group": [str(g) for g in group]})
+        result = lmer("y ~ x + (1 | group)", data)
+
+        with pytest.raises(ValueError, match="newresp has length"):
+            result.refit(np.random.randn(n + 10))
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -320,6 +320,39 @@ class LmerResult:
 
         return fixed_part + random_part + noise
 
+    def refit(self, newresp: NDArray[np.floating]) -> LmerResult:
+        if len(newresp) != self.matrices.n_obs:
+            raise ValueError(f"newresp has length {len(newresp)}, expected {self.matrices.n_obs}")
+
+        new_matrices = ModelMatrices(
+            y=newresp,
+            X=self.matrices.X,
+            Z=self.matrices.Z,
+            fixed_names=self.matrices.fixed_names,
+            random_structures=self.matrices.random_structures,
+            n_obs=self.matrices.n_obs,
+            n_fixed=self.matrices.n_fixed,
+            n_random=self.matrices.n_random,
+            weights=self.matrices.weights,
+            offset=self.matrices.offset,
+        )
+
+        optimizer = LMMOptimizer(new_matrices, REML=self.REML, verbose=0)
+        opt_result = optimizer.optimize(start=self.theta)
+
+        return LmerResult(
+            formula=self.formula,
+            matrices=new_matrices,
+            theta=opt_result.theta,
+            beta=opt_result.beta,
+            sigma=opt_result.sigma,
+            u=opt_result.u,
+            deviance=opt_result.deviance,
+            REML=self.REML,
+            converged=opt_result.converged,
+            n_iter=opt_result.n_iter,
+        )
+
     def summary(self) -> str:
         lines = []
         lines.append("Linear mixed model fit by " + ("REML" if self.REML else "ML"))
