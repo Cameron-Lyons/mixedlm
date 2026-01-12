@@ -524,9 +524,19 @@ class LmerResult:
         return model.fit()
 
     def drop1(self, data: pd.DataFrame, test: str = "Chisq"):
-        from mixedlm.inference.drop1 import Drop1Result, drop1_lmer
+        from mixedlm.inference.drop1 import drop1_lmer
 
         return drop1_lmer(self, data, test=test)
+
+    def allFit(
+        self,
+        data: pd.DataFrame,
+        optimizers: list[str] | None = None,
+        verbose: bool = False,
+    ):
+        from mixedlm.inference.allfit import allfit_lmer
+
+        return allfit_lmer(self, data, optimizers=optimizers, verbose=verbose)
 
     def summary(self) -> str:
         lines = []

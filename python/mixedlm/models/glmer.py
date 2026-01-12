@@ -569,9 +569,19 @@ class GlmerResult:
         return model.fit(nAGQ=new_nAGQ)
 
     def drop1(self, data: pd.DataFrame, test: str = "Chisq"):
-        from mixedlm.inference.drop1 import Drop1Result, drop1_glmer
+        from mixedlm.inference.drop1 import drop1_glmer
 
         return drop1_glmer(self, data, test=test)
+
+    def allFit(
+        self,
+        data: pd.DataFrame,
+        optimizers: list[str] | None = None,
+        verbose: bool = False,
+    ):
+        from mixedlm.inference.allfit import allfit_glmer
+
+        return allfit_glmer(self, data, optimizers=optimizers, verbose=verbose)
 
     def summary(self) -> str:
         lines = []

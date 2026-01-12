@@ -1848,5 +1848,88 @@ class TestIsSingular:
         assert result_not_singular.isSingular() is False
 
 
+class TestAllFit:
+    def test_allfit_lmer_basic(self):
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+        allfit_result = result.allFit(SLEEPSTUDY, optimizers=["L-BFGS-B", "Nelder-Mead"])
+
+        assert len(allfit_result.fits) == 2
+        assert "L-BFGS-B" in allfit_result.fits
+        assert "Nelder-Mead" in allfit_result.fits
+
+    def test_allfit_lmer_default_optimizers(self):
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+        allfit_result = result.allFit(SLEEPSTUDY)
+
+        assert len(allfit_result.fits) == 6
+
+    def test_allfit_glmer_basic(self):
+        result = glmer(
+            "y ~ period + (1 | herd)",
+            CBPP,
+            family=families.Binomial(),
+        )
+        allfit_result = result.allFit(CBPP, optimizers=["L-BFGS-B", "Nelder-Mead"])
+
+        assert len(allfit_result.fits) == 2
+        assert "L-BFGS-B" in allfit_result.fits
+        assert "Nelder-Mead" in allfit_result.fits
+
+    def test_allfit_best_fit(self):
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+        allfit_result = result.allFit(SLEEPSTUDY, optimizers=["L-BFGS-B", "Nelder-Mead"])
+
+        best = allfit_result.best_fit()
+        assert best is not None
+        assert hasattr(best, "deviance")
+
+        best_aic = allfit_result.best_fit(criterion="AIC")
+        assert best_aic is not None
+
+        best_bic = allfit_result.best_fit(criterion="BIC")
+        assert best_bic is not None
+
+    def test_allfit_is_consistent(self):
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+        allfit_result = result.allFit(SLEEPSTUDY, optimizers=["L-BFGS-B", "Nelder-Mead"])
+
+        consistent = allfit_result.is_consistent()
+        assert isinstance(consistent, bool)
+
+    def test_allfit_fixef_table(self):
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+        allfit_result = result.allFit(SLEEPSTUDY, optimizers=["L-BFGS-B", "Nelder-Mead"])
+
+        fixef_table = allfit_result.fixef_table()
+        assert isinstance(fixef_table, dict)
+        assert len(fixef_table) > 0
+        for opt_name, fixefs in fixef_table.items():
+            assert "(Intercept)" in fixefs
+            assert "Days" in fixefs
+
+    def test_allfit_theta_table(self):
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+        allfit_result = result.allFit(SLEEPSTUDY, optimizers=["L-BFGS-B", "Nelder-Mead"])
+
+        theta_table = allfit_result.theta_table()
+        assert isinstance(theta_table, dict)
+        assert len(theta_table) > 0
+        for opt_name, thetas in theta_table.items():
+            assert isinstance(thetas, list)
+
+    def test_allfit_str_repr(self):
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+        allfit_result = result.allFit(SLEEPSTUDY, optimizers=["L-BFGS-B", "Nelder-Mead"])
+
+        str_output = str(allfit_result)
+        assert "allFit summary:" in str_output
+        assert "L-BFGS-B" in str_output
+        assert "Nelder-Mead" in str_output
+
+        repr_output = repr(allfit_result)
+        assert "AllFitResult" in repr_output
+        assert "successful" in repr_output
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
