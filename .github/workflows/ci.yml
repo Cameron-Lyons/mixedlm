@@ -44,7 +44,7 @@ jobs:
         run: uv python install 3.14
 
       - name: Set up Rust
-        uses: dtolnay/rust-action@stable
+        uses: dtolnay/rust-toolchain@stable
 
       - name: Create venv and install maturin
         run: |
@@ -75,7 +75,7 @@ jobs:
         run: uv python install 3.14
 
       - name: Set up Rust
-        uses: dtolnay/rust-action@stable
+        uses: dtolnay/rust-toolchain@stable
 
       - name: Create venv and install maturin
         run: |
