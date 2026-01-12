@@ -1228,5 +1228,119 @@ class TestRefit:
             result.refit(np.random.randn(n + 10))
 
 
+class TestAccessors:
+    def test_lmer_nobs(self) -> None:
+        np.random.seed(42)
+        n_groups = 10
+        n_per_group = 20
+        n = n_groups * n_per_group
+
+        group = np.repeat(np.arange(n_groups), n_per_group)
+        x = np.random.randn(n)
+        group_effects = np.random.randn(n_groups) * 0.5
+        y = 2.0 + 1.5 * x + group_effects[group] + np.random.randn(n) * 0.5
+
+        data = pd.DataFrame({"y": y, "x": x, "group": [str(g) for g in group]})
+        result = lmer("y ~ x + (1 | group)", data)
+
+        assert result.nobs() == n
+
+    def test_lmer_ngrps(self) -> None:
+        np.random.seed(42)
+        n_groups = 10
+        n_per_group = 20
+        n = n_groups * n_per_group
+
+        group = np.repeat(np.arange(n_groups), n_per_group)
+        x = np.random.randn(n)
+        group_effects = np.random.randn(n_groups) * 0.5
+        y = 2.0 + 1.5 * x + group_effects[group] + np.random.randn(n) * 0.5
+
+        data = pd.DataFrame({"y": y, "x": x, "group": [str(g) for g in group]})
+        result = lmer("y ~ x + (1 | group)", data)
+
+        ngrps = result.ngrps()
+        assert "group" in ngrps
+        assert ngrps["group"] == n_groups
+
+    def test_lmer_get_sigma(self) -> None:
+        np.random.seed(42)
+        n_groups = 10
+        n_per_group = 20
+        n = n_groups * n_per_group
+
+        group = np.repeat(np.arange(n_groups), n_per_group)
+        x = np.random.randn(n)
+        group_effects = np.random.randn(n_groups) * 0.5
+        y = 2.0 + 1.5 * x + group_effects[group] + np.random.randn(n) * 0.5
+
+        data = pd.DataFrame({"y": y, "x": x, "group": [str(g) for g in group]})
+        result = lmer("y ~ x + (1 | group)", data)
+
+        assert result.get_sigma() == result.sigma
+        assert result.get_sigma() > 0
+
+    def test_lmer_df_residual(self) -> None:
+        np.random.seed(42)
+        n_groups = 10
+        n_per_group = 20
+        n = n_groups * n_per_group
+
+        group = np.repeat(np.arange(n_groups), n_per_group)
+        x = np.random.randn(n)
+        group_effects = np.random.randn(n_groups) * 0.5
+        y = 2.0 + 1.5 * x + group_effects[group] + np.random.randn(n) * 0.5
+
+        data = pd.DataFrame({"y": y, "x": x, "group": [str(g) for g in group]})
+        result = lmer("y ~ x + (1 | group)", data)
+
+        assert result.df_residual() == n - 2
+
+    def test_glmer_accessors(self) -> None:
+        np.random.seed(42)
+        n_groups = 10
+        n_per_group = 20
+        n = n_groups * n_per_group
+
+        group = np.repeat(np.arange(n_groups), n_per_group)
+        x = np.random.randn(n)
+        group_effects = np.random.randn(n_groups) * 0.3
+        eta = -0.5 + 0.5 * x + group_effects[group]
+        p = 1 / (1 + np.exp(-eta))
+        y = np.random.binomial(1, p)
+
+        data = pd.DataFrame({"y": y, "x": x, "group": [str(g) for g in group]})
+        result = glmer("y ~ x + (1 | group)", data, family=families.Binomial())
+
+        assert result.nobs() == n
+        assert result.ngrps()["group"] == n_groups
+        assert result.df_residual() == n - 2
+
+    def test_ngrps_multiple_grouping(self) -> None:
+        np.random.seed(42)
+        n = 200
+
+        group1 = np.random.choice(10, n)
+        group2 = np.random.choice(5, n)
+        x = np.random.randn(n)
+        y = 2.0 + 1.5 * x + np.random.randn(n) * 0.5
+
+        data = pd.DataFrame(
+            {
+                "y": y,
+                "x": x,
+                "group1": [str(g) for g in group1],
+                "group2": [str(g) for g in group2],
+            }
+        )
+        result = lmer("y ~ x + (1 | group1) + (1 | group2)", data)
+
+        ngrps = result.ngrps()
+        assert "group1" in ngrps
+        assert "group2" in ngrps
+        assert ngrps["group1"] == 10
+        assert ngrps["group2"] == 5
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

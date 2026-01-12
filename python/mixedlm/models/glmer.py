@@ -84,6 +84,19 @@ class GlmerResult:
 
         return result
 
+    def nobs(self) -> int:
+        return self.matrices.n_obs
+
+    def ngrps(self) -> dict[str, int]:
+        return {
+            struct.grouping_factor: struct.n_levels for struct in self.matrices.random_structures
+        }
+
+    def df_residual(self) -> int:
+        n = self.matrices.n_obs
+        p = self.matrices.n_fixed
+        return n - p
+
     def linear_predictor(self) -> NDArray[np.floating]:
         fixed_part = self.matrices.X @ self.beta
         random_part = self.matrices.Z @ self.u
