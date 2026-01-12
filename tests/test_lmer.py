@@ -2108,5 +2108,57 @@ class TestLogLik:
         assert np.isclose(result.BIC(), expected_bic)
 
 
+class TestCoef:
+    def test_lmer_coef_basic(self):
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+        coef = result.coef()
+
+        assert "Subject" in coef
+        assert "(Intercept)" in coef["Subject"]
+        assert len(coef["Subject"]["(Intercept)"]) == 18
+
+    def test_lmer_coef_combines_fixed_and_random(self):
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+        coef = result.coef()
+        fixef = result.fixef()
+        ranef = result.ranef()
+
+        for i in range(len(ranef["Subject"]["(Intercept)"])):
+            expected = fixef["(Intercept)"] + ranef["Subject"]["(Intercept)"][i]
+            assert np.isclose(coef["Subject"]["(Intercept)"][i], expected)
+
+    def test_lmer_coef_random_slope(self):
+        result = lmer("Reaction ~ Days + (Days | Subject)", SLEEPSTUDY)
+        coef = result.coef()
+
+        assert "Subject" in coef
+        assert "(Intercept)" in coef["Subject"]
+        assert "Days" in coef["Subject"]
+
+        fixef = result.fixef()
+        ranef = result.ranef()
+
+        for i in range(len(ranef["Subject"]["Days"])):
+            expected_days = fixef["Days"] + ranef["Subject"]["Days"][i]
+            assert np.isclose(coef["Subject"]["Days"][i], expected_days)
+
+    def test_glmer_coef_basic(self):
+        result = glmer("y ~ period + (1 | herd)", CBPP, family=families.Binomial())
+        coef = result.coef()
+
+        assert "herd" in coef
+        assert "(Intercept)" in coef["herd"]
+
+    def test_glmer_coef_combines_fixed_and_random(self):
+        result = glmer("y ~ period + (1 | herd)", CBPP, family=families.Binomial())
+        coef = result.coef()
+        fixef = result.fixef()
+        ranef = result.ranef()
+
+        for i in range(len(ranef["herd"]["(Intercept)"])):
+            expected = fixef["(Intercept)"] + ranef["herd"]["(Intercept)"][i]
+            assert np.isclose(coef["herd"]["(Intercept)"][i], expected)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
