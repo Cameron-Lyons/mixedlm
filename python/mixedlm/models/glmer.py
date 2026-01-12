@@ -250,7 +250,7 @@ class GlmerResult:
         newdata: pd.DataFrame | None = None,
         type: str = "response",
         re_form: str | None = None,
-        offset: NDArray[np.floating] | None = None,
+        allow_new_levels: bool = False,
     ) -> NDArray[np.floating]:
         if newdata is None:
             return self.fitted(type=type)
@@ -258,13 +258,45 @@ class GlmerResult:
         new_matrices = build_model_matrices(self.formula, newdata)
         eta = new_matrices.X @ self.beta
 
-        if offset is None:
-            offset = np.zeros(len(newdata), dtype=np.float64)
-
-        eta = eta + offset
+        if new_matrices.offset is not None:
+            eta = eta + new_matrices.offset
 
         if re_form != "NA" and re_form != "~0":
-            pass
+            u_idx = 0
+
+            for struct in self.matrices.random_structures:
+                group_col = struct.grouping_factor
+                n_terms = struct.n_terms
+                n_levels_orig = struct.n_levels
+
+                if group_col not in newdata.columns:
+                    u_idx += n_levels_orig * n_terms
+                    continue
+
+                new_groups = newdata[group_col].astype(str).values
+                u_block = self.u[u_idx : u_idx + n_levels_orig * n_terms].reshape(
+                    n_levels_orig, n_terms
+                )
+                u_idx += n_levels_orig * n_terms
+
+                for i, term_name in enumerate(struct.term_names):
+                    if term_name == "(Intercept)":
+                        term_values = np.ones(len(newdata))
+                    else:
+                        if term_name in newdata.columns:
+                            term_values = newdata[term_name].values.astype(np.float64)
+                        else:
+                            continue
+
+                    for j, group_level in enumerate(new_groups):
+                        if group_level in struct.level_map:
+                            level_idx = struct.level_map[group_level]
+                            eta[j] += u_block[level_idx, i] * term_values[j]
+                        elif not allow_new_levels:
+                            raise ValueError(
+                                f"New level '{group_level}' in grouping factor '{group_col}'. "
+                                "Set allow_new_levels=True to predict with random effects = 0."
+                            )
 
         if type == "link":
             return eta

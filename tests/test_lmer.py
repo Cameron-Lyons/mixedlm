@@ -2160,5 +2160,122 @@ class TestCoef:
             assert np.isclose(coef["herd"]["(Intercept)"][i], expected)
 
 
+class TestPredict:
+    def test_lmer_predict_no_newdata(self):
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+        pred = result.predict()
+        fitted = result.fitted()
+
+        assert np.allclose(pred, fitted)
+
+    def test_lmer_predict_same_data(self):
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+        pred = result.predict(newdata=SLEEPSTUDY)
+        fitted = result.fitted()
+
+        assert np.allclose(pred, fitted)
+
+    def test_lmer_predict_fixed_only(self):
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+        pred_fixed = result.predict(newdata=SLEEPSTUDY, re_form="NA")
+
+        fixef = result.fixef()
+        expected_fixed = fixef["(Intercept)"] + fixef["Days"] * SLEEPSTUDY["Days"].values
+        assert np.allclose(pred_fixed, expected_fixed)
+
+    def test_lmer_predict_new_levels_error(self):
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+
+        new_data = pd.DataFrame({
+            "Reaction": [300.0],
+            "Days": [5.0],
+            "Subject": ["999"]
+        })
+
+        with pytest.raises(ValueError, match="New level"):
+            result.predict(newdata=new_data)
+
+    def test_lmer_predict_new_levels_allowed(self):
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+
+        new_data = pd.DataFrame({
+            "Reaction": [300.0],
+            "Days": [5.0],
+            "Subject": ["999"]
+        })
+
+        pred = result.predict(newdata=new_data, allow_new_levels=True)
+        fixef = result.fixef()
+        expected = fixef["(Intercept)"] + fixef["Days"] * 5.0
+
+        assert np.isclose(pred[0], expected)
+
+    def test_lmer_predict_random_slope(self):
+        result = lmer("Reaction ~ Days + (Days | Subject)", SLEEPSTUDY)
+
+        subject = SLEEPSTUDY["Subject"].iloc[0]
+        new_data = pd.DataFrame({
+            "Reaction": [300.0],
+            "Days": [5.0],
+            "Subject": [subject]
+        })
+
+        pred = result.predict(newdata=new_data)
+        pred_fixed = result.predict(newdata=new_data, re_form="NA")
+
+        assert pred[0] != pred_fixed[0]
+
+    def test_glmer_predict_no_newdata(self):
+        result = glmer("y ~ period + (1 | herd)", CBPP, family=families.Binomial())
+        pred = result.predict()
+        fitted = result.fitted()
+
+        assert np.allclose(pred, fitted)
+
+    def test_glmer_predict_same_data(self):
+        result = glmer("y ~ period + (1 | herd)", CBPP, family=families.Binomial())
+        pred = result.predict(newdata=CBPP)
+        fitted = result.fitted()
+
+        assert np.allclose(pred, fitted)
+
+    def test_glmer_predict_fixed_only(self):
+        result = glmer("y ~ period + (1 | herd)", CBPP, family=families.Binomial())
+        pred_fixed = result.predict(newdata=CBPP, re_form="NA")
+        pred_full = result.predict(newdata=CBPP)
+
+        assert not np.allclose(pred_fixed, pred_full)
+
+    def test_glmer_predict_link_scale(self):
+        result = glmer("y ~ period + (1 | herd)", CBPP, family=families.Binomial())
+        pred_response = result.predict(newdata=CBPP, type="response")
+        pred_link = result.predict(newdata=CBPP, type="link")
+
+        assert np.all(pred_response >= 0) and np.all(pred_response <= 1)
+        assert not np.all(pred_link >= 0) or not np.all(pred_link <= 1)
+
+    def test_glmer_predict_new_levels_allowed(self):
+        np.random.seed(42)
+        n_groups = 10
+        n_per_group = 20
+        n = n_groups * n_per_group
+
+        group = np.repeat(np.arange(n_groups), n_per_group)
+        x = np.random.randn(n)
+        group_effects = np.random.randn(n_groups) * 0.3
+        eta = -0.5 + 0.5 * x + group_effects[group]
+        p = 1 / (1 + np.exp(-eta))
+        y = np.random.binomial(1, p)
+
+        data = pd.DataFrame({"y": y, "x": x, "group": [str(g) for g in group]})
+        result = glmer("y ~ x + (1 | group)", data, family=families.Binomial())
+
+        new_data = pd.DataFrame({"y": [0], "x": [0.5], "group": ["999"]})
+        pred = result.predict(newdata=new_data, allow_new_levels=True)
+
+        assert len(pred) == 1
+        assert 0 <= pred[0] <= 1
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
