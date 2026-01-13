@@ -2,6 +2,7 @@ from mixedlm import datasets, diagnostics, families, inference, nlme
 from mixedlm.datasets import load_cbpp, load_sleepstudy
 from mixedlm.formula.parser import findbars, is_mixed_formula, nobars, parse_formula, subbars
 from mixedlm.inference.anova import AnovaResult, anova
+from mixedlm.inference.emmeans import Emmeans, emmeans
 from mixedlm.models.control import GlmerControl, LmerControl, glmerControl, lmerControl
 from mixedlm.models.glmer import GlmerMod, GlmerVarCorr, glmer
 from mixedlm.models.lmer import (
@@ -48,6 +49,8 @@ __all__ = [
     "NlmerMod",
     "anova",
     "AnovaResult",
+    "emmeans",
+    "Emmeans",
     "parse_formula",
     "nobars",
     "findbars",

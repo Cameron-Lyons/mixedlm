@@ -6,6 +6,12 @@ from mixedlm.inference.bootstrap import (
     bootstrap_lmer,
 )
 from mixedlm.inference.drop1 import Drop1Result, drop1_glmer, drop1_lmer
+from mixedlm.inference.emmeans import (
+    ContrastResult,
+    EmmeanResult,
+    Emmeans,
+    emmeans,
+)
 from mixedlm.inference.profile import (
     ProfileResult,
     plot_profiles,
@@ -23,6 +29,10 @@ __all__ = [
     "Drop1Result",
     "drop1_lmer",
     "drop1_glmer",
+    "Emmeans",
+    "EmmeanResult",
+    "ContrastResult",
+    "emmeans",
     "ProfileResult",
     "profile_lmer",
     "profile_glmer",
