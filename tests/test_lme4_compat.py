@@ -1,7 +1,6 @@
 import numpy as np
 import pandas as pd
 import pytest
-
 from mixedlm import (
     families,
     glmer,
@@ -175,7 +174,7 @@ class TestLmList:
         assert "fits" in results
         assert "coef" in results
         assert len(results["fits"]) == 18
-        for subj, fit in results["fits"].items():
+        for _subj, fit in results["fits"].items():
             assert "coef" in fit
             assert len(fit["coef"]) == 2
 

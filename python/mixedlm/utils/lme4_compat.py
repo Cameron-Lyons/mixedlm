@@ -142,8 +142,8 @@ def ranef(
     """
     if hasattr(model, "isNLMM") and model.isNLMM():
         return model.ranef()  # type: ignore[return-value]
-    from mixedlm.models.lmer import LmerResult, RanefResult
     from mixedlm.models.glmer import GlmerResult
+    from mixedlm.models.lmer import LmerResult, RanefResult
     if isinstance(model, (LmerResult, GlmerResult)):
         result = model.ranef(condVar=condVar)
         if isinstance(result, RanefResult):
@@ -326,8 +326,8 @@ def pvalues(
             result[name] = float(p)
         return result
 
-    from mixedlm.models.lmer import LmerResult
     from mixedlm.models.glmer import GlmerResult
+    from mixedlm.models.lmer import LmerResult
 
     if not isinstance(model, (LmerResult, GlmerResult)):
         for i, name in enumerate(names):
@@ -337,15 +337,8 @@ def pvalues(
 
     n = model.matrices.n_obs
     p_fixed = model.matrices.n_fixed
-    n_groups = sum(int(s.n_levels) for s in model.matrices.random_structures)
 
-    if method in ("satterthwaite", "satt"):
-        for i, name in enumerate(names):
-            df = _satterthwaite_df(model, i, se_vals[i])
-            df = max(1, min(df, n - p_fixed))
-            p = 2 * (1 - stats.t.cdf(np.abs(t_vals[i]), df))
-            result[name] = float(p)
-    elif method in ("kr", "kenward-roger", "kenward_roger"):
+    if method in ("satterthwaite", "satt") or method in ("kr", "kenward-roger", "kenward_roger"):
         for i, name in enumerate(names):
             df = _satterthwaite_df(model, i, se_vals[i])
             df = max(1, min(df, n - p_fixed))
@@ -374,7 +367,6 @@ def _satterthwaite_df(model: MerMod, param_idx: int, se: float) -> float:
     if n_groups == 0:
         return float(n - p)
 
-    min_group_size = min(int(s.n_levels) for s in model.matrices.random_structures)
     avg_obs_per_group = n / max(n_groups, 1)
 
     df_between = n_groups - 1
@@ -383,10 +375,7 @@ def _satterthwaite_df(model: MerMod, param_idx: int, se: float) -> float:
     model_sigma = getattr(model, "sigma", 1.0)
     var_ratio = model_sigma**2 / (se**2 * n + 1e-10)
 
-    if var_ratio > avg_obs_per_group:
-        df = max(df_between, 1)
-    else:
-        df = df_within
+    df = max(df_between, 1) if var_ratio > avg_obs_per_group else df_within
 
     return float(max(1, min(df, n - p)))
 
@@ -643,13 +632,10 @@ def checkConv(
         messages.append("Optimizer did not report convergence")
 
     is_singular = False
-    if check_singular:
-        if hasattr(model, "isSingular"):
-            is_singular = model.isSingular(tol=tol)
-            if is_singular:
-                messages.append(
-                    f"Model is singular (boundary fit) at tolerance {tol}"
-                )
+    if check_singular and hasattr(model, "isSingular"):
+        is_singular = model.isSingular(tol=tol)
+        if is_singular:
+            messages.append(f"Model is singular (boundary fit) at tolerance {tol}")
 
     optimizer = "unknown"
     if hasattr(model, "control") and hasattr(model.control, "optimizer"):
@@ -662,15 +648,14 @@ def checkConv(
         iterations = model.optinfo.get("nit") or model.optinfo.get("iterations")
 
     gradient_norm = None
-    if check_gradient:
-        if hasattr(model, "optinfo") and isinstance(model.optinfo, dict):
-            grad = model.optinfo.get("jac") or model.optinfo.get("gradient")
-            if grad is not None:
-                gradient_norm = float(np.linalg.norm(grad))
-                if gradient_norm > grad_tol:
-                    messages.append(
-                        f"Gradient norm ({gradient_norm:.2e}) exceeds tolerance ({grad_tol:.2e})"
-                    )
+    if check_gradient and hasattr(model, "optinfo") and isinstance(model.optinfo, dict):
+        grad = model.optinfo.get("jac") or model.optinfo.get("gradient")
+        if grad is not None:
+            gradient_norm = float(np.linalg.norm(grad))
+            if gradient_norm > grad_tol:
+                messages.append(
+                    f"Gradient norm ({gradient_norm:.2e}) exceeds tolerance ({grad_tol:.2e})"
+                )
 
     hessian_ok = None
     if check_hessian:
