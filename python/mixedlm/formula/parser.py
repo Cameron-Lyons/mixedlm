@@ -559,9 +559,7 @@ def subbars(formula: Formula | str) -> str:
 
     fixed_parts: list[str] = []
 
-    if formula.fixed.has_intercept:
-        pass
-    else:
+    if not formula.fixed.has_intercept:
         fixed_parts.append("0")
 
     for term in formula.fixed.terms:
