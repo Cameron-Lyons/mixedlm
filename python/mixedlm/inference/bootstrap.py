@@ -786,6 +786,5 @@ def bootMer(
         )
     else:
         raise TypeError(
-            f"Model type {type(model).__name__} not supported. "
-            "Use LmerResult or GlmerResult."
+            f"Model type {type(model).__name__} not supported. Use LmerResult or GlmerResult."
         )

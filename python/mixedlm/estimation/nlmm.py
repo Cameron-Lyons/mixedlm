@@ -273,7 +273,14 @@ def pnls_step(
             futures = [
                 executor.submit(
                     _compute_group_rss,  # type: ignore[arg-type]
-                    g, groups, x, y, phi_new, b_new, random_params, model
+                    g,
+                    groups,
+                    x,
+                    y,
+                    phi_new,
+                    b_new,
+                    random_params,
+                    model,
                 )
                 for g in range(n_groups)
             ]
@@ -329,7 +336,14 @@ def nlmm_deviance(
             futures = [
                 executor.submit(
                     _compute_group_rss,  # type: ignore[arg-type]
-                    g, groups, x, y, phi_new, b_new, random_params, model
+                    g,
+                    groups,
+                    x,
+                    y,
+                    phi_new,
+                    b_new,
+                    random_params,
+                    model,
                 )
                 for g in range(n_groups)
             ]

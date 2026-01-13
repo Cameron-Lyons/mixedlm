@@ -88,8 +88,7 @@ def ngrps(model: MerMod) -> dict[str, int]:
         return model.ngrps()
     elif hasattr(model, "matrices"):
         return {
-            struct.grouping_factor: struct.n_levels
-            for struct in model.matrices.random_structures
+            struct.grouping_factor: struct.n_levels for struct in model.matrices.random_structures
         }
     return {}
 
@@ -116,9 +115,7 @@ def fixef(model: MerMod) -> dict[str, float]:
     return model.fixef()
 
 
-def ranef(
-    model: MerMod, condVar: bool = False
-) -> dict[str, dict[str, NDArray[np.floating]]]:
+def ranef(model: MerMod, condVar: bool = False) -> dict[str, dict[str, NDArray[np.floating]]]:
     """Extract random effects (BLUPs) from a fitted model.
 
     Parameters
@@ -144,6 +141,7 @@ def ranef(
         return model.ranef()  # type: ignore[return-value]
     from mixedlm.models.glmer import GlmerResult
     from mixedlm.models.lmer import LmerResult, RanefResult
+
     if isinstance(model, (LmerResult, GlmerResult)):
         result = model.ranef(condVar=condVar)
         if isinstance(result, RanefResult):
@@ -203,8 +201,7 @@ def getME(model: MerMod, name: str):
     """
     if not hasattr(model, "getME"):
         raise AttributeError(
-            f"{type(model).__name__} does not support getME(). "
-            "Use model attributes directly."
+            f"{type(model).__name__} does not support getME(). Use model attributes directly."
         )
     return model.getME(name)
 
@@ -345,9 +342,7 @@ def pvalues(
             p = 2 * (1 - stats.t.cdf(np.abs(t_vals[i]), df))
             result[name] = float(p)
     else:
-        raise ValueError(
-            f"Unknown method '{method}'. Use 'Satterthwaite', 'KR', or 'normal'."
-        )
+        raise ValueError(f"Unknown method '{method}'. Use 'Satterthwaite', 'KR', or 'normal'.")
 
     return result
 
@@ -445,9 +440,7 @@ def lmList(
             group = bar_match.group(1)
             formula = re.sub(r"\s*\+?\s*\([^)]*\|\s*\w+\s*\)", "", formula).strip()
         else:
-            raise ValueError(
-                "group must be specified when formula does not contain random effects"
-            )
+            raise ValueError("group must be specified when formula does not contain random effects")
 
     if group not in data.columns:
         raise ValueError(f"Grouping variable '{group}' not found in data")
@@ -763,9 +756,7 @@ def fortify(
         if hasattr(model, "matrices") and hasattr(model.matrices, "frame"):
             data = model.matrices.frame
         else:
-            raise ValueError(
-                "No data available. Provide data or ensure model stores frame."
-            )
+            raise ValueError("No data available. Provide data or ensure model stores frame.")
 
     if data is None:
         raise ValueError("No data available")
@@ -892,9 +883,7 @@ def devcomp(model: MerMod) -> DevComp:
             cmp["nth"] = len(model.theta)
 
         if hasattr(matrices, "random_structures"):
-            dims["ngrps"] = sum(
-                s.n_levels for s in matrices.random_structures
-            )
+            dims["ngrps"] = sum(s.n_levels for s in matrices.random_structures)
 
     if hasattr(model, "u") and model.u is not None:
         cmp["ussq"] = float(np.sum(model.u**2))

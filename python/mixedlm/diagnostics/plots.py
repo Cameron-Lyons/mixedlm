@@ -352,9 +352,7 @@ def plot_ranef(
 
     from mixedlm.models.lmer import RanefResult
 
-    ranef_values = (
-        ranef_result.values if isinstance(ranef_result, RanefResult) else ranef_result
-    )
+    ranef_values = ranef_result.values if isinstance(ranef_result, RanefResult) else ranef_result
 
     if group is None:
         group = list(ranef_values.keys())[0]

@@ -231,7 +231,7 @@ class Emmeans:
         raw_p = 2 * (1 - stats.t.cdf(np.abs(t_ratio), self._df))
         p_adjusted = _adjust_pvalues(raw_p, adjust, n_contrasts, self._df, t_ratio)
 
-        contrast_labels = [f"C{i+1}" for i in range(n_contrasts)]
+        contrast_labels = [f"C{i + 1}" for i in range(n_contrasts)]
 
         return ContrastResult(
             contrast=contrast_labels,
@@ -344,8 +344,7 @@ def emmeans(
     for spec in specs:
         if spec not in factor_vars:
             raise ValueError(
-                f"Variable '{spec}' must be a factor. "
-                f"Available factors: {list(factor_vars.keys())}"
+                f"Variable '{spec}' must be a factor. Available factors: {list(factor_vars.keys())}"
             )
 
     spec_levels = [factor_vars[spec] for spec in specs]
