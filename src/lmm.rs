@@ -7,7 +7,7 @@ use pyo3::prelude::*;
 
 use crate::linalg::LinalgError;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct RandomEffectStructure {
     pub n_levels: usize,
     pub n_terms: usize,
