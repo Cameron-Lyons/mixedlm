@@ -36,6 +36,43 @@ class RanefResult:
 
 
 @dataclass
+class PredictResult:
+    """Result of prediction with optional intervals.
+
+    Attributes
+    ----------
+    fit : NDArray
+        Predicted values.
+    se_fit : NDArray or None
+        Standard errors of predictions (if requested).
+    lower : NDArray or None
+        Lower bound of interval (if requested).
+    upper : NDArray or None
+        Upper bound of interval (if requested).
+    interval : str
+        Type of interval: "none", "confidence", or "prediction".
+    level : float
+        Confidence level used for intervals.
+    """
+
+    fit: NDArray[np.floating]
+    se_fit: NDArray[np.floating] | None = None
+    lower: NDArray[np.floating] | None = None
+    upper: NDArray[np.floating] | None = None
+    interval: str = "none"
+    level: float = 0.95
+
+    def __array__(self) -> NDArray[np.floating]:
+        return self.fit
+
+    def __len__(self) -> int:
+        return len(self.fit)
+
+    def __getitem__(self, idx: int) -> float:
+        return float(self.fit[idx])
+
+
+@dataclass
 class LogLik:
     value: float
     df: int
@@ -269,19 +306,104 @@ class LmerResult:
         newdata: pd.DataFrame | None = None,
         re_form: str | None = None,
         allow_new_levels: bool = False,
-    ) -> NDArray[np.floating]:
+        se_fit: bool = False,
+        interval: str = "none",
+        level: float = 0.95,
+    ) -> NDArray[np.floating] | PredictResult:
+        """Generate predictions from the fitted model.
+
+        Parameters
+        ----------
+        newdata : DataFrame, optional
+            New data for prediction. If None, returns fitted values.
+        re_form : str, optional
+            Formula for random effects. Use "NA" or "~0" for fixed effects only.
+        allow_new_levels : bool, default False
+            Allow new levels in grouping factors (predicts with RE=0).
+        se_fit : bool, default False
+            If True, return standard errors of predictions.
+        interval : str, default "none"
+            Type of interval: "none", "confidence", or "prediction".
+        level : float, default 0.95
+            Confidence level for intervals.
+
+        Returns
+        -------
+        NDArray or PredictResult
+            Predictions. Returns PredictResult if se_fit=True or interval!="none".
+        """
+        include_re = re_form != "NA" and re_form != "~0"
+
         if newdata is None:
-            return self.fitted()
+            pred = self._fitted_values.copy()
+            if not se_fit and interval == "none":
+                return pred
+            X = self.matrices.X
+            new_matrices = self.matrices
+        else:
+            new_matrices = build_model_matrices(self.formula, newdata)
+            X = new_matrices.X
+            pred = X @ self.beta
 
-        new_matrices = build_model_matrices(self.formula, newdata)
-        pred = new_matrices.X @ self.beta
+            if new_matrices.offset is not None:
+                pred = pred + new_matrices.offset
 
-        if new_matrices.offset is not None:
-            pred = pred + new_matrices.offset
+            if include_re:
+                pred = self._add_random_effects_to_pred(
+                    pred, newdata, new_matrices, allow_new_levels
+                )
 
-        if re_form == "NA" or re_form == "~0":
+        if not se_fit and interval == "none":
             return pred
 
+        vcov_beta = self.vcov()
+        var_fixed = np.sum((X @ vcov_beta) * X, axis=1)
+
+        if include_re and newdata is not None:
+            var_re = self._compute_re_prediction_variance(newdata, new_matrices, allow_new_levels)
+            var_fit = var_fixed + var_re
+        else:
+            var_fit = var_fixed
+
+        se = np.sqrt(var_fit)
+
+        if interval == "none":
+            return PredictResult(fit=pred, se_fit=se, interval="none", level=level)
+
+        z_crit = stats.norm.ppf(1 - (1 - level) / 2)
+
+        if interval == "confidence":
+            lower = pred - z_crit * se
+            upper = pred + z_crit * se
+            return PredictResult(
+                fit=pred, se_fit=se, lower=lower, upper=upper, interval="confidence", level=level
+            )
+        elif interval == "prediction":
+            var_pred = var_fit + self.sigma**2
+            se_pred = np.sqrt(var_pred)
+            lower = pred - z_crit * se_pred
+            upper = pred + z_crit * se_pred
+            return PredictResult(
+                fit=pred,
+                se_fit=se,
+                lower=lower,
+                upper=upper,
+                interval="prediction",
+                level=level,
+            )
+        else:
+            raise ValueError(
+                f"Unknown interval type: {interval}. Use 'none', 'confidence', or 'prediction'."
+            )
+
+    def _add_random_effects_to_pred(
+        self,
+        pred: NDArray[np.floating],
+        newdata: pd.DataFrame,
+        new_matrices: ModelMatrices,
+        allow_new_levels: bool,
+    ) -> NDArray[np.floating]:
+        """Add random effects contribution to predictions."""
         u_idx = 0
 
         for struct in self.matrices.random_structures:
@@ -302,11 +424,10 @@ class LmerResult:
             for i, term_name in enumerate(struct.term_names):
                 if term_name == "(Intercept)":
                     term_values = np.ones(len(newdata))
+                elif term_name in newdata.columns:
+                    term_values = newdata[term_name].values.astype(np.float64)
                 else:
-                    if term_name in newdata.columns:
-                        term_values = newdata[term_name].values.astype(np.float64)
-                    else:
-                        continue
+                    continue
 
                 for j, group_level in enumerate(new_groups):
                     if group_level in struct.level_map:
@@ -319,6 +440,67 @@ class LmerResult:
                         )
 
         return pred
+
+    def _compute_re_prediction_variance(
+        self,
+        newdata: pd.DataFrame,
+        new_matrices: ModelMatrices,
+        allow_new_levels: bool,
+    ) -> NDArray[np.floating]:
+        """Compute variance contribution from random effects for predictions."""
+        n = len(newdata)
+        var_re = np.zeros(n, dtype=np.float64)
+
+        cond_var = self._compute_condVar()
+        u_idx = 0
+
+        for struct in self.matrices.random_structures:
+            group_col = struct.grouping_factor
+            n_terms = struct.n_terms
+            n_levels_orig = struct.n_levels
+
+            if group_col not in newdata.columns:
+                u_idx += n_levels_orig * n_terms
+                continue
+
+            if group_col not in cond_var:
+                u_idx += n_levels_orig * n_terms
+                continue
+
+            new_groups = newdata[group_col].astype(str).values
+            group_cond_var = cond_var[group_col]
+
+            for i, term_name in enumerate(struct.term_names):
+                if term_name == "(Intercept)":
+                    term_values = np.ones(n)
+                elif term_name in newdata.columns:
+                    term_values = newdata[term_name].values.astype(np.float64)
+                else:
+                    continue
+
+                if term_name not in group_cond_var:
+                    continue
+
+                term_var = group_cond_var[term_name]
+
+                for j, group_level in enumerate(new_groups):
+                    if group_level in struct.level_map:
+                        level_idx = struct.level_map[group_level]
+                        var_re[j] += term_var[level_idx] * term_values[j] ** 2
+                    elif allow_new_levels:
+                        theta_idx = 0
+                        for s in self.matrices.random_structures:
+                            if s.grouping_factor == group_col:
+                                break
+                            theta_idx += (
+                                s.n_terms * (s.n_terms + 1) // 2 if s.correlated else s.n_terms
+                            )
+                        re_var = self.theta[theta_idx + i] ** 2 * self.sigma**2
+                        var_re[j] += re_var * term_values[j] ** 2
+
+            u_idx += n_levels_orig * n_terms
+
+        return var_re
 
     def vcov(self) -> NDArray[np.floating]:
         q = self.matrices.n_random

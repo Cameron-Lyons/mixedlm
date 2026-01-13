@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 from numpy.typing import NDArray
-from scipy import linalg, sparse
+from scipy import linalg, sparse, stats
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -17,7 +17,7 @@ from mixedlm.families.binomial import Binomial
 from mixedlm.formula.parser import parse_formula, update_formula
 from mixedlm.formula.terms import Formula
 from mixedlm.matrices.design import ModelMatrices, build_model_matrices
-from mixedlm.models.lmer import LogLik, RanefResult, VarCorrGroup
+from mixedlm.models.lmer import LogLik, PredictResult, RanefResult, VarCorrGroup
 
 
 @dataclass
@@ -256,57 +256,155 @@ class GlmerResult:
         type: str = "response",
         re_form: str | None = None,
         allow_new_levels: bool = False,
-    ) -> NDArray[np.floating]:
+        se_fit: bool = False,
+        interval: str = "none",
+        level: float = 0.95,
+    ) -> NDArray[np.floating] | PredictResult:
+        """Generate predictions from the fitted model.
+
+        Parameters
+        ----------
+        newdata : DataFrame, optional
+            New data for prediction. If None, returns fitted values.
+        type : str, default "response"
+            Type of prediction: "response" (mean) or "link" (linear predictor).
+        re_form : str, optional
+            Formula for random effects. Use "NA" or "~0" for fixed effects only.
+        allow_new_levels : bool, default False
+            Allow new levels in grouping factors (predicts with RE=0).
+        se_fit : bool, default False
+            If True, return standard errors of predictions.
+        interval : str, default "none"
+            Type of interval: "none" or "confidence".
+            Note: prediction intervals not available for GLMMs.
+        level : float, default 0.95
+            Confidence level for intervals.
+
+        Returns
+        -------
+        NDArray or PredictResult
+            Predictions. Returns PredictResult if se_fit=True or interval!="none".
+        """
+        include_re = re_form != "NA" and re_form != "~0"
+
         if newdata is None:
-            return self.fitted(type=type)
+            if not se_fit and interval == "none":
+                return self.fitted(type=type)
+            eta = self._linear_predictor.copy()
+            X = self.matrices.X
+            new_matrices = self.matrices
+        else:
+            new_matrices = build_model_matrices(self.formula, newdata)
+            X = new_matrices.X
+            eta = X @ self.beta
 
-        new_matrices = build_model_matrices(self.formula, newdata)
-        eta = new_matrices.X @ self.beta
+            if new_matrices.offset is not None:
+                eta = eta + new_matrices.offset
 
-        if new_matrices.offset is not None:
-            eta = eta + new_matrices.offset
+            if include_re:
+                eta = self._add_random_effects_to_eta(eta, newdata, new_matrices, allow_new_levels)
 
-        if re_form != "NA" and re_form != "~0":
-            u_idx = 0
+        if not se_fit and interval == "none":
+            if type == "link":
+                return eta
+            else:
+                return self.family.link.inverse(eta)
 
-            for struct in self.matrices.random_structures:
-                group_col = struct.grouping_factor
-                n_terms = struct.n_terms
-                n_levels_orig = struct.n_levels
+        vcov_beta = self.vcov()
+        var_eta = np.sum((X @ vcov_beta) * X, axis=1)
+        se_eta = np.sqrt(var_eta)
 
-                if group_col not in newdata.columns:
-                    u_idx += n_levels_orig * n_terms
+        if interval == "none":
+            if type == "link":
+                return PredictResult(fit=eta, se_fit=se_eta, interval="none", level=level)
+            else:
+                mu = self.family.link.inverse(eta)
+                deriv = self.family.link.deriv(mu)
+                se_mu = se_eta / np.abs(deriv)
+                return PredictResult(fit=mu, se_fit=se_mu, interval="none", level=level)
+
+        if interval == "prediction":
+            raise ValueError(
+                "Prediction intervals not available for GLMMs. Use interval='confidence'."
+            )
+
+        z_crit = stats.norm.ppf(1 - (1 - level) / 2)
+
+        if interval == "confidence":
+            if type == "link":
+                lower = eta - z_crit * se_eta
+                upper = eta + z_crit * se_eta
+                return PredictResult(
+                    fit=eta,
+                    se_fit=se_eta,
+                    lower=lower,
+                    upper=upper,
+                    interval="confidence",
+                    level=level,
+                )
+            else:
+                eta_lower = eta - z_crit * se_eta
+                eta_upper = eta + z_crit * se_eta
+                mu = self.family.link.inverse(eta)
+                lower = self.family.link.inverse(eta_lower)
+                upper = self.family.link.inverse(eta_upper)
+                deriv = self.family.link.deriv(mu)
+                se_mu = se_eta / np.abs(deriv)
+                return PredictResult(
+                    fit=mu,
+                    se_fit=se_mu,
+                    lower=lower,
+                    upper=upper,
+                    interval="confidence",
+                    level=level,
+                )
+        else:
+            raise ValueError(f"Unknown interval type: {interval}. Use 'none' or 'confidence'.")
+
+    def _add_random_effects_to_eta(
+        self,
+        eta: NDArray[np.floating],
+        newdata: pd.DataFrame,
+        new_matrices: ModelMatrices,
+        allow_new_levels: bool,
+    ) -> NDArray[np.floating]:
+        """Add random effects contribution to linear predictor."""
+        u_idx = 0
+
+        for struct in self.matrices.random_structures:
+            group_col = struct.grouping_factor
+            n_terms = struct.n_terms
+            n_levels_orig = struct.n_levels
+
+            if group_col not in newdata.columns:
+                u_idx += n_levels_orig * n_terms
+                continue
+
+            new_groups = newdata[group_col].astype(str).values
+            u_block = self.u[u_idx : u_idx + n_levels_orig * n_terms].reshape(
+                n_levels_orig, n_terms
+            )
+            u_idx += n_levels_orig * n_terms
+
+            for i, term_name in enumerate(struct.term_names):
+                if term_name == "(Intercept)":
+                    term_values = np.ones(len(newdata))
+                elif term_name in newdata.columns:
+                    term_values = newdata[term_name].values.astype(np.float64)
+                else:
                     continue
 
-                new_groups = newdata[group_col].astype(str).values
-                u_block = self.u[u_idx : u_idx + n_levels_orig * n_terms].reshape(
-                    n_levels_orig, n_terms
-                )
-                u_idx += n_levels_orig * n_terms
+                for j, group_level in enumerate(new_groups):
+                    if group_level in struct.level_map:
+                        level_idx = struct.level_map[group_level]
+                        eta[j] += u_block[level_idx, i] * term_values[j]
+                    elif not allow_new_levels:
+                        raise ValueError(
+                            f"New level '{group_level}' in grouping factor '{group_col}'. "
+                            "Set allow_new_levels=True to predict with random effects = 0."
+                        )
 
-                for i, term_name in enumerate(struct.term_names):
-                    if term_name == "(Intercept)":
-                        term_values = np.ones(len(newdata))
-                    else:
-                        if term_name in newdata.columns:
-                            term_values = newdata[term_name].values.astype(np.float64)
-                        else:
-                            continue
-
-                    for j, group_level in enumerate(new_groups):
-                        if group_level in struct.level_map:
-                            level_idx = struct.level_map[group_level]
-                            eta[j] += u_block[level_idx, i] * term_values[j]
-                        elif not allow_new_levels:
-                            raise ValueError(
-                                f"New level '{group_level}' in grouping factor '{group_col}'. "
-                                "Set allow_new_levels=True to predict with random effects = 0."
-                            )
-
-        if type == "link":
-            return eta
-        else:
-            return self.family.link.inverse(eta)
+        return eta
 
     def vcov(self) -> NDArray[np.floating]:
         q = self.matrices.n_random
