@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import cached_property
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -136,12 +137,10 @@ class GlmerResult:
 
             block_cov = cond_cov[u_idx : u_idx + n_u, u_idx : u_idx + n_u]
 
+            block_diag = np.diag(block_cov).reshape(n_levels, n_terms)
             term_vars: dict[str, NDArray[np.floating]] = {}
             for j, term_name in enumerate(struct.term_names):
-                variances = np.array(
-                    [block_cov[g * n_terms + j, g * n_terms + j] for g in range(n_levels)]
-                )
-                term_vars[term_name] = variances
+                term_vars[term_name] = block_diag[:, j]
 
             result[struct.grouping_factor] = term_vars
             u_idx += n_u
@@ -220,13 +219,17 @@ class GlmerResult:
 
         return components[name]
 
-    def linear_predictor(self) -> NDArray[np.floating]:
+    @cached_property
+    def _linear_predictor(self) -> NDArray[np.floating]:
         fixed_part = self.matrices.X @ self.beta
         random_part = self.matrices.Z @ self.u
         return fixed_part + random_part + self.matrices.offset
 
+    def linear_predictor(self) -> NDArray[np.floating]:
+        return self._linear_predictor
+
     def fitted(self, type: str = "response") -> NDArray[np.floating]:
-        eta = self.linear_predictor()
+        eta = self._linear_predictor
         if type == "link":
             return eta
         else:
@@ -520,17 +523,12 @@ class GlmerResult:
         else:
             u_new = np.zeros(q, dtype=np.float64)
             u_idx = 0
+            theta_start = 0
 
             for struct in self.matrices.random_structures:
                 n_levels = struct.n_levels
                 n_terms = struct.n_terms
 
-                theta_start = sum(
-                    s.n_terms * (s.n_terms + 1) // 2 if s.correlated else s.n_terms
-                    for s in self.matrices.random_structures[
-                        : self.matrices.random_structures.index(struct)
-                    ]
-                )
                 n_theta = n_terms * (n_terms + 1) // 2 if struct.correlated else n_terms
                 theta_block = self.theta[theta_start : theta_start + n_theta]
 
@@ -553,6 +551,7 @@ class GlmerResult:
                         u_new[u_idx + g * n_terms + j] = b_g[j]
 
                 u_idx += n_levels * n_terms
+                theta_start += n_theta
 
             eta = self.matrices.X @ self.beta + self.matrices.Z @ u_new
 

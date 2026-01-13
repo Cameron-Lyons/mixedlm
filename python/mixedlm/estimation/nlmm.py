@@ -50,11 +50,8 @@ def _build_psi_matrix(
         L = theta.reshape(q, q) if q * q == n_theta else np.diag(theta[:n_random])
     else:
         L = np.zeros((q, q), dtype=np.float64)
-        idx = 0
-        for i in range(q):
-            for j in range(i + 1):
-                L[i, j] = theta[idx]
-                idx += 1
+        row_indices, col_indices = np.tril_indices(q)
+        L[row_indices, col_indices] = theta
 
     return L @ L.T
 
@@ -74,8 +71,7 @@ def _compute_group_resid_grad(
     y_g = y[mask]
 
     params_g = phi.copy()
-    for j, p_idx in enumerate(random_params):
-        params_g[p_idx] += b[g, j]
+    np.add.at(params_g, random_params, b[g, :])
 
     pred_g = model.predict(params_g, x_g)
     grad_g = model.gradient(params_g, x_g)
@@ -92,7 +88,7 @@ def _update_group_random_effects(
     b: NDArray,
     random_params: list[int],
     model: NonlinearModel,
-    Psi_inv: NDArray,
+    Psi_chol: NDArray,
     sigma: float,
 ) -> tuple[int, NDArray]:
     mask = groups == g
@@ -100,8 +96,7 @@ def _update_group_random_effects(
     y_g = y[mask]
 
     params_g = phi.copy()
-    for j, p_idx in enumerate(random_params):
-        params_g[p_idx] += b[g, j]
+    np.add.at(params_g, random_params, b[g, :])
 
     pred_g = model.predict(params_g, x_g)
     grad_g = model.gradient(params_g, x_g)
@@ -112,6 +107,8 @@ def _update_group_random_effects(
     ZtZ = Z_g.T @ Z_g
     Ztr = Z_g.T @ resid_g
 
+    n_random = len(random_params)
+    Psi_inv = linalg.cho_solve((Psi_chol, True), np.eye(n_random))
     C = ZtZ / sigma**2 + Psi_inv
     try:
         b_g = linalg.solve(C, Ztr / sigma**2, assume_a="pos")
@@ -136,8 +133,7 @@ def _compute_group_rss(
     y_g = y[mask]
 
     params_g = phi.copy()
-    for j, p_idx in enumerate(random_params):
-        params_g[p_idx] += b[g, j]
+    np.add.at(params_g, random_params, b[g, :])
 
     pred_g = model.predict(params_g, x_g)
     return float(np.sum((y_g - pred_g) ** 2))
@@ -160,7 +156,13 @@ def pnls_step(
     n_phi = len(phi)
     n_random = len(random_params)
 
-    Psi_inv = linalg.inv(Psi + 1e-8 * np.eye(n_random))
+    Psi_reg = Psi + 1e-8 * np.eye(n_random)
+    try:
+        Psi_chol = linalg.cholesky(Psi_reg, lower=True)
+        Psi_inv = linalg.cho_solve((Psi_chol, True), np.eye(n_random))
+    except linalg.LinAlgError:
+        Psi_inv = linalg.pinv(Psi_reg)
+        Psi_chol = None
 
     phi_new = phi.copy()
     b_new = b.copy()
@@ -169,6 +171,8 @@ def pnls_step(
         n_jobs = os.cpu_count() or 1
 
     use_parallel = n_jobs > 1 and n_groups >= n_jobs
+
+    reg_phi = 1e-6 * np.eye(n_phi)
 
     for _iteration in range(10):
         resid_total = np.zeros(n, dtype=np.float64)
@@ -194,8 +198,7 @@ def pnls_step(
                 y_g = y[mask]
 
                 params_g = phi.copy()
-                for j, p_idx in enumerate(random_params):
-                    params_g[p_idx] += b[g, j]
+                np.add.at(params_g, random_params, b[g, :])
 
                 pred_g = model.predict(params_g, x_g)
                 grad_g = model.gradient(params_g, x_g)
@@ -207,18 +210,18 @@ def pnls_step(
         Gtr = grad_total.T @ resid_total
 
         try:
-            delta_phi = linalg.solve(GtG + 1e-6 * np.eye(n_phi), Gtr, assume_a="pos")
+            delta_phi = linalg.solve(GtG + reg_phi, Gtr, assume_a="pos")
         except linalg.LinAlgError:
             delta_phi = linalg.lstsq(GtG, Gtr)[0]
 
         phi_new = phi + 0.5 * delta_phi
 
-        if use_parallel:
+        if use_parallel and Psi_chol is not None:
             with ThreadPoolExecutor(max_workers=n_jobs) as executor:
                 futures = [
                     executor.submit(
                         _update_group_random_effects,
-                        g, groups, x, y, phi_new, b, random_params, model, Psi_inv, sigma
+                        g, groups, x, y, phi_new, b, random_params, model, Psi_chol, sigma
                     )
                     for g in range(n_groups)
                 ]
@@ -226,14 +229,14 @@ def pnls_step(
                     g, b_g = future.result()
                     b_new[g, :] = b_g
         else:
+            sigma2 = sigma**2
             for g in range(n_groups):
                 mask = groups == g
                 x_g = x[mask]
                 y_g = y[mask]
 
                 params_g = phi_new.copy()
-                for j, p_idx in enumerate(random_params):
-                    params_g[p_idx] += b[g, j]
+                np.add.at(params_g, random_params, b[g, :])
 
                 pred_g = model.predict(params_g, x_g)
                 grad_g = model.gradient(params_g, x_g)
@@ -244,11 +247,11 @@ def pnls_step(
                 ZtZ = Z_g.T @ Z_g
                 Ztr = Z_g.T @ resid_g
 
-                C = ZtZ / sigma**2 + Psi_inv
+                C = ZtZ / sigma2 + Psi_inv
                 try:
-                    b_new[g, :] = linalg.solve(C, Ztr / sigma**2, assume_a="pos")
+                    b_new[g, :] = linalg.solve(C, Ztr / sigma2, assume_a="pos")
                 except linalg.LinAlgError:
-                    b_new[g, :] = linalg.lstsq(C, Ztr / sigma**2)[0]
+                    b_new[g, :] = linalg.lstsq(C, Ztr / sigma2)[0]
 
         if np.max(np.abs(phi_new - phi)) < 1e-6:
             break
@@ -274,8 +277,7 @@ def pnls_step(
             y_g = y[mask]
 
             params_g = phi_new.copy()
-            for j, p_idx in enumerate(random_params):
-                params_g[p_idx] += b_new[g, j]
+            np.add.at(params_g, random_params, b_new[g, :])
 
             pred_g = model.predict(params_g, x_g)
             rss += np.sum((y_g - pred_g) ** 2)
@@ -330,17 +332,21 @@ def nlmm_deviance(
             y_g = y[mask]
 
             params_g = phi_new.copy()
-            for j, p_idx in enumerate(random_params):
-                params_g[p_idx] += b_new[g, j]
+            np.add.at(params_g, random_params, b_new[g, :])
 
             pred_g = model.predict(params_g, x_g)
             rss += np.sum((y_g - pred_g) ** 2)
 
     deviance = n * np.log(2 * np.pi * sigma_new**2) + rss / sigma_new**2
 
-    Psi_inv = linalg.inv(Psi + 1e-8 * np.eye(n_random))
-    for g in range(n_groups):
-        deviance += b_new[g, :] @ Psi_inv @ b_new[g, :]
+    Psi_reg = Psi + 1e-8 * np.eye(n_random)
+    try:
+        for g in range(n_groups):
+            deviance += b_new[g, :] @ linalg.solve(Psi_reg, b_new[g, :], assume_a="pos")
+    except linalg.LinAlgError:
+        Psi_inv = linalg.pinv(Psi_reg)
+        for g in range(n_groups):
+            deviance += b_new[g, :] @ Psi_inv @ b_new[g, :]
 
     sign, logdet = np.linalg.slogdet(Psi)
     if sign > 0:

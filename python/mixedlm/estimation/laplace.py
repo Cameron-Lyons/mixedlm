@@ -68,11 +68,8 @@ def _build_lambda(
             theta_idx += n_theta
 
             L_block = np.zeros((q, q), dtype=np.float64)
-            idx = 0
-            for i in range(q):
-                for j in range(i + 1):
-                    L_block[i, j] = theta_block[idx]
-                    idx += 1
+            row_indices, col_indices = np.tril_indices(q)
+            L_block[row_indices, col_indices] = theta_block
 
             block = sparse.kron(
                 sparse.eye(n_levels, format="csc"),

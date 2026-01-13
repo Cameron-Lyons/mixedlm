@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import cached_property
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -168,11 +169,8 @@ class LmerResult:
             n_terms = struct.n_terms
             n_u = n_levels * n_terms
 
-            var_block = np.zeros((n_levels, n_terms), dtype=np.float64)
-            for i in range(n_levels):
-                for j in range(n_terms):
-                    idx = u_idx + i * n_terms + j
-                    var_block[i, j] = cond_cov[idx, idx]
+            block_diag = np.diag(cond_cov[u_idx : u_idx + n_u, u_idx : u_idx + n_u])
+            var_block = block_diag.reshape(n_levels, n_terms)
 
             u_idx += n_u
 
@@ -249,10 +247,14 @@ class LmerResult:
 
         return components[name]
 
-    def fitted(self) -> NDArray[np.floating]:
+    @cached_property
+    def _fitted_values(self) -> NDArray[np.floating]:
         fixed_part = self.matrices.X @ self.beta
         random_part = self.matrices.Z @ self.u
         return fixed_part + random_part + self.matrices.offset
+
+    def fitted(self) -> NDArray[np.floating]:
+        return self._fitted_values
 
     def residuals(self, type: str = "response") -> NDArray[np.floating]:
         if type == "response":
@@ -529,17 +531,12 @@ class LmerResult:
         else:
             u_new = np.zeros(q, dtype=np.float64)
             u_idx = 0
+            theta_start = 0
 
             for struct in self.matrices.random_structures:
                 n_levels = struct.n_levels
                 n_terms = struct.n_terms
 
-                theta_start = sum(
-                    s.n_terms * (s.n_terms + 1) // 2 if s.correlated else s.n_terms
-                    for s in self.matrices.random_structures[
-                        : self.matrices.random_structures.index(struct)
-                    ]
-                )
                 n_theta = n_terms * (n_terms + 1) // 2 if struct.correlated else n_terms
                 theta_block = self.theta[theta_start : theta_start + n_theta]
 
@@ -560,6 +557,7 @@ class LmerResult:
                         u_new[u_idx + g * n_terms + j] = b_g[j]
 
                 u_idx += n_levels * n_terms
+                theta_start += n_theta
 
             random_part = self.matrices.Z @ u_new
 

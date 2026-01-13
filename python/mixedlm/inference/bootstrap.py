@@ -164,16 +164,9 @@ def _lmer_bootstrap_worker(
             z_slice = struct_data["z_slice"]
 
             levels = list(level_map.keys())
-            group_col = []
-            for i in range(n):
-                found = False
-                for lv, idx in level_map.items():
-                    if z_slice[i, idx * n_terms] != 0:
-                        group_col.append(lv)
-                        found = True
-                        break
-                if not found:
-                    group_col.append(levels[0])
+            z_first_cols = z_slice[:, ::n_terms]
+            level_indices = np.argmax(z_first_cols != 0, axis=1)
+            group_col = [levels[idx] for idx in level_indices]
             sim_df[grouping_factor] = group_col
 
         model = LmerMod(formula, sim_df, REML=REML)
@@ -266,16 +259,9 @@ def _glmer_bootstrap_worker(args: tuple[Any, ...]) -> tuple[int, NDArray | None,
             z_slice = struct_data["z_slice"]
 
             levels = list(level_map.keys())
-            group_col = []
-            for i in range(n):
-                found = False
-                for lv, idx in level_map.items():
-                    if z_slice[i, idx * n_terms] != 0:
-                        group_col.append(lv)
-                        found = True
-                        break
-                if not found:
-                    group_col.append(levels[0])
+            z_first_cols = z_slice[:, ::n_terms]
+            level_indices = np.argmax(z_first_cols != 0, axis=1)
+            group_col = [levels[idx] for idx in level_indices]
             sim_df[grouping_factor] = group_col
 
         model = GlmerMod(formula, sim_df, family=family)
@@ -289,6 +275,7 @@ def _glmer_bootstrap_worker(args: tuple[Any, ...]) -> tuple[int, NDArray | None,
 def _prepare_lmer_worker_data(result: LmerResult) -> dict[str, Any]:
     random_structures_data = []
     theta_offset = 0
+    z_start = 0
 
     for struct in result.matrices.random_structures:
         n_terms = struct.n_terms
@@ -296,12 +283,6 @@ def _prepare_lmer_worker_data(result: LmerResult) -> dict[str, Any]:
         theta_block = result.theta[theta_offset : theta_offset + n_theta]
         theta_offset += n_theta
 
-        z_start = sum(
-            s.n_levels * s.n_terms
-            for s in result.matrices.random_structures[
-                : result.matrices.random_structures.index(struct)
-            ]
-        )
         z_end = z_start + struct.n_levels * struct.n_terms
         z_slice = result.matrices.Z[:, z_start:z_end]
 
@@ -314,6 +295,7 @@ def _prepare_lmer_worker_data(result: LmerResult) -> dict[str, Any]:
             "theta_block": theta_block.copy(),
             "z_slice": z_slice.copy() if hasattr(z_slice, "copy") else np.array(z_slice),
         })
+        z_start = z_end
 
     return {
         "formula": result.formula,
@@ -332,6 +314,7 @@ def _prepare_lmer_worker_data(result: LmerResult) -> dict[str, Any]:
 def _prepare_glmer_worker_data(result: GlmerResult) -> dict[str, Any]:
     random_structures_data = []
     theta_offset = 0
+    z_start = 0
 
     for struct in result.matrices.random_structures:
         n_terms = struct.n_terms
@@ -339,12 +322,6 @@ def _prepare_glmer_worker_data(result: GlmerResult) -> dict[str, Any]:
         theta_block = result.theta[theta_offset : theta_offset + n_theta]
         theta_offset += n_theta
 
-        z_start = sum(
-            s.n_levels * s.n_terms
-            for s in result.matrices.random_structures[
-                : result.matrices.random_structures.index(struct)
-            ]
-        )
         z_end = z_start + struct.n_levels * struct.n_terms
         z_slice = result.matrices.Z[:, z_start:z_end]
 
@@ -357,6 +334,7 @@ def _prepare_glmer_worker_data(result: GlmerResult) -> dict[str, Any]:
             "theta_block": theta_block.copy(),
             "z_slice": z_slice.copy() if hasattr(z_slice, "copy") else np.array(z_slice),
         })
+        z_start = z_end
 
     return {
         "formula": result.formula,
@@ -501,16 +479,11 @@ def _simulate_lmer(result: LmerResult) -> NDArray[np.floating]:
         u_new = np.zeros(q, dtype=np.float64)
 
         u_idx = 0
+        theta_start = 0
         for struct in result.matrices.random_structures:
             n_levels = struct.n_levels
             n_terms = struct.n_terms
 
-            theta_start = sum(
-                s.n_terms * (s.n_terms + 1) // 2 if s.correlated else s.n_terms
-                for s in result.matrices.random_structures[
-                    : result.matrices.random_structures.index(struct)
-                ]
-            )
             n_theta = n_terms * (n_terms + 1) // 2 if struct.correlated else n_terms
 
             theta_block = result.theta[theta_start : theta_start + n_theta]
@@ -535,6 +508,7 @@ def _simulate_lmer(result: LmerResult) -> NDArray[np.floating]:
                     u_new[u_idx + g * n_terms + j] = b_g[j]
 
             u_idx += n_levels * n_terms
+            theta_start += n_theta
 
         random_part = result.matrices.Z @ u_new
     else:
@@ -668,17 +642,12 @@ def _simulate_glmer(result: GlmerResult) -> NDArray[np.floating]:
     if q > 0:
         u_new = np.zeros(q, dtype=np.float64)
         u_idx = 0
+        theta_start = 0
 
         for struct in result.matrices.random_structures:
             n_levels = struct.n_levels
             n_terms = struct.n_terms
 
-            theta_start = sum(
-                s.n_terms * (s.n_terms + 1) // 2 if s.correlated else s.n_terms
-                for s in result.matrices.random_structures[
-                    : result.matrices.random_structures.index(struct)
-                ]
-            )
             n_theta = n_terms * (n_terms + 1) // 2 if struct.correlated else n_terms
 
             theta_block = result.theta[theta_start : theta_start + n_theta]
@@ -703,6 +672,7 @@ def _simulate_glmer(result: GlmerResult) -> NDArray[np.floating]:
                     u_new[u_idx + g * n_terms + j] = b_g[j]
 
             u_idx += n_levels * n_terms
+            theta_start += n_theta
 
         eta = result.matrices.X @ result.beta + result.matrices.Z @ u_new
     else:
