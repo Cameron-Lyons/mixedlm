@@ -1,17 +1,39 @@
-from mixedlm import datasets, diagnostics, families, inference, nlme, utils
+from mixedlm import datasets, diagnostics, families, inference, nlme, power, utils
 from mixedlm.datasets import (
+    load_arabidopsis,
     load_cake,
     load_cbpp,
     load_dyestuff,
     load_dyestuff2,
+    load_grouseticks,
     load_insteval,
     load_pastes,
     load_penicillin,
     load_sleepstudy,
+    load_verbagg,
 )
-from mixedlm.formula.parser import findbars, is_mixed_formula, nobars, parse_formula, subbars
+from mixedlm.formula.parser import (
+    dropOffset,
+    expandDoubleVerts,
+    findbars,
+    getFixedFormulaStr,
+    getNGroups,
+    getRandomFormulaStr,
+    getResponseName,
+    is_mixed_formula,
+    nobars,
+    parse_formula,
+    set_cov_type,
+    subbars,
+)
 from mixedlm.inference.anova import AnovaResult, anova
-from mixedlm.inference.bootstrap import bootMer
+from mixedlm.inference.bootstrap import bootMer, bootstrap_nlmer
+from mixedlm.inference.ddf import (
+    DenomDFResult,
+    kenward_roger_df,
+    pvalues_with_ddf,
+    satterthwaite_df,
+)
 from mixedlm.inference.emmeans import Emmeans, emmeans
 from mixedlm.inference.profile import plot_profiles, splom_profiles
 from mixedlm.models.control import GlmerControl, LmerControl, glmerControl, lmerControl
@@ -34,16 +56,21 @@ from mixedlm.models.modular import (
     LmerDevfun,
     LmerParsedFormula,
     OptimizeResult,
+    ReTrms,
+    devfun2,
     glFormula,
     lFormula,
     mkGlmerDevfun,
     mkGlmerMod,
     mkLmerDevfun,
     mkLmerMod,
+    mkReTrms,
     optimizeGlmer,
     optimizeLmer,
+    simulate_formula,
 )
-from mixedlm.models.nlmer import NlmerMod, nlmer
+from mixedlm.models.nlmer import NlmerMod, NlmerResult, nlmer
+from mixedlm.power import PowerCurveResult, PowerResult, extend, powerCurve, powerSim
 from mixedlm.utils.lme4_compat import (
     ConvergenceInfo,
     DevComp,
@@ -53,6 +80,7 @@ from mixedlm.utils.lme4_compat import (
     devcomp,
     factorize,
     fortify,
+    isNested,
     lmList,
     mkMerMod,
     ngrps,
@@ -75,11 +103,23 @@ __all__ = [
     "GlmerControl",
     "nlmer",
     "NlmerMod",
+    "NlmerResult",
     "anova",
     "AnovaResult",
     "emmeans",
     "Emmeans",
     "bootMer",
+    "bootstrap_nlmer",
+    "satterthwaite_df",
+    "kenward_roger_df",
+    "pvalues_with_ddf",
+    "DenomDFResult",
+    "powerSim",
+    "powerCurve",
+    "extend",
+    "PowerResult",
+    "PowerCurveResult",
+    "power",
     "sigma",
     "ngrps",
     "lmList",
@@ -94,6 +134,13 @@ __all__ = [
     "findbars",
     "subbars",
     "is_mixed_formula",
+    "set_cov_type",
+    "expandDoubleVerts",
+    "dropOffset",
+    "getResponseName",
+    "getFixedFormulaStr",
+    "getRandomFormulaStr",
+    "getNGroups",
     "families",
     "nlme",
     "inference",
@@ -108,6 +155,9 @@ __all__ = [
     "load_cake",
     "load_pastes",
     "load_insteval",
+    "load_arabidopsis",
+    "load_grouseticks",
+    "load_verbagg",
     "fortify",
     "devcomp",
     "DevComp",
@@ -137,4 +187,9 @@ __all__ = [
     "LmerDevfun",
     "GlmerDevfun",
     "OptimizeResult",
+    "ReTrms",
+    "mkReTrms",
+    "simulate_formula",
+    "devfun2",
+    "isNested",
 ]

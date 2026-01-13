@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "mixedlm"
-version = "0.1.0"
+version = "0.1.1"
 description = "Mixed-effects models in Python with Rust backend"
 requires-python = ">=3.14"
 license = {text = "MIT"}
@@ -33,6 +33,10 @@ dev = [
 ]
 plots = [
     "matplotlib>=3.5",
+]
+optimizers = [
+    "Py-BOBYQA>=1.4",
+    "nlopt>=2.7",
 ]
 
 [tool.maturin]

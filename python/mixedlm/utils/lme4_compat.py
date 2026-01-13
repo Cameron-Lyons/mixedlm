@@ -1121,6 +1121,77 @@ def factorize(
     return result
 
 
+def isNested(
+    factor1: pd.Series | NDArray | list,
+    factor2: pd.Series | NDArray | list,
+) -> bool:
+    """Check if factor1 is nested within factor2.
+
+    A factor is nested within another if each level of the first factor
+    occurs within only one level of the second factor. For example,
+    students nested within schools means each student belongs to exactly
+    one school.
+
+    Parameters
+    ----------
+    factor1 : array-like
+        The potentially nested factor (e.g., student IDs).
+    factor2 : array-like
+        The grouping factor (e.g., school IDs).
+
+    Returns
+    -------
+    bool
+        True if factor1 is nested within factor2, False otherwise.
+
+    Examples
+    --------
+    >>> import pandas as pd
+    >>> students = ['s1', 's2', 's3', 's4', 's5', 's6']
+    >>> schools = ['A', 'A', 'A', 'B', 'B', 'B']
+    >>> isNested(students, schools)
+    True
+
+    >>> # Not nested - student s1 appears in both schools
+    >>> students = ['s1', 's2', 's1', 's3', 's4', 's5']
+    >>> schools = ['A', 'A', 'B', 'B', 'B', 'B']
+    >>> isNested(students, schools)
+    False
+
+    >>> # Crossed design - items crossed with subjects
+    >>> items = [1, 2, 3, 1, 2, 3]
+    >>> subjects = ['A', 'A', 'A', 'B', 'B', 'B']
+    >>> isNested(items, subjects)
+    False
+
+    Notes
+    -----
+    This function is useful for determining the appropriate random effects
+    structure. Nested factors typically use (1|factor2/factor1) syntax,
+    while crossed factors use (1|factor1) + (1|factor2).
+
+    See Also
+    --------
+    lmer : Fit linear mixed models with nested or crossed effects.
+    """
+    f1 = np.asarray(factor1)
+    f2 = np.asarray(factor2)
+
+    if len(f1) != len(f2):
+        raise ValueError("factor1 and factor2 must have the same length")
+
+    level_to_group: dict = {}
+
+    for level, group in zip(f1, f2, strict=False):
+        if level in level_to_group:
+            if level_to_group[level] != group:
+                return False
+        else:
+            level_to_group[level] = group
+
+    return True
+
+
 def mkMerMod(
     model: MerMod,
     theta: NDArray[np.floating] | None = None,

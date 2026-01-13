@@ -20,6 +20,7 @@ class LmerControl:
         - "Nelder-Mead": Simplex algorithm
         - "Powell": Powell's method
         - "trust-constr": Trust-region constrained
+        - "bobyqa": BOBYQA (Bound Optimization BY Quadratic Approximation)
     maxiter : int, default 1000
         Maximum number of iterations for the optimizer.
     ftol : float, default 1e-8
@@ -41,11 +42,15 @@ class LmerControl:
     use_rust : bool, default True
         Whether to use Rust backend for optimization (if available).
     optCtrl : dict, optional
-        Additional options passed directly to scipy.optimize.minimize.
+        Additional options passed directly to the optimizer.
+        For BOBYQA, supports: rhobeg, rhoend, seek_global_minimum.
 
     Examples
     --------
     >>> ctrl = LmerControl(optimizer="Nelder-Mead", maxiter=2000)
+    >>> result = lmer("y ~ x + (1|group)", data, control=ctrl)
+
+    >>> ctrl = LmerControl(optimizer="bobyqa")
     >>> result = lmer("y ~ x + (1|group)", data, control=ctrl)
 
     >>> ctrl = LmerControl(boundary_tol=1e-5, check_singular=False)
@@ -62,6 +67,12 @@ class LmerControl:
     check_singular: bool = True
     calc_derivs: bool = True
     use_rust: bool = True
+    check_nobs_vs_rankZ: str = "ignore"
+    check_nobs_vs_nlev: str = "ignore"
+    check_nlev_gtreq_5: str = "warning"
+    check_nlev_gtr_1: str = "stop"
+    check_rankX: str = "message+drop.cols"
+    check_scaleX: str = "warning"
     optCtrl: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -74,6 +85,13 @@ class LmerControl:
             "SLSQP",
             "TNC",
             "COBYLA",
+            "bobyqa",
+            "nloptwrap_BOBYQA",
+            "nloptwrap_NEWUOA",
+            "nloptwrap_PRAXIS",
+            "nloptwrap_SBPLX",
+            "nloptwrap_COBYLA",
+            "nloptwrap_NELDERMEAD",
         }
         if self.optimizer not in valid_optimizers:
             raise ValueError(
@@ -86,6 +104,33 @@ class LmerControl:
 
         if self.boundary_tol < 0:
             raise ValueError("boundary_tol must be non-negative")
+
+        valid_check_actions = {"ignore", "warning", "message", "stop"}
+        valid_rankX_actions = {
+            "ignore",
+            "warning",
+            "message",
+            "stop",
+            "message+drop.cols",
+            "warning+drop.cols",
+            "stop+drop.cols",
+        }
+
+        for param in [
+            "check_nobs_vs_rankZ",
+            "check_nobs_vs_nlev",
+            "check_nlev_gtreq_5",
+            "check_nlev_gtr_1",
+            "check_scaleX",
+        ]:
+            val = getattr(self, param)
+            if val not in valid_check_actions:
+                raise ValueError(f"{param} must be one of {valid_check_actions}, got '{val}'")
+
+        if self.check_rankX not in valid_rankX_actions:
+            raise ValueError(
+                f"check_rankX must be one of {valid_rankX_actions}, got '{self.check_rankX}'"
+            )
 
     def get_scipy_options(self) -> dict[str, Any]:
         """Get options dict for scipy.optimize.minimize."""
@@ -131,6 +176,7 @@ class GlmerControl:
         - "Nelder-Mead": Simplex algorithm
         - "Powell": Powell's method
         - "trust-constr": Trust-region constrained
+        - "bobyqa": BOBYQA (Bound Optimization BY Quadratic Approximation)
     maxiter : int, default 1000
         Maximum number of iterations for the optimizer.
     ftol : float, default 1e-8
@@ -154,11 +200,15 @@ class GlmerControl:
         Whether to start with nAGQ=0 step before switching to
         the requested nAGQ value.
     optCtrl : dict, optional
-        Additional options passed directly to scipy.optimize.minimize.
+        Additional options passed directly to the optimizer.
+        For BOBYQA, supports: rhobeg, rhoend, seek_global_minimum.
 
     Examples
     --------
     >>> ctrl = GlmerControl(optimizer="Nelder-Mead", maxiter=2000)
+    >>> result = glmer("y ~ x + (1|group)", data, family=Binomial(), control=ctrl)
+
+    >>> ctrl = GlmerControl(optimizer="bobyqa")
     >>> result = glmer("y ~ x + (1|group)", data, family=Binomial(), control=ctrl)
 
     >>> ctrl = GlmerControl(tolPwrss=1e-8, nAGQ0initStep=False)
@@ -176,6 +226,12 @@ class GlmerControl:
     tolPwrss: float = 1e-7
     compDev: bool = True
     nAGQ0initStep: bool = True
+    check_nobs_vs_rankZ: str = "ignore"
+    check_nobs_vs_nlev: str = "ignore"
+    check_nlev_gtreq_5: str = "warning"
+    check_nlev_gtr_1: str = "stop"
+    check_rankX: str = "message+drop.cols"
+    check_scaleX: str = "warning"
     optCtrl: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -188,6 +244,13 @@ class GlmerControl:
             "SLSQP",
             "TNC",
             "COBYLA",
+            "bobyqa",
+            "nloptwrap_BOBYQA",
+            "nloptwrap_NEWUOA",
+            "nloptwrap_PRAXIS",
+            "nloptwrap_SBPLX",
+            "nloptwrap_COBYLA",
+            "nloptwrap_NELDERMEAD",
         }
         if self.optimizer not in valid_optimizers:
             raise ValueError(
@@ -203,6 +266,33 @@ class GlmerControl:
 
         if self.tolPwrss <= 0:
             raise ValueError("tolPwrss must be positive")
+
+        valid_check_actions = {"ignore", "warning", "message", "stop"}
+        valid_rankX_actions = {
+            "ignore",
+            "warning",
+            "message",
+            "stop",
+            "message+drop.cols",
+            "warning+drop.cols",
+            "stop+drop.cols",
+        }
+
+        for param in [
+            "check_nobs_vs_rankZ",
+            "check_nobs_vs_nlev",
+            "check_nlev_gtreq_5",
+            "check_nlev_gtr_1",
+            "check_scaleX",
+        ]:
+            val = getattr(self, param)
+            if val not in valid_check_actions:
+                raise ValueError(f"{param} must be one of {valid_check_actions}, got '{val}'")
+
+        if self.check_rankX not in valid_rankX_actions:
+            raise ValueError(
+                f"check_rankX must be one of {valid_rankX_actions}, got '{self.check_rankX}'"
+            )
 
     def get_scipy_options(self) -> dict[str, Any]:
         """Get options dict for scipy.optimize.minimize."""
@@ -243,6 +333,12 @@ def lmerControl(
     check_singular: bool = True,
     calc_derivs: bool = True,
     use_rust: bool = True,
+    check_nobs_vs_rankZ: str = "ignore",
+    check_nobs_vs_nlev: str = "ignore",
+    check_nlev_gtreq_5: str = "warning",
+    check_nlev_gtr_1: str = "stop",
+    check_rankX: str = "message+drop.cols",
+    check_scaleX: str = "warning",
     optCtrl: dict[str, Any] | None = None,
 ) -> LmerControl:
     """Create a control object for lmer().
@@ -271,6 +367,12 @@ def lmerControl(
         check_singular=check_singular,
         calc_derivs=calc_derivs,
         use_rust=use_rust,
+        check_nobs_vs_rankZ=check_nobs_vs_rankZ,
+        check_nobs_vs_nlev=check_nobs_vs_nlev,
+        check_nlev_gtreq_5=check_nlev_gtreq_5,
+        check_nlev_gtr_1=check_nlev_gtr_1,
+        check_rankX=check_rankX,
+        check_scaleX=check_scaleX,
         optCtrl=optCtrl or {},
     )
 
@@ -287,6 +389,12 @@ def glmerControl(
     tolPwrss: float = 1e-7,
     compDev: bool = True,
     nAGQ0initStep: bool = True,
+    check_nobs_vs_rankZ: str = "ignore",
+    check_nobs_vs_nlev: str = "ignore",
+    check_nlev_gtreq_5: str = "warning",
+    check_nlev_gtr_1: str = "stop",
+    check_rankX: str = "message+drop.cols",
+    check_scaleX: str = "warning",
     optCtrl: dict[str, Any] | None = None,
 ) -> GlmerControl:
     """Create a control object for glmer().
@@ -316,5 +424,11 @@ def glmerControl(
         tolPwrss=tolPwrss,
         compDev=compDev,
         nAGQ0initStep=nAGQ0initStep,
+        check_nobs_vs_rankZ=check_nobs_vs_rankZ,
+        check_nobs_vs_nlev=check_nobs_vs_nlev,
+        check_nlev_gtreq_5=check_nlev_gtreq_5,
+        check_nlev_gtr_1=check_nlev_gtr_1,
+        check_rankX=check_rankX,
+        check_scaleX=check_scaleX,
         optCtrl=optCtrl or {},
     )

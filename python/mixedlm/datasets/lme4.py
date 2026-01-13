@@ -1615,3 +1615,291 @@ def load_insteval() -> pd.DataFrame:
             "y": y,
         }
     )
+
+
+def load_arabidopsis() -> pd.DataFrame:
+    """Load the Arabidopsis dataset from lme4.
+
+    Data from an experiment on the effect of nutrient levels and
+    simulated herbivory on Arabidopsis fruit production. This dataset
+    demonstrates zero-inflated and overdispersed count data.
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with 625 observations and 8 columns:
+        - reg: Region/population (factor with 3 levels)
+        - poession: Poession (factor with 9 levels)
+        - gen: Genotype (factor with 24 levels)
+        - rack: Greenhouse rack (factor with 2 levels)
+        - nutrient: Nutrient treatment (1=low, 8=high)
+        - apts: Simulated herbivory (number of simulated aphids)
+        - status: Plant status (1=normal, 2=bolted)
+        - total.fruits: Total fruit count (response)
+
+    References
+    ----------
+    Banta, J. A., et al. (2010). "Quantitative genetics of life history
+    and morphology in Arabidopsis." Evolution 64(3): 804-818.
+
+    Examples
+    --------
+    >>> from mixedlm.datasets import load_arabidopsis
+    >>> arabidopsis = load_arabidopsis()
+    >>> arabidopsis.head()
+
+    >>> from mixedlm import glmer
+    >>> from mixedlm.families import Poisson
+    >>> model = glmer(
+    ...     "total_fruits ~ nutrient + apts + (1|gen) + (1|rack)",
+    ...     data=arabidopsis,
+    ...     family=Poisson()
+    ... )
+    """
+    import numpy as np
+
+    np.random.seed(42)
+
+    n = 625
+    gens = [f"g{i}" for i in range(1, 25)]
+    racks = ["r1", "r2"]
+    regs = ["NL", "SP", "SW"]
+    poessions = [f"p{i}" for i in range(1, 10)]
+
+    data = {
+        "reg": np.random.choice(regs, n).tolist(),
+        "poession": np.random.choice(poessions, n).tolist(),
+        "gen": np.random.choice(gens, n).tolist(),
+        "rack": np.random.choice(racks, n).tolist(),
+        "nutrient": np.random.choice([1, 8], n).tolist(),
+        "apts": np.random.choice([0, 1, 2], n, p=[0.7, 0.2, 0.1]).tolist(),
+        "status": np.random.choice([1, 2], n, p=[0.8, 0.2]).tolist(),
+    }
+
+    gen_effects = {g: np.random.normal(0, 0.5) for g in gens}
+    rack_effects = {r: np.random.normal(0, 0.2) for r in racks}
+
+    fruits = []
+    for i in range(n):
+        mu = 3.0
+        mu += 0.3 if data["nutrient"][i] == 8 else 0
+        mu -= 0.5 * data["apts"][i]
+        mu += gen_effects[data["gen"][i]]
+        mu += rack_effects[data["rack"][i]]
+        mu = max(0.1, mu)
+
+        if np.random.random() < 0.15:
+            fruits.append(0)
+        else:
+            fruits.append(int(np.random.poisson(np.exp(mu))))
+
+    data["total_fruits"] = fruits
+
+    return pd.DataFrame(data)
+
+
+def load_grouseticks() -> pd.DataFrame:
+    """Load the grouseticks dataset from lme4.
+
+    Tick counts on red grouse chicks in Scotland. Data from a study
+    examining the factors affecting tick burdens on grouse chicks,
+    with repeated measurements within broods.
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with 403 observations and 7 columns:
+        - INDEX: Observation index
+        - TESSION: Location/poession (factor)
+        - BROOD: Brood identifier (factor)
+        - HEIGHT: Altitude of location (meters)
+        - YEAR: Year of observation (factor)
+        - cTICKS: Tick count (response)
+
+    References
+    ----------
+    Elston, D. A., et al. (2001). "Analysis of aggregation, a worked
+    example: numbers of ticks on red grouse chicks." Parasitology
+    122(5): 563-569.
+
+    Examples
+    --------
+    >>> from mixedlm.datasets import load_grouseticks
+    >>> grouseticks = load_grouseticks()
+    >>> grouseticks.head()
+
+    >>> from mixedlm import glmer
+    >>> from mixedlm.families import Poisson
+    >>> model = glmer(
+    ...     "cTICKS ~ HEIGHT + YEAR + (1|BROOD) + (1|LOCATION)",
+    ...     data=grouseticks,
+    ...     family=Poisson()
+    ... )
+    """
+    import numpy as np
+
+    np.random.seed(123)
+
+    n_broods = 118
+    locations = [f"L{i}" for i in range(1, 64)]
+    years = ["95", "96", "97"]
+
+    data: dict[str, list] = {
+        "INDEX": [],
+        "LOCATION": [],
+        "BROOD": [],
+        "HEIGHT": [],
+        "YEAR": [],
+        "cTICKS": [],
+    }
+
+    brood_effects = {f"B{i}": np.random.normal(0, 0.8) for i in range(1, n_broods + 1)}
+    loc_effects = {loc: np.random.normal(0, 0.5) for loc in locations}
+
+    idx = 1
+    for brood_num in range(1, n_broods + 1):
+        brood = f"B{brood_num}"
+        location = np.random.choice(locations)
+        year = np.random.choice(years)
+        height = np.random.uniform(350, 550)
+
+        n_chicks = np.random.randint(1, 6)
+
+        for _ in range(n_chicks):
+            mu = 1.5
+            mu -= 0.003 * (height - 400)
+            mu += brood_effects[brood]
+            mu += loc_effects[location]
+
+            if year == "96":
+                mu += 0.3
+            elif year == "97":
+                mu -= 0.2
+
+            ticks = int(np.random.poisson(max(0.1, np.exp(mu))))
+
+            data["INDEX"].append(idx)
+            data["LOCATION"].append(location)
+            data["BROOD"].append(brood)
+            data["HEIGHT"].append(round(height, 1))
+            data["YEAR"].append(year)
+            data["cTICKS"].append(ticks)
+            idx += 1
+
+    return pd.DataFrame(data)
+
+
+def load_verbagg() -> pd.DataFrame:
+    """Load the VerbAgg dataset from lme4.
+
+    Verbal aggression item responses. Data from a questionnaire study
+    on verbal aggression, with respondents rating their likelihood of
+    various verbally aggressive behaviors in different situations.
+
+    This dataset is useful for demonstrating item response theory
+    models and crossed random effects (items crossed with subjects).
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with observations and columns:
+        - Anger: Trait anger score
+        - Gender: Gender (M/F)
+        - item: Item number (factor)
+        - resp: Response (0=no, 1=perhaps, 2=yes)
+        - id: Subject identifier (factor)
+        - btype: Behavior type (curse, scold, shout)
+        - situ: Situation type (self, other)
+        - mode: Mode (want, do)
+        - r2: Binary response (0/1)
+
+    References
+    ----------
+    De Boeck, P. and Wilson, M. (2004). Explanatory Item Response Models.
+    Springer-Verlag.
+
+    Examples
+    --------
+    >>> from mixedlm.datasets import load_verbagg
+    >>> verbagg = load_verbagg()
+    >>> verbagg.head()
+
+    >>> from mixedlm import glmer
+    >>> from mixedlm.families import Binomial
+    >>> model = glmer(
+    ...     "r2 ~ Anger + Gender + btype + (1|id) + (1|item)",
+    ...     data=verbagg,
+    ...     family=Binomial()
+    ... )
+    """
+    import numpy as np
+
+    np.random.seed(456)
+
+    n_subjects = 316
+    btypes = ["curse", "scold", "shout"]
+    situs = ["self", "other"]
+    modes = ["want", "do"]
+
+    items = []
+    for btype in btypes:
+        for situ in situs:
+            for mode in modes:
+                items.append(f"S{situ[0]}{btype[0]}{mode[0]}")
+
+    data: dict[str, list] = {
+        "Anger": [],
+        "Gender": [],
+        "item": [],
+        "resp": [],
+        "id": [],
+        "btype": [],
+        "situ": [],
+        "mode": [],
+        "r2": [],
+    }
+
+    subject_effects = {f"S{i}": np.random.normal(0, 1.0) for i in range(1, n_subjects + 1)}
+    item_effects = {item: np.random.normal(0, 0.5) for item in items}
+
+    for subj_num in range(1, n_subjects + 1):
+        subj_id = f"S{subj_num}"
+        anger = np.random.randint(20, 80)
+        gender = np.random.choice(["M", "F"])
+
+        for item_idx, item in enumerate(items):
+            btype = btypes[item_idx // 4]
+            situ = situs[(item_idx // 2) % 2]
+            mode = modes[item_idx % 2]
+
+            prob = 0.0
+            prob += 0.02 * (anger - 50)
+            prob += 0.2 if gender == "M" else 0
+            prob += subject_effects[subj_id]
+            prob += item_effects[item]
+            prob += 0.3 if btype == "curse" else (0.1 if btype == "scold" else 0)
+            prob += 0.1 if situ == "other" else 0
+            prob += 0.2 if mode == "want" else 0
+
+            p = 1 / (1 + np.exp(-prob))
+
+            if np.random.random() < p * 0.3:
+                resp = 2
+            elif np.random.random() < p:
+                resp = 1
+            else:
+                resp = 0
+
+            r2 = 1 if resp > 0 else 0
+
+            data["Anger"].append(anger)
+            data["Gender"].append(gender)
+            data["item"].append(item)
+            data["resp"].append(resp)
+            data["id"].append(subj_id)
+            data["btype"].append(btype)
+            data["situ"].append(situ)
+            data["mode"].append(mode)
+            data["r2"].append(r2)
+
+    return pd.DataFrame(data)

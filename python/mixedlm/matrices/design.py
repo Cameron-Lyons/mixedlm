@@ -30,6 +30,7 @@ class RandomEffectStructure:
     n_terms: int
     correlated: bool
     level_map: dict[str, int]
+    cov_type: str = "us"
 
 
 @dataclass
@@ -302,6 +303,7 @@ def _build_random_block(
         n_terms=n_terms,
         correlated=rterm.correlated,
         level_map=level_map,
+        cov_type=rterm.cov_type,
     )
 
     return Z_block, structure
@@ -375,6 +377,7 @@ def _build_nested_random_block(
         n_terms=n_terms,
         correlated=rterm.correlated,
         level_map=level_map,
+        cov_type=rterm.cov_type,
     )
 
     return Z_block, structure

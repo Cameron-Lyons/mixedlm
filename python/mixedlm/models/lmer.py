@@ -1615,104 +1615,6 @@ class LmerResult:
         else:
             return new_formula
 
-    def refit(
-        self,
-        newresp: NDArray[np.floating],
-        **kwargs,
-    ) -> LmerResult:
-        """Refit the model with a new response vector.
-
-        This method refits the model using the same formula, random effects
-        structure, and model matrices, but with a different response vector.
-        This is useful for simulation studies, bootstrapping, and permutation
-        tests where you want to fit the same model structure repeatedly with
-        different response data.
-
-        Parameters
-        ----------
-        newresp : array-like
-            New response vector. Must have the same length as the original
-            response (after NA removal if applicable).
-        **kwargs
-            Additional arguments passed to the optimizer (start, method, maxiter).
-
-        Returns
-        -------
-        LmerResult
-            New fitted model result with the new response.
-
-        Raises
-        ------
-        ValueError
-            If newresp has incorrect length.
-
-        Examples
-        --------
-        >>> result = lmer("y ~ x + (1|group)", data)
-        >>> # Simulate new responses
-        >>> new_y = result.simulate()
-        >>> # Refit with simulated response
-        >>> result2 = result.refit(new_y)
-
-        Notes
-        -----
-        The refit uses the same model matrices (X, Z) and random effects
-        structure as the original fit. Only the response vector y is replaced.
-        This is more efficient than calling lmer() again because the design
-        matrices don't need to be reconstructed.
-
-        See Also
-        --------
-        simulate : Simulate responses from the fitted model.
-        update : Update and refit with modified formula or data.
-        refitML : Refit a REML model with ML estimation.
-        """
-        newresp = np.asarray(newresp, dtype=np.float64)
-
-        if len(newresp) != self.matrices.n_obs:
-            raise ValueError(
-                f"newresp has length {len(newresp)}, but model has "
-                f"{self.matrices.n_obs} observations"
-            )
-
-        new_matrices = ModelMatrices(
-            y=newresp,
-            X=self.matrices.X,
-            Z=self.matrices.Z,
-            fixed_names=self.matrices.fixed_names,
-            random_structures=self.matrices.random_structures,
-            n_obs=self.matrices.n_obs,
-            n_fixed=self.matrices.n_fixed,
-            n_random=self.matrices.n_random,
-            weights=self.matrices.weights,
-            offset=self.matrices.offset,
-            frame=self.matrices.frame,
-            na_info=self.matrices.na_info,
-        )
-
-        optimizer = LMMOptimizer(
-            new_matrices,
-            REML=self.REML,
-            verbose=0,
-        )
-
-        start = kwargs.pop("start", self.theta)
-
-        opt_result = optimizer.optimize(start=start, **kwargs)
-
-        return LmerResult(
-            formula=self.formula,
-            matrices=new_matrices,
-            theta=opt_result.theta,
-            beta=opt_result.beta,
-            sigma=opt_result.sigma,
-            u=opt_result.u,
-            deviance=opt_result.deviance,
-            REML=self.REML,
-            converged=opt_result.converged,
-            n_iter=opt_result.n_iter,
-        )
-
     def logLik(self) -> LogLik:
         n = self.matrices.n_obs
         p = self.matrices.n_fixed
@@ -2024,6 +1926,88 @@ class LmerResult:
             n_iter=opt_result.n_iter,
         )
 
+    def refit(
+        self,
+        newresp: NDArray[np.floating] | None = None,
+        **kwargs,
+    ) -> LmerResult:
+        """Refit the model with a new response vector.
+
+        This method refits the model using the same formula and design matrices
+        but with a different response vector. This is useful for simulation
+        studies, bootstrap, and permutation tests.
+
+        Parameters
+        ----------
+        newresp : array-like, optional
+            New response values. Must have the same length as the original
+            response. If None, refits with the original response.
+        **kwargs
+            Additional arguments passed to the optimizer (start, method, maxiter).
+
+        Returns
+        -------
+        LmerResult
+            New fitted model result with the updated response.
+
+        Examples
+        --------
+        >>> result = lmer("y ~ x + (1|group)", data)
+        >>> # Refit with simulated response
+        >>> y_sim = result.simulate()
+        >>> result_sim = result.refit(newresp=y_sim)
+
+        See Also
+        --------
+        simulate : Simulate response from the fitted model.
+        refitML : Refit using ML instead of REML.
+        """
+        if newresp is None:
+            newresp = self.matrices.y
+        else:
+            newresp = np.asarray(newresp, dtype=np.float64)
+            if len(newresp) != self.matrices.n_obs:
+                raise ValueError(
+                    f"newresp has length {len(newresp)}, expected {self.matrices.n_obs}"
+                )
+
+        new_matrices = ModelMatrices(
+            y=newresp,
+            X=self.matrices.X,
+            Z=self.matrices.Z,
+            fixed_names=self.matrices.fixed_names,
+            random_structures=self.matrices.random_structures,
+            n_obs=self.matrices.n_obs,
+            n_fixed=self.matrices.n_fixed,
+            n_random=self.matrices.n_random,
+            weights=self.matrices.weights,
+            offset=self.matrices.offset,
+            frame=self.matrices.frame,
+            na_info=self.matrices.na_info,
+        )
+
+        optimizer = LMMOptimizer(
+            new_matrices,
+            REML=self.REML,
+            verbose=0,
+        )
+
+        start = kwargs.pop("start", self.theta)
+        opt_result = optimizer.optimize(start=start, **kwargs)
+
+        return LmerResult(
+            formula=self.formula,
+            matrices=new_matrices,
+            theta=opt_result.theta,
+            beta=opt_result.beta,
+            sigma=opt_result.sigma,
+            u=opt_result.u,
+            deviance=opt_result.deviance,
+            REML=self.REML,
+            converged=opt_result.converged,
+            n_iter=opt_result.n_iter,
+        )
+
     def isREML(self) -> bool:
         """Check if the model was fit using REML."""
         return self.REML
@@ -2162,9 +2146,13 @@ class LmerMod:
     ) -> LmerResult:
         import warnings
 
+        from mixedlm.models.checks import run_model_checks
+
         ctrl = self.control
         opt_method = method if method is not None else ctrl.optimizer
         opt_maxiter = maxiter if maxiter is not None else ctrl.maxiter
+
+        self.matrices, self._dropped_cols = run_model_checks(self.matrices, ctrl)
 
         optimizer = LMMOptimizer(
             self.matrices,
@@ -2177,6 +2165,7 @@ class LmerMod:
             start=start,
             method=opt_method,
             maxiter=opt_maxiter,
+            options=ctrl.optCtrl,
         )
 
         result = LmerResult(
