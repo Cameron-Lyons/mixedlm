@@ -546,15 +546,11 @@ class NLMMOptimizer:
         self._b_cache = np.zeros((self.n_groups, self.n_random), dtype=np.float64)
         self._sigma_cache = np.std(self.y)
 
-        bounds: list[tuple[float | None, float | None]] = []
+        bounds: list[tuple[float | None, float | None]] = [(None, None)] * self.n_theta
         idx = 0
         for i in range(self.n_random):
-            for j in range(i + 1):
-                if i == j:
-                    bounds.append((1e-6, None))
-                else:
-                    bounds.append((None, None))
-                idx += 1
+            bounds[idx + i] = (1e-6, None)
+            idx += i + 1
 
         callback: Callable[[NDArray[np.floating]], None] | None = None
         if self.verbose > 0:

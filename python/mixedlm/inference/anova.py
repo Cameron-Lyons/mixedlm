@@ -101,36 +101,31 @@ def anova(
                 stacklevel=2,
             )
 
-    model_names = []
-    n_obs = []
-    df_list = []
-    aic_list = []
-    bic_list = []
-    loglik_list = []
-    deviance_list = []
-
+    model_data = []
     for m in model_list:
-        model_names.append(str(m.formula))
-        n_obs.append(m.matrices.n_obs)
-
         n_fixed = m.matrices.n_fixed
         n_theta = len(m.theta)
         n_params = n_fixed + n_theta + 1 if isinstance(m, LmerResult) else n_fixed + n_theta
 
-        df_list.append(n_params)
-        aic_list.append(m.AIC())
-        bic_list.append(m.BIC())
-        loglik_list.append(m.logLik().value)
-        deviance_list.append(m.deviance)
+        model_data.append((
+            str(m.formula),
+            m.matrices.n_obs,
+            n_params,
+            m.AIC(),
+            m.BIC(),
+            m.logLik().value,
+            m.deviance,
+        ))
 
-    sorted_indices = sorted(range(len(df_list)), key=lambda i: df_list[i])
-    model_names = [model_names[i] for i in sorted_indices]
-    n_obs = [n_obs[i] for i in sorted_indices]
-    df_list = [df_list[i] for i in sorted_indices]
-    aic_list = [aic_list[i] for i in sorted_indices]
-    bic_list = [bic_list[i] for i in sorted_indices]
-    loglik_list = [loglik_list[i] for i in sorted_indices]
-    deviance_list = [deviance_list[i] for i in sorted_indices]
+    model_data.sort(key=lambda x: x[2])
+
+    model_names = [d[0] for d in model_data]
+    n_obs = [d[1] for d in model_data]
+    df_list = [d[2] for d in model_data]
+    aic_list = [d[3] for d in model_data]
+    bic_list = [d[4] for d in model_data]
+    loglik_list = [d[5] for d in model_data]
+    deviance_list = [d[6] for d in model_data]
 
     chi_sq: list[float | None] = [None]
     chi_df: list[int | None] = [None]

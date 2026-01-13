@@ -131,11 +131,8 @@ def _lmer_bootstrap_worker(
 
                 if correlated:
                     L = np.zeros((n_terms, n_terms))
-                    idx = 0
-                    for i in range(n_terms):
-                        for j in range(i + 1):
-                            L[i, j] = theta_block[idx]
-                            idx += 1
+                    row_indices, col_indices = np.tril_indices(n_terms)
+                    L[row_indices, col_indices] = theta_block
                     cov = L @ L.T * sigma**2
                 else:
                     cov = np.diag(theta_block**2) * sigma**2
@@ -214,11 +211,8 @@ def _glmer_bootstrap_worker(args: tuple[Any, ...]) -> tuple[int, NDArray | None,
 
                 if correlated:
                     L = np.zeros((n_terms, n_terms))
-                    idx = 0
-                    for i in range(n_terms):
-                        for j in range(i + 1):
-                            L[i, j] = theta_block[idx]
-                            idx += 1
+                    row_indices, col_indices = np.tril_indices(n_terms)
+                    L[row_indices, col_indices] = theta_block
                     cov = L @ L.T
                 else:
                     cov = np.diag(theta_block**2)
@@ -273,11 +267,12 @@ def _glmer_bootstrap_worker(args: tuple[Any, ...]) -> tuple[int, NDArray | None,
 
 
 def _prepare_lmer_worker_data(result: LmerResult) -> dict[str, Any]:
-    random_structures_data = []
+    n_structs = len(result.matrices.random_structures)
+    random_structures_data: list[dict[str, Any]] = [{}] * n_structs
     theta_offset = 0
     z_start = 0
 
-    for struct in result.matrices.random_structures:
+    for s_idx, struct in enumerate(result.matrices.random_structures):
         n_terms = struct.n_terms
         n_theta = n_terms * (n_terms + 1) // 2 if struct.correlated else n_terms
         theta_block = result.theta[theta_offset : theta_offset + n_theta]
@@ -286,7 +281,7 @@ def _prepare_lmer_worker_data(result: LmerResult) -> dict[str, Any]:
         z_end = z_start + struct.n_levels * struct.n_terms
         z_slice = result.matrices.Z[:, z_start:z_end]
 
-        random_structures_data.append({
+        random_structures_data[s_idx] = {
             "n_levels": struct.n_levels,
             "n_terms": struct.n_terms,
             "correlated": struct.correlated,
@@ -294,7 +289,7 @@ def _prepare_lmer_worker_data(result: LmerResult) -> dict[str, Any]:
             "grouping_factor": struct.grouping_factor,
             "theta_block": theta_block.copy(),
             "z_slice": z_slice.copy() if hasattr(z_slice, "copy") else np.array(z_slice),
-        })
+        }
         z_start = z_end
 
     return {
@@ -312,11 +307,12 @@ def _prepare_lmer_worker_data(result: LmerResult) -> dict[str, Any]:
 
 
 def _prepare_glmer_worker_data(result: GlmerResult) -> dict[str, Any]:
-    random_structures_data = []
+    n_structs = len(result.matrices.random_structures)
+    random_structures_data: list[dict[str, Any]] = [{}] * n_structs
     theta_offset = 0
     z_start = 0
 
-    for struct in result.matrices.random_structures:
+    for s_idx, struct in enumerate(result.matrices.random_structures):
         n_terms = struct.n_terms
         n_theta = n_terms * (n_terms + 1) // 2 if struct.correlated else n_terms
         theta_block = result.theta[theta_offset : theta_offset + n_theta]
@@ -325,7 +321,7 @@ def _prepare_glmer_worker_data(result: GlmerResult) -> dict[str, Any]:
         z_end = z_start + struct.n_levels * struct.n_terms
         z_slice = result.matrices.Z[:, z_start:z_end]
 
-        random_structures_data.append({
+        random_structures_data[s_idx] = {
             "n_levels": struct.n_levels,
             "n_terms": struct.n_terms,
             "correlated": struct.correlated,
@@ -333,7 +329,7 @@ def _prepare_glmer_worker_data(result: GlmerResult) -> dict[str, Any]:
             "grouping_factor": struct.grouping_factor,
             "theta_block": theta_block.copy(),
             "z_slice": z_slice.copy() if hasattr(z_slice, "copy") else np.array(z_slice),
-        })
+        }
         z_start = z_end
 
     return {
@@ -490,11 +486,8 @@ def _simulate_lmer(result: LmerResult) -> NDArray[np.floating]:
 
             if struct.correlated:
                 L = np.zeros((n_terms, n_terms))
-                idx = 0
-                for i in range(n_terms):
-                    for j in range(i + 1):
-                        L[i, j] = theta_block[idx]
-                        idx += 1
+                row_indices, col_indices = np.tril_indices(n_terms)
+                L[row_indices, col_indices] = theta_block
                 cov = L @ L.T * result.sigma**2
             else:
                 cov = np.diag(theta_block**2) * result.sigma**2
@@ -654,11 +647,8 @@ def _simulate_glmer(result: GlmerResult) -> NDArray[np.floating]:
 
             if struct.correlated:
                 L = np.zeros((n_terms, n_terms))
-                idx = 0
-                for i in range(n_terms):
-                    for j in range(i + 1):
-                        L[i, j] = theta_block[idx]
-                        idx += 1
+                row_indices, col_indices = np.tril_indices(n_terms)
+                L[row_indices, col_indices] = theta_block
                 cov = L @ L.T
             else:
                 cov = np.diag(theta_block**2)
