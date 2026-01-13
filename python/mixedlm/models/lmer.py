@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import cached_property
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from numpy.typing import NDArray
@@ -318,31 +318,43 @@ class LmerResult:
         p = self.matrices.n_fixed
         return n - p
 
-    def weights(self) -> NDArray[np.floating]:
+    def weights(self, copy: bool = True) -> NDArray[np.floating]:
         """Get the model weights.
 
         Returns the prior weights used in model fitting.
         If no weights were specified, returns an array of ones.
+
+        Parameters
+        ----------
+        copy : bool, default True
+            If True, return a copy of the weights array.
+            If False, return the original array (faster but should not be modified).
 
         Returns
         -------
         NDArray
             Array of weights with length equal to number of observations.
         """
-        return self.matrices.weights.copy()
+        return self.matrices.weights.copy() if copy else self.matrices.weights
 
-    def offset(self) -> NDArray[np.floating]:
+    def offset(self, copy: bool = True) -> NDArray[np.floating]:
         """Get the model offset.
 
         Returns the offset used in model fitting.
         If no offset was specified, returns an array of zeros.
+
+        Parameters
+        ----------
+        copy : bool, default True
+            If True, return a copy of the offset array.
+            If False, return the original array (faster but should not be modified).
 
         Returns
         -------
         NDArray
             Array of offsets with length equal to number of observations.
         """
-        return self.matrices.offset.copy()
+        return self.matrices.offset.copy() if copy else self.matrices.offset
 
     def model_matrix(self, type: str = "fixed") -> NDArray[np.floating] | sparse.csc_matrix:
         """Get the model design matrix.
@@ -688,6 +700,12 @@ class LmerResult:
         cond_var = self._compute_condVar()
         u_idx = 0
 
+        theta_idx_map: dict[str, int] = {}
+        theta_idx = 0
+        for s in self.matrices.random_structures:
+            theta_idx_map[s.grouping_factor] = theta_idx
+            theta_idx += s.n_terms * (s.n_terms + 1) // 2 if s.correlated else s.n_terms
+
         for struct in self.matrices.random_structures:
             group_col = struct.grouping_factor
             n_terms = struct.n_terms
@@ -703,6 +721,7 @@ class LmerResult:
 
             new_groups = newdata[group_col].astype(str).values
             group_cond_var = cond_var[group_col]
+            struct_theta_idx = theta_idx_map[group_col]
 
             for i, term_name in enumerate(struct.term_names):
                 if term_name == "(Intercept)":
@@ -716,21 +735,14 @@ class LmerResult:
                     continue
 
                 term_var = group_cond_var[term_name]
+                re_var_new = self.theta[struct_theta_idx + i] ** 2 * self.sigma**2
 
                 for j, group_level in enumerate(new_groups):
                     if group_level in struct.level_map:
                         level_idx = struct.level_map[group_level]
                         var_re[j] += term_var[level_idx] * term_values[j] ** 2
                     elif allow_new_levels:
-                        theta_idx = 0
-                        for s in self.matrices.random_structures:
-                            if s.grouping_factor == group_col:
-                                break
-                            theta_idx += (
-                                s.n_terms * (s.n_terms + 1) // 2 if s.correlated else s.n_terms
-                            )
-                        re_var = self.theta[theta_idx + i] ** 2 * self.sigma**2
-                        var_re[j] += re_var * term_values[j] ** 2
+                        var_re[j] += re_var_new * term_values[j] ** 2
 
             u_idx += n_levels_orig * n_terms
 
@@ -962,8 +974,9 @@ class LmerResult:
                 cov = np.diag(theta_block**2) * self.sigma**2
                 corr = None
 
-            variance = {term: cov[i, i] for i, term in enumerate(struct.term_names)}
-            stddev = {term: np.sqrt(cov[i, i]) for i, term in enumerate(struct.term_names)}
+            diag_cov = np.diag(cov)
+            variance = {term: diag_cov[i] for i, term in enumerate(struct.term_names)}
+            stddev = {term: np.sqrt(diag_cov[i]) for i, term in enumerate(struct.term_names)}
 
             groups[struct.grouping_factor] = VarCorrGroup(
                 name=struct.grouping_factor,
@@ -1820,13 +1833,59 @@ class LmerResult:
             np.random.seed(seed)
 
         n = self.matrices.n_obs
+        q = self.matrices.n_random
 
         if nsim == 1:
             return self._simulate_once(use_re, re_form)
 
+        include_re = use_re and q > 0 and re_form not in ("~0", "NA")
+
+        try:
+            from mixedlm._rust import compute_zu, simulate_re_batch
+
+            if include_re and nsim > 1:
+                return self._simulate_batch_rust(nsim, seed, simulate_re_batch, compute_zu)
+        except ImportError:
+            pass
+
         result = np.zeros((n, nsim), dtype=np.float64)
         for i in range(nsim):
             result[:, i] = self._simulate_once(use_re, re_form)
+
+        return result
+
+    def _simulate_batch_rust(
+        self,
+        nsim: int,
+        seed: int | None,
+        simulate_re_batch: Any,
+        compute_zu: Any,
+    ) -> NDArray[np.floating]:
+        n = self.matrices.n_obs
+
+        fixed_part = self.matrices.X @ self.beta
+
+        n_levels = [s.n_levels for s in self.matrices.random_structures]
+        n_terms = [s.n_terms for s in self.matrices.random_structures]
+        correlated = [s.correlated for s in self.matrices.random_structures]
+
+        u_batch = simulate_re_batch(
+            self.theta,
+            self.sigma,
+            n_levels,
+            n_terms,
+            correlated,
+            nsim,
+            seed,
+        )
+
+        Z = self.matrices.Z
+
+        result = np.zeros((n, nsim), dtype=np.float64)
+        for i in range(nsim):
+            random_part = Z @ u_batch[i]
+            noise = np.random.randn(n) * self.sigma
+            result[:, i] = fixed_part + random_part + noise
 
         return result
 
