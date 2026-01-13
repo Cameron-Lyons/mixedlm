@@ -483,6 +483,7 @@ class NLMMOptimizer:
         verbose: int = 0,
         use_rust: bool = True,
         n_jobs: int = 1,
+        weights: NDArray[np.floating] | None = None,
     ) -> None:
         self.y = y
         self.x = x
@@ -492,6 +493,7 @@ class NLMMOptimizer:
         self.verbose = verbose
         self.use_rust = use_rust and _HAS_RUST and model.name.lower() in _SUPPORTED_RUST_MODELS
         self.n_jobs = n_jobs
+        self.weights = weights if weights is not None else np.ones(len(y), dtype=np.float64)
 
         self.n_groups = len(np.unique(groups))
         self.n_random = len(random_params)

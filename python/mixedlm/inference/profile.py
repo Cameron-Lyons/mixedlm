@@ -888,3 +888,232 @@ def profile_glmer(
         )
 
     return profiles
+
+
+def logProf(profile: ProfileResult) -> ProfileResult:
+    """Transform profile to log scale for variance components.
+
+    This transformation is useful for variance components, which are
+    always positive and often better represented on a log scale.
+    The transformation is: log_value = log(value)
+
+    Parameters
+    ----------
+    profile : ProfileResult
+        Original profile result.
+
+    Returns
+    -------
+    ProfileResult
+        Profile with values transformed to log scale.
+
+    Examples
+    --------
+    >>> profiles = profile_lmer(result)
+    >>> log_profile = logProf(profiles["sigma"])
+    """
+    log_values = np.log(np.maximum(profile.values, 1e-10))
+    log_mle = np.log(max(profile.mle, 1e-10))
+    log_ci_lower = np.log(max(profile.ci_lower, 1e-10))
+    log_ci_upper = np.log(max(profile.ci_upper, 1e-10))
+
+    return ProfileResult(
+        parameter=f"log({profile.parameter})",
+        values=log_values,
+        zeta=profile.zeta,
+        mle=log_mle,
+        ci_lower=log_ci_lower,
+        ci_upper=log_ci_upper,
+        level=profile.level,
+    )
+
+
+def varianceProf(profile: ProfileResult) -> ProfileResult:
+    """Transform profile to variance scale.
+
+    This transformation squares the values, which is useful when
+    the original profile is on the standard deviation scale but
+    the variance is desired.
+
+    Parameters
+    ----------
+    profile : ProfileResult
+        Original profile result (typically on SD scale).
+
+    Returns
+    -------
+    ProfileResult
+        Profile with values transformed to variance scale.
+
+    Examples
+    --------
+    >>> profiles = profile_lmer(result)
+    >>> var_profile = varianceProf(profiles["sigma"])
+    """
+    var_values = profile.values**2
+    var_mle = profile.mle**2
+    var_ci_lower = profile.ci_lower**2
+    var_ci_upper = profile.ci_upper**2
+
+    if var_ci_lower > var_ci_upper:
+        var_ci_lower, var_ci_upper = var_ci_upper, var_ci_lower
+
+    return ProfileResult(
+        parameter=f"{profile.parameter}²",
+        values=var_values,
+        zeta=profile.zeta,
+        mle=var_mle,
+        ci_lower=var_ci_lower,
+        ci_upper=var_ci_upper,
+        level=profile.level,
+    )
+
+
+def sdProf(profile: ProfileResult) -> ProfileResult:
+    """Transform profile to standard deviation scale.
+
+    This transformation takes the square root of the values,
+    which is useful when the original profile is on the variance
+    scale but the standard deviation is desired.
+
+    Parameters
+    ----------
+    profile : ProfileResult
+        Original profile result (typically on variance scale).
+
+    Returns
+    -------
+    ProfileResult
+        Profile with values transformed to SD scale.
+
+    Examples
+    --------
+    >>> profiles = profile_lmer(result)
+    >>> sd_profile = sdProf(var_profile)
+    """
+    sd_values = np.sqrt(np.maximum(profile.values, 0))
+    sd_mle = np.sqrt(max(profile.mle, 0))
+    sd_ci_lower = np.sqrt(max(profile.ci_lower, 0))
+    sd_ci_upper = np.sqrt(max(profile.ci_upper, 0))
+
+    return ProfileResult(
+        parameter=f"sqrt({profile.parameter})",
+        values=sd_values,
+        zeta=profile.zeta,
+        mle=sd_mle,
+        ci_lower=sd_ci_lower,
+        ci_upper=sd_ci_upper,
+        level=profile.level,
+    )
+
+
+def as_dataframe(
+    profiles: dict[str, ProfileResult] | ProfileResult,
+) -> "pd.DataFrame":
+    """Export profile(s) as a pandas DataFrame.
+
+    Parameters
+    ----------
+    profiles : dict[str, ProfileResult] or ProfileResult
+        Either a single ProfileResult or a dictionary of profile results.
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with columns for parameter, value, and zeta.
+        For multiple profiles, includes all parameters stacked.
+
+    Examples
+    --------
+    >>> profiles = profile_lmer(result)
+    >>> df = as_dataframe(profiles)
+    >>> # Export to CSV
+    >>> df.to_csv("profiles.csv", index=False)
+    """
+    import pandas as pd
+
+    if isinstance(profiles, ProfileResult):
+        profiles = {profiles.parameter: profiles}
+
+    rows = []
+    for param, profile in profiles.items():
+        for val, zeta in zip(profile.values, profile.zeta, strict=False):
+            rows.append(
+                {
+                    "parameter": param,
+                    "value": val,
+                    "zeta": zeta,
+                    "mle": profile.mle,
+                    "ci_lower": profile.ci_lower,
+                    "ci_upper": profile.ci_upper,
+                    "level": profile.level,
+                }
+            )
+
+    return pd.DataFrame(rows)
+
+
+def confint_profile(
+    profiles: dict[str, ProfileResult],
+    level: float | None = None,
+) -> "pd.DataFrame":
+    """Extract confidence intervals from profile results.
+
+    Parameters
+    ----------
+    profiles : dict[str, ProfileResult]
+        Dictionary of profile results.
+    level : float, optional
+        Confidence level. If None, uses the level from the profiles.
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with columns for parameter, lower, upper, and level.
+
+    Examples
+    --------
+    >>> profiles = profile_lmer(result)
+    >>> ci = confint_profile(profiles)
+    """
+    import pandas as pd
+
+    rows = []
+    for param, profile in profiles.items():
+        if level is not None and level != profile.level:
+            alpha = 1 - level
+            z_crit = stats.norm.ppf(1 - alpha / 2)
+
+            from scipy.interpolate import interp1d
+
+            try:
+                f = interp1d(
+                    profile.zeta,
+                    profile.values,
+                    kind="linear",
+                    bounds_error=False,
+                    fill_value="extrapolate",
+                )
+                ci_lower = float(f(-z_crit))
+                ci_upper = float(f(z_crit))
+            except Exception:
+                se = (profile.ci_upper - profile.ci_lower) / (2 * stats.norm.ppf((1 + profile.level) / 2))
+                ci_lower = profile.mle - z_crit * se
+                ci_upper = profile.mle + z_crit * se
+            use_level = level
+        else:
+            ci_lower = profile.ci_lower
+            ci_upper = profile.ci_upper
+            use_level = profile.level
+
+        rows.append(
+            {
+                "parameter": param,
+                "estimate": profile.mle,
+                "lower": ci_lower,
+                "upper": ci_upper,
+                "level": use_level,
+            }
+        )
+
+    return pd.DataFrame(rows)

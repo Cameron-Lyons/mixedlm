@@ -6,14 +6,17 @@ from mixedlm import (
     glmer,
     glmer_nb,
     lmer,
+    load_arabidopsis,
     load_cake,
     load_cbpp,
     load_dyestuff,
     load_dyestuff2,
+    load_grouseticks,
     load_insteval,
     load_pastes,
     load_penicillin,
     load_sleepstudy,
+    load_verbagg,
 )
 from mixedlm.inference.bootstrap import bootMer
 from mixedlm.utils.lme4_compat import (
@@ -29,6 +32,7 @@ from mixedlm.utils.lme4_compat import (
     fixef,
     fortify,
     getME,
+    isNested,
     lmList,
     mkMerMod,
     ngrps,
@@ -530,6 +534,61 @@ class TestDatasets:
         assert "s" in data.columns
         assert "d" in data.columns
         assert len(data) >= 100
+
+    def test_load_arabidopsis(self) -> None:
+        data = load_arabidopsis()
+        assert isinstance(data, pd.DataFrame)
+        assert "total_fruits" in data.columns
+        assert "gen" in data.columns
+        assert len(data) > 0
+
+    def test_load_grouseticks(self) -> None:
+        data = load_grouseticks()
+        assert isinstance(data, pd.DataFrame)
+        assert "cTICKS" in data.columns
+        assert "BROOD" in data.columns
+        assert "LOCATION" in data.columns
+        assert len(data) > 0
+
+    def test_load_verbagg(self) -> None:
+        data = load_verbagg()
+        assert isinstance(data, pd.DataFrame)
+        assert "r2" in data.columns
+        assert "id" in data.columns
+        assert "item" in data.columns
+        assert len(data) > 0
+
+
+class TestIsNested:
+    def test_nested_students_in_schools(self) -> None:
+        students = ["s1", "s2", "s3", "s4", "s5", "s6"]
+        schools = ["A", "A", "A", "B", "B", "B"]
+        assert isNested(students, schools) is True
+
+    def test_not_nested_crossed(self) -> None:
+        factor1 = ["a", "b", "a", "b", "a", "b"]
+        factor2 = ["X", "X", "Y", "Y", "Z", "Z"]
+        assert isNested(factor1, factor2) is False
+
+    def test_nested_with_numpy_arrays(self) -> None:
+        factor1 = np.array([1, 2, 3, 4, 5, 6])
+        factor2 = np.array(["A", "A", "B", "B", "C", "C"])
+        assert isNested(factor1, factor2) is True
+
+    def test_nested_with_pandas_series(self) -> None:
+        df = pd.DataFrame({
+            "student": ["s1", "s2", "s3", "s4"],
+            "school": ["A", "A", "B", "B"]
+        })
+        assert isNested(df["student"], df["school"]) is True
+
+    def test_nested_identical_factors(self) -> None:
+        factor = ["A", "B", "C", "A", "B", "C"]
+        assert isNested(factor, factor) is True
+
+    def test_nested_with_real_data(self) -> None:
+        sleepstudy = load_sleepstudy()
+        assert isNested(sleepstudy["Days"], sleepstudy["Subject"]) is False
 
 
 class TestDatasetsUsability:

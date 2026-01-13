@@ -2,12 +2,19 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 from numpy.typing import NDArray
 from scipy import linalg, sparse
-from scipy.optimize import minimize
 
+from mixedlm.estimation.optimizers import run_optimizer
+from mixedlm.estimation.reml import (
+    _build_ar1_cholesky,
+    _build_cs_cholesky,
+    _build_lambda,
+    _count_theta,
+)
 from mixedlm.families.base import Family
 from mixedlm.matrices.design import ModelMatrices, RandomEffectStructure
 
@@ -49,59 +56,6 @@ class GLMMOptimizationResult:
     deviance: float
     converged: bool
     n_iter: int
-
-
-def _build_lambda(
-    theta: NDArray[np.floating],
-    structures: list[RandomEffectStructure],
-) -> sparse.csc_matrix:
-    blocks: list[sparse.csc_matrix] = []
-    theta_idx = 0
-
-    for struct in structures:
-        q = struct.n_terms
-        n_levels = struct.n_levels
-
-        if struct.correlated:
-            n_theta = q * (q + 1) // 2
-            theta_block = theta[theta_idx : theta_idx + n_theta]
-            theta_idx += n_theta
-
-            L_block = np.zeros((q, q), dtype=np.float64)
-            row_indices, col_indices = np.tril_indices(q)
-            L_block[row_indices, col_indices] = theta_block
-
-            block = sparse.kron(
-                sparse.eye(n_levels, format="csc"),
-                sparse.csc_matrix(L_block),
-            )
-        else:
-            theta_block = theta[theta_idx : theta_idx + q]
-            theta_idx += q
-
-            L_diag = np.diag(theta_block)
-            block = sparse.kron(
-                sparse.eye(n_levels, format="csc"),
-                sparse.csc_matrix(L_diag),
-            )
-
-        blocks.append(block)
-
-    if not blocks:
-        return sparse.csc_matrix((0, 0), dtype=np.float64)
-
-    return sparse.block_diag(blocks, format="csc")
-
-
-def _count_theta(structures: list[RandomEffectStructure]) -> int:
-    count = 0
-    for struct in structures:
-        q = struct.n_terms
-        if struct.correlated:
-            count += q * (q + 1) // 2
-        else:
-            count += q
-    return count
 
 
 def pirls(
@@ -334,7 +288,28 @@ class GLMMOptimizer:
         self._u_cache: NDArray[np.floating] | None = None
 
     def get_start_theta(self) -> NDArray[np.floating]:
-        return np.ones(self.n_theta, dtype=np.float64)
+        theta_list: list[float] = []
+        for struct in self.matrices.random_structures:
+            q = struct.n_terms
+            cov_type = getattr(struct, "cov_type", "us")
+            if cov_type == "cs":
+                theta_list.append(1.0)
+                if q > 1:
+                    theta_list.append(0.0)
+            elif cov_type == "ar1":
+                theta_list.append(1.0)
+                if q > 1:
+                    theta_list.append(0.0)
+            elif struct.correlated:
+                for i in range(q):
+                    for j in range(i + 1):
+                        if i == j:
+                            theta_list.append(1.0)
+                        else:
+                            theta_list.append(0.0)
+            else:
+                theta_list.extend([1.0] * q)
+        return np.array(theta_list, dtype=np.float64)
 
     def objective(self, theta: NDArray[np.floating]) -> float:
         dev, beta, u = laplace_deviance(
@@ -349,6 +324,7 @@ class GLMMOptimizer:
         start: NDArray[np.floating] | None = None,
         method: str = "L-BFGS-B",
         maxiter: int = 1000,
+        options: dict[str, Any] | None = None,
     ) -> GLMMOptimizationResult:
         if start is None:
             start = self.get_start_theta()
@@ -360,7 +336,20 @@ class GLMMOptimizer:
         idx = 0
         for struct in self.matrices.random_structures:
             q = struct.n_terms
-            if struct.correlated:
+            cov_type = getattr(struct, "cov_type", "us")
+            if cov_type == "cs":
+                bounds[idx] = (0.0, None)
+                idx += 1
+                if q > 1:
+                    bounds[idx] = (-1.0 / (q - 1) + 1e-6, 1.0 - 1e-6)
+                    idx += 1
+            elif cov_type == "ar1":
+                bounds[idx] = (0.0, None)
+                idx += 1
+                if q > 1:
+                    bounds[idx] = (-1.0 + 1e-6, 1.0 - 1e-6)
+                    idx += 1
+            elif struct.correlated:
                 for i in range(q):
                     for j in range(i + 1):
                         if i == j:
@@ -378,12 +367,16 @@ class GLMMOptimizer:
                 dev = self.objective(x)
                 print(f"theta = {x}, deviance = {dev:.6f}")
 
-        result = minimize(
+        opt_options = {"maxiter": maxiter}
+        if options:
+            opt_options.update(options)
+
+        result = run_optimizer(
             self.objective,
             start,
             method=method,
             bounds=bounds,
-            options={"maxiter": maxiter},
+            options=opt_options,
             callback=callback,
         )
 

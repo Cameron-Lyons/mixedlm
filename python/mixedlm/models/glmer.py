@@ -1726,6 +1726,87 @@ class GlmerResult:
         """
         return self
 
+    def refit(
+        self,
+        newresp: NDArray[np.floating] | None = None,
+        **kwargs,
+    ) -> GlmerResult:
+        """Refit the model with a new response vector.
+
+        This method refits the model using the same formula and design matrices
+        but with a different response vector. This is useful for simulation
+        studies, bootstrap, and permutation tests.
+
+        Parameters
+        ----------
+        newresp : array-like, optional
+            New response values. Must have the same length as the original
+            response. If None, refits with the original response.
+        **kwargs
+            Additional arguments passed to the optimizer (start, method, maxiter).
+
+        Returns
+        -------
+        GlmerResult
+            New fitted model result with the updated response.
+
+        Examples
+        --------
+        >>> result = glmer("y ~ x + (1|group)", data, family=families.Binomial())
+        >>> # Refit with simulated response
+        >>> y_sim = result.simulate()
+        >>> result_sim = result.refit(newresp=y_sim)
+
+        See Also
+        --------
+        simulate : Simulate response from the fitted model.
+        """
+        if newresp is None:
+            newresp = self.matrices.y
+        else:
+            newresp = np.asarray(newresp, dtype=np.float64)
+            if len(newresp) != self.matrices.n_obs:
+                raise ValueError(
+                    f"newresp has length {len(newresp)}, expected {self.matrices.n_obs}"
+                )
+
+        new_matrices = ModelMatrices(
+            y=newresp,
+            X=self.matrices.X,
+            Z=self.matrices.Z,
+            fixed_names=self.matrices.fixed_names,
+            random_structures=self.matrices.random_structures,
+            n_obs=self.matrices.n_obs,
+            n_fixed=self.matrices.n_fixed,
+            n_random=self.matrices.n_random,
+            weights=self.matrices.weights,
+            offset=self.matrices.offset,
+            frame=self.matrices.frame,
+            na_info=self.matrices.na_info,
+        )
+
+        optimizer = GLMMOptimizer(
+            new_matrices,
+            self.family,
+            verbose=0,
+        )
+
+        start = kwargs.pop("start", self.theta)
+        opt_result = optimizer.optimize(start=start, **kwargs)
+
+        return GlmerResult(
+            formula=self.formula,
+            matrices=new_matrices,
+            family=self.family,
+            theta=opt_result.theta,
+            beta=opt_result.beta,
+            u=opt_result.u,
+            deviance=opt_result.deviance,
+            converged=opt_result.converged,
+            n_iter=opt_result.n_iter,
+            nAGQ=self.nAGQ,
+        )
+
     def isREML(self) -> bool:
         """Check if the model was fit using REML.
 
@@ -1895,9 +1976,13 @@ class GlmerMod:
     ) -> GlmerResult:
         import warnings
 
+        from mixedlm.models.checks import run_model_checks
+
         ctrl = self.control
         opt_method = method if method is not None else ctrl.optimizer
         opt_maxiter = maxiter if maxiter is not None else ctrl.maxiter
+
+        self.matrices, self._dropped_cols = run_model_checks(self.matrices, ctrl)
 
         optimizer = GLMMOptimizer(
             self.matrices,
@@ -1909,6 +1994,7 @@ class GlmerMod:
             start=start,
             method=opt_method,
             maxiter=opt_maxiter,
+            options=ctrl.optCtrl,
         )
 
         result = GlmerResult(

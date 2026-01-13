@@ -1944,7 +1944,7 @@ class TestAllFit:
         result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
         allfit_result = result.allFit(SLEEPSTUDY)
 
-        assert len(allfit_result.fits) == 6
+        assert len(allfit_result.fits) == 7
 
     def test_allfit_glmer_basic(self):
         result = glmer(
@@ -3401,6 +3401,354 @@ class TestControl:
         assert "BFGS" in repr_str
         assert "500" in repr_str
         assert "1e-06" in repr_str
+
+    def test_lmer_control_bobyqa_valid(self) -> None:
+        ctrl = LmerControl(optimizer="bobyqa")
+        assert ctrl.optimizer == "bobyqa"
+
+    def test_glmer_control_bobyqa_valid(self) -> None:
+        ctrl = GlmerControl(optimizer="bobyqa")
+        assert ctrl.optimizer == "bobyqa"
+
+
+class TestBobyqaOptimizer:
+    @pytest.fixture
+    def has_bobyqa(self) -> bool:
+        from mixedlm.estimation.optimizers import has_bobyqa
+
+        return has_bobyqa()
+
+    def test_lmer_bobyqa(self, has_bobyqa: bool) -> None:
+        if not has_bobyqa:
+            pytest.skip("pybobyqa not installed")
+
+        ctrl = lmerControl(optimizer="bobyqa")
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY, control=ctrl)
+        assert result.converged
+        assert result.fixef() is not None
+        assert result.sigma > 0
+
+    def test_lmer_bobyqa_random_slope(self, has_bobyqa: bool) -> None:
+        if not has_bobyqa:
+            pytest.skip("pybobyqa not installed")
+
+        ctrl = lmerControl(optimizer="bobyqa")
+        result = lmer("Reaction ~ Days + (Days | Subject)", SLEEPSTUDY, control=ctrl)
+        assert result.converged
+        fe = result.fixef()
+        assert "(Intercept)" in fe
+        assert "Days" in fe
+
+    def test_lmer_bobyqa_optctrl(self, has_bobyqa: bool) -> None:
+        if not has_bobyqa:
+            pytest.skip("pybobyqa not installed")
+
+        ctrl = lmerControl(optimizer="bobyqa", optCtrl={"rhobeg": 0.5, "rhoend": 1e-4})
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY, control=ctrl)
+        assert result.converged
+
+    def test_glmer_bobyqa(self, has_bobyqa: bool) -> None:
+        if not has_bobyqa:
+            pytest.skip("pybobyqa not installed")
+
+        data = CBPP.copy()
+        data["y"] = data["incidence"] / data["size"]
+
+        ctrl = glmerControl(optimizer="bobyqa")
+        result = glmer(
+            "y ~ period + (1 | herd)",
+            data,
+            family=families.Binomial(),
+            weights=data["size"].values,
+            control=ctrl,
+        )
+        assert result.converged
+        assert result.fixef() is not None
+
+    def test_bobyqa_vs_lbfgsb_consistency(self, has_bobyqa: bool) -> None:
+        if not has_bobyqa:
+            pytest.skip("pybobyqa not installed")
+
+        ctrl_bobyqa = lmerControl(optimizer="bobyqa")
+        ctrl_lbfgsb = lmerControl(optimizer="L-BFGS-B")
+
+        result_bobyqa = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY, control=ctrl_bobyqa)
+        result_lbfgsb = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY, control=ctrl_lbfgsb)
+
+        assert abs(result_bobyqa.deviance - result_lbfgsb.deviance) < 0.1
+        fe_bobyqa = result_bobyqa.fixef()
+        fe_lbfgsb = result_lbfgsb.fixef()
+        assert abs(fe_bobyqa["(Intercept)"] - fe_lbfgsb["(Intercept)"]) < 1.0
+        assert abs(fe_bobyqa["Days"] - fe_lbfgsb["Days"]) < 0.5
+
+    def test_has_bobyqa_function(self) -> None:
+        from mixedlm.estimation.optimizers import has_bobyqa
+
+        result = has_bobyqa()
+        assert isinstance(result, bool)
+
+    def test_allfit_includes_bobyqa(self, has_bobyqa: bool) -> None:
+        if not has_bobyqa:
+            pytest.skip("pybobyqa not installed")
+
+        from mixedlm.inference.allfit import _get_available_optimizers
+
+        optimizers = _get_available_optimizers()
+        assert "bobyqa" in optimizers
+
+
+class TestNloptOptimizer:
+    @pytest.fixture
+    def has_nlopt(self) -> bool:
+        from mixedlm.estimation.optimizers import has_nlopt
+
+        return has_nlopt()
+
+    def test_lmer_nlopt_bobyqa(self, has_nlopt: bool) -> None:
+        if not has_nlopt:
+            pytest.skip("nlopt not installed")
+
+        ctrl = lmerControl(optimizer="nloptwrap_BOBYQA")
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY, control=ctrl)
+        assert result.converged
+        assert result.fixef() is not None
+        assert result.sigma > 0
+
+    def test_lmer_nlopt_neldermead(self, has_nlopt: bool) -> None:
+        if not has_nlopt:
+            pytest.skip("nlopt not installed")
+
+        ctrl = lmerControl(optimizer="nloptwrap_NELDERMEAD")
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY, control=ctrl)
+        assert result.converged
+
+    def test_lmer_nlopt_sbplx(self, has_nlopt: bool) -> None:
+        if not has_nlopt:
+            pytest.skip("nlopt not installed")
+
+        ctrl = lmerControl(optimizer="nloptwrap_SBPLX")
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY, control=ctrl)
+        assert result.converged
+
+    def test_glmer_nlopt_bobyqa(self, has_nlopt: bool) -> None:
+        if not has_nlopt:
+            pytest.skip("nlopt not installed")
+
+        data = CBPP.copy()
+        data["y"] = data["incidence"] / data["size"]
+
+        ctrl = glmerControl(optimizer="nloptwrap_BOBYQA")
+        result = glmer(
+            "y ~ period + (1 | herd)",
+            data,
+            family=families.Binomial(),
+            weights=data["size"].values,
+            control=ctrl,
+        )
+        assert result.converged
+
+    def test_nlopt_vs_lbfgsb_consistency(self, has_nlopt: bool) -> None:
+        if not has_nlopt:
+            pytest.skip("nlopt not installed")
+
+        ctrl_nlopt = lmerControl(optimizer="nloptwrap_BOBYQA")
+        ctrl_lbfgsb = lmerControl(optimizer="L-BFGS-B")
+
+        result_nlopt = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY, control=ctrl_nlopt)
+        result_lbfgsb = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY, control=ctrl_lbfgsb)
+
+        assert abs(result_nlopt.deviance - result_lbfgsb.deviance) < 0.1
+        fe_nlopt = result_nlopt.fixef()
+        fe_lbfgsb = result_lbfgsb.fixef()
+        assert abs(fe_nlopt["(Intercept)"] - fe_lbfgsb["(Intercept)"]) < 1.0
+
+    def test_has_nlopt_function(self) -> None:
+        from mixedlm.estimation.optimizers import has_nlopt
+
+        result = has_nlopt()
+        assert isinstance(result, bool)
+
+    def test_allfit_includes_nlopt(self, has_nlopt: bool) -> None:
+        if not has_nlopt:
+            pytest.skip("nlopt not installed")
+
+        from mixedlm.inference.allfit import _get_available_optimizers
+
+        optimizers = _get_available_optimizers()
+        assert "nloptwrap_BOBYQA" in optimizers
+
+    def test_nlopt_control_valid(self) -> None:
+        ctrl = LmerControl(optimizer="nloptwrap_BOBYQA")
+        assert ctrl.optimizer == "nloptwrap_BOBYQA"
+
+        ctrl = GlmerControl(optimizer="nloptwrap_SBPLX")
+        assert ctrl.optimizer == "nloptwrap_SBPLX"
+
+
+class TestMkReTrms:
+    def test_mkretrms_basic(self) -> None:
+        from mixedlm.models.modular import mkReTrms
+
+        re_terms = mkReTrms("Reaction ~ Days + (1|Subject)", SLEEPSTUDY)
+
+        assert re_terms.Zt is not None
+        assert re_terms.theta is not None
+        assert re_terms.Lind is not None
+        assert re_terms.Gp is not None
+        assert "Subject" in re_terms.flist
+        assert "Subject" in re_terms.cnms
+
+    def test_mkretrms_dimensions(self) -> None:
+        from mixedlm.models.modular import mkReTrms
+
+        re_terms = mkReTrms("Reaction ~ Days + (1|Subject)", SLEEPSTUDY)
+
+        n_subjects = SLEEPSTUDY["Subject"].nunique()
+        assert re_terms.Zt.shape[0] == n_subjects
+        assert re_terms.Zt.shape[1] == len(SLEEPSTUDY)
+        assert re_terms.nl == [n_subjects]
+
+    def test_mkretrms_random_slope(self) -> None:
+        from mixedlm.models.modular import mkReTrms
+
+        re_terms = mkReTrms("Reaction ~ Days + (Days|Subject)", SLEEPSTUDY)
+
+        n_subjects = SLEEPSTUDY["Subject"].nunique()
+        assert re_terms.Zt.shape[0] == n_subjects * 2
+        assert len(re_terms.theta) == 3
+
+    def test_mkretrms_multiple_grouping(self) -> None:
+        from mixedlm.models.modular import mkReTrms
+
+        np.random.seed(42)
+        n = 100
+        group1 = np.repeat(np.arange(10), 10).astype(str)
+        group2 = np.tile(np.arange(5), 20).astype(str)
+        y = np.random.randn(n)
+        x = np.random.randn(n)
+        data = pd.DataFrame({"y": y, "x": x, "g1": group1, "g2": group2})
+
+        re_terms = mkReTrms("y ~ x + (1|g1) + (1|g2)", data)
+
+        assert "g1" in re_terms.flist
+        assert "g2" in re_terms.flist
+        assert len(re_terms.nl) == 2
+
+
+class TestSimulateFormula:
+    def test_simulate_formula_basic(self) -> None:
+        from mixedlm.models.modular import simulate_formula
+
+        result = simulate_formula(
+            "Reaction ~ Days + (1|Subject)",
+            SLEEPSTUDY,
+            beta=np.array([250.0, 10.0]),
+            theta=np.array([1.0]),
+            sigma=25.0,
+            seed=42,
+        )
+
+        assert isinstance(result, pd.DataFrame)
+        assert "Reaction" in result.columns
+        assert len(result) == len(SLEEPSTUDY)
+
+    def test_simulate_formula_multiple_sims(self) -> None:
+        from mixedlm.models.modular import simulate_formula
+
+        result = simulate_formula(
+            "Reaction ~ Days + (1|Subject)",
+            SLEEPSTUDY,
+            beta=np.array([250.0, 10.0]),
+            theta=np.array([1.0]),
+            sigma=25.0,
+            nsim=5,
+            seed=42,
+        )
+
+        assert isinstance(result, list)
+        assert len(result) == 5
+        for df in result:
+            assert isinstance(df, pd.DataFrame)
+            assert "Reaction" in df.columns
+
+    def test_simulate_formula_with_dict_beta(self) -> None:
+        from mixedlm.models.modular import simulate_formula
+
+        result = simulate_formula(
+            "Reaction ~ Days + (1|Subject)",
+            SLEEPSTUDY,
+            beta={"(Intercept)": 250.0, "Days": 10.0},
+            theta=np.array([1.0]),
+            sigma=25.0,
+            seed=42,
+        )
+
+        assert isinstance(result, pd.DataFrame)
+        assert "Reaction" in result.columns
+
+    def test_simulate_formula_reproducibility(self) -> None:
+        from mixedlm.models.modular import simulate_formula
+
+        result1 = simulate_formula(
+            "Reaction ~ Days + (1|Subject)",
+            SLEEPSTUDY,
+            beta=np.array([250.0, 10.0]),
+            theta=np.array([1.0]),
+            sigma=25.0,
+            seed=123,
+        )
+
+        result2 = simulate_formula(
+            "Reaction ~ Days + (1|Subject)",
+            SLEEPSTUDY,
+            beta=np.array([250.0, 10.0]),
+            theta=np.array([1.0]),
+            sigma=25.0,
+            seed=123,
+        )
+
+        np.testing.assert_array_equal(result1["Reaction"].values, result2["Reaction"].values)
+
+
+class TestDevfun2:
+    def test_devfun2_basic(self) -> None:
+        from mixedlm.models.modular import devfun2, lFormula, mkLmerDevfun
+
+        parsed = lFormula("Reaction ~ Days + (1|Subject)", SLEEPSTUDY)
+        devfun = mkLmerDevfun(parsed)
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+
+        profile_devfun = devfun2(devfun, result.theta)
+
+        dev = profile_devfun(result.theta)
+        assert isinstance(dev, float)
+        assert np.isfinite(dev)
+
+    def test_devfun2_which_parameter(self) -> None:
+        from mixedlm.models.modular import devfun2, lFormula, mkLmerDevfun
+
+        parsed = lFormula("Reaction ~ Days + (Days|Subject)", SLEEPSTUDY)
+        devfun = mkLmerDevfun(parsed)
+        result = lmer("Reaction ~ Days + (Days | Subject)", SLEEPSTUDY)
+
+        profile_devfun = devfun2(devfun, result.theta, which=[0])
+
+        dev = profile_devfun(np.array([result.theta[0]]))
+        assert isinstance(dev, float)
+        assert np.isfinite(dev)
+
+    def test_devfun2_profile_value(self) -> None:
+        from mixedlm.models.modular import devfun2, lFormula, mkLmerDevfun
+
+        parsed = lFormula("Reaction ~ Days + (1|Subject)", SLEEPSTUDY)
+        devfun = mkLmerDevfun(parsed)
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+
+        profile_devfun = devfun2(devfun, result.theta)
+
+        dev_opt = profile_devfun(result.theta)
+        dev_perturbed = profile_devfun(result.theta * 1.5)
+        assert dev_perturbed >= dev_opt - 0.01
 
 
 class TestModelFrame:
