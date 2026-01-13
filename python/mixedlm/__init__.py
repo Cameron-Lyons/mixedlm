@@ -1,4 +1,5 @@
-from mixedlm import diagnostics, families, inference, nlme
+from mixedlm import datasets, diagnostics, families, inference, nlme
+from mixedlm.datasets import load_cbpp, load_sleepstudy
 from mixedlm.formula.parser import findbars, is_mixed_formula, nobars, parse_formula, subbars
 from mixedlm.inference.anova import AnovaResult, anova
 from mixedlm.models.control import GlmerControl, LmerControl, glmerControl, lmerControl
@@ -56,6 +57,9 @@ __all__ = [
     "nlme",
     "inference",
     "diagnostics",
+    "datasets",
+    "load_sleepstudy",
+    "load_cbpp",
     "LogLik",
     "ModelTerms",
     "PredictResult",
