@@ -1,8 +1,9 @@
 import numpy as np
 import pandas as pd
 import pytest
-from mixedlm import anova, families, glmer, lmer, nlme, nlmer, parse_formula
+from mixedlm import anova, families, findbars, glmer, glmerControl, is_mixed_formula, lmer, lmerControl, nlme, nlmer, nobars, parse_formula, subbars
 from mixedlm.matrices import build_model_matrices
+from mixedlm.models.control import GlmerControl, LmerControl
 
 SLEEPSTUDY = pd.DataFrame(
     {
@@ -1219,6 +1220,74 @@ class TestRefit:
         with pytest.raises(ValueError, match="newresp has length"):
             result.refit(np.random.randn(n + 10))
 
+    def test_lmer_refitML(self) -> None:
+        np.random.seed(42)
+        n_groups = 10
+        n_per_group = 20
+        n = n_groups * n_per_group
+
+        group = np.repeat(np.arange(n_groups), n_per_group)
+        x = np.random.randn(n)
+        group_effects = np.random.randn(n_groups) * 0.5
+        y = 2.0 + 1.5 * x + group_effects[group] + np.random.randn(n) * 0.5
+
+        data = pd.DataFrame({"y": y, "x": x, "group": [str(g) for g in group]})
+        result_reml = lmer("y ~ x + (1 | group)", data, REML=True)
+
+        assert result_reml.REML is True
+        assert result_reml.isREML() is True
+        assert result_reml.isGLMM() is False
+
+        result_ml = result_reml.refitML()
+
+        assert result_ml.REML is False
+        assert result_ml.isREML() is False
+        assert result_ml.converged
+        assert abs(result_ml.fixef()["x"] - result_reml.fixef()["x"]) < 0.1
+
+        result_ml2 = result_ml.refitML()
+        assert result_ml2 is result_ml
+
+    def test_lmer_refitML_ml_model(self) -> None:
+        np.random.seed(42)
+        n_groups = 10
+        n_per_group = 20
+        n = n_groups * n_per_group
+
+        group = np.repeat(np.arange(n_groups), n_per_group)
+        x = np.random.randn(n)
+        group_effects = np.random.randn(n_groups) * 0.5
+        y = 2.0 + 1.5 * x + group_effects[group] + np.random.randn(n) * 0.5
+
+        data = pd.DataFrame({"y": y, "x": x, "group": [str(g) for g in group]})
+        result_ml = lmer("y ~ x + (1 | group)", data, REML=False)
+
+        assert result_ml.REML is False
+        result_ml2 = result_ml.refitML()
+        assert result_ml2 is result_ml
+
+    def test_glmer_refitML(self) -> None:
+        np.random.seed(42)
+        n_groups = 10
+        n_per_group = 20
+        n = n_groups * n_per_group
+
+        group = np.repeat(np.arange(n_groups), n_per_group)
+        x = np.random.randn(n)
+        group_effects = np.random.randn(n_groups) * 0.3
+        eta = -0.5 + 0.5 * x + group_effects[group]
+        p = 1 / (1 + np.exp(-eta))
+        y = np.random.binomial(1, p).astype(float)
+
+        data = pd.DataFrame({"y": y, "x": x, "group": [str(g) for g in group]})
+        result = glmer("y ~ x + (1 | group)", data, family=families.Binomial())
+
+        assert result.isREML() is False
+        assert result.isGLMM() is True
+
+        result2 = result.refitML()
+        assert result2 is result
+
 
 class TestAccessors:
     def test_lmer_nobs(self) -> None:
@@ -2106,6 +2175,271 @@ class TestLogLik:
         assert np.isclose(result.BIC(), expected_bic)
 
 
+class TestDeviance:
+    def test_lmer_get_deviance(self):
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+        dev = result.get_deviance()
+
+        assert isinstance(dev, float)
+        assert dev > 0
+        assert dev == result.deviance
+
+    def test_lmer_remlcrit_reml(self):
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY, REML=True)
+        crit = result.REMLcrit()
+
+        assert isinstance(crit, float)
+        assert crit > 0
+        assert crit == result.deviance
+        assert result.isREML()
+
+    def test_lmer_remlcrit_ml(self):
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY, REML=False)
+        crit = result.REMLcrit()
+
+        assert isinstance(crit, float)
+        assert crit > 0
+        assert crit == result.deviance
+        assert not result.isREML()
+
+    def test_lmer_deviance_consistency(self):
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+        ll = result.logLik()
+
+        assert result.get_deviance() == result.REMLcrit()
+        assert np.isclose(-2 * ll.value, result.deviance + (result.matrices.n_obs - result.matrices.n_fixed) * np.log(2 * np.pi), rtol=1e-6)
+
+    def test_glmer_get_deviance(self):
+        result = glmer("y ~ period + (1 | herd)", CBPP, family=families.Binomial())
+        dev = result.get_deviance()
+
+        assert isinstance(dev, float)
+        assert dev > 0
+        assert dev == result.deviance
+
+    def test_glmer_remlcrit(self):
+        result = glmer("y ~ period + (1 | herd)", CBPP, family=families.Binomial())
+        crit = result.REMLcrit()
+
+        assert isinstance(crit, float)
+        assert crit > 0
+        assert crit == result.deviance
+        assert not result.isREML()
+
+    def test_glmer_deviance_loglik_relation(self):
+        result = glmer("y ~ period + (1 | herd)", CBPP, family=families.Binomial())
+        ll = result.logLik()
+
+        assert np.isclose(-2 * ll.value, result.deviance, rtol=1e-6)
+
+
+class TestModelMatrix:
+    def test_lmer_model_matrix_fixed(self):
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+        X = result.model_matrix("fixed")
+
+        assert X.shape[0] == len(SLEEPSTUDY)
+        assert X.shape[1] == 2
+
+    def test_lmer_model_matrix_random(self):
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+        Z = result.model_matrix("random")
+
+        assert Z.shape[0] == len(SLEEPSTUDY)
+        assert Z.shape[1] == 18
+
+    def test_lmer_model_matrix_both(self):
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+        X, Z = result.model_matrix("both")
+
+        assert X.shape[0] == len(SLEEPSTUDY)
+        assert Z.shape[0] == len(SLEEPSTUDY)
+
+    def test_lmer_model_matrix_aliases(self):
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+
+        X1 = result.model_matrix("fixed")
+        X2 = result.model_matrix("X")
+        assert np.allclose(X1, X2)
+
+        Z1 = result.model_matrix("random")
+        Z2 = result.model_matrix("Z")
+        assert (Z1 != Z2).nnz == 0
+
+    def test_glmer_model_matrix_fixed(self):
+        result = glmer("y ~ period + (1 | herd)", CBPP, family=families.Binomial())
+        X = result.model_matrix("fixed")
+
+        assert X.shape[0] == len(CBPP)
+        assert X.shape[1] == 4
+
+    def test_glmer_model_matrix_random(self):
+        result = glmer("y ~ period + (1 | herd)", CBPP, family=families.Binomial())
+        Z = result.model_matrix("random")
+
+        assert Z.shape[0] == len(CBPP)
+
+
+class TestTerms:
+    def test_lmer_terms_basic(self):
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+        t = result.terms()
+
+        assert t.response == "Reaction"
+        assert "(Intercept)" in t.fixed_terms
+        assert "Days" in t.fixed_terms
+        assert "Subject" in t.random_terms
+        assert "(Intercept)" in t.random_terms["Subject"]
+
+    def test_lmer_terms_variables(self):
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+        t = result.terms()
+
+        assert "Days" in t.fixed_variables
+        assert "Subject" in t.grouping_factors
+        assert t.has_intercept
+
+    def test_lmer_terms_random_slope(self):
+        result = lmer("Reaction ~ Days + (Days | Subject)", SLEEPSTUDY)
+        t = result.terms()
+
+        assert "(Intercept)" in t.random_terms["Subject"]
+        assert "Days" in t.random_terms["Subject"]
+        assert "Days" in t.random_variables
+
+    def test_lmer_terms_str(self):
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+        t = result.terms()
+
+        output = str(t)
+        assert "Response" in output
+        assert "Reaction" in output
+        assert "Fixed effects" in output
+
+    def test_lmer_get_formula(self):
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+        f = result.get_formula()
+
+        assert f.response == "Reaction"
+        assert str(f) == "Reaction ~ Days + (1 | Subject)"
+
+    def test_glmer_terms_basic(self):
+        result = glmer("y ~ period + (1 | herd)", CBPP, family=families.Binomial())
+        t = result.terms()
+
+        assert t.response == "y"
+        assert "(Intercept)" in t.fixed_terms
+        assert "herd" in t.random_terms
+        assert "herd" in t.grouping_factors
+
+    def test_glmer_get_formula(self):
+        result = glmer("y ~ period + (1 | herd)", CBPP, family=families.Binomial())
+        f = result.get_formula()
+
+        assert f.response == "y"
+
+
+class TestFormulaUtilities:
+    def test_nobars_simple(self):
+        f = nobars("y ~ x + (1 | group)")
+
+        assert f.response == "y"
+        assert len(f.random) == 0
+        assert f.fixed.has_intercept
+
+    def test_nobars_multiple_random(self):
+        f = nobars("y ~ x + z + (x | group) + (1 | subject)")
+
+        assert len(f.random) == 0
+        assert "x" in str(f)
+        assert "z" in str(f)
+
+    def test_nobars_with_formula_object(self):
+        original = parse_formula("y ~ x + (1 | group)")
+        f = nobars(original)
+
+        assert len(f.random) == 0
+        assert f.response == original.response
+        assert f.fixed == original.fixed
+
+    def test_findbars_simple(self):
+        bars = findbars("y ~ x + (1 | group)")
+
+        assert len(bars) == 1
+        assert bars[0].grouping == "group"
+        assert bars[0].has_intercept
+
+    def test_findbars_multiple(self):
+        bars = findbars("y ~ x + (x | group) + (1 | subject)")
+
+        assert len(bars) == 2
+        groupings = {b.grouping for b in bars}
+        assert "group" in groupings
+        assert "subject" in groupings
+
+    def test_findbars_with_formula_object(self):
+        original = parse_formula("y ~ x + (x | group)")
+        bars = findbars(original)
+
+        assert len(bars) == 1
+        assert bars[0].grouping == "group"
+
+    def test_findbars_no_random(self):
+        bars = findbars("y ~ x + z")
+
+        assert len(bars) == 0
+
+    def test_subbars_simple(self):
+        result = subbars("y ~ x + (1 | group)")
+
+        assert "group" in result
+        assert "|" not in result
+        assert "y ~" in result
+
+    def test_subbars_with_slope(self):
+        result = subbars("y ~ x + (x | group)")
+
+        assert "group" in result
+        assert "group:x" in result
+        assert "|" not in result
+
+    def test_is_mixed_formula_true(self):
+        assert is_mixed_formula("y ~ x + (1 | group)")
+        assert is_mixed_formula("y ~ x + (x | group) + (1 | subject)")
+
+    def test_is_mixed_formula_false(self):
+        assert not is_mixed_formula("y ~ x")
+        assert not is_mixed_formula("y ~ x + z")
+
+    def test_is_mixed_formula_with_object(self):
+        mixed = parse_formula("y ~ x + (1 | group)")
+        not_mixed = parse_formula("y ~ x + z")
+
+        assert is_mixed_formula(mixed)
+        assert not is_mixed_formula(not_mixed)
+
+    def test_nobars_preserves_fixed_structure(self):
+        f = nobars("y ~ x * z + (1 | group)")
+
+        assert f.fixed.has_intercept
+        fixed_str = str(f)
+        assert "x" in fixed_str
+        assert "z" in fixed_str
+
+    def test_findbars_uncorrelated(self):
+        bars = findbars("y ~ x + (x || group)")
+
+        assert len(bars) == 1
+        assert not bars[0].correlated
+
+    def test_findbars_nested(self):
+        bars = findbars("y ~ x + (1 | group/subgroup)")
+
+        assert len(bars) == 1
+        assert bars[0].is_nested
+        assert bars[0].grouping_factors == ("group", "subgroup")
+
+
 class TestCoef:
     def test_lmer_coef_basic(self):
         result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
@@ -2261,6 +2595,2188 @@ class TestPredict:
 
         assert len(pred) == 1
         assert 0 <= pred[0] <= 1
+
+
+class TestNAAction:
+    def test_lmer_na_omit(self) -> None:
+        np.random.seed(42)
+        n_groups = 10
+        n_per_group = 20
+        n = n_groups * n_per_group
+
+        group = np.repeat(np.arange(n_groups), n_per_group)
+        x = np.random.randn(n)
+        group_effects = np.random.randn(n_groups) * 0.5
+        y = 2.0 + 1.5 * x + group_effects[group] + np.random.randn(n) * 0.5
+
+        data = pd.DataFrame({"y": y, "x": x, "group": [str(g) for g in group]})
+        data.loc[0, "y"] = np.nan
+        data.loc[5, "x"] = np.nan
+        data.loc[10, "group"] = np.nan
+
+        result = lmer("y ~ x + (1 | group)", data, na_action="omit")
+
+        assert result.matrices.n_obs == n - 3
+        assert len(result.fitted()) == n - 3
+        assert len(result.residuals()) == n - 3
+        assert result.converged
+
+    def test_lmer_na_exclude(self) -> None:
+        np.random.seed(42)
+        n_groups = 10
+        n_per_group = 20
+        n = n_groups * n_per_group
+
+        group = np.repeat(np.arange(n_groups), n_per_group)
+        x = np.random.randn(n)
+        group_effects = np.random.randn(n_groups) * 0.5
+        y = 2.0 + 1.5 * x + group_effects[group] + np.random.randn(n) * 0.5
+
+        data = pd.DataFrame({"y": y, "x": x, "group": [str(g) for g in group]})
+        data.loc[0, "y"] = np.nan
+        data.loc[5, "x"] = np.nan
+
+        result = lmer("y ~ x + (1 | group)", data, na_action="exclude")
+
+        assert result.matrices.n_obs == n - 2
+
+        fitted_vals = result.fitted()
+        assert len(fitted_vals) == n
+        assert np.isnan(fitted_vals[0])
+        assert np.isnan(fitted_vals[5])
+        assert not np.isnan(fitted_vals[1])
+
+        resid = result.residuals()
+        assert len(resid) == n
+        assert np.isnan(resid[0])
+        assert np.isnan(resid[5])
+
+    def test_lmer_na_fail(self) -> None:
+        np.random.seed(42)
+        n = 50
+        group = np.repeat(np.arange(5), 10)
+        x = np.random.randn(n)
+        y = 2.0 + 1.5 * x + np.random.randn(n) * 0.5
+
+        data = pd.DataFrame({"y": y, "x": x, "group": [str(g) for g in group]})
+        data.loc[0, "y"] = np.nan
+
+        with pytest.raises(ValueError, match="Missing values"):
+            lmer("y ~ x + (1 | group)", data, na_action="fail")
+
+    def test_lmer_no_na(self) -> None:
+        np.random.seed(42)
+        n_groups = 10
+        n_per_group = 20
+        n = n_groups * n_per_group
+
+        group = np.repeat(np.arange(n_groups), n_per_group)
+        x = np.random.randn(n)
+        group_effects = np.random.randn(n_groups) * 0.5
+        y = 2.0 + 1.5 * x + group_effects[group] + np.random.randn(n) * 0.5
+
+        data = pd.DataFrame({"y": y, "x": x, "group": [str(g) for g in group]})
+
+        result = lmer("y ~ x + (1 | group)", data, na_action="omit")
+
+        assert result.matrices.n_obs == n
+        assert len(result.fitted()) == n
+
+    def test_glmer_na_omit(self) -> None:
+        np.random.seed(42)
+        n_groups = 10
+        n_per_group = 20
+        n = n_groups * n_per_group
+
+        group = np.repeat(np.arange(n_groups), n_per_group)
+        x = np.random.randn(n)
+        group_effects = np.random.randn(n_groups) * 0.3
+        eta = -0.5 + 0.5 * x + group_effects[group]
+        p = 1 / (1 + np.exp(-eta))
+        y = np.random.binomial(1, p).astype(float)
+
+        data = pd.DataFrame({"y": y, "x": x, "group": [str(g) for g in group]})
+        data.loc[0, "y"] = np.nan
+        data.loc[5, "x"] = np.nan
+
+        result = glmer("y ~ x + (1 | group)", data, family=families.Binomial(), na_action="omit")
+
+        assert result.matrices.n_obs == n - 2
+        assert result.converged
+
+    def test_glmer_na_exclude(self) -> None:
+        np.random.seed(42)
+        n_groups = 10
+        n_per_group = 20
+        n = n_groups * n_per_group
+
+        group = np.repeat(np.arange(n_groups), n_per_group)
+        x = np.random.randn(n)
+        group_effects = np.random.randn(n_groups) * 0.3
+        eta = -0.5 + 0.5 * x + group_effects[group]
+        p = 1 / (1 + np.exp(-eta))
+        y = np.random.binomial(1, p).astype(float)
+
+        data = pd.DataFrame({"y": y, "x": x, "group": [str(g) for g in group]})
+        data.loc[0, "y"] = np.nan
+        data.loc[5, "x"] = np.nan
+
+        result = glmer("y ~ x + (1 | group)", data, family=families.Binomial(), na_action="exclude")
+
+        assert result.matrices.n_obs == n - 2
+
+        fitted_vals = result.fitted()
+        assert len(fitted_vals) == n
+        assert np.isnan(fitted_vals[0])
+        assert np.isnan(fitted_vals[5])
+        assert not np.isnan(fitted_vals[1])
+
+
+class TestInfluenceDiagnostics:
+    def test_lmer_hatvalues(self) -> None:
+        np.random.seed(42)
+        n_groups = 10
+        n_per_group = 20
+        n = n_groups * n_per_group
+
+        group = np.repeat(np.arange(n_groups), n_per_group)
+        x = np.random.randn(n)
+        group_effects = np.random.randn(n_groups) * 0.5
+        y = 2.0 + 1.5 * x + group_effects[group] + np.random.randn(n) * 0.5
+
+        data = pd.DataFrame({"y": y, "x": x, "group": [str(g) for g in group]})
+        result = lmer("y ~ x + (1 | group)", data)
+
+        h = result.hatvalues()
+
+        assert len(h) == n
+        assert np.all(h >= 0)
+        assert np.all(h < 1)
+        assert np.sum(h) > 0
+
+    def test_lmer_cooks_distance(self) -> None:
+        np.random.seed(42)
+        n_groups = 10
+        n_per_group = 20
+        n = n_groups * n_per_group
+
+        group = np.repeat(np.arange(n_groups), n_per_group)
+        x = np.random.randn(n)
+        group_effects = np.random.randn(n_groups) * 0.5
+        y = 2.0 + 1.5 * x + group_effects[group] + np.random.randn(n) * 0.5
+
+        data = pd.DataFrame({"y": y, "x": x, "group": [str(g) for g in group]})
+        result = lmer("y ~ x + (1 | group)", data)
+
+        cooks_d = result.cooks_distance()
+
+        assert len(cooks_d) == n
+        assert np.all(cooks_d >= 0)
+        assert np.all(np.isfinite(cooks_d))
+
+    def test_lmer_influence(self) -> None:
+        np.random.seed(42)
+        n_groups = 10
+        n_per_group = 20
+        n = n_groups * n_per_group
+
+        group = np.repeat(np.arange(n_groups), n_per_group)
+        x = np.random.randn(n)
+        group_effects = np.random.randn(n_groups) * 0.5
+        y = 2.0 + 1.5 * x + group_effects[group] + np.random.randn(n) * 0.5
+
+        data = pd.DataFrame({"y": y, "x": x, "group": [str(g) for g in group]})
+        result = lmer("y ~ x + (1 | group)", data)
+
+        infl = result.influence()
+
+        assert "hat" in infl
+        assert "cooks_d" in infl
+        assert "std_resid" in infl
+        assert "student_resid" in infl
+
+        assert len(infl["hat"]) == n
+        assert len(infl["cooks_d"]) == n
+        assert len(infl["std_resid"]) == n
+        assert len(infl["student_resid"]) == n
+
+    def test_lmer_hatvalues_sum_constraint(self) -> None:
+        np.random.seed(42)
+        n_groups = 10
+        n_per_group = 20
+        n = n_groups * n_per_group
+
+        group = np.repeat(np.arange(n_groups), n_per_group)
+        x = np.random.randn(n)
+        group_effects = np.random.randn(n_groups) * 0.5
+        y = 2.0 + 1.5 * x + group_effects[group] + np.random.randn(n) * 0.5
+
+        data = pd.DataFrame({"y": y, "x": x, "group": [str(g) for g in group]})
+        result = lmer("y ~ x + (1 | group)", data)
+
+        h = result.hatvalues()
+
+        assert np.sum(h) > 0
+        assert np.mean(h) > 0
+        assert np.mean(h) < 1
+
+    def test_glmer_hatvalues(self) -> None:
+        np.random.seed(42)
+        n_groups = 10
+        n_per_group = 20
+        n = n_groups * n_per_group
+
+        group = np.repeat(np.arange(n_groups), n_per_group)
+        x = np.random.randn(n)
+        group_effects = np.random.randn(n_groups) * 0.3
+        eta = -0.5 + 0.5 * x + group_effects[group]
+        p = 1 / (1 + np.exp(-eta))
+        y = np.random.binomial(1, p).astype(float)
+
+        data = pd.DataFrame({"y": y, "x": x, "group": [str(g) for g in group]})
+        result = glmer("y ~ x + (1 | group)", data, family=families.Binomial())
+
+        h = result.hatvalues()
+
+        assert len(h) == n
+        assert np.all(h >= 0)
+        assert np.all(h < 1)
+
+    def test_glmer_cooks_distance(self) -> None:
+        np.random.seed(42)
+        n_groups = 10
+        n_per_group = 20
+        n = n_groups * n_per_group
+
+        group = np.repeat(np.arange(n_groups), n_per_group)
+        x = np.random.randn(n)
+        group_effects = np.random.randn(n_groups) * 0.3
+        eta = -0.5 + 0.5 * x + group_effects[group]
+        p = 1 / (1 + np.exp(-eta))
+        y = np.random.binomial(1, p).astype(float)
+
+        data = pd.DataFrame({"y": y, "x": x, "group": [str(g) for g in group]})
+        result = glmer("y ~ x + (1 | group)", data, family=families.Binomial())
+
+        cooks_d = result.cooks_distance()
+
+        assert len(cooks_d) == n
+        assert np.all(cooks_d >= 0)
+        assert np.all(np.isfinite(cooks_d))
+
+    def test_glmer_influence(self) -> None:
+        np.random.seed(42)
+        n_groups = 10
+        n_per_group = 20
+        n = n_groups * n_per_group
+
+        group = np.repeat(np.arange(n_groups), n_per_group)
+        x = np.random.randn(n)
+        group_effects = np.random.randn(n_groups) * 0.3
+        eta = -0.5 + 0.5 * x + group_effects[group]
+        p = 1 / (1 + np.exp(-eta))
+        y = np.random.binomial(1, p).astype(float)
+
+        data = pd.DataFrame({"y": y, "x": x, "group": [str(g) for g in group]})
+        result = glmer("y ~ x + (1 | group)", data, family=families.Binomial())
+
+        infl = result.influence()
+
+        assert "hat" in infl
+        assert "cooks_d" in infl
+        assert "pearson_resid" in infl
+        assert "deviance_resid" in infl
+
+        assert len(infl["hat"]) == n
+        assert len(infl["cooks_d"]) == n
+
+
+class TestRePCA:
+    def test_repca_basic(self) -> None:
+        np.random.seed(42)
+        n_groups = 10
+        n_per_group = 20
+        n = n_groups * n_per_group
+
+        group = np.repeat(np.arange(n_groups), n_per_group)
+        x = np.random.randn(n)
+        group_int = np.random.randn(n_groups) * 0.5
+        group_slope = np.random.randn(n_groups) * 0.3
+        y = 2.0 + 1.5 * x + group_int[group] + group_slope[group] * x + np.random.randn(n) * 0.5
+
+        data = pd.DataFrame({"y": y, "x": x, "group": [str(g) for g in group]})
+        result = lmer("y ~ x + (x | group)", data)
+
+        pca = result.rePCA()
+
+        assert "group" in pca.groups
+        group_pca = pca["group"]
+        assert group_pca.n_terms == 2
+        assert len(group_pca.sdev) == 2
+        assert len(group_pca.proportion) == 2
+        assert len(group_pca.cumulative) == 2
+
+        assert np.all(group_pca.sdev >= 0)
+        assert np.all(group_pca.proportion >= 0)
+        assert np.all(group_pca.proportion <= 1)
+        assert np.isclose(group_pca.cumulative[-1], 1.0, atol=1e-6) or group_pca.cumulative[-1] == 0
+
+    def test_repca_single_term(self) -> None:
+        np.random.seed(42)
+        n_groups = 10
+        n_per_group = 20
+        n = n_groups * n_per_group
+
+        group = np.repeat(np.arange(n_groups), n_per_group)
+        x = np.random.randn(n)
+        group_effects = np.random.randn(n_groups) * 0.5
+        y = 2.0 + 1.5 * x + group_effects[group] + np.random.randn(n) * 0.5
+
+        data = pd.DataFrame({"y": y, "x": x, "group": [str(g) for g in group]})
+        result = lmer("y ~ x + (1 | group)", data)
+
+        pca = result.rePCA()
+
+        assert pca["group"].n_terms == 1
+        assert len(pca["group"].sdev) == 1
+        assert pca["group"].sdev[0] >= 0
+
+    def test_repca_is_singular(self) -> None:
+        np.random.seed(42)
+        n_groups = 10
+        n_per_group = 20
+        n = n_groups * n_per_group
+
+        group = np.repeat(np.arange(n_groups), n_per_group)
+        x = np.random.randn(n)
+        group_effects = np.random.randn(n_groups) * 0.5
+        y = 2.0 + 1.5 * x + group_effects[group] + np.random.randn(n) * 0.5
+
+        data = pd.DataFrame({"y": y, "x": x, "group": [str(g) for g in group]})
+        result = lmer("y ~ x + (1 | group)", data)
+
+        pca = result.rePCA()
+        singular = pca.is_singular()
+
+        assert isinstance(singular, dict)
+        assert "group" in singular
+        assert isinstance(singular["group"], (bool, np.bool_))
+
+    def test_repca_str_output(self) -> None:
+        np.random.seed(42)
+        n_groups = 10
+        n_per_group = 20
+        n = n_groups * n_per_group
+
+        group = np.repeat(np.arange(n_groups), n_per_group)
+        x = np.random.randn(n)
+        group_effects = np.random.randn(n_groups) * 0.5
+        y = 2.0 + 1.5 * x + group_effects[group] + np.random.randn(n) * 0.5
+
+        data = pd.DataFrame({"y": y, "x": x, "group": [str(g) for g in group]})
+        result = lmer("y ~ x + (x | group)", data)
+
+        pca = result.rePCA()
+        output = str(pca)
+
+        assert "Random effect PCA" in output
+        assert "group" in output
+        assert "PC1" in output
+        assert "PC2" in output
+
+    def test_glmer_repca(self) -> None:
+        np.random.seed(42)
+        n_groups = 10
+        n_per_group = 20
+        n = n_groups * n_per_group
+
+        group = np.repeat(np.arange(n_groups), n_per_group)
+        x = np.random.randn(n)
+        group_effects = np.random.randn(n_groups) * 0.3
+        eta = -0.5 + 0.5 * x + group_effects[group]
+        p = 1 / (1 + np.exp(-eta))
+        y = np.random.binomial(1, p).astype(float)
+
+        data = pd.DataFrame({"y": y, "x": x, "group": [str(g) for g in group]})
+        result = glmer("y ~ x + (1 | group)", data, family=families.Binomial())
+
+        pca = result.rePCA()
+
+        assert "group" in pca.groups
+        assert pca["group"].n_terms == 1
+
+
+class TestDotplot:
+    def test_dotplot_basic(self) -> None:
+        pytest.importorskip("matplotlib")
+
+        np.random.seed(42)
+        n_groups = 10
+        n_per_group = 20
+        n = n_groups * n_per_group
+
+        group = np.repeat(np.arange(n_groups), n_per_group)
+        x = np.random.randn(n)
+        group_effects = np.random.randn(n_groups) * 0.5
+        y = 2.0 + 1.5 * x + group_effects[group] + np.random.randn(n) * 0.5
+
+        data = pd.DataFrame({"y": y, "x": x, "group": [str(g) for g in group]})
+        result = lmer("y ~ x + (1 | group)", data)
+
+        import matplotlib
+        matplotlib.use("Agg")
+
+        fig = result.dotplot()
+        assert fig is not None
+
+        import matplotlib.pyplot as plt
+        plt.close(fig)
+
+    def test_dotplot_multiple_terms(self) -> None:
+        pytest.importorskip("matplotlib")
+
+        np.random.seed(42)
+        n_groups = 10
+        n_per_group = 20
+        n = n_groups * n_per_group
+
+        group = np.repeat(np.arange(n_groups), n_per_group)
+        x = np.random.randn(n)
+        group_int = np.random.randn(n_groups) * 0.5
+        group_slope = np.random.randn(n_groups) * 0.3
+        y = 2.0 + 1.5 * x + group_int[group] + group_slope[group] * x + np.random.randn(n) * 0.5
+
+        data = pd.DataFrame({"y": y, "x": x, "group": [str(g) for g in group]})
+        result = lmer("y ~ x + (x | group)", data)
+
+        import matplotlib
+        matplotlib.use("Agg")
+
+        fig = result.dotplot()
+        assert fig is not None
+
+        import matplotlib.pyplot as plt
+        plt.close(fig)
+
+    def test_dotplot_specific_term(self) -> None:
+        pytest.importorskip("matplotlib")
+
+        np.random.seed(42)
+        n_groups = 10
+        n_per_group = 20
+        n = n_groups * n_per_group
+
+        group = np.repeat(np.arange(n_groups), n_per_group)
+        x = np.random.randn(n)
+        group_int = np.random.randn(n_groups) * 0.5
+        group_slope = np.random.randn(n_groups) * 0.3
+        y = 2.0 + 1.5 * x + group_int[group] + group_slope[group] * x + np.random.randn(n) * 0.5
+
+        data = pd.DataFrame({"y": y, "x": x, "group": [str(g) for g in group]})
+        result = lmer("y ~ x + (x | group)", data)
+
+        import matplotlib
+        matplotlib.use("Agg")
+
+        fig = result.dotplot(term="(Intercept)")
+        assert fig is not None
+
+        import matplotlib.pyplot as plt
+        plt.close(fig)
+
+    def test_glmer_dotplot(self) -> None:
+        pytest.importorskip("matplotlib")
+
+        np.random.seed(42)
+        n_groups = 10
+        n_per_group = 20
+        n = n_groups * n_per_group
+
+        group = np.repeat(np.arange(n_groups), n_per_group)
+        x = np.random.randn(n)
+        group_effects = np.random.randn(n_groups) * 0.3
+        eta = -0.5 + 0.5 * x + group_effects[group]
+        p = 1 / (1 + np.exp(-eta))
+        y = np.random.binomial(1, p).astype(float)
+
+        data = pd.DataFrame({"y": y, "x": x, "group": [str(g) for g in group]})
+        result = glmer("y ~ x + (1 | group)", data, family=families.Binomial())
+
+        import matplotlib
+        matplotlib.use("Agg")
+
+        fig = result.dotplot()
+        assert fig is not None
+
+        import matplotlib.pyplot as plt
+        plt.close(fig)
+
+
+class TestContrasts:
+    def test_treatment_contrasts_default(self) -> None:
+        np.random.seed(42)
+        n = 120
+        group = np.repeat(["A", "B", "C", "D"], n // 4)
+        subject = np.repeat(np.arange(12), n // 12)
+        y = np.random.randn(n) + np.array([0, 1, 2, 3])[np.searchsorted(["A", "B", "C", "D"], group)]
+
+        data = pd.DataFrame({
+            "y": y,
+            "group": group,
+            "subject": [str(s) for s in subject]
+        })
+
+        result = lmer("y ~ group + (1 | subject)", data)
+
+        fixed_names = result.matrices.fixed_names
+        assert "(Intercept)" in fixed_names
+        assert any("group" in name for name in fixed_names)
+        assert len(fixed_names) == 4
+
+    def test_sum_contrasts(self) -> None:
+        np.random.seed(42)
+        n = 120
+        group = np.repeat(["A", "B", "C", "D"], n // 4)
+        subject = np.repeat(np.arange(12), n // 12)
+        y = np.random.randn(n) + np.array([0, 1, 2, 3])[np.searchsorted(["A", "B", "C", "D"], group)]
+
+        data = pd.DataFrame({
+            "y": y,
+            "group": group,
+            "subject": [str(s) for s in subject]
+        })
+
+        result = lmer("y ~ group + (1 | subject)", data, contrasts={"group": "sum"})
+
+        fixed_names = result.matrices.fixed_names
+        assert len(fixed_names) == 4
+        assert "(Intercept)" in fixed_names
+
+    def test_helmert_contrasts(self) -> None:
+        np.random.seed(42)
+        n = 120
+        group = np.repeat(["A", "B", "C", "D"], n // 4)
+        subject = np.repeat(np.arange(12), n // 12)
+        y = np.random.randn(n) + np.array([0, 1, 2, 3])[np.searchsorted(["A", "B", "C", "D"], group)]
+
+        data = pd.DataFrame({
+            "y": y,
+            "group": group,
+            "subject": [str(s) for s in subject]
+        })
+
+        result = lmer("y ~ group + (1 | subject)", data, contrasts={"group": "helmert"})
+
+        fixed_names = result.matrices.fixed_names
+        assert len(fixed_names) == 4
+        assert result.converged
+
+    def test_poly_contrasts(self) -> None:
+        np.random.seed(42)
+        n = 120
+        group = np.repeat(["A", "B", "C", "D"], n // 4)
+        subject = np.repeat(np.arange(12), n // 12)
+        y = np.random.randn(n) + np.array([0, 1, 4, 9])[np.searchsorted(["A", "B", "C", "D"], group)]
+
+        data = pd.DataFrame({
+            "y": y,
+            "group": group,
+            "subject": [str(s) for s in subject]
+        })
+
+        result = lmer("y ~ group + (1 | subject)", data, contrasts={"group": "poly"})
+
+        fixed_names = result.matrices.fixed_names
+        assert len(fixed_names) == 4
+        assert result.converged
+
+    def test_custom_contrast_matrix(self) -> None:
+        np.random.seed(42)
+        n = 90
+        group = np.repeat(["A", "B", "C"], n // 3)
+        subject = np.repeat(np.arange(9), n // 9)
+        y = np.random.randn(n) + np.array([0, 1, 2])[np.searchsorted(["A", "B", "C"], group)]
+
+        data = pd.DataFrame({
+            "y": y,
+            "group": group,
+            "subject": [str(s) for s in subject]
+        })
+
+        custom_contrasts = np.array([
+            [-1, -1],
+            [1, 0],
+            [0, 1]
+        ], dtype=np.float64)
+
+        result = lmer("y ~ group + (1 | subject)", data, contrasts={"group": custom_contrasts})
+
+        fixed_names = result.matrices.fixed_names
+        assert len(fixed_names) == 3
+        assert result.converged
+
+    def test_glmer_contrasts(self) -> None:
+        np.random.seed(42)
+        n = 120
+        group = np.repeat(["A", "B", "C"], n // 3)
+        subject = np.repeat(np.arange(12), n // 12)
+        eta = np.array([-1.0, 0.0, 1.0])[np.searchsorted(["A", "B", "C"], group)]
+        p = 1 / (1 + np.exp(-eta))
+        y = np.random.binomial(1, p).astype(float)
+
+        data = pd.DataFrame({
+            "y": y,
+            "group": group,
+            "subject": [str(s) for s in subject]
+        })
+
+        result = glmer(
+            "y ~ group + (1 | subject)",
+            data,
+            family=families.Binomial(),
+            contrasts={"group": "sum"}
+        )
+
+        fixed_names = result.matrices.fixed_names
+        assert len(fixed_names) == 3
+        assert "(Intercept)" in fixed_names
+
+    def test_contrasts_different_effects(self) -> None:
+        from mixedlm.utils.contrasts import contr_treatment, contr_sum
+
+        n = 3
+        treatment_matrix = contr_treatment(n)
+        sum_matrix = contr_sum(n)
+
+        assert treatment_matrix.shape == (3, 2)
+        assert sum_matrix.shape == (3, 2)
+        assert not np.allclose(treatment_matrix, sum_matrix)
+
+        assert np.allclose(treatment_matrix[0, :], [0, 0])
+        assert np.allclose(sum_matrix[-1, :], [-1, -1])
+
+    def test_contrasts_with_interactions(self) -> None:
+        np.random.seed(42)
+        n = 240
+        group1 = np.tile(np.repeat(["A", "B"], n // 4), 2)
+        group2 = np.repeat(["X", "Y"], n // 2)
+        subject = np.repeat(np.arange(24), n // 24)
+        y = np.random.randn(n)
+
+        data = pd.DataFrame({
+            "y": y,
+            "group1": group1,
+            "group2": group2,
+            "subject": [str(s) for s in subject]
+        })
+
+        result = lmer(
+            "y ~ group1 * group2 + (1 | subject)",
+            data,
+            contrasts={"group1": "sum", "group2": "treatment"}
+        )
+
+        assert result.converged
+        assert "(Intercept)" in result.matrices.fixed_names
+
+
+class TestControl:
+    def test_lmer_control_default(self) -> None:
+        ctrl = LmerControl()
+        assert ctrl.optimizer == "L-BFGS-B"
+        assert ctrl.maxiter == 1000
+        assert ctrl.ftol == 1e-8
+        assert ctrl.gtol == 1e-5
+        assert ctrl.boundary_tol == 1e-4
+        assert ctrl.check_conv is True
+        assert ctrl.check_singular is True
+        assert ctrl.use_rust is True
+
+    def test_lmer_control_custom(self) -> None:
+        ctrl = LmerControl(
+            optimizer="Nelder-Mead",
+            maxiter=2000,
+            ftol=1e-6,
+            boundary_tol=1e-5,
+            check_singular=False
+        )
+        assert ctrl.optimizer == "Nelder-Mead"
+        assert ctrl.maxiter == 2000
+        assert ctrl.ftol == 1e-6
+        assert ctrl.boundary_tol == 1e-5
+        assert ctrl.check_singular is False
+
+    def test_lmer_control_invalid_optimizer(self) -> None:
+        with pytest.raises(ValueError, match="Unknown optimizer"):
+            LmerControl(optimizer="invalid")
+
+    def test_lmer_control_invalid_maxiter(self) -> None:
+        with pytest.raises(ValueError, match="maxiter must be at least 1"):
+            LmerControl(maxiter=0)
+
+    def test_lmer_control_invalid_boundary_tol(self) -> None:
+        with pytest.raises(ValueError, match="boundary_tol must be non-negative"):
+            LmerControl(boundary_tol=-1)
+
+    def test_lmer_control_function(self) -> None:
+        ctrl = lmerControl(optimizer="BFGS", maxiter=500)
+        assert isinstance(ctrl, LmerControl)
+        assert ctrl.optimizer == "BFGS"
+        assert ctrl.maxiter == 500
+
+    def test_lmer_control_scipy_options(self) -> None:
+        ctrl = LmerControl(maxiter=500, gtol=1e-4, ftol=1e-7)
+        options = ctrl.get_scipy_options()
+        assert options["maxiter"] == 500
+        assert options["gtol"] == 1e-4
+        assert options["ftol"] == 1e-7
+
+    def test_lmer_with_control(self) -> None:
+        ctrl = lmerControl(maxiter=100, check_singular=False)
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY, control=ctrl)
+        assert result.converged
+        assert result.fixef is not None
+
+    def test_lmer_control_nelder_mead(self) -> None:
+        ctrl = lmerControl(optimizer="Nelder-Mead", maxiter=2000)
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY, control=ctrl)
+        assert result.converged
+
+    def test_glmer_control_default(self) -> None:
+        ctrl = GlmerControl()
+        assert ctrl.optimizer == "L-BFGS-B"
+        assert ctrl.maxiter == 1000
+        assert ctrl.tolPwrss == 1e-7
+        assert ctrl.compDev is True
+        assert ctrl.nAGQ0initStep is True
+
+    def test_glmer_control_custom(self) -> None:
+        ctrl = GlmerControl(
+            optimizer="BFGS",
+            maxiter=500,
+            tolPwrss=1e-6,
+            nAGQ0initStep=False
+        )
+        assert ctrl.optimizer == "BFGS"
+        assert ctrl.maxiter == 500
+        assert ctrl.tolPwrss == 1e-6
+        assert ctrl.nAGQ0initStep is False
+
+    def test_glmer_control_invalid_tolPwrss(self) -> None:
+        with pytest.raises(ValueError, match="tolPwrss must be positive"):
+            GlmerControl(tolPwrss=0)
+
+    def test_glmer_control_function(self) -> None:
+        ctrl = glmerControl(optimizer="BFGS", tolPwrss=1e-6)
+        assert isinstance(ctrl, GlmerControl)
+        assert ctrl.optimizer == "BFGS"
+        assert ctrl.tolPwrss == 1e-6
+
+    def test_glmer_with_control(self) -> None:
+        data = CBPP.copy()
+        data["y"] = data["incidence"] / data["size"]
+
+        ctrl = glmerControl(maxiter=100, check_singular=False)
+        result = glmer(
+            "y ~ period + (1 | herd)",
+            data,
+            family=families.Binomial(),
+            weights=data["size"].values,
+            control=ctrl
+        )
+        assert result.converged
+
+    def test_lmer_control_opt_ctrl(self) -> None:
+        ctrl = lmerControl(optCtrl={"disp": True})
+        options = ctrl.get_scipy_options()
+        assert options.get("disp") is True
+
+    def test_glmer_control_opt_ctrl(self) -> None:
+        ctrl = glmerControl(optCtrl={"disp": True})
+        options = ctrl.get_scipy_options()
+        assert options.get("disp") is True
+
+    def test_lmer_control_repr(self) -> None:
+        ctrl = LmerControl(optimizer="BFGS", maxiter=500)
+        repr_str = repr(ctrl)
+        assert "BFGS" in repr_str
+        assert "500" in repr_str
+
+    def test_glmer_control_repr(self) -> None:
+        ctrl = GlmerControl(optimizer="BFGS", maxiter=500, tolPwrss=1e-6)
+        repr_str = repr(ctrl)
+        assert "BFGS" in repr_str
+        assert "500" in repr_str
+        assert "1e-06" in repr_str
+
+
+class TestModelFrame:
+    def test_model_frame_basic(self) -> None:
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+        mf = result.model_frame()
+
+        assert isinstance(mf, pd.DataFrame)
+        assert "Reaction" in mf.columns
+        assert "Days" in mf.columns
+        assert "Subject" in mf.columns
+        assert len(mf) == len(SLEEPSTUDY)
+
+    def test_model_frame_multiple_random_effects(self) -> None:
+        np.random.seed(42)
+        n = 100
+        group1 = np.repeat(np.arange(10), 10).astype(str)
+        group2 = np.tile(np.arange(10), 10).astype(str)
+        x = np.random.randn(n)
+        y = np.random.randn(n)
+
+        data = pd.DataFrame({
+            "y": y,
+            "x": x,
+            "group1": group1,
+            "group2": group2
+        })
+
+        result = lmer("y ~ x + (1 | group1) + (1 | group2)", data)
+        mf = result.model_frame()
+
+        assert "y" in mf.columns
+        assert "x" in mf.columns
+        assert "group1" in mf.columns
+        assert "group2" in mf.columns
+        assert len(mf) == n
+
+    def test_model_frame_interaction(self) -> None:
+        np.random.seed(42)
+        n = 60
+        x1 = np.random.randn(n)
+        x2 = np.random.randn(n)
+        group = np.repeat(np.arange(6), 10).astype(str)
+        y = np.random.randn(n)
+
+        data = pd.DataFrame({
+            "y": y,
+            "x1": x1,
+            "x2": x2,
+            "group": group
+        })
+
+        result = lmer("y ~ x1 * x2 + (1 | group)", data)
+        mf = result.model_frame()
+
+        assert "y" in mf.columns
+        assert "x1" in mf.columns
+        assert "x2" in mf.columns
+        assert "group" in mf.columns
+
+    def test_model_frame_na_omit(self) -> None:
+        data = SLEEPSTUDY.copy()
+        data.loc[0, "Reaction"] = np.nan
+        data.loc[5, "Days"] = np.nan
+
+        result = lmer("Reaction ~ Days + (1 | Subject)", data, na_action="omit")
+        mf = result.model_frame()
+
+        assert len(mf) == len(SLEEPSTUDY) - 2
+        assert not mf["Reaction"].isna().any()
+        assert not mf["Days"].isna().any()
+
+    def test_glmer_model_frame(self) -> None:
+        data = CBPP.copy()
+        data["y"] = data["incidence"] / data["size"]
+
+        result = glmer(
+            "y ~ period + (1 | herd)",
+            data,
+            family=families.Binomial(),
+            weights=data["size"].values
+        )
+        mf = result.model_frame()
+
+        assert isinstance(mf, pd.DataFrame)
+        assert "y" in mf.columns
+        assert "period" in mf.columns
+        assert "herd" in mf.columns
+
+    def test_model_frame_random_slope(self) -> None:
+        result = lmer("Reaction ~ Days + (Days | Subject)", SLEEPSTUDY)
+        mf = result.model_frame()
+
+        assert "Reaction" in mf.columns
+        assert "Days" in mf.columns
+        assert "Subject" in mf.columns
+
+
+class TestRanefCondVar:
+    def test_ranef_condvar_basic(self) -> None:
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+
+        ranef_no_var = result.ranef(condVar=False)
+        assert isinstance(ranef_no_var, dict)
+
+        ranef_with_var = result.ranef(condVar=True)
+        assert hasattr(ranef_with_var, "condVar")
+        assert ranef_with_var.condVar is not None
+
+        assert "Subject" in ranef_with_var.values
+        assert "Subject" in ranef_with_var.condVar
+
+    def test_ranef_condvar_values(self) -> None:
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+        ranef_result = result.ranef(condVar=True)
+
+        cond_var = ranef_result.condVar["Subject"]["(Intercept)"]
+        assert len(cond_var) == result.ngrps()["Subject"]
+        assert np.all(cond_var >= 0)
+
+    def test_ranef_condvar_random_slope(self) -> None:
+        result = lmer("Reaction ~ Days + (Days | Subject)", SLEEPSTUDY)
+        ranef_result = result.ranef(condVar=True)
+
+        assert "(Intercept)" in ranef_result.condVar["Subject"]
+        assert "Days" in ranef_result.condVar["Subject"]
+
+        intercept_var = ranef_result.condVar["Subject"]["(Intercept)"]
+        slope_var = ranef_result.condVar["Subject"]["Days"]
+
+        assert len(intercept_var) == result.ngrps()["Subject"]
+        assert len(slope_var) == result.ngrps()["Subject"]
+        assert np.all(intercept_var >= 0)
+        assert np.all(slope_var >= 0)
+
+    def test_ranef_condvar_dict_interface(self) -> None:
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+        ranef_result = result.ranef(condVar=True)
+
+        assert "Subject" in ranef_result
+        assert list(ranef_result.keys()) == ["Subject"]
+
+        for group, terms in ranef_result.items():
+            assert "(Intercept)" in terms
+
+    def test_glmer_ranef_condvar(self) -> None:
+        data = CBPP.copy()
+        data["y"] = data["incidence"] / data["size"]
+
+        result = glmer(
+            "y ~ period + (1 | herd)",
+            data,
+            family=families.Binomial(),
+            weights=data["size"].values
+        )
+
+        ranef_result = result.ranef(condVar=True)
+        assert ranef_result.condVar is not None
+        assert "herd" in ranef_result.condVar
+
+        cond_var = ranef_result.condVar["herd"]["(Intercept)"]
+        assert len(cond_var) == result.ngrps()["herd"]
+        assert np.all(cond_var >= 0)
+
+    def test_ranef_result_export(self) -> None:
+        from mixedlm import RanefResult
+
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+        ranef_result = result.ranef(condVar=True)
+        assert isinstance(ranef_result, RanefResult)
+
+
+class TestModelTypeChecks:
+    def test_lmer_is_lmm(self) -> None:
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+        assert result.isLMM() is True
+        assert result.isGLMM() is False
+        assert result.isNLMM() is False
+
+    def test_glmer_is_glmm(self) -> None:
+        data = CBPP.copy()
+        data["y"] = data["incidence"] / data["size"]
+
+        result = glmer(
+            "y ~ period + (1 | herd)",
+            data,
+            family=families.Binomial(),
+            weights=data["size"].values
+        )
+        assert result.isGLMM() is True
+        assert result.isLMM() is False
+        assert result.isNLMM() is False
+
+    def test_nlmer_is_nlmm(self) -> None:
+        np.random.seed(42)
+        n_groups = 5
+        n_per_group = 20
+        x = np.tile(np.linspace(0, 10, n_per_group), n_groups)
+        groups = np.repeat([f"g{i}" for i in range(n_groups)], n_per_group)
+
+        asym = 200 + np.random.randn(n_groups) * 10
+        xmid = 5 + np.random.randn(n_groups) * 0.5
+        scal = 1.0
+
+        y = np.zeros(len(x))
+        for i in range(n_groups):
+            mask = groups == f"g{i}"
+            y[mask] = asym[i] / (1 + np.exp((xmid[i] - x[mask]) / scal))
+        y += np.random.randn(len(y)) * 5
+
+        data = pd.DataFrame({"y": y, "x": x, "group": groups})
+
+        result = nlmer(
+            model=nlme.SSlogis(),
+            data=data,
+            x_var="x",
+            y_var="y",
+            group_var="group",
+            random_params=[0, 1],
+            start={"Asym": 200, "xmid": 5, "scal": 1}
+        )
+        assert result.isNLMM() is True
+        assert result.isLMM() is False
+        assert result.isGLMM() is False
+
+
+class TestNpar:
+    def test_lmer_npar_simple(self) -> None:
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+        npar = result.npar()
+
+        n_fixed = 2
+        n_theta = 1
+        n_sigma = 1
+        assert npar == n_fixed + n_theta + n_sigma
+
+    def test_lmer_npar_random_slope(self) -> None:
+        result = lmer("Reaction ~ Days + (Days | Subject)", SLEEPSTUDY)
+        npar = result.npar()
+
+        n_fixed = 2
+        n_theta = 3
+        n_sigma = 1
+        assert npar == n_fixed + n_theta + n_sigma
+
+    def test_lmer_npar_multiple_random(self) -> None:
+        np.random.seed(42)
+        n = 100
+        group1 = np.repeat(np.arange(10), 10).astype(str)
+        group2 = np.tile(np.arange(10), 10).astype(str)
+        x = np.random.randn(n)
+        y = np.random.randn(n)
+
+        data = pd.DataFrame({
+            "y": y,
+            "x": x,
+            "group1": group1,
+            "group2": group2
+        })
+
+        result = lmer("y ~ x + (1 | group1) + (1 | group2)", data)
+        npar = result.npar()
+
+        n_fixed = 2
+        n_theta = 2
+        n_sigma = 1
+        assert npar == n_fixed + n_theta + n_sigma
+
+    def test_glmer_npar(self) -> None:
+        data = CBPP.copy()
+        data["y"] = data["incidence"] / data["size"]
+
+        result = glmer(
+            "y ~ period + (1 | herd)",
+            data,
+            family=families.Binomial(),
+            weights=data["size"].values
+        )
+        npar = result.npar()
+
+        n_fixed = 4
+        n_theta = 1
+        assert npar == n_fixed + n_theta
+
+    def test_nlmer_npar(self) -> None:
+        np.random.seed(42)
+        n_groups = 5
+        n_per_group = 20
+        x = np.tile(np.linspace(0, 10, n_per_group), n_groups)
+        groups = np.repeat([f"g{i}" for i in range(n_groups)], n_per_group)
+
+        asym = 200 + np.random.randn(n_groups) * 10
+        xmid = 5 + np.random.randn(n_groups) * 0.5
+        scal = 1.0
+
+        y = np.zeros(len(x))
+        for i in range(n_groups):
+            mask = groups == f"g{i}"
+            y[mask] = asym[i] / (1 + np.exp((xmid[i] - x[mask]) / scal))
+        y += np.random.randn(len(y)) * 5
+
+        data = pd.DataFrame({"y": y, "x": x, "group": groups})
+
+        result = nlmer(
+            model=nlme.SSlogis(),
+            data=data,
+            x_var="x",
+            y_var="y",
+            group_var="group",
+            random_params=[0, 1],
+            start={"Asym": 200, "xmid": 5, "scal": 1}
+        )
+        npar = result.npar()
+
+        n_fixed = 3
+        n_theta = 3
+        n_sigma = 1
+        assert npar == n_fixed + n_theta + n_sigma
+
+
+class TestDfResidual:
+    def test_lmer_df_residual(self) -> None:
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+        df_res = result.df_residual()
+
+        n = len(SLEEPSTUDY)
+        p = 2
+        assert df_res == n - p
+
+    def test_lmer_df_residual_multiple_fixed(self) -> None:
+        np.random.seed(42)
+        n = 100
+        x1 = np.random.randn(n)
+        x2 = np.random.randn(n)
+        group = np.repeat(np.arange(10), 10).astype(str)
+        y = np.random.randn(n)
+
+        data = pd.DataFrame({
+            "y": y,
+            "x1": x1,
+            "x2": x2,
+            "group": group
+        })
+
+        result = lmer("y ~ x1 + x2 + (1 | group)", data)
+        df_res = result.df_residual()
+
+        assert df_res == n - 3
+
+    def test_glmer_df_residual(self) -> None:
+        data = CBPP.copy()
+        data["y"] = data["incidence"] / data["size"]
+
+        result = glmer(
+            "y ~ period + (1 | herd)",
+            data,
+            family=families.Binomial(),
+            weights=data["size"].values
+        )
+        df_res = result.df_residual()
+
+        n = len(data)
+        p = 4
+        assert df_res == n - p
+
+    def test_nlmer_df_residual(self) -> None:
+        np.random.seed(42)
+        n_groups = 5
+        n_per_group = 20
+        x = np.tile(np.linspace(0, 10, n_per_group), n_groups)
+        groups = np.repeat([f"g{i}" for i in range(n_groups)], n_per_group)
+
+        asym = 200 + np.random.randn(n_groups) * 10
+        xmid = 5 + np.random.randn(n_groups) * 0.5
+        scal = 1.0
+
+        y = np.zeros(len(x))
+        for i in range(n_groups):
+            mask = groups == f"g{i}"
+            y[mask] = asym[i] / (1 + np.exp((xmid[i] - x[mask]) / scal))
+        y += np.random.randn(len(y)) * 5
+
+        data = pd.DataFrame({"y": y, "x": x, "group": groups})
+
+        result = nlmer(
+            model=nlme.SSlogis(),
+            data=data,
+            x_var="x",
+            y_var="y",
+            group_var="group",
+            random_params=[0, 1],
+            start={"Asym": 200, "xmid": 5, "scal": 1}
+        )
+
+        n = len(x)
+        p = 3
+        assert result.df_residual() == n - p
+
+
+try:
+    import matplotlib
+    HAS_MATPLOTLIB = True
+except ImportError:
+    HAS_MATPLOTLIB = False
+
+
+@pytest.mark.skipif(not HAS_MATPLOTLIB, reason="matplotlib not installed")
+class TestProfilePlotting:
+    def test_profile_plot_basic(self) -> None:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        from mixedlm.inference import profile_lmer
+
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+        profiles = profile_lmer(result, which=["Days"], n_points=10)
+
+        ax = profiles["Days"].plot()
+        assert ax is not None
+        plt.close("all")
+
+    def test_profile_plot_density(self) -> None:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        from mixedlm.inference import profile_lmer
+
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+        profiles = profile_lmer(result, which=["Days"], n_points=10)
+
+        ax = profiles["Days"].plot_density()
+        assert ax is not None
+        plt.close("all")
+
+    def test_plot_profiles(self) -> None:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        from mixedlm.inference import plot_profiles, profile_lmer
+
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+        profiles = profile_lmer(result, which=["(Intercept)", "Days"], n_points=10)
+
+        fig = plot_profiles(profiles)
+        assert fig is not None
+        plt.close("all")
+
+    def test_splom_profiles(self) -> None:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        from mixedlm.inference import profile_lmer, splom_profiles
+
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+        profiles = profile_lmer(result, which=["(Intercept)", "Days"], n_points=10)
+
+        fig = splom_profiles(profiles)
+        assert fig is not None
+        plt.close("all")
+
+    def test_profile_plot_no_ci(self) -> None:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        from mixedlm.inference import profile_lmer
+
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+        profiles = profile_lmer(result, which=["Days"], n_points=10)
+
+        ax = profiles["Days"].plot(show_ci=False, show_mle=False)
+        assert ax is not None
+        plt.close("all")
+
+
+class TestAccessors:
+    def test_lmer_weights_default(self) -> None:
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+        w = result.weights()
+
+        assert len(w) == len(SLEEPSTUDY)
+        assert np.allclose(w, 1.0)
+
+    def test_lmer_weights_custom(self) -> None:
+        weights = np.random.rand(len(SLEEPSTUDY)) + 0.5
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY, weights=weights)
+        w = result.weights()
+
+        assert len(w) == len(SLEEPSTUDY)
+        assert np.allclose(w, weights)
+
+    def test_lmer_offset_default(self) -> None:
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+        o = result.offset()
+
+        assert len(o) == len(SLEEPSTUDY)
+        assert np.allclose(o, 0.0)
+
+    def test_lmer_offset_custom(self) -> None:
+        offset = np.random.randn(len(SLEEPSTUDY))
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY, offset=offset)
+        o = result.offset()
+
+        assert len(o) == len(SLEEPSTUDY)
+        assert np.allclose(o, offset)
+
+    def test_glmer_weights(self) -> None:
+        data = CBPP.copy()
+        data["y"] = data["incidence"] / data["size"]
+        weights = data["size"].values
+
+        result = glmer(
+            "y ~ period + (1 | herd)",
+            data,
+            family=families.Binomial(),
+            weights=weights
+        )
+        w = result.weights()
+
+        assert len(w) == len(data)
+        assert np.allclose(w, weights)
+
+    def test_glmer_offset(self) -> None:
+        data = CBPP.copy()
+        data["y"] = data["incidence"] / data["size"]
+        offset = np.log(data["size"].values)
+
+        result = glmer(
+            "y ~ period + (1 | herd)",
+            data,
+            family=families.Binomial(),
+            offset=offset
+        )
+        o = result.offset()
+
+        assert len(o) == len(data)
+        assert np.allclose(o, offset)
+
+    def test_glmer_get_family(self) -> None:
+        from mixedlm.families.base import LogitLink
+
+        data = CBPP.copy()
+        data["y"] = data["incidence"] / data["size"]
+
+        result = glmer(
+            "y ~ period + (1 | herd)",
+            data,
+            family=families.Binomial(),
+            weights=data["size"].values
+        )
+        fam = result.get_family()
+
+        assert isinstance(fam, families.Binomial)
+        assert isinstance(fam.link, LogitLink)
+
+    def test_glmer_get_family_poisson(self) -> None:
+        from mixedlm.families.base import LogLink
+
+        np.random.seed(42)
+        n = 100
+        group = np.repeat(np.arange(10), 10).astype(str)
+        x = np.random.randn(n)
+        y = np.random.poisson(np.exp(0.5 + 0.3 * x), n).astype(float)
+
+        data = pd.DataFrame({"y": y, "x": x, "group": group})
+
+        result = glmer(
+            "y ~ x + (1 | group)",
+            data,
+            family=families.Poisson()
+        )
+        fam = result.get_family()
+
+        assert isinstance(fam, families.Poisson)
+        assert isinstance(fam.link, LogLink)
+
+    def test_weights_returns_copy(self) -> None:
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+        w1 = result.weights()
+        w2 = result.weights()
+
+        w1[0] = 999
+        assert w2[0] != 999
+
+    def test_offset_returns_copy(self) -> None:
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+        o1 = result.offset()
+        o2 = result.offset()
+
+        o1[0] = 999
+        assert o2[0] != 999
+
+
+@pytest.mark.skipif(not HAS_MATPLOTLIB, reason="matplotlib not installed")
+class TestQQmath:
+    def test_qqmath_basic(self) -> None:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+        fig = result.qqmath()
+
+        assert fig is not None
+        plt.close("all")
+
+    def test_qqmath_specific_term(self) -> None:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        result = lmer("Reaction ~ Days + (Days | Subject)", SLEEPSTUDY)
+        fig = result.qqmath(term="(Intercept)")
+
+        assert fig is not None
+        plt.close("all")
+
+    def test_qqmath_multiple_terms(self) -> None:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        result = lmer("Reaction ~ Days + (Days | Subject)", SLEEPSTUDY)
+        fig = result.qqmath()
+
+        assert fig is not None
+        plt.close("all")
+
+    def test_qqmath_glmer(self) -> None:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        data = CBPP.copy()
+        data["y"] = data["incidence"] / data["size"]
+
+        result = glmer(
+            "y ~ period + (1 | herd)",
+            data,
+            family=families.Binomial(),
+            weights=data["size"].values
+        )
+        fig = result.qqmath()
+
+        assert fig is not None
+        plt.close("all")
+
+    def test_qqmath_custom_figsize(self) -> None:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+        fig = result.qqmath(figsize=(8, 6))
+
+        assert fig is not None
+        plt.close("all")
+
+    def test_qqmath_invalid_group(self) -> None:
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+
+        with pytest.raises(ValueError, match="not found"):
+            result.qqmath(group="InvalidGroup")
+
+    def test_qqmath_invalid_term(self) -> None:
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+
+        with pytest.raises(ValueError, match="not found"):
+            result.qqmath(term="InvalidTerm")
+
+
+@pytest.mark.skipif(not HAS_MATPLOTLIB, reason="matplotlib not installed")
+class TestPlotDiagnostics:
+    def test_plot_basic_lmer(self) -> None:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+        fig = result.plot()
+
+        assert fig is not None
+        plt.close("all")
+
+    def test_plot_basic_glmer(self) -> None:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        data = CBPP.copy()
+        data["y"] = data["incidence"] / data["size"]
+
+        result = glmer(
+            "y ~ period + (1 | herd)",
+            data,
+            family=families.Binomial(),
+            weights=data["size"].values
+        )
+        fig = result.plot()
+
+        assert fig is not None
+        plt.close("all")
+
+    def test_plot_subset_which(self) -> None:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+        fig = result.plot(which=[1, 2])
+
+        assert fig is not None
+        plt.close("all")
+
+    def test_plot_single_which(self) -> None:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+        fig = result.plot(which=[1])
+
+        assert fig is not None
+        plt.close("all")
+
+    def test_plot_custom_figsize(self) -> None:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+        fig = result.plot(figsize=(10, 8))
+
+        assert fig is not None
+        plt.close("all")
+
+    def test_plot_all_panels(self) -> None:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+        fig = result.plot(which=[1, 2, 3, 4])
+
+        axes = fig.get_axes()
+        assert len(axes) == 4
+        plt.close("all")
+
+    def test_plot_no_random_effects_skips_panel4(self) -> None:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        from mixedlm.diagnostics.plots import plot_diagnostics
+
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+
+        fig = plot_diagnostics(result, which=[1, 2, 3])
+        axes = [ax for ax in fig.get_axes() if ax.get_visible()]
+        assert len(axes) == 3
+        plt.close("all")
+
+    def test_plot_ranef_function(self) -> None:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        from mixedlm.diagnostics import plot_ranef
+
+        result = lmer("Reaction ~ Days + (Days | Subject)", SLEEPSTUDY)
+        ax = plot_ranef(result, term="(Intercept)")
+
+        assert ax is not None
+        plt.close("all")
+
+    def test_plot_individual_functions(self) -> None:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        from mixedlm.diagnostics import (
+            plot_qq,
+            plot_resid_fitted,
+            plot_resid_group,
+            plot_scale_location,
+        )
+
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+
+        ax1 = plot_resid_fitted(result)
+        assert ax1 is not None
+
+        ax2 = plot_qq(result)
+        assert ax2 is not None
+
+        ax3 = plot_scale_location(result)
+        assert ax3 is not None
+
+        ax4 = plot_resid_group(result)
+        assert ax4 is not None
+
+        plt.close("all")
+
+
+class TestModularInterface:
+    def test_lFormula_basic(self) -> None:
+        from mixedlm import lFormula
+
+        parsed = lFormula("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+
+        assert parsed.n_obs == 180
+        assert parsed.n_fixed == 2
+        assert parsed.n_random == 18
+        assert parsed.n_theta == 1
+        assert parsed.X.shape == (180, 2)
+        assert parsed.y.shape == (180,)
+        assert parsed.REML is True
+
+    def test_lFormula_with_REML_false(self) -> None:
+        from mixedlm import lFormula
+
+        parsed = lFormula("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY, REML=False)
+
+        assert parsed.REML is False
+
+    def test_mkLmerDevfun_basic(self) -> None:
+        from mixedlm import lFormula, mkLmerDevfun
+
+        parsed = lFormula("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+        devfun = mkLmerDevfun(parsed)
+
+        start = devfun.get_start()
+        assert len(start) == 1
+        assert start[0] == 1.0
+
+        dev = devfun(start)
+        assert isinstance(dev, float)
+        assert dev > 0
+
+    def test_mkLmerDevfun_bounds(self) -> None:
+        from mixedlm import lFormula, mkLmerDevfun
+
+        parsed = lFormula("Reaction ~ Days + (Days | Subject)", SLEEPSTUDY)
+        devfun = mkLmerDevfun(parsed)
+
+        bounds = devfun.get_bounds()
+        assert len(bounds) == 3
+        assert bounds[0] == (0.0, None)
+        assert bounds[1] == (None, None)
+        assert bounds[2] == (0.0, None)
+
+    def test_optimizeLmer_basic(self) -> None:
+        from mixedlm import lFormula, mkLmerDevfun, optimizeLmer
+
+        parsed = lFormula("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+        devfun = mkLmerDevfun(parsed)
+        opt = optimizeLmer(devfun)
+
+        assert opt.converged
+        assert len(opt.theta) == 1
+        assert opt.deviance > 0
+
+    def test_mkLmerMod_basic(self) -> None:
+        from mixedlm import lFormula, mkLmerDevfun, mkLmerMod, optimizeLmer
+
+        parsed = lFormula("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+        devfun = mkLmerDevfun(parsed)
+        opt = optimizeLmer(devfun)
+        result = mkLmerMod(devfun, opt)
+
+        assert result.converged
+        assert len(result.fixef()) == 2
+        assert result.sigma > 0
+
+        ranefs = result.ranef()
+        assert "Subject" in ranefs
+
+    def test_modular_matches_lmer(self) -> None:
+        from mixedlm import lFormula, mkLmerDevfun, mkLmerMod, optimizeLmer
+
+        direct_result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+
+        parsed = lFormula("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+        devfun = mkLmerDevfun(parsed)
+        opt = optimizeLmer(devfun)
+        modular_result = mkLmerMod(devfun, opt)
+
+        direct_fixef = np.array(list(direct_result.fixef().values()))
+        modular_fixef = np.array(list(modular_result.fixef().values()))
+        assert np.allclose(direct_fixef, modular_fixef, rtol=1e-4)
+        assert np.allclose(direct_result.theta, modular_result.theta, rtol=1e-4)
+        assert np.allclose(direct_result.sigma, modular_result.sigma, rtol=1e-4)
+
+    def test_glFormula_basic(self) -> None:
+        from mixedlm import glFormula
+
+        data = CBPP.copy()
+        data["y"] = data["incidence"] / data["size"]
+
+        parsed = glFormula("y ~ period + (1 | herd)", data, family=families.Binomial())
+
+        assert parsed.n_obs == 56
+        assert parsed.n_fixed == 4
+        assert parsed.family is not None
+        assert parsed.n_theta == 1
+
+    def test_mkGlmerDevfun_basic(self) -> None:
+        from mixedlm import glFormula, mkGlmerDevfun
+
+        data = CBPP.copy()
+        data["y"] = data["incidence"] / data["size"]
+
+        parsed = glFormula("y ~ period + (1 | herd)", data, family=families.Binomial())
+        devfun = mkGlmerDevfun(parsed)
+
+        start = devfun.get_start()
+        assert len(start) == 1
+
+        dev = devfun(start)
+        assert isinstance(dev, float)
+
+    def test_optimizeGlmer_basic(self) -> None:
+        from mixedlm import glFormula, mkGlmerDevfun, optimizeGlmer
+
+        data = CBPP.copy()
+        data["y"] = data["incidence"] / data["size"]
+
+        parsed = glFormula("y ~ period + (1 | herd)", data, family=families.Binomial())
+        devfun = mkGlmerDevfun(parsed)
+        opt = optimizeGlmer(devfun)
+
+        assert opt.converged
+        assert len(opt.theta) == 1
+
+    def test_mkGlmerMod_basic(self) -> None:
+        from mixedlm import glFormula, mkGlmerDevfun, mkGlmerMod, optimizeGlmer
+
+        data = CBPP.copy()
+        data["y"] = data["incidence"] / data["size"]
+
+        parsed = glFormula("y ~ period + (1 | herd)", data, family=families.Binomial())
+        devfun = mkGlmerDevfun(parsed)
+        opt = optimizeGlmer(devfun)
+        result = mkGlmerMod(devfun, opt)
+
+        assert result.converged
+        assert len(result.fixef()) == 4
+
+        ranefs = result.ranef()
+        assert "herd" in ranefs
+
+    def test_glmer_modular_matches_glmer(self) -> None:
+        from mixedlm import glFormula, mkGlmerDevfun, mkGlmerMod, optimizeGlmer
+
+        data = CBPP.copy()
+        data["y"] = data["incidence"] / data["size"]
+
+        direct_result = glmer("y ~ period + (1 | herd)", data, family=families.Binomial())
+
+        parsed = glFormula("y ~ period + (1 | herd)", data, family=families.Binomial())
+        devfun = mkGlmerDevfun(parsed)
+        opt = optimizeGlmer(devfun)
+        modular_result = mkGlmerMod(devfun, opt)
+
+        direct_fixef = np.array(list(direct_result.fixef().values()))
+        modular_fixef = np.array(list(modular_result.fixef().values()))
+        assert np.allclose(direct_fixef, modular_fixef, rtol=1e-3)
+        assert np.allclose(direct_result.theta, modular_result.theta, rtol=1e-3)
+
+    def test_custom_optimizer_lmer(self) -> None:
+        from mixedlm import lFormula, mkLmerDevfun, mkLmerMod, OptimizeResult
+
+        parsed = lFormula("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+        devfun = mkLmerDevfun(parsed)
+
+        from scipy.optimize import minimize
+
+        start = devfun.get_start()
+        bounds = devfun.get_bounds()
+        result = minimize(devfun, start, method="Nelder-Mead", options={"maxiter": 500})
+
+        opt = OptimizeResult(
+            theta=result.x,
+            deviance=result.fun,
+            converged=result.success,
+            n_iter=result.nit,
+            message="Custom optimizer",
+        )
+
+        model_result = mkLmerMod(devfun, opt)
+        assert len(model_result.fixef()) == 2
+
+    def test_lFormula_with_weights(self) -> None:
+        from mixedlm import lFormula
+
+        weights = np.ones(180)
+        weights[:90] = 2.0
+
+        parsed = lFormula(
+            "Reaction ~ Days + (1 | Subject)",
+            SLEEPSTUDY,
+            weights=weights
+        )
+
+        assert np.allclose(parsed.matrices.weights[:90], 2.0)
+        assert np.allclose(parsed.matrices.weights[90:], 1.0)
+
+    def test_lFormula_with_offset(self) -> None:
+        from mixedlm import lFormula
+
+        offset = np.zeros(180)
+        offset[:90] = 10.0
+
+        parsed = lFormula(
+            "Reaction ~ Days + (1 | Subject)",
+            SLEEPSTUDY,
+            offset=offset
+        )
+
+        assert np.allclose(parsed.matrices.offset[:90], 10.0)
+        assert np.allclose(parsed.matrices.offset[90:], 0.0)
+
+    def test_parsed_formula_properties(self) -> None:
+        from mixedlm import lFormula
+
+        parsed = lFormula("Reaction ~ Days + (Days | Subject)", SLEEPSTUDY)
+
+        assert parsed.n_theta == 3
+        assert parsed.Z.shape[1] == 36
+
+
+class TestGetME:
+    def test_getME_X(self) -> None:
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+        X = result.getME("X")
+
+        assert X.shape == (180, 2)
+        assert np.allclose(X[:, 0], 1.0)
+
+    def test_getME_Z(self) -> None:
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+        Z = result.getME("Z")
+
+        assert Z.shape == (180, 18)
+
+    def test_getME_y(self) -> None:
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+        y = result.getME("y")
+
+        assert len(y) == 180
+        assert np.allclose(y, SLEEPSTUDY["Reaction"].values)
+
+    def test_getME_beta(self) -> None:
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+        beta = result.getME("beta")
+
+        assert len(beta) == 2
+        assert np.allclose(beta, list(result.fixef().values()))
+
+    def test_getME_theta(self) -> None:
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+        theta = result.getME("theta")
+
+        assert len(theta) == 1
+        assert theta[0] >= 0
+
+    def test_getME_Lambda(self) -> None:
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+        Lambda = result.getME("Lambda")
+
+        assert Lambda.shape == (18, 18)
+
+    def test_getME_u_b(self) -> None:
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+        u = result.getME("u")
+        b = result.getME("b")
+
+        assert len(u) == 18
+        assert np.allclose(u, b)
+
+    def test_getME_sigma(self) -> None:
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+        sigma = result.getME("sigma")
+
+        assert sigma > 0
+        assert sigma == result.sigma
+
+    def test_getME_dimensions(self) -> None:
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+
+        assert result.getME("n") == 180
+        assert result.getME("n_obs") == 180
+        assert result.getME("p") == 2
+        assert result.getME("n_fixed") == 2
+        assert result.getME("q") == 18
+        assert result.getME("n_random") == 18
+
+    def test_getME_lower(self) -> None:
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+        lower = result.getME("lower")
+
+        assert len(lower) == 1
+        assert lower[0] == 0.0
+
+    def test_getME_lower_correlated(self) -> None:
+        result = lmer("Reaction ~ Days + (Days | Subject)", SLEEPSTUDY)
+        lower = result.getME("lower")
+
+        assert len(lower) == 3
+        assert lower[0] == 0.0
+        assert lower[1] == -np.inf
+        assert lower[2] == 0.0
+
+    def test_getME_weights_offset(self) -> None:
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+
+        weights = result.getME("weights")
+        assert len(weights) == 180
+        assert np.allclose(weights, 1.0)
+
+        offset = result.getME("offset")
+        assert len(offset) == 180
+        assert np.allclose(offset, 0.0)
+
+    def test_getME_REML_deviance(self) -> None:
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+
+        assert result.getME("REML") is True
+        assert result.getME("deviance") > 0
+
+    def test_getME_flist_cnms(self) -> None:
+        result = lmer("Reaction ~ Days + (Days | Subject)", SLEEPSTUDY)
+
+        flist = result.getME("flist")
+        assert flist == ["Subject"]
+
+        cnms = result.getME("cnms")
+        assert "Subject" in cnms
+        assert "(Intercept)" in cnms["Subject"]
+        assert "Days" in cnms["Subject"]
+
+    def test_getME_Gp(self) -> None:
+        result = lmer("Reaction ~ Days + (Days | Subject)", SLEEPSTUDY)
+        Gp = result.getME("Gp")
+
+        assert len(Gp) == 2
+        assert Gp[0] == 0
+        assert Gp[1] == 36
+
+    def test_getME_invalid(self) -> None:
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+
+        with pytest.raises(ValueError, match="Unknown component name"):
+            result.getME("invalid_name")
+
+    def test_getME_glmer(self) -> None:
+        data = CBPP.copy()
+        data["y"] = data["incidence"] / data["size"]
+
+        result = glmer("y ~ period + (1 | herd)", data, family=families.Binomial())
+
+        X = result.getME("X")
+        assert X.shape[1] == 4
+
+        family = result.getME("family")
+        assert isinstance(family, families.Binomial)
+
+
+class TestUpdate:
+    def test_update_REML(self) -> None:
+        result1 = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+        assert result1.REML is True
+
+        result2 = result1.update(REML=False)
+        assert result2.REML is False
+
+    def test_update_same_formula(self) -> None:
+        result1 = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+        result2 = result1.update()
+
+        fixef1 = np.array(list(result1.fixef().values()))
+        fixef2 = np.array(list(result2.fixef().values()))
+        assert np.allclose(fixef1, fixef2, rtol=1e-4)
+
+    def test_update_new_formula(self) -> None:
+        data = SLEEPSTUDY.copy()
+        data["Days2"] = data["Days"] ** 2
+
+        result1 = lmer("Reaction ~ Days + (1 | Subject)", data)
+        result2 = result1.update("Reaction ~ Days + Days2 + (1 | Subject)", data=data)
+
+        assert len(result1.fixef()) == 2
+        assert len(result2.fixef()) == 3
+
+    def test_update_new_data(self) -> None:
+        result1 = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+
+        subset = SLEEPSTUDY[SLEEPSTUDY["Days"] <= 5].copy()
+        result2 = result1.update(data=subset)
+
+        assert result2.getME("n") < result1.getME("n")
+
+    def test_update_glmer_family(self) -> None:
+        data = CBPP.copy()
+        data["y"] = data["incidence"] / data["size"]
+
+        result1 = glmer("y ~ period + (1 | herd)", data, family=families.Binomial())
+
+        data["count"] = np.round(data["incidence"]).astype(int)
+        result2 = result1.update(
+            formula="count ~ period + (1 | herd)",
+            data=data,
+            family=families.Poisson()
+        )
+
+        assert isinstance(result1.getME("family"), families.Binomial)
+        assert isinstance(result2.getME("family"), families.Poisson)
+
+    def test_update_with_weights(self) -> None:
+        result1 = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+
+        weights = np.ones(180)
+        weights[:90] = 2.0
+        result2 = result1.update(weights=weights)
+
+        w1 = result1.getME("weights")
+        w2 = result2.getME("weights")
+
+        assert np.allclose(w1, 1.0)
+        assert np.allclose(w2[:90], 2.0)
+
+    def test_update_formula_dot_syntax_add(self) -> None:
+        data = SLEEPSTUDY.copy()
+        data["Days2"] = data["Days"] ** 2
+
+        result1 = lmer("Reaction ~ Days + (1 | Subject)", data)
+        result2 = result1.update(". ~ . + Days2", data=data)
+
+        assert len(result1.fixef()) == 2
+        assert len(result2.fixef()) == 3
+
+
+class TestRefit:
+    def test_refit_same_response(self) -> None:
+        result1 = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+
+        newresp = SLEEPSTUDY["Reaction"].values.copy()
+        result2 = result1.refit(newresp)
+
+        fixef1 = np.array(list(result1.fixef().values()))
+        fixef2 = np.array(list(result2.fixef().values()))
+        assert np.allclose(fixef1, fixef2, rtol=1e-4)
+
+    def test_refit_new_response(self) -> None:
+        result1 = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+
+        np.random.seed(42)
+        newresp = SLEEPSTUDY["Reaction"].values + np.random.normal(0, 50, 180)
+        result2 = result1.refit(newresp)
+
+        fixef1 = np.array(list(result1.fixef().values()))
+        fixef2 = np.array(list(result2.fixef().values()))
+        assert not np.allclose(fixef1, fixef2, rtol=1e-4)
+
+    def test_refit_wrong_size(self) -> None:
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+
+        with pytest.raises(ValueError, match="length"):
+            result.refit(np.array([1.0, 2.0, 3.0]))
+
+    def test_refit_preserves_structure(self) -> None:
+        result1 = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+
+        newresp = SLEEPSTUDY["Reaction"].values + 100
+        result2 = result1.refit(newresp)
+
+        assert result1.getME("n") == result2.getME("n")
+        assert result1.getME("p") == result2.getME("p")
+        assert result1.getME("q") == result2.getME("q")
+
+    def test_refit_multiple_times(self) -> None:
+        result1 = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+
+        newresp = SLEEPSTUDY["Reaction"].values.copy()
+        result2 = result1.refit(newresp)
+        result3 = result2.refit(newresp)
+
+        fixef2 = np.array(list(result2.fixef().values()))
+        fixef3 = np.array(list(result3.fixef().values()))
+        assert np.allclose(fixef2, fixef3, rtol=1e-4)
+
+    def test_refit_glmer_basic(self) -> None:
+        data = CBPP.copy()
+        data["y"] = data["incidence"] / data["size"]
+
+        result1 = glmer("y ~ period + (1 | herd)", data, family=families.Binomial())
+
+        np.random.seed(42)
+        newresp = np.clip(data["y"].values + np.random.normal(0, 0.1, len(data)), 0.01, 0.99)
+        result2 = result1.refit(newresp)
+
+        assert result1.getME("n") == result2.getME("n")
+
+    def test_refit_glmer_wrong_size(self) -> None:
+        data = CBPP.copy()
+        data["y"] = data["incidence"] / data["size"]
+
+        result = glmer("y ~ period + (1 | herd)", data, family=families.Binomial())
+
+        with pytest.raises(ValueError, match="length"):
+            result.refit(np.array([0.1, 0.2, 0.3]))
+
+    def test_refit_simulation_workflow(self) -> None:
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+
+        np.random.seed(123)
+        fixef_samples = []
+        for _ in range(3):
+            newresp = SLEEPSTUDY["Reaction"].values + np.random.normal(0, 30, 180)
+            refit_result = result.refit(newresp)
+            fixef_samples.append(list(refit_result.fixef().values()))
+
+        fixef_array = np.array(fixef_samples)
+        assert fixef_array.shape == (3, 2)
+
+
+class TestRefitML:
+    def test_refitML_basic(self) -> None:
+        result_reml = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY, REML=True)
+        assert result_reml.REML is True
+
+        result_ml = result_reml.refitML()
+        assert result_ml.REML is False
+
+    def test_refitML_preserves_structure(self) -> None:
+        result_reml = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY, REML=True)
+        result_ml = result_reml.refitML()
+
+        assert result_reml.getME("n") == result_ml.getME("n")
+        assert result_reml.getME("p") == result_ml.getME("p")
+        assert result_reml.getME("q") == result_ml.getME("q")
+
+    def test_refitML_different_estimates(self) -> None:
+        result_reml = lmer("Reaction ~ Days + (Days | Subject)", SLEEPSTUDY, REML=True)
+        result_ml = result_reml.refitML()
+
+        theta_reml = result_reml.theta
+        theta_ml = result_ml.theta
+
+        assert result_reml.REML is True
+        assert result_ml.REML is False
+        assert theta_reml.shape == theta_ml.shape
+
+    def test_refitML_already_ML_returns_self(self) -> None:
+        result_ml = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY, REML=False)
+        result_ml2 = result_ml.refitML()
+
+        assert result_ml is result_ml2
+
+    def test_refitML_for_LRT(self) -> None:
+        data = SLEEPSTUDY.copy()
+        data["Days2"] = data["Days"] ** 2
+
+        result_full = lmer("Reaction ~ Days + Days2 + (1 | Subject)", data, REML=True)
+        result_reduced = lmer("Reaction ~ Days + (1 | Subject)", data, REML=True)
+
+        ml_full = result_full.refitML()
+        ml_reduced = result_reduced.refitML()
+
+        ll_full = ml_full.logLik().value
+        ll_reduced = ml_reduced.logLik().value
+
+        assert ll_full > ll_reduced
 
 
 if __name__ == "__main__":

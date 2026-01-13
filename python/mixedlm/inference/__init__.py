@@ -8,8 +8,10 @@ from mixedlm.inference.bootstrap import (
 from mixedlm.inference.drop1 import Drop1Result, drop1_glmer, drop1_lmer
 from mixedlm.inference.profile import (
     ProfileResult,
+    plot_profiles,
     profile_glmer,
     profile_lmer,
+    splom_profiles,
 )
 
 __all__ = [
@@ -24,6 +26,8 @@ __all__ = [
     "ProfileResult",
     "profile_lmer",
     "profile_glmer",
+    "plot_profiles",
+    "splom_profiles",
     "BootstrapResult",
     "bootstrap_lmer",
     "bootstrap_glmer",

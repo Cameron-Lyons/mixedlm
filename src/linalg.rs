@@ -2,8 +2,8 @@ use nalgebra::DMatrix;
 use nalgebra_sparse::csc::CscMatrix;
 use nalgebra_sparse::factorization::CscCholesky;
 use ndarray::ArrayView2;
-use pyo3::exceptions::PyValueError;
 use pyo3::PyResult;
+use pyo3::exceptions::PyValueError;
 use thiserror::Error;
 
 #[derive(Error, Debug, Clone)]

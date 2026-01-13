@@ -451,3 +451,164 @@ def update_formula(old_formula: Formula, new_formula_str: str) -> Formula:
 
     new_fixed = FixedTerm(terms=tuple(new_fixed_terms), has_intercept=has_intercept)
     return Formula(response=response, fixed=new_fixed, random=tuple(new_random))
+
+
+def nobars(formula: Formula | str) -> Formula:
+    """Remove random effects (bar terms) from a formula.
+
+    Returns a new formula containing only the fixed effects part,
+    with all random effects removed.
+
+    Parameters
+    ----------
+    formula : Formula or str
+        A Formula object or formula string to process.
+
+    Returns
+    -------
+    Formula
+        A new formula with random effects removed.
+
+    Examples
+    --------
+    >>> f = parse_formula("y ~ x + (1 | group)")
+    >>> nobars(f)
+    Formula(response='y', fixed=..., random=())
+
+    >>> nobars("y ~ x + (x | group) + (1 | subject)")
+    Formula(response='y', fixed=..., random=())
+    """
+    if isinstance(formula, str):
+        formula = parse_formula(formula)
+
+    return Formula(
+        response=formula.response,
+        fixed=formula.fixed,
+        random=(),
+    )
+
+
+def findbars(formula: Formula | str) -> tuple[RandomTerm, ...]:
+    """Find and return the random effects (bar terms) from a formula.
+
+    Extracts all random effect specifications from a mixed model formula.
+
+    Parameters
+    ----------
+    formula : Formula or str
+        A Formula object or formula string to process.
+
+    Returns
+    -------
+    tuple of RandomTerm
+        The random effect terms found in the formula.
+
+    Examples
+    --------
+    >>> f = parse_formula("y ~ x + (1 | group)")
+    >>> bars = findbars(f)
+    >>> len(bars)
+    1
+    >>> bars[0].grouping
+    'group'
+
+    >>> bars = findbars("y ~ x + (x | group) + (1 | subject)")
+    >>> len(bars)
+    2
+    """
+    if isinstance(formula, str):
+        formula = parse_formula(formula)
+
+    return formula.random
+
+
+def subbars(formula: Formula | str) -> str:
+    """Substitute random effects with fixed effects equivalents.
+
+    Converts random effect terms to their fixed effect equivalents.
+    For example, `(1 + x | group)` becomes `group + group:x`.
+
+    Parameters
+    ----------
+    formula : Formula or str
+        A Formula object or formula string to process.
+
+    Returns
+    -------
+    str
+        A formula string with random effects converted to fixed effects.
+
+    Examples
+    --------
+    >>> subbars("y ~ x + (1 | group)")
+    'y ~ x + group'
+
+    >>> subbars("y ~ x + (x | group)")
+    'y ~ x + group + group:x'
+    """
+    if isinstance(formula, str):
+        formula = parse_formula(formula)
+
+    fixed_parts: list[str] = []
+
+    if formula.fixed.has_intercept:
+        pass
+    else:
+        fixed_parts.append("0")
+
+    for term in formula.fixed.terms:
+        if isinstance(term, InterceptTerm):
+            continue
+        elif isinstance(term, VariableTerm):
+            fixed_parts.append(term.name)
+        elif isinstance(term, InteractionTerm):
+            fixed_parts.append(":".join(term.variables))
+
+    for rterm in formula.random:
+        grouping = (
+            "/".join(rterm.grouping)
+            if isinstance(rterm.grouping, tuple)
+            else rterm.grouping
+        )
+
+        if rterm.has_intercept:
+            fixed_parts.append(grouping)
+
+        for term in rterm.expr:
+            if isinstance(term, InterceptTerm):
+                continue
+            elif isinstance(term, VariableTerm):
+                fixed_parts.append(f"{grouping}:{term.name}")
+            elif isinstance(term, InteractionTerm):
+                interaction = ":".join(term.variables)
+                fixed_parts.append(f"{grouping}:{interaction}")
+
+    rhs = " + ".join(fixed_parts) if fixed_parts else "1"
+    return f"{formula.response} ~ {rhs}"
+
+
+def is_mixed_formula(formula: Formula | str) -> bool:
+    """Check if a formula contains random effects.
+
+    Parameters
+    ----------
+    formula : Formula or str
+        A Formula object or formula string to check.
+
+    Returns
+    -------
+    bool
+        True if the formula contains random effects, False otherwise.
+
+    Examples
+    --------
+    >>> is_mixed_formula("y ~ x + (1 | group)")
+    True
+
+    >>> is_mixed_formula("y ~ x")
+    False
+    """
+    if isinstance(formula, str):
+        formula = parse_formula(formula)
+
+    return len(formula.random) > 0

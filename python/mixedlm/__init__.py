@@ -1,8 +1,35 @@
 from mixedlm import diagnostics, families, inference, nlme
-from mixedlm.formula.parser import parse_formula
+from mixedlm.formula.parser import findbars, is_mixed_formula, nobars, parse_formula, subbars
 from mixedlm.inference.anova import AnovaResult, anova
+from mixedlm.models.control import GlmerControl, LmerControl, glmerControl, lmerControl
 from mixedlm.models.glmer import GlmerMod, GlmerVarCorr, glmer
-from mixedlm.models.lmer import LmerMod, LogLik, PredictResult, VarCorr, VarCorrGroup, lmer
+from mixedlm.models.lmer import (
+    LmerMod,
+    LogLik,
+    ModelTerms,
+    PredictResult,
+    RanefResult,
+    RePCA,
+    RePCAGroup,
+    VarCorr,
+    VarCorrGroup,
+    lmer,
+)
+from mixedlm.models.modular import (
+    GlmerDevfun,
+    GlmerParsedFormula,
+    LmerDevfun,
+    LmerParsedFormula,
+    OptimizeResult,
+    glFormula,
+    lFormula,
+    mkGlmerDevfun,
+    mkGlmerMod,
+    mkLmerDevfun,
+    mkLmerMod,
+    optimizeGlmer,
+    optimizeLmer,
+)
 from mixedlm.models.nlmer import NlmerMod, nlmer
 
 __version__ = "0.1.0"
@@ -10,20 +37,45 @@ __version__ = "0.1.0"
 __all__ = [
     "lmer",
     "LmerMod",
+    "lmerControl",
+    "LmerControl",
     "glmer",
     "GlmerMod",
+    "glmerControl",
+    "GlmerControl",
     "nlmer",
     "NlmerMod",
     "anova",
     "AnovaResult",
     "parse_formula",
+    "nobars",
+    "findbars",
+    "subbars",
+    "is_mixed_formula",
     "families",
     "nlme",
     "inference",
     "diagnostics",
     "LogLik",
+    "ModelTerms",
     "PredictResult",
+    "RanefResult",
     "VarCorr",
     "VarCorrGroup",
     "GlmerVarCorr",
+    "RePCA",
+    "RePCAGroup",
+    "lFormula",
+    "glFormula",
+    "mkLmerDevfun",
+    "mkGlmerDevfun",
+    "optimizeLmer",
+    "optimizeGlmer",
+    "mkLmerMod",
+    "mkGlmerMod",
+    "LmerParsedFormula",
+    "GlmerParsedFormula",
+    "LmerDevfun",
+    "GlmerDevfun",
+    "OptimizeResult",
 ]

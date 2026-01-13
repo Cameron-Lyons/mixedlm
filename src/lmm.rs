@@ -1,10 +1,9 @@
 use faer::linalg::solvers::{Llt, Solve};
-use faer::prelude::*;
 use faer::{Mat, Side};
 use nalgebra_sparse::csc::CscMatrix;
 use ndarray::{ArrayView1, ArrayView2};
-use pyo3::prelude::*;
 use pyo3::PyResult;
+use pyo3::prelude::*;
 
 use crate::linalg::LinalgError;
 
@@ -121,7 +120,11 @@ pub fn profiled_deviance_impl(
     let p = x_data.ncols();
     let q = z_shape.1;
 
-    let y_adj: Vec<f64> = y.iter().zip(offset.iter()).map(|(yi, oi)| yi - oi).collect();
+    let y_adj: Vec<f64> = y
+        .iter()
+        .zip(offset.iter())
+        .map(|(yi, oi)| yi - oi)
+        .collect();
     let sqrt_w: Vec<f64> = weights.iter().map(|w| w.sqrt()).collect();
 
     let x = Mat::from_fn(n, p, |i, j| x_data[[i, j]]);

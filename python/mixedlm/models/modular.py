@@ -1,0 +1,805 @@
+from __future__ import annotations
+
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+import numpy as np
+from numpy.typing import NDArray
+
+if TYPE_CHECKING:
+    import pandas as pd
+
+    from mixedlm.estimation.laplace import GLMMOptimizer
+    from mixedlm.families.base import Family
+    from mixedlm.formula.terms import Formula
+    from mixedlm.models.control import GlmerControl, LmerControl
+    from mixedlm.models.glmer import GlmerResult
+    from mixedlm.models.lmer import LmerResult
+
+from mixedlm.estimation.reml import (
+    LMMOptimizer,
+    _count_theta,
+)
+from mixedlm.formula.parser import parse_formula
+from mixedlm.matrices.design import ModelMatrices, build_model_matrices
+
+
+@dataclass
+class LmerParsedFormula:
+    """Result of lFormula - parsed formula and model matrices for LMM.
+
+    This class contains all the information needed to construct the
+    deviance function and fit a linear mixed model.
+
+    Attributes
+    ----------
+    formula : Formula
+        The parsed formula object.
+    matrices : ModelMatrices
+        Model matrices including X (fixed effects), Z (random effects),
+        y (response), weights, offset, and random effect structures.
+    REML : bool
+        Whether to use REML estimation.
+    """
+
+    formula: Formula
+    matrices: ModelMatrices
+    REML: bool
+
+    @property
+    def X(self) -> NDArray[np.floating]:
+        """Fixed effects design matrix."""
+        return self.matrices.X
+
+    @property
+    def Z(self):
+        """Random effects design matrix (sparse)."""
+        return self.matrices.Z
+
+    @property
+    def y(self) -> NDArray[np.floating]:
+        """Response vector."""
+        return self.matrices.y
+
+    @property
+    def n_obs(self) -> int:
+        """Number of observations."""
+        return self.matrices.n_obs
+
+    @property
+    def n_fixed(self) -> int:
+        """Number of fixed effects."""
+        return self.matrices.n_fixed
+
+    @property
+    def n_random(self) -> int:
+        """Number of random effects."""
+        return self.matrices.n_random
+
+    @property
+    def n_theta(self) -> int:
+        """Number of variance component parameters."""
+        return _count_theta(self.matrices.random_structures)
+
+
+@dataclass
+class GlmerParsedFormula:
+    """Result of glFormula - parsed formula and model matrices for GLMM.
+
+    This class contains all the information needed to construct the
+    deviance function and fit a generalized linear mixed model.
+
+    Attributes
+    ----------
+    formula : Formula
+        The parsed formula object.
+    matrices : ModelMatrices
+        Model matrices including X (fixed effects), Z (random effects),
+        y (response), weights, offset, and random effect structures.
+    family : Family
+        The GLM family (e.g., Binomial, Poisson).
+    """
+
+    formula: Formula
+    matrices: ModelMatrices
+    family: Family
+
+    @property
+    def X(self) -> NDArray[np.floating]:
+        """Fixed effects design matrix."""
+        return self.matrices.X
+
+    @property
+    def Z(self):
+        """Random effects design matrix (sparse)."""
+        return self.matrices.Z
+
+    @property
+    def y(self) -> NDArray[np.floating]:
+        """Response vector."""
+        return self.matrices.y
+
+    @property
+    def n_obs(self) -> int:
+        """Number of observations."""
+        return self.matrices.n_obs
+
+    @property
+    def n_fixed(self) -> int:
+        """Number of fixed effects."""
+        return self.matrices.n_fixed
+
+    @property
+    def n_random(self) -> int:
+        """Number of random effects."""
+        return self.matrices.n_random
+
+    @property
+    def n_theta(self) -> int:
+        """Number of variance component parameters."""
+        return _count_theta(self.matrices.random_structures)
+
+
+@dataclass
+class LmerDevfun:
+    """Deviance function for linear mixed models.
+
+    This class wraps the profiled deviance function and provides
+    methods for evaluation and optimization.
+
+    Attributes
+    ----------
+    parsed : LmerParsedFormula
+        The parsed formula result from lFormula.
+    optimizer : LMMOptimizer
+        The optimizer object for computing deviance.
+    """
+
+    parsed: LmerParsedFormula
+    optimizer: LMMOptimizer
+
+    def __call__(self, theta: NDArray[np.floating]) -> float:
+        """Evaluate the deviance function at theta.
+
+        Parameters
+        ----------
+        theta : NDArray
+            Variance component parameters (relative covariance factors).
+
+        Returns
+        -------
+        float
+            The profiled deviance (or REML criterion).
+        """
+        return self.optimizer.objective(theta)
+
+    def get_start(self) -> NDArray[np.floating]:
+        """Get default starting values for theta.
+
+        Returns
+        -------
+        NDArray
+            Starting values (ones by default).
+        """
+        return self.optimizer.get_start_theta()
+
+    def get_bounds(self) -> list[tuple[float | None, float | None]]:
+        """Get bounds for theta parameters.
+
+        Diagonal elements of the Cholesky factor must be non-negative.
+
+        Returns
+        -------
+        list of tuple
+            Bounds for each theta parameter.
+        """
+        bounds: list[tuple[float | None, float | None]] = []
+        for struct in self.parsed.matrices.random_structures:
+            q = struct.n_terms
+            if struct.correlated:
+                for i in range(q):
+                    for j in range(i + 1):
+                        if i == j:
+                            bounds.append((0.0, None))
+                        else:
+                            bounds.append((None, None))
+            else:
+                for _ in range(q):
+                    bounds.append((0.0, None))
+        return bounds
+
+
+@dataclass
+class GlmerDevfun:
+    """Deviance function for generalized linear mixed models.
+
+    This class wraps the Laplace approximation deviance function
+    and provides methods for evaluation and optimization.
+
+    Attributes
+    ----------
+    parsed : GlmerParsedFormula
+        The parsed formula result from glFormula.
+    optimizer : GLMMOptimizer
+        The optimizer object for computing deviance.
+    """
+
+    parsed: GlmerParsedFormula
+    optimizer: GLMMOptimizer
+
+    def __call__(self, theta: NDArray[np.floating]) -> float:
+        """Evaluate the deviance function at theta.
+
+        Parameters
+        ----------
+        theta : NDArray
+            Variance component parameters (relative covariance factors).
+
+        Returns
+        -------
+        float
+            The Laplace approximation to the deviance.
+        """
+        return self.optimizer.objective(theta)
+
+    def get_start(self) -> NDArray[np.floating]:
+        """Get default starting values for theta.
+
+        Returns
+        -------
+        NDArray
+            Starting values (ones by default).
+        """
+        return self.optimizer.get_start_theta()
+
+    def get_bounds(self) -> list[tuple[float | None, float | None]]:
+        """Get bounds for theta parameters.
+
+        Returns
+        -------
+        list of tuple
+            Bounds for each theta parameter.
+        """
+        bounds: list[tuple[float | None, float | None]] = []
+        for struct in self.parsed.matrices.random_structures:
+            q = struct.n_terms
+            if struct.correlated:
+                for i in range(q):
+                    for j in range(i + 1):
+                        if i == j:
+                            bounds.append((0.0, None))
+                        else:
+                            bounds.append((None, None))
+            else:
+                for _ in range(q):
+                    bounds.append((0.0, None))
+        return bounds
+
+
+@dataclass
+class OptimizeResult:
+    """Result of optimization for mixed models.
+
+    Attributes
+    ----------
+    theta : NDArray
+        Optimized variance component parameters.
+    deviance : float
+        Final deviance value.
+    converged : bool
+        Whether optimization converged.
+    n_iter : int
+        Number of iterations.
+    message : str
+        Optimization message.
+    """
+
+    theta: NDArray[np.floating]
+    deviance: float
+    converged: bool
+    n_iter: int
+    message: str
+
+
+def lFormula(
+    formula: str,
+    data: pd.DataFrame,
+    REML: bool = True,
+    weights: NDArray[np.floating] | None = None,
+    offset: NDArray[np.floating] | None = None,
+    na_action: str | None = "omit",
+    contrasts: dict[str, str | NDArray[np.floating]] | None = None,
+) -> LmerParsedFormula:
+    """Parse a formula and create model matrices for a linear mixed model.
+
+    This is the first step in the modular interface for fitting LMMs.
+    It parses the formula and builds the design matrices without
+    performing any optimization.
+
+    Parameters
+    ----------
+    formula : str
+        Model formula in lme4 syntax (e.g., "y ~ x + (1|group)").
+    data : DataFrame
+        Data containing the variables in the formula.
+    REML : bool, default True
+        Whether to use REML estimation (stored for later use).
+    weights : array-like, optional
+        Prior weights for observations.
+    offset : array-like, optional
+        Offset term for the linear predictor.
+    na_action : str, optional
+        How to handle missing values: "omit", "exclude", or "fail".
+    contrasts : dict, optional
+        Contrast coding for categorical variables.
+
+    Returns
+    -------
+    LmerParsedFormula
+        Object containing the parsed formula and model matrices.
+
+    Examples
+    --------
+    >>> parsed = lFormula("y ~ x + (1|group)", data)
+    >>> parsed.X.shape  # Fixed effects design matrix
+    >>> parsed.n_theta  # Number of variance parameters
+
+    See Also
+    --------
+    mkLmerDevfun : Create deviance function from parsed formula.
+    optimizeLmer : Optimize the deviance function.
+    mkLmerMod : Create final model from optimization results.
+    """
+    parsed_formula = parse_formula(formula)
+    matrices = build_model_matrices(
+        parsed_formula,
+        data,
+        weights=weights,
+        offset=offset,
+        na_action=na_action,
+        contrasts=contrasts,
+    )
+
+    return LmerParsedFormula(
+        formula=parsed_formula,
+        matrices=matrices,
+        REML=REML,
+    )
+
+
+def glFormula(
+    formula: str,
+    data: pd.DataFrame,
+    family: Family | None = None,
+    weights: NDArray[np.floating] | None = None,
+    offset: NDArray[np.floating] | None = None,
+    na_action: str | None = "omit",
+    contrasts: dict[str, str | NDArray[np.floating]] | None = None,
+) -> GlmerParsedFormula:
+    """Parse a formula and create model matrices for a generalized linear mixed model.
+
+    This is the first step in the modular interface for fitting GLMMs.
+    It parses the formula and builds the design matrices without
+    performing any optimization.
+
+    Parameters
+    ----------
+    formula : str
+        Model formula in lme4 syntax (e.g., "y ~ x + (1|group)").
+    data : DataFrame
+        Data containing the variables in the formula.
+    family : Family, optional
+        GLM family (default: Binomial).
+    weights : array-like, optional
+        Prior weights for observations.
+    offset : array-like, optional
+        Offset term for the linear predictor.
+    na_action : str, optional
+        How to handle missing values: "omit", "exclude", or "fail".
+    contrasts : dict, optional
+        Contrast coding for categorical variables.
+
+    Returns
+    -------
+    GlmerParsedFormula
+        Object containing the parsed formula, model matrices, and family.
+
+    Examples
+    --------
+    >>> from mixedlm.families import Binomial
+    >>> parsed = glFormula("y ~ x + (1|group)", data, family=Binomial())
+    >>> parsed.X.shape  # Fixed effects design matrix
+    >>> parsed.family   # The GLM family
+
+    See Also
+    --------
+    mkGlmerDevfun : Create deviance function from parsed formula.
+    optimizeGlmer : Optimize the deviance function.
+    """
+    from mixedlm.families import Binomial
+
+    parsed_formula = parse_formula(formula)
+    matrices = build_model_matrices(
+        parsed_formula,
+        data,
+        weights=weights,
+        offset=offset,
+        na_action=na_action,
+        contrasts=contrasts,
+    )
+
+    if family is None:
+        family = Binomial()
+
+    return GlmerParsedFormula(
+        formula=parsed_formula,
+        matrices=matrices,
+        family=family,
+    )
+
+
+def mkLmerDevfun(
+    parsed: LmerParsedFormula,
+    verbose: int = 0,
+    control: LmerControl | None = None,
+) -> LmerDevfun:
+    """Create the deviance function for a linear mixed model.
+
+    This is the second step in the modular interface. It creates
+    the objective function that will be minimized to fit the model.
+
+    Parameters
+    ----------
+    parsed : LmerParsedFormula
+        Result from lFormula.
+    verbose : int, default 0
+        Verbosity level for optimization output.
+    control : LmerControl, optional
+        Control parameters for the optimizer.
+
+    Returns
+    -------
+    LmerDevfun
+        Callable deviance function object.
+
+    Examples
+    --------
+    >>> parsed = lFormula("y ~ x + (1|group)", data)
+    >>> devfun = mkLmerDevfun(parsed)
+    >>> devfun.get_start()  # Get starting values
+    >>> devfun(theta)  # Evaluate deviance at theta
+
+    See Also
+    --------
+    lFormula : Parse formula and create model matrices.
+    optimizeLmer : Optimize the deviance function.
+    """
+    from mixedlm.models.control import LmerControl
+
+    if control is None:
+        control = LmerControl()
+
+    optimizer = LMMOptimizer(
+        parsed.matrices,
+        REML=parsed.REML,
+        verbose=verbose,
+        use_rust=control.use_rust,
+    )
+
+    return LmerDevfun(parsed=parsed, optimizer=optimizer)
+
+
+def mkGlmerDevfun(
+    parsed: GlmerParsedFormula,
+    verbose: int = 0,
+    control: GlmerControl | None = None,
+) -> GlmerDevfun:
+    """Create the deviance function for a generalized linear mixed model.
+
+    This is the second step in the modular interface for GLMMs. It creates
+    the objective function (Laplace approximation) that will be minimized.
+
+    Parameters
+    ----------
+    parsed : GlmerParsedFormula
+        Result from glFormula.
+    verbose : int, default 0
+        Verbosity level for optimization output.
+    control : GlmerControl, optional
+        Control parameters for the optimizer.
+
+    Returns
+    -------
+    GlmerDevfun
+        Callable deviance function object.
+
+    Examples
+    --------
+    >>> from mixedlm.families import Binomial
+    >>> parsed = glFormula("y ~ x + (1|group)", data, family=Binomial())
+    >>> devfun = mkGlmerDevfun(parsed)
+    >>> devfun.get_start()  # Get starting values
+
+    See Also
+    --------
+    glFormula : Parse formula and create model matrices.
+    optimizeGlmer : Optimize the deviance function.
+    """
+    from mixedlm.estimation.laplace import GLMMOptimizer
+    from mixedlm.models.control import GlmerControl
+
+    if control is None:
+        control = GlmerControl()
+
+    optimizer = GLMMOptimizer(
+        parsed.matrices,
+        parsed.family,
+        verbose=verbose,
+    )
+
+    return GlmerDevfun(parsed=parsed, optimizer=optimizer)
+
+
+def optimizeLmer(
+    devfun: LmerDevfun,
+    start: NDArray[np.floating] | None = None,
+    method: str = "L-BFGS-B",
+    maxiter: int = 1000,
+    verbose: int = 0,
+) -> OptimizeResult:
+    """Optimize the deviance function for a linear mixed model.
+
+    This is the third step in the modular interface. It minimizes
+    the deviance function to find optimal variance components.
+
+    Parameters
+    ----------
+    devfun : LmerDevfun
+        Deviance function from mkLmerDevfun.
+    start : NDArray, optional
+        Starting values for theta. If None, uses default.
+    method : str, default "L-BFGS-B"
+        Optimization method (passed to scipy.optimize.minimize).
+    maxiter : int, default 1000
+        Maximum number of iterations.
+    verbose : int, default 0
+        Verbosity level.
+
+    Returns
+    -------
+    OptimizeResult
+        Optimization result containing theta, deviance, and convergence info.
+
+    Examples
+    --------
+    >>> parsed = lFormula("y ~ x + (1|group)", data)
+    >>> devfun = mkLmerDevfun(parsed)
+    >>> opt = optimizeLmer(devfun)
+    >>> opt.theta  # Optimized variance parameters
+    >>> opt.converged  # Did optimization converge?
+
+    See Also
+    --------
+    mkLmerDevfun : Create deviance function.
+    mkLmerMod : Create final model from optimization results.
+    """
+    from scipy.optimize import minimize
+
+    if start is None:
+        start = devfun.get_start()
+
+    bounds = devfun.get_bounds()
+
+    callback: Callable[[NDArray[np.floating]], None] | None = None
+    if verbose > 0:
+        def callback(x: NDArray[np.floating]) -> None:
+            dev = devfun(x)
+            print(f"theta = {x}, deviance = {dev:.6f}")
+
+    result = minimize(
+        devfun,
+        start,
+        method=method,
+        bounds=bounds,
+        options={"maxiter": maxiter},
+        callback=callback,
+    )
+
+    return OptimizeResult(
+        theta=result.x,
+        deviance=result.fun,
+        converged=result.success,
+        n_iter=result.nit,
+        message=result.message if hasattr(result, "message") else "",
+    )
+
+
+def optimizeGlmer(
+    devfun: GlmerDevfun,
+    start: NDArray[np.floating] | None = None,
+    method: str = "L-BFGS-B",
+    maxiter: int = 1000,
+    verbose: int = 0,
+) -> OptimizeResult:
+    """Optimize the deviance function for a generalized linear mixed model.
+
+    This is the third step in the modular interface for GLMMs.
+
+    Parameters
+    ----------
+    devfun : GlmerDevfun
+        Deviance function from mkGlmerDevfun.
+    start : NDArray, optional
+        Starting values for theta. If None, uses default.
+    method : str, default "L-BFGS-B"
+        Optimization method (passed to scipy.optimize.minimize).
+    maxiter : int, default 1000
+        Maximum number of iterations.
+    verbose : int, default 0
+        Verbosity level.
+
+    Returns
+    -------
+    OptimizeResult
+        Optimization result containing theta, deviance, and convergence info.
+
+    Examples
+    --------
+    >>> from mixedlm.families import Binomial
+    >>> parsed = glFormula("y ~ x + (1|group)", data, family=Binomial())
+    >>> devfun = mkGlmerDevfun(parsed)
+    >>> opt = optimizeGlmer(devfun)
+    >>> opt.theta  # Optimized variance parameters
+
+    See Also
+    --------
+    mkGlmerDevfun : Create deviance function.
+    """
+    from scipy.optimize import minimize
+
+    if start is None:
+        start = devfun.get_start()
+
+    bounds = devfun.get_bounds()
+
+    callback: Callable[[NDArray[np.floating]], None] | None = None
+    if verbose > 0:
+        def callback(x: NDArray[np.floating]) -> None:
+            dev = devfun(x)
+            print(f"theta = {x}, deviance = {dev:.6f}")
+
+    result = minimize(
+        devfun,
+        start,
+        method=method,
+        bounds=bounds,
+        options={"maxiter": maxiter},
+        callback=callback,
+    )
+
+    return OptimizeResult(
+        theta=result.x,
+        deviance=result.fun,
+        converged=result.success,
+        n_iter=result.nit,
+        message=result.message if hasattr(result, "message") else "",
+    )
+
+
+def mkLmerMod(
+    devfun: LmerDevfun,
+    opt: OptimizeResult,
+) -> LmerResult:
+    """Create an LmerResult from optimization results.
+
+    This is the final step in the modular interface. It constructs
+    the fitted model object from the deviance function and optimization
+    results.
+
+    Parameters
+    ----------
+    devfun : LmerDevfun
+        Deviance function from mkLmerDevfun.
+    opt : OptimizeResult
+        Optimization result from optimizeLmer.
+
+    Returns
+    -------
+    LmerResult
+        The fitted model result with all parameter estimates.
+
+    Examples
+    --------
+    >>> parsed = lFormula("y ~ x + (1|group)", data)
+    >>> devfun = mkLmerDevfun(parsed)
+    >>> opt = optimizeLmer(devfun)
+    >>> result = mkLmerMod(devfun, opt)
+    >>> result.fixef()  # Fixed effects estimates
+    >>> result.ranef()  # Random effects predictions
+
+    See Also
+    --------
+    lFormula : Parse formula.
+    mkLmerDevfun : Create deviance function.
+    optimizeLmer : Optimize deviance.
+    """
+    from mixedlm.models.lmer import LmerResult
+
+    beta, sigma, u = devfun.optimizer._extract_estimates(opt.theta)
+
+    return LmerResult(
+        formula=devfun.parsed.formula,
+        matrices=devfun.parsed.matrices,
+        theta=opt.theta,
+        beta=beta,
+        sigma=sigma,
+        u=u,
+        deviance=opt.deviance,
+        REML=devfun.parsed.REML,
+        converged=opt.converged,
+        n_iter=opt.n_iter,
+    )
+
+
+def mkGlmerMod(
+    devfun: GlmerDevfun,
+    opt: OptimizeResult,
+    nAGQ: int = 1,
+) -> GlmerResult:
+    """Create a GlmerResult from optimization results.
+
+    This is the final step in the modular interface for GLMMs.
+
+    Parameters
+    ----------
+    devfun : GlmerDevfun
+        Deviance function from mkGlmerDevfun.
+    opt : OptimizeResult
+        Optimization result from optimizeGlmer.
+    nAGQ : int, default 1
+        Number of adaptive Gauss-Hermite quadrature points used.
+
+    Returns
+    -------
+    GlmerResult
+        The fitted model result.
+
+    Examples
+    --------
+    >>> from mixedlm.families import Binomial
+    >>> parsed = glFormula("y ~ x + (1|group)", data, family=Binomial())
+    >>> devfun = mkGlmerDevfun(parsed)
+    >>> opt = optimizeGlmer(devfun)
+    >>> result = mkGlmerMod(devfun, opt)
+    >>> result.fixef()  # Fixed effects estimates
+
+    See Also
+    --------
+    glFormula : Parse formula.
+    mkGlmerDevfun : Create deviance function.
+    optimizeGlmer : Optimize deviance.
+    """
+    from mixedlm.estimation.laplace import laplace_deviance
+    from mixedlm.models.glmer import GlmerResult
+
+    _, beta, u = laplace_deviance(
+        opt.theta,
+        devfun.parsed.matrices,
+        devfun.parsed.family,
+        devfun.optimizer._beta_cache,
+        devfun.optimizer._u_cache,
+    )
+
+    return GlmerResult(
+        formula=devfun.parsed.formula,
+        matrices=devfun.parsed.matrices,
+        family=devfun.parsed.family,
+        theta=opt.theta,
+        beta=beta,
+        u=u,
+        deviance=opt.deviance,
+        converged=opt.converged,
+        n_iter=opt.n_iter,
+        nAGQ=nAGQ,
+    )

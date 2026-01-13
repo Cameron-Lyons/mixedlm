@@ -1,6 +1,6 @@
 use nalgebra::{Cholesky, DMatrix, DVector};
-use pyo3::prelude::*;
 use pyo3::PyResult;
+use pyo3::prelude::*;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum NlmeModel {
@@ -223,12 +223,12 @@ pub fn pnls_step_impl(
 ) -> PnlsResult {
     let n = y.len();
     let unique_groups: Vec<i64> = {
-        let mut v: Vec<i64> = groups.iter().cloned().collect();
+        let mut v: Vec<i64> = groups.to_vec();
         v.sort();
         v.dedup();
         v
     };
-    let n_groups = unique_groups.len();
+    let _n_groups = unique_groups.len();
     let n_phi = phi.len();
     let n_random = random_params.len();
 
@@ -280,8 +280,8 @@ pub fn pnls_step_impl(
         }
 
         let gtg = grad_total.transpose() * &grad_total;
-        let gtr: DVector<f64> = grad_total.transpose()
-            * DVector::from_iterator(n, resid_total.iter().cloned());
+        let gtr: DVector<f64> =
+            grad_total.transpose() * DVector::from_iterator(n, resid_total.iter().cloned());
 
         let gtg_reg = {
             let mut m = gtg.clone();
@@ -293,11 +293,13 @@ pub fn pnls_step_impl(
 
         let delta_phi = match Cholesky::new(gtg_reg.clone()) {
             Some(chol) => chol.solve(&gtr),
-            None => gtg_reg.try_inverse().map_or(DVector::zeros(n_phi), |inv| inv * &gtr),
+            None => gtg_reg
+                .try_inverse()
+                .map_or(DVector::zeros(n_phi), |inv| inv * &gtr),
         };
 
         for i in 0..n_phi {
-            phi_new[i] = phi_new[i] + 0.5 * delta_phi[i];
+            phi_new[i] += 0.5 * delta_phi[i];
         }
 
         for (g_idx, &g) in unique_groups.iter().enumerate() {
@@ -345,7 +347,9 @@ pub fn pnls_step_impl(
 
             let b_g_new = match Cholesky::new(c.clone()) {
                 Some(chol) => chol.solve(&(&ztr / sigma_sq)),
-                None => c.try_inverse().map_or(DVector::zeros(n_random), |inv| inv * &ztr / sigma_sq),
+                None => c
+                    .try_inverse()
+                    .map_or(DVector::zeros(n_random), |inv| inv * &ztr / sigma_sq),
             };
 
             for j in 0..n_random {
@@ -411,7 +415,7 @@ pub fn nlmm_deviance_impl(
 ) -> (f64, Vec<f64>, DMatrix<f64>, f64) {
     let n = y.len();
     let unique_groups: Vec<i64> = {
-        let mut v: Vec<i64> = groups.iter().cloned().collect();
+        let mut v: Vec<i64> = groups.to_vec();
         v.sort();
         v.dedup();
         v
@@ -526,9 +530,12 @@ pub fn pnls_step(
         "ssfpl" => NlmeModel::SSfpl,
         "ssgompertz" => NlmeModel::SSgompertz,
         "ssbiexp" => NlmeModel::SSbiexp,
-        _ => return Err(pyo3::exceptions::PyValueError::new_err(
-            format!("Unknown model: {}. Supported models: SSasymp, SSlogis, SSmicmen, SSfpl, SSgompertz, SSbiexp", model_name)
-        )),
+        _ => {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "Unknown model: {}. Supported models: SSasymp, SSlogis, SSmicmen, SSfpl, SSgompertz, SSbiexp",
+                model_name
+            )));
+        }
     };
 
     let y_arr = y.as_array();
@@ -599,9 +606,12 @@ pub fn nlmm_deviance(
         "ssfpl" => NlmeModel::SSfpl,
         "ssgompertz" => NlmeModel::SSgompertz,
         "ssbiexp" => NlmeModel::SSbiexp,
-        _ => return Err(pyo3::exceptions::PyValueError::new_err(
-            format!("Unknown model: {}. Supported models: SSasymp, SSlogis, SSmicmen, SSfpl, SSgompertz, SSbiexp", model_name)
-        )),
+        _ => {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "Unknown model: {}. Supported models: SSasymp, SSlogis, SSmicmen, SSfpl, SSgompertz, SSbiexp",
+                model_name
+            )));
+        }
     };
 
     let y_arr = y.as_array();

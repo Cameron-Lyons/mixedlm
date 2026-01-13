@@ -52,7 +52,6 @@ class NlmerResult:
         return dict(zip(self.model.param_names, self.phi, strict=False))
 
     def ranef(self) -> dict[str, dict[str, NDArray[np.floating]]]:
-        self.b.shape[0]
         random_param_names = [self.model.param_names[i] for i in self.random_params]
 
         term_ranefs: dict[str, NDArray[np.floating]] = {}
@@ -63,7 +62,6 @@ class NlmerResult:
 
     def coef(self) -> dict[str, dict[str, NDArray[np.floating]]]:
         n_groups = self.b.shape[0]
-        [self.model.param_names[i] for i in self.random_params]
 
         group_coef: dict[str, NDArray[np.floating]] = {}
         for j, p_idx in enumerate(self.random_params):
@@ -147,7 +145,6 @@ class NlmerResult:
         return NlmerVarCorr(groups=groups, residual=self.sigma**2)
 
     def logLik(self) -> float:
-        len(self.y)
         return -0.5 * self.deviance
 
     def AIC(self) -> float:
@@ -158,6 +155,60 @@ class NlmerResult:
         n_params = len(self.phi) + len(self.theta) + 1
         n = len(self.y)
         return -2 * self.logLik() + n_params * np.log(n)
+
+    def isGLMM(self) -> bool:
+        """Check if this is a generalized linear mixed model.
+
+        Always returns False for NlmerResult.
+        """
+        return False
+
+    def isLMM(self) -> bool:
+        """Check if this is a linear mixed model.
+
+        Always returns False for NlmerResult.
+        """
+        return False
+
+    def isNLMM(self) -> bool:
+        """Check if this is a nonlinear mixed model.
+
+        Always returns True for NlmerResult.
+        """
+        return True
+
+    def npar(self) -> int:
+        """Get the number of parameters in the model.
+
+        Returns the total number of estimated parameters:
+        - Fixed effects (phi)
+        - Variance-covariance parameters (theta)
+        - Residual standard deviation (sigma)
+
+        Returns
+        -------
+        int
+            Total number of parameters.
+        """
+        n_fixed = len(self.phi)
+        n_theta = len(self.theta)
+        n_sigma = 1
+        return n_fixed + n_theta + n_sigma
+
+    def df_residual(self) -> int:
+        """Get the residual degrees of freedom.
+
+        Returns n - p where n is the number of observations
+        and p is the number of fixed effect parameters.
+
+        Returns
+        -------
+        int
+            Residual degrees of freedom.
+        """
+        n = len(self.y)
+        p = len(self.phi)
+        return n - p
 
     def summary(self) -> str:
         lines = []

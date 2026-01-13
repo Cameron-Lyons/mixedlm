@@ -1,7 +1,7 @@
 use nalgebra::{Cholesky, DMatrix, DVector};
 use nalgebra_sparse::csc::CscMatrix;
-use pyo3::prelude::*;
 use pyo3::PyResult;
+use pyo3::prelude::*;
 
 use crate::linalg::LinalgError;
 
@@ -273,7 +273,9 @@ pub fn pirls_impl(
 
         match Cholesky::new(xtx.clone()) {
             Some(chol) => chol.solve(&xty),
-            None => xtx.try_inverse().map_or(DVector::zeros(p), |inv| inv * &xty),
+            None => xtx
+                .try_inverse()
+                .map_or(DVector::zeros(p), |inv| inv * &xty),
         }
     };
 
@@ -402,7 +404,7 @@ pub fn pirls_impl(
                             u,
                             deviance: 1e10,
                             converged: false,
-                        }
+                        };
                     }
                 }
             }
@@ -595,10 +597,7 @@ pub fn laplace_deviance_impl(
         }
         None => {
             let eigvals = h.symmetric_eigenvalues();
-            eigvals
-                .iter()
-                .map(|&e| e.max(1e-10).ln())
-                .sum::<f64>()
+            eigvals.iter().map(|&e| e.max(1e-10).ln()).sum::<f64>()
         }
     };
 

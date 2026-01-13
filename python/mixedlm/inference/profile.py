@@ -25,6 +25,279 @@ class ProfileResult:
     ci_upper: float
     level: float
 
+    def plot(
+        self,
+        ax: Any | None = None,
+        show_ci: bool = True,
+        show_mle: bool = True,
+        **kwargs: Any,
+    ) -> Any:
+        """Plot the profile likelihood.
+
+        Creates a plot of the signed square root deviance (zeta)
+        against the parameter values. This is useful for assessing
+        the symmetry of the likelihood and identifying non-normality.
+
+        Parameters
+        ----------
+        ax : matplotlib.axes.Axes, optional
+            Axes to plot on. If None, creates a new figure.
+        show_ci : bool, default True
+            Whether to show confidence interval lines.
+        show_mle : bool, default True
+            Whether to show vertical line at MLE.
+        **kwargs
+            Additional arguments passed to plot().
+
+        Returns
+        -------
+        matplotlib.axes.Axes
+            The axes with the profile plot.
+
+        Examples
+        --------
+        >>> result = lmer("y ~ x + (1 | group)", data)
+        >>> profiles = profile_lmer(result, which=["x"])
+        >>> profiles["x"].plot()
+        """
+        try:
+            import matplotlib.pyplot as plt
+        except ImportError:
+            raise ImportError("matplotlib is required for plotting") from None
+
+        if ax is None:
+            fig, ax = plt.subplots(figsize=(6, 4))
+
+        ax.plot(self.values, self.zeta, "b-", linewidth=2, **kwargs)
+        ax.axhline(0, color="gray", linestyle="--", alpha=0.5)
+
+        if show_mle:
+            ax.axvline(self.mle, color="red", linestyle="--", alpha=0.7, label="MLE")
+
+        if show_ci:
+            z_crit = stats.norm.ppf((1 + self.level) / 2)
+            ax.axhline(z_crit, color="green", linestyle=":", alpha=0.7)
+            ax.axhline(-z_crit, color="green", linestyle=":", alpha=0.7)
+            ax.axvline(self.ci_lower, color="green", linestyle=":", alpha=0.5)
+            ax.axvline(self.ci_upper, color="green", linestyle=":", alpha=0.5)
+
+        ax.set_xlabel(self.parameter)
+        ax.set_ylabel("ζ (signed sqrt deviance)")
+        ax.set_title(f"Profile: {self.parameter}")
+
+        return ax
+
+    def plot_density(
+        self,
+        ax: Any | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Plot the profile-based density.
+
+        Creates a density plot derived from the profile likelihood,
+        which can show deviations from normality.
+
+        Parameters
+        ----------
+        ax : matplotlib.axes.Axes, optional
+            Axes to plot on. If None, creates a new figure.
+        **kwargs
+            Additional arguments passed to plot().
+
+        Returns
+        -------
+        matplotlib.axes.Axes
+            The axes with the density plot.
+        """
+        try:
+            import matplotlib.pyplot as plt
+        except ImportError:
+            raise ImportError("matplotlib is required for plotting") from None
+
+        if ax is None:
+            fig, ax = plt.subplots(figsize=(6, 4))
+
+        density = np.exp(-0.5 * self.zeta**2)
+        density = density / np.trapezoid(density, self.values)
+
+        ax.plot(self.values, density, "b-", linewidth=2, **kwargs)
+        ax.fill_between(self.values, density, alpha=0.3)
+
+        ax.axvline(self.mle, color="red", linestyle="--", alpha=0.7, label="MLE")
+        ax.axvline(self.ci_lower, color="green", linestyle=":", alpha=0.5)
+        ax.axvline(self.ci_upper, color="green", linestyle=":", alpha=0.5)
+
+        ax.set_xlabel(self.parameter)
+        ax.set_ylabel("Density")
+        ax.set_title(f"Profile density: {self.parameter}")
+
+        return ax
+
+
+def plot_profiles(
+    profiles: dict[str, ProfileResult],
+    plot_type: str = "zeta",
+    ncols: int = 2,
+    figsize: tuple[float, float] | None = None,
+) -> Any:
+    """Plot multiple profile results in a grid.
+
+    Parameters
+    ----------
+    profiles : dict[str, ProfileResult]
+        Dictionary of profile results from profile_lmer or profile_glmer.
+    plot_type : str, default "zeta"
+        Type of plot: "zeta" for signed sqrt deviance, "density" for density.
+    ncols : int, default 2
+        Number of columns in the plot grid.
+    figsize : tuple, optional
+        Figure size. If None, computed automatically.
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+        The figure containing all profile plots.
+
+    Examples
+    --------
+    >>> result = lmer("y ~ x1 + x2 + (1 | group)", data)
+    >>> profiles = profile_lmer(result)
+    >>> plot_profiles(profiles)
+    """
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError:
+        raise ImportError("matplotlib is required for plotting") from None
+
+    n_profiles = len(profiles)
+    nrows = (n_profiles + ncols - 1) // ncols
+
+    if figsize is None:
+        figsize = (5 * ncols, 4 * nrows)
+
+    fig, axes = plt.subplots(nrows, ncols, figsize=figsize)
+    if n_profiles == 1:
+        axes = np.array([axes])
+    axes = axes.flatten()
+
+    for i, (_name, profile) in enumerate(profiles.items()):
+        if plot_type == "density":
+            profile.plot_density(ax=axes[i])
+        else:
+            profile.plot(ax=axes[i])
+
+    for j in range(i + 1, len(axes)):
+        axes[j].set_visible(False)
+
+    plt.tight_layout()
+    return fig
+
+
+def splom_profiles(
+    profiles: dict[str, ProfileResult],
+    figsize: tuple[float, float] | None = None,
+) -> Any:
+    """Create a scatter plot matrix (pairs plot) of profile zeta values.
+
+    This creates a matrix of plots showing the relationships between
+    profile zeta values for different parameters, which can reveal
+    correlations and non-linearities in the likelihood surface.
+
+    Parameters
+    ----------
+    profiles : dict[str, ProfileResult]
+        Dictionary of profile results from profile_lmer or profile_glmer.
+    figsize : tuple, optional
+        Figure size. If None, computed automatically.
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+        The figure containing the scatter plot matrix.
+
+    Examples
+    --------
+    >>> result = lmer("y ~ x1 + x2 + (1 | group)", data)
+    >>> profiles = profile_lmer(result)
+    >>> splom_profiles(profiles)
+    """
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError:
+        raise ImportError("matplotlib is required for plotting") from None
+
+    names = list(profiles.keys())
+    n = len(names)
+
+    if n < 2:
+        raise ValueError("Need at least 2 profiles for splom plot")
+
+    if figsize is None:
+        figsize = (3 * n, 3 * n)
+
+    fig, axes = plt.subplots(n, n, figsize=figsize)
+
+    for i, name_i in enumerate(names):
+        for j, name_j in enumerate(names):
+            ax = axes[i, j]
+
+            if i == j:
+                profiles[name_i].plot(ax=ax, show_ci=False, show_mle=False)
+                ax.set_title("")
+                if i == 0:
+                    ax.set_title(name_i)
+                if j == n - 1:
+                    ax.yaxis.set_label_position("right")
+                    ax.set_ylabel(name_i)
+                else:
+                    ax.set_ylabel("")
+            else:
+                p_i = profiles[name_i]
+                p_j = profiles[name_j]
+
+                from scipy.interpolate import interp1d
+
+                try:
+                    f_i = interp1d(
+                        p_i.zeta, p_i.values, kind="linear",
+                        bounds_error=False, fill_value="extrapolate"
+                    )
+                    f_j = interp1d(
+                        p_j.zeta, p_j.values, kind="linear",
+                        bounds_error=False, fill_value="extrapolate"
+                    )
+
+                    zeta_common = np.linspace(
+                        max(p_i.zeta.min(), p_j.zeta.min()),
+                        min(p_i.zeta.max(), p_j.zeta.max()),
+                        50
+                    )
+
+                    vals_i = f_i(zeta_common)
+                    vals_j = f_j(zeta_common)
+
+                    ax.plot(vals_j, vals_i, "b-", linewidth=1.5)
+                    ax.axhline(p_i.mle, color="gray", linestyle="--", alpha=0.3)
+                    ax.axvline(p_j.mle, color="gray", linestyle="--", alpha=0.3)
+                except Exception:
+                    ax.text(0.5, 0.5, "N/A", ha="center", va="center",
+                            transform=ax.transAxes)
+
+            if i < n - 1:
+                ax.set_xlabel("")
+                ax.set_xticklabels([])
+            else:
+                ax.set_xlabel(name_j)
+
+            if j > 0:
+                ax.set_ylabel("")
+                ax.set_yticklabels([])
+            else:
+                ax.set_ylabel(name_i)
+
+    plt.tight_layout()
+    return fig
+
 
 def _profile_grid_worker(
     args: tuple[Any, ...],
