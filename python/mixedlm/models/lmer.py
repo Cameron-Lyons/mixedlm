@@ -1453,6 +1453,8 @@ class LmerResult:
             return self.REML
         elif name == "deviance":
             return self.deviance
+        elif name == "fixef_names":
+            return list(self.matrices.fixed_names)
         elif name == "flist":
             return [s.grouping_factor for s in self.matrices.random_structures]
         elif name == "cnms":
@@ -1466,7 +1468,8 @@ class LmerResult:
             valid_names = [
                 "X", "Z", "Zt", "y", "beta", "theta", "Lambda", "Lambdat",
                 "u", "b", "sigma", "n", "n_obs", "p", "n_fixed", "q", "n_random",
-                "lower", "weights", "offset", "REML", "deviance", "flist", "cnms", "Gp"
+                "lower", "weights", "offset", "REML", "deviance", "fixef_names",
+                "flist", "cnms", "Gp"
             ]
             raise ValueError(
                 f"Unknown component name: '{name}'. Valid names are: {valid_names}"

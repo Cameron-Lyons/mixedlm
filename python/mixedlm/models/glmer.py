@@ -1280,11 +1280,14 @@ class GlmerResult:
             return np.array(gp)
         elif name == "family":
             return self.family
+        elif name == "nAGQ":
+            return self.nAGQ
         else:
             valid_names = [
                 "X", "Z", "Zt", "y", "beta", "theta", "Lambda", "Lambdat",
                 "u", "b", "n", "n_obs", "p", "n_fixed", "q", "n_random",
-                "lower", "weights", "offset", "deviance", "flist", "cnms", "Gp", "family"
+                "lower", "weights", "offset", "deviance", "flist", "cnms", "Gp",
+                "family", "nAGQ"
             ]
             raise ValueError(
                 f"Unknown component name: '{name}'. Valid names are: {valid_names}"

@@ -1,7 +1,21 @@
 import numpy as np
 import pandas as pd
 import pytest
-from mixedlm import anova, families, findbars, glmer, glmerControl, is_mixed_formula, lmer, lmerControl, nlme, nlmer, nobars, parse_formula, subbars
+from mixedlm import (
+    anova,
+    families,
+    findbars,
+    glmer,
+    glmerControl,
+    is_mixed_formula,
+    lmer,
+    lmerControl,
+    nlme,
+    nlmer,
+    nobars,
+    parse_formula,
+    subbars,
+)
 from mixedlm.matrices import build_model_matrices
 from mixedlm.models.control import GlmerControl, LmerControl
 
@@ -1684,11 +1698,11 @@ class TestUpdate:
         result2 = result1.update(data=data, family=families.Poisson())
         assert result2.family.__class__.__name__ == "Poisson"
 
-    def test_update_requires_data(self) -> None:
+    def test_update_uses_stored_data(self) -> None:
         result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
 
-        with pytest.raises(ValueError, match="data must be provided"):
-            result.update(". ~ . + 1")
+        result2 = result.update(". ~ . + 1")
+        assert result2.converged
 
 
 class TestUpdateFormula:
@@ -2207,7 +2221,10 @@ class TestDeviance:
         ll = result.logLik()
 
         assert result.get_deviance() == result.REMLcrit()
-        assert np.isclose(-2 * ll.value, result.deviance + (result.matrices.n_obs - result.matrices.n_fixed) * np.log(2 * np.pi), rtol=1e-6)
+        expected = result.deviance + (
+            result.matrices.n_obs - result.matrices.n_fixed
+        ) * np.log(2 * np.pi)
+        assert np.isclose(-2 * ll.value, expected, rtol=1e-6)
 
     def test_glmer_get_deviance(self):
         result = glmer("y ~ period + (1 | herd)", CBPP, family=families.Binomial())
@@ -3118,7 +3135,8 @@ class TestContrasts:
         n = 120
         group = np.repeat(["A", "B", "C", "D"], n // 4)
         subject = np.repeat(np.arange(12), n // 12)
-        y = np.random.randn(n) + np.array([0, 1, 2, 3])[np.searchsorted(["A", "B", "C", "D"], group)]
+        effects = np.array([0, 1, 2, 3])[np.searchsorted(["A", "B", "C", "D"], group)]
+        y = np.random.randn(n) + effects
 
         data = pd.DataFrame({
             "y": y,
@@ -3138,7 +3156,8 @@ class TestContrasts:
         n = 120
         group = np.repeat(["A", "B", "C", "D"], n // 4)
         subject = np.repeat(np.arange(12), n // 12)
-        y = np.random.randn(n) + np.array([0, 1, 2, 3])[np.searchsorted(["A", "B", "C", "D"], group)]
+        effects = np.array([0, 1, 2, 3])[np.searchsorted(["A", "B", "C", "D"], group)]
+        y = np.random.randn(n) + effects
 
         data = pd.DataFrame({
             "y": y,
@@ -3157,7 +3176,8 @@ class TestContrasts:
         n = 120
         group = np.repeat(["A", "B", "C", "D"], n // 4)
         subject = np.repeat(np.arange(12), n // 12)
-        y = np.random.randn(n) + np.array([0, 1, 2, 3])[np.searchsorted(["A", "B", "C", "D"], group)]
+        effects = np.array([0, 1, 2, 3])[np.searchsorted(["A", "B", "C", "D"], group)]
+        y = np.random.randn(n) + effects
 
         data = pd.DataFrame({
             "y": y,
@@ -3176,7 +3196,8 @@ class TestContrasts:
         n = 120
         group = np.repeat(["A", "B", "C", "D"], n // 4)
         subject = np.repeat(np.arange(12), n // 12)
-        y = np.random.randn(n) + np.array([0, 1, 4, 9])[np.searchsorted(["A", "B", "C", "D"], group)]
+        effects = np.array([0, 1, 4, 9])[np.searchsorted(["A", "B", "C", "D"], group)]
+        y = np.random.randn(n) + effects
 
         data = pd.DataFrame({
             "y": y,
@@ -3242,7 +3263,7 @@ class TestContrasts:
         assert "(Intercept)" in fixed_names
 
     def test_contrasts_different_effects(self) -> None:
-        from mixedlm.utils.contrasts import contr_treatment, contr_sum
+        from mixedlm.utils.contrasts import contr_sum, contr_treatment
 
         n = 3
         treatment_matrix = contr_treatment(n)
@@ -3550,7 +3571,7 @@ class TestRanefCondVar:
         assert "Subject" in ranef_result
         assert list(ranef_result.keys()) == ["Subject"]
 
-        for group, terms in ranef_result.items():
+        for _group, terms in ranef_result.items():
             assert "(Intercept)" in terms
 
     def test_glmer_ranef_condvar(self) -> None:
@@ -3808,7 +3829,7 @@ class TestDfResidual:
 
 
 try:
-    import matplotlib
+    import matplotlib  # noqa: F401
     HAS_MATPLOTLIB = True
 except ImportError:
     HAS_MATPLOTLIB = False
@@ -3882,7 +3903,7 @@ class TestProfilePlotting:
         plt.close("all")
 
 
-class TestAccessors:
+class TestAccessorsWeightsOffset:
     def test_lmer_weights_default(self) -> None:
         result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
         w = result.weights()
@@ -4374,7 +4395,7 @@ class TestModularInterface:
         assert np.allclose(direct_result.theta, modular_result.theta, rtol=1e-3)
 
     def test_custom_optimizer_lmer(self) -> None:
-        from mixedlm import lFormula, mkLmerDevfun, mkLmerMod, OptimizeResult
+        from mixedlm import OptimizeResult, lFormula, mkLmerDevfun, mkLmerMod
 
         parsed = lFormula("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
         devfun = mkLmerDevfun(parsed)
@@ -4382,7 +4403,6 @@ class TestModularInterface:
         from scipy.optimize import minimize
 
         start = devfun.get_start()
-        bounds = devfun.get_bounds()
         result = minimize(devfun, start, method="Nelder-Mead", options={"maxiter": 500})
 
         opt = OptimizeResult(
@@ -4435,7 +4455,7 @@ class TestModularInterface:
         assert parsed.Z.shape[1] == 36
 
 
-class TestGetME:
+class TestGetMEComponents:
     def test_getME_X(self) -> None:
         result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
         X = result.getME("X")
@@ -4572,7 +4592,7 @@ class TestGetME:
         assert isinstance(family, families.Binomial)
 
 
-class TestUpdate:
+class TestUpdateSleepstudy:
     def test_update_REML(self) -> None:
         result1 = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
         assert result1.REML is True
@@ -4646,7 +4666,7 @@ class TestUpdate:
         assert len(result2.fixef()) == 3
 
 
-class TestRefit:
+class TestRefitSleepstudy:
     def test_refit_same_response(self) -> None:
         result1 = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
 
