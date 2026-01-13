@@ -207,8 +207,7 @@ def allfit_lmer(
             n_jobs = os.cpu_count() or 1
 
         tasks = [
-            (opt_name, model.formula, data, model.REML, weights, offset)
-            for opt_name in optimizers
+            (opt_name, model.formula, data, model.REML, weights, offset) for opt_name in optimizers
         ]
 
         with ProcessPoolExecutor(max_workers=n_jobs) as executor:

@@ -612,9 +612,7 @@ class LmerResult:
                 "The original data is not stored in the result object."
             )
 
-        new_formula = (
-            update_formula(self.formula, formula) if formula is not None else self.formula
-        )
+        new_formula = update_formula(self.formula, formula) if formula is not None else self.formula
 
         new_REML = REML if REML is not None else self.REML
 

@@ -107,15 +107,17 @@ def anova(
         n_theta = len(m.theta)
         n_params = n_fixed + n_theta + 1 if isinstance(m, LmerResult) else n_fixed + n_theta
 
-        model_data.append((
-            str(m.formula),
-            m.matrices.n_obs,
-            n_params,
-            m.AIC(),
-            m.BIC(),
-            m.logLik().value,
-            m.deviance,
-        ))
+        model_data.append(
+            (
+                str(m.formula),
+                m.matrices.n_obs,
+                n_params,
+                m.AIC(),
+                m.BIC(),
+                m.logLik().value,
+                m.deviance,
+            )
+        )
 
     model_data.sort(key=lambda x: x[2])
 

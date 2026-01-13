@@ -182,8 +182,7 @@ def pnls_step(
             with ThreadPoolExecutor(max_workers=n_jobs) as executor:
                 futures = [
                     executor.submit(
-                        _compute_group_resid_grad,
-                        g, groups, x, y, phi, b, random_params, model
+                        _compute_group_resid_grad, g, groups, x, y, phi, b, random_params, model
                     )
                     for g in range(n_groups)
                 ]
@@ -221,7 +220,16 @@ def pnls_step(
                 futures = [
                     executor.submit(
                         _update_group_random_effects,
-                        g, groups, x, y, phi_new, b, random_params, model, Psi_chol, sigma
+                        g,
+                        groups,
+                        x,
+                        y,
+                        phi_new,
+                        b,
+                        random_params,
+                        model,
+                        Psi_chol,
+                        sigma,
                     )
                     for g in range(n_groups)
                 ]
@@ -263,8 +271,7 @@ def pnls_step(
         with ThreadPoolExecutor(max_workers=n_jobs) as executor:
             futures = [
                 executor.submit(
-                    _compute_group_rss,
-                    g, groups, x, y, phi_new, b_new, random_params, model
+                    _compute_group_rss, g, groups, x, y, phi_new, b_new, random_params, model
                 )
                 for g in range(n_groups)
             ]
@@ -318,8 +325,7 @@ def nlmm_deviance(
         with ThreadPoolExecutor(max_workers=n_jobs) as executor:
             futures = [
                 executor.submit(
-                    _compute_group_rss,
-                    g, groups, x, y, phi_new, b_new, random_params, model
+                    _compute_group_rss, g, groups, x, y, phi_new, b_new, random_params, model
                 )
                 for g in range(n_groups)
             ]

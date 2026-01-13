@@ -203,17 +203,19 @@ def drop1_lmer(
         tasks = []
         for term in droppable_terms:
             reduced_formula = update_formula(model.formula, f". ~ . - {term}")
-            tasks.append((
-                term,
-                reduced_formula,
-                data,
-                model.REML,
-                weights,
-                offset,
-                full_n_params,
-                full_loglik,
-                test,
-            ))
+            tasks.append(
+                (
+                    term,
+                    reduced_formula,
+                    data,
+                    model.REML,
+                    weights,
+                    offset,
+                    full_n_params,
+                    full_loglik,
+                    test,
+                )
+            )
 
         results: dict[str, tuple[int | None, float | None, float | None, float | None]] = {}
 
@@ -320,18 +322,20 @@ def drop1_glmer(
         tasks = []
         for term in droppable_terms:
             reduced_formula = update_formula(model.formula, f". ~ . - {term}")
-            tasks.append((
-                term,
-                reduced_formula,
-                data,
-                model.family,
-                weights,
-                offset,
-                model.nAGQ,
-                full_n_params,
-                full_loglik,
-                test,
-            ))
+            tasks.append(
+                (
+                    term,
+                    reduced_formula,
+                    data,
+                    model.family,
+                    weights,
+                    offset,
+                    model.nAGQ,
+                    full_n_params,
+                    full_loglik,
+                    test,
+                )
+            )
 
         results: dict[str, tuple[int | None, float | None, float | None, float | None]] = {}
 

@@ -1685,9 +1685,7 @@ class TestDrop1:
         group_effects = np.random.randn(n_groups) * 0.5
         y = 2.0 + 1.5 * x1 + 0.8 * x2 + group_effects[group] + np.random.randn(n) * 0.5
 
-        data = pd.DataFrame(
-            {"y": y, "x1": x1, "x2": x2, "group": [str(g) for g in group]}
-        )
+        data = pd.DataFrame({"y": y, "x1": x1, "x2": x2, "group": [str(g) for g in group]})
         result = lmer("y ~ x1 + x2 + (1 | group)", data, REML=False)
 
         drop1_result = result.drop1(data=data)
@@ -2186,11 +2184,7 @@ class TestPredict:
     def test_lmer_predict_new_levels_error(self):
         result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
 
-        new_data = pd.DataFrame({
-            "Reaction": [300.0],
-            "Days": [5.0],
-            "Subject": ["999"]
-        })
+        new_data = pd.DataFrame({"Reaction": [300.0], "Days": [5.0], "Subject": ["999"]})
 
         with pytest.raises(ValueError, match="New level"):
             result.predict(newdata=new_data)
@@ -2198,11 +2192,7 @@ class TestPredict:
     def test_lmer_predict_new_levels_allowed(self):
         result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
 
-        new_data = pd.DataFrame({
-            "Reaction": [300.0],
-            "Days": [5.0],
-            "Subject": ["999"]
-        })
+        new_data = pd.DataFrame({"Reaction": [300.0], "Days": [5.0], "Subject": ["999"]})
 
         pred = result.predict(newdata=new_data, allow_new_levels=True)
         fixef = result.fixef()
@@ -2214,11 +2204,7 @@ class TestPredict:
         result = lmer("Reaction ~ Days + (Days | Subject)", SLEEPSTUDY)
 
         subject = SLEEPSTUDY["Subject"].iloc[0]
-        new_data = pd.DataFrame({
-            "Reaction": [300.0],
-            "Days": [5.0],
-            "Subject": [subject]
-        })
+        new_data = pd.DataFrame({"Reaction": [300.0], "Days": [5.0], "Subject": [subject]})
 
         pred = result.predict(newdata=new_data)
         pred_fixed = result.predict(newdata=new_data, re_form="NA")

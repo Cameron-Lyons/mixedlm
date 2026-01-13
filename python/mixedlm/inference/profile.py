@@ -166,16 +166,40 @@ def _profile_param_worker(
 
     for i, val in enumerate(param_values):
         dev = _profile_deviance_at_beta_direct(
-            idx, val, theta, y, X, Zt_data, Zt_indices, Zt_indptr, Zt_shape,
-            random_structures, n, p, q, REML
+            idx,
+            val,
+            theta,
+            y,
+            X,
+            Zt_data,
+            Zt_indices,
+            Zt_indptr,
+            Zt_shape,
+            random_structures,
+            n,
+            p,
+            q,
+            REML,
         )
         sign = 1 if val >= mle else -1
         zeta_values[i] = sign * np.sqrt(max(0, dev - dev_mle))
 
     def zeta_func(val: float) -> float:
         dev = _profile_deviance_at_beta_direct(
-            idx, val, theta, y, X, Zt_data, Zt_indices, Zt_indptr, Zt_shape,
-            random_structures, n, p, q, REML
+            idx,
+            val,
+            theta,
+            y,
+            X,
+            Zt_data,
+            Zt_indices,
+            Zt_indptr,
+            Zt_shape,
+            random_structures,
+            n,
+            p,
+            q,
+            REML,
         )
         sign = 1 if val >= mle else -1
         return sign * np.sqrt(max(0, dev - dev_mle))
@@ -198,15 +222,18 @@ def _profile_param_worker(
     except ValueError:
         ci_upper = mle + z_crit * se
 
-    return (param, ProfileResult(
-        parameter=param,
-        values=param_values,
-        zeta=zeta_values,
-        mle=mle,
-        ci_lower=ci_lower,
-        ci_upper=ci_upper,
-        level=level,
-    ))
+    return (
+        param,
+        ProfileResult(
+            parameter=param,
+            values=param_values,
+            zeta=zeta_values,
+            mle=mle,
+            ci_lower=ci_lower,
+            ci_upper=ci_upper,
+            level=level,
+        ),
+    )
 
 
 def _profile_deviance_at_beta_direct(
@@ -411,28 +438,30 @@ def profile_lmer(
             mle = result.beta[idx]
             se = np.sqrt(vcov[idx, idx])
 
-            tasks.append((
-                param,
-                idx,
-                mle,
-                se,
-                dev_mle,
-                z_crit,
-                level,
-                n_points,
-                result.theta.copy(),
-                matrices.y.copy(),
-                matrices.X.copy(),
-                Zt_data,
-                Zt_indices,
-                Zt_indptr,
-                Zt_shape,
-                matrices.random_structures,
-                n,
-                p,
-                q,
-                result.REML,
-            ))
+            tasks.append(
+                (
+                    param,
+                    idx,
+                    mle,
+                    se,
+                    dev_mle,
+                    z_crit,
+                    level,
+                    n_points,
+                    result.theta.copy(),
+                    matrices.y.copy(),
+                    matrices.X.copy(),
+                    Zt_data,
+                    Zt_indices,
+                    Zt_indptr,
+                    Zt_shape,
+                    matrices.random_structures,
+                    n,
+                    p,
+                    q,
+                    result.REML,
+                )
+            )
 
         with ProcessPoolExecutor(max_workers=n_jobs) as executor:
             futures = {executor.submit(_profile_param_worker, task): task[0] for task in tasks}
