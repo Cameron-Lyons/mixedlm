@@ -593,6 +593,7 @@ def optimizeLmer(
 
     callback: Callable[[NDArray[np.floating]], None] | None = None
     if verbose > 0:
+
         def callback(x: NDArray[np.floating]) -> None:
             dev = devfun(x)
             print(f"theta = {x}, deviance = {dev:.6f}")
@@ -665,6 +666,7 @@ def optimizeGlmer(
 
     callback: Callable[[NDArray[np.floating]], None] | None = None
     if verbose > 0:
+
         def callback(x: NDArray[np.floating]) -> None:
             dev = devfun(x)
             print(f"theta = {x}, deviance = {dev:.6f}")

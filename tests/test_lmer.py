@@ -2221,9 +2221,9 @@ class TestDeviance:
         ll = result.logLik()
 
         assert result.get_deviance() == result.REMLcrit()
-        expected = result.deviance + (
-            result.matrices.n_obs - result.matrices.n_fixed
-        ) * np.log(2 * np.pi)
+        expected = result.deviance + (result.matrices.n_obs - result.matrices.n_fixed) * np.log(
+            2 * np.pi
+        )
         assert np.isclose(-2 * ll.value, expected, rtol=1e-6)
 
     def test_glmer_get_deviance(self):
@@ -3041,12 +3041,14 @@ class TestDotplot:
         result = lmer("y ~ x + (1 | group)", data)
 
         import matplotlib
+
         matplotlib.use("Agg")
 
         fig = result.dotplot()
         assert fig is not None
 
         import matplotlib.pyplot as plt
+
         plt.close(fig)
 
     def test_dotplot_multiple_terms(self) -> None:
@@ -3067,12 +3069,14 @@ class TestDotplot:
         result = lmer("y ~ x + (x | group)", data)
 
         import matplotlib
+
         matplotlib.use("Agg")
 
         fig = result.dotplot()
         assert fig is not None
 
         import matplotlib.pyplot as plt
+
         plt.close(fig)
 
     def test_dotplot_specific_term(self) -> None:
@@ -3093,12 +3097,14 @@ class TestDotplot:
         result = lmer("y ~ x + (x | group)", data)
 
         import matplotlib
+
         matplotlib.use("Agg")
 
         fig = result.dotplot(term="(Intercept)")
         assert fig is not None
 
         import matplotlib.pyplot as plt
+
         plt.close(fig)
 
     def test_glmer_dotplot(self) -> None:
@@ -3120,12 +3126,14 @@ class TestDotplot:
         result = glmer("y ~ x + (1 | group)", data, family=families.Binomial())
 
         import matplotlib
+
         matplotlib.use("Agg")
 
         fig = result.dotplot()
         assert fig is not None
 
         import matplotlib.pyplot as plt
+
         plt.close(fig)
 
 
@@ -3138,11 +3146,7 @@ class TestContrasts:
         effects = np.array([0, 1, 2, 3])[np.searchsorted(["A", "B", "C", "D"], group)]
         y = np.random.randn(n) + effects
 
-        data = pd.DataFrame({
-            "y": y,
-            "group": group,
-            "subject": [str(s) for s in subject]
-        })
+        data = pd.DataFrame({"y": y, "group": group, "subject": [str(s) for s in subject]})
 
         result = lmer("y ~ group + (1 | subject)", data)
 
@@ -3159,11 +3163,7 @@ class TestContrasts:
         effects = np.array([0, 1, 2, 3])[np.searchsorted(["A", "B", "C", "D"], group)]
         y = np.random.randn(n) + effects
 
-        data = pd.DataFrame({
-            "y": y,
-            "group": group,
-            "subject": [str(s) for s in subject]
-        })
+        data = pd.DataFrame({"y": y, "group": group, "subject": [str(s) for s in subject]})
 
         result = lmer("y ~ group + (1 | subject)", data, contrasts={"group": "sum"})
 
@@ -3179,11 +3179,7 @@ class TestContrasts:
         effects = np.array([0, 1, 2, 3])[np.searchsorted(["A", "B", "C", "D"], group)]
         y = np.random.randn(n) + effects
 
-        data = pd.DataFrame({
-            "y": y,
-            "group": group,
-            "subject": [str(s) for s in subject]
-        })
+        data = pd.DataFrame({"y": y, "group": group, "subject": [str(s) for s in subject]})
 
         result = lmer("y ~ group + (1 | subject)", data, contrasts={"group": "helmert"})
 
@@ -3199,11 +3195,7 @@ class TestContrasts:
         effects = np.array([0, 1, 4, 9])[np.searchsorted(["A", "B", "C", "D"], group)]
         y = np.random.randn(n) + effects
 
-        data = pd.DataFrame({
-            "y": y,
-            "group": group,
-            "subject": [str(s) for s in subject]
-        })
+        data = pd.DataFrame({"y": y, "group": group, "subject": [str(s) for s in subject]})
 
         result = lmer("y ~ group + (1 | subject)", data, contrasts={"group": "poly"})
 
@@ -3218,17 +3210,9 @@ class TestContrasts:
         subject = np.repeat(np.arange(9), n // 9)
         y = np.random.randn(n) + np.array([0, 1, 2])[np.searchsorted(["A", "B", "C"], group)]
 
-        data = pd.DataFrame({
-            "y": y,
-            "group": group,
-            "subject": [str(s) for s in subject]
-        })
+        data = pd.DataFrame({"y": y, "group": group, "subject": [str(s) for s in subject]})
 
-        custom_contrasts = np.array([
-            [-1, -1],
-            [1, 0],
-            [0, 1]
-        ], dtype=np.float64)
+        custom_contrasts = np.array([[-1, -1], [1, 0], [0, 1]], dtype=np.float64)
 
         result = lmer("y ~ group + (1 | subject)", data, contrasts={"group": custom_contrasts})
 
@@ -3245,17 +3229,13 @@ class TestContrasts:
         p = 1 / (1 + np.exp(-eta))
         y = np.random.binomial(1, p).astype(float)
 
-        data = pd.DataFrame({
-            "y": y,
-            "group": group,
-            "subject": [str(s) for s in subject]
-        })
+        data = pd.DataFrame({"y": y, "group": group, "subject": [str(s) for s in subject]})
 
         result = glmer(
             "y ~ group + (1 | subject)",
             data,
             family=families.Binomial(),
-            contrasts={"group": "sum"}
+            contrasts={"group": "sum"},
         )
 
         fixed_names = result.matrices.fixed_names
@@ -3284,17 +3264,14 @@ class TestContrasts:
         subject = np.repeat(np.arange(24), n // 24)
         y = np.random.randn(n)
 
-        data = pd.DataFrame({
-            "y": y,
-            "group1": group1,
-            "group2": group2,
-            "subject": [str(s) for s in subject]
-        })
+        data = pd.DataFrame(
+            {"y": y, "group1": group1, "group2": group2, "subject": [str(s) for s in subject]}
+        )
 
         result = lmer(
             "y ~ group1 * group2 + (1 | subject)",
             data,
-            contrasts={"group1": "sum", "group2": "treatment"}
+            contrasts={"group1": "sum", "group2": "treatment"},
         )
 
         assert result.converged
@@ -3319,7 +3296,7 @@ class TestControl:
             maxiter=2000,
             ftol=1e-6,
             boundary_tol=1e-5,
-            check_singular=False
+            check_singular=False,
         )
         assert ctrl.optimizer == "Nelder-Mead"
         assert ctrl.maxiter == 2000
@@ -3372,12 +3349,7 @@ class TestControl:
         assert ctrl.nAGQ0initStep is True
 
     def test_glmer_control_custom(self) -> None:
-        ctrl = GlmerControl(
-            optimizer="BFGS",
-            maxiter=500,
-            tolPwrss=1e-6,
-            nAGQ0initStep=False
-        )
+        ctrl = GlmerControl(optimizer="BFGS", maxiter=500, tolPwrss=1e-6, nAGQ0initStep=False)
         assert ctrl.optimizer == "BFGS"
         assert ctrl.maxiter == 500
         assert ctrl.tolPwrss == 1e-6
@@ -3403,7 +3375,7 @@ class TestControl:
             data,
             family=families.Binomial(),
             weights=data["size"].values,
-            control=ctrl
+            control=ctrl,
         )
         assert result.converged
 
@@ -3450,12 +3422,7 @@ class TestModelFrame:
         x = np.random.randn(n)
         y = np.random.randn(n)
 
-        data = pd.DataFrame({
-            "y": y,
-            "x": x,
-            "group1": group1,
-            "group2": group2
-        })
+        data = pd.DataFrame({"y": y, "x": x, "group1": group1, "group2": group2})
 
         result = lmer("y ~ x + (1 | group1) + (1 | group2)", data)
         mf = result.model_frame()
@@ -3474,12 +3441,7 @@ class TestModelFrame:
         group = np.repeat(np.arange(6), 10).astype(str)
         y = np.random.randn(n)
 
-        data = pd.DataFrame({
-            "y": y,
-            "x1": x1,
-            "x2": x2,
-            "group": group
-        })
+        data = pd.DataFrame({"y": y, "x1": x1, "x2": x2, "group": group})
 
         result = lmer("y ~ x1 * x2 + (1 | group)", data)
         mf = result.model_frame()
@@ -3506,10 +3468,7 @@ class TestModelFrame:
         data["y"] = data["incidence"] / data["size"]
 
         result = glmer(
-            "y ~ period + (1 | herd)",
-            data,
-            family=families.Binomial(),
-            weights=data["size"].values
+            "y ~ period + (1 | herd)", data, family=families.Binomial(), weights=data["size"].values
         )
         mf = result.model_frame()
 
@@ -3579,10 +3538,7 @@ class TestRanefCondVar:
         data["y"] = data["incidence"] / data["size"]
 
         result = glmer(
-            "y ~ period + (1 | herd)",
-            data,
-            family=families.Binomial(),
-            weights=data["size"].values
+            "y ~ period + (1 | herd)", data, family=families.Binomial(), weights=data["size"].values
         )
 
         ranef_result = result.ranef(condVar=True)
@@ -3613,10 +3569,7 @@ class TestModelTypeChecks:
         data["y"] = data["incidence"] / data["size"]
 
         result = glmer(
-            "y ~ period + (1 | herd)",
-            data,
-            family=families.Binomial(),
-            weights=data["size"].values
+            "y ~ period + (1 | herd)", data, family=families.Binomial(), weights=data["size"].values
         )
         assert result.isGLMM() is True
         assert result.isLMM() is False
@@ -3648,7 +3601,7 @@ class TestModelTypeChecks:
             y_var="y",
             group_var="group",
             random_params=[0, 1],
-            start={"Asym": 200, "xmid": 5, "scal": 1}
+            start={"Asym": 200, "xmid": 5, "scal": 1},
         )
         assert result.isNLMM() is True
         assert result.isLMM() is False
@@ -3682,12 +3635,7 @@ class TestNpar:
         x = np.random.randn(n)
         y = np.random.randn(n)
 
-        data = pd.DataFrame({
-            "y": y,
-            "x": x,
-            "group1": group1,
-            "group2": group2
-        })
+        data = pd.DataFrame({"y": y, "x": x, "group1": group1, "group2": group2})
 
         result = lmer("y ~ x + (1 | group1) + (1 | group2)", data)
         npar = result.npar()
@@ -3702,10 +3650,7 @@ class TestNpar:
         data["y"] = data["incidence"] / data["size"]
 
         result = glmer(
-            "y ~ period + (1 | herd)",
-            data,
-            family=families.Binomial(),
-            weights=data["size"].values
+            "y ~ period + (1 | herd)", data, family=families.Binomial(), weights=data["size"].values
         )
         npar = result.npar()
 
@@ -3739,7 +3684,7 @@ class TestNpar:
             y_var="y",
             group_var="group",
             random_params=[0, 1],
-            start={"Asym": 200, "xmid": 5, "scal": 1}
+            start={"Asym": 200, "xmid": 5, "scal": 1},
         )
         npar = result.npar()
 
@@ -3766,12 +3711,7 @@ class TestDfResidual:
         group = np.repeat(np.arange(10), 10).astype(str)
         y = np.random.randn(n)
 
-        data = pd.DataFrame({
-            "y": y,
-            "x1": x1,
-            "x2": x2,
-            "group": group
-        })
+        data = pd.DataFrame({"y": y, "x1": x1, "x2": x2, "group": group})
 
         result = lmer("y ~ x1 + x2 + (1 | group)", data)
         df_res = result.df_residual()
@@ -3783,10 +3723,7 @@ class TestDfResidual:
         data["y"] = data["incidence"] / data["size"]
 
         result = glmer(
-            "y ~ period + (1 | herd)",
-            data,
-            family=families.Binomial(),
-            weights=data["size"].values
+            "y ~ period + (1 | herd)", data, family=families.Binomial(), weights=data["size"].values
         )
         df_res = result.df_residual()
 
@@ -3820,7 +3757,7 @@ class TestDfResidual:
             y_var="y",
             group_var="group",
             random_params=[0, 1],
-            start={"Asym": 200, "xmid": 5, "scal": 1}
+            start={"Asym": 200, "xmid": 5, "scal": 1},
         )
 
         n = len(x)
@@ -3830,6 +3767,7 @@ class TestDfResidual:
 
 try:
     import matplotlib  # noqa: F401
+
     HAS_MATPLOTLIB = True
 except ImportError:
     HAS_MATPLOTLIB = False
@@ -3839,6 +3777,7 @@ except ImportError:
 class TestProfilePlotting:
     def test_profile_plot_basic(self) -> None:
         import matplotlib
+
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
         from mixedlm.inference import profile_lmer
@@ -3852,6 +3791,7 @@ class TestProfilePlotting:
 
     def test_profile_plot_density(self) -> None:
         import matplotlib
+
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
         from mixedlm.inference import profile_lmer
@@ -3865,6 +3805,7 @@ class TestProfilePlotting:
 
     def test_plot_profiles(self) -> None:
         import matplotlib
+
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
         from mixedlm.inference import plot_profiles, profile_lmer
@@ -3878,6 +3819,7 @@ class TestProfilePlotting:
 
     def test_splom_profiles(self) -> None:
         import matplotlib
+
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
         from mixedlm.inference import profile_lmer, splom_profiles
@@ -3891,6 +3833,7 @@ class TestProfilePlotting:
 
     def test_profile_plot_no_ci(self) -> None:
         import matplotlib
+
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
         from mixedlm.inference import profile_lmer
@@ -3939,12 +3882,7 @@ class TestAccessorsWeightsOffset:
         data["y"] = data["incidence"] / data["size"]
         weights = data["size"].values
 
-        result = glmer(
-            "y ~ period + (1 | herd)",
-            data,
-            family=families.Binomial(),
-            weights=weights
-        )
+        result = glmer("y ~ period + (1 | herd)", data, family=families.Binomial(), weights=weights)
         w = result.weights()
 
         assert len(w) == len(data)
@@ -3955,12 +3893,7 @@ class TestAccessorsWeightsOffset:
         data["y"] = data["incidence"] / data["size"]
         offset = np.log(data["size"].values)
 
-        result = glmer(
-            "y ~ period + (1 | herd)",
-            data,
-            family=families.Binomial(),
-            offset=offset
-        )
+        result = glmer("y ~ period + (1 | herd)", data, family=families.Binomial(), offset=offset)
         o = result.offset()
 
         assert len(o) == len(data)
@@ -3973,10 +3906,7 @@ class TestAccessorsWeightsOffset:
         data["y"] = data["incidence"] / data["size"]
 
         result = glmer(
-            "y ~ period + (1 | herd)",
-            data,
-            family=families.Binomial(),
-            weights=data["size"].values
+            "y ~ period + (1 | herd)", data, family=families.Binomial(), weights=data["size"].values
         )
         fam = result.get_family()
 
@@ -3994,11 +3924,7 @@ class TestAccessorsWeightsOffset:
 
         data = pd.DataFrame({"y": y, "x": x, "group": group})
 
-        result = glmer(
-            "y ~ x + (1 | group)",
-            data,
-            family=families.Poisson()
-        )
+        result = glmer("y ~ x + (1 | group)", data, family=families.Poisson())
         fam = result.get_family()
 
         assert isinstance(fam, families.Poisson)
@@ -4025,6 +3951,7 @@ class TestAccessorsWeightsOffset:
 class TestQQmath:
     def test_qqmath_basic(self) -> None:
         import matplotlib
+
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
 
@@ -4036,6 +3963,7 @@ class TestQQmath:
 
     def test_qqmath_specific_term(self) -> None:
         import matplotlib
+
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
 
@@ -4047,6 +3975,7 @@ class TestQQmath:
 
     def test_qqmath_multiple_terms(self) -> None:
         import matplotlib
+
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
 
@@ -4058,6 +3987,7 @@ class TestQQmath:
 
     def test_qqmath_glmer(self) -> None:
         import matplotlib
+
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
 
@@ -4065,10 +3995,7 @@ class TestQQmath:
         data["y"] = data["incidence"] / data["size"]
 
         result = glmer(
-            "y ~ period + (1 | herd)",
-            data,
-            family=families.Binomial(),
-            weights=data["size"].values
+            "y ~ period + (1 | herd)", data, family=families.Binomial(), weights=data["size"].values
         )
         fig = result.qqmath()
 
@@ -4077,6 +4004,7 @@ class TestQQmath:
 
     def test_qqmath_custom_figsize(self) -> None:
         import matplotlib
+
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
 
@@ -4103,6 +4031,7 @@ class TestQQmath:
 class TestPlotDiagnostics:
     def test_plot_basic_lmer(self) -> None:
         import matplotlib
+
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
 
@@ -4114,6 +4043,7 @@ class TestPlotDiagnostics:
 
     def test_plot_basic_glmer(self) -> None:
         import matplotlib
+
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
 
@@ -4121,10 +4051,7 @@ class TestPlotDiagnostics:
         data["y"] = data["incidence"] / data["size"]
 
         result = glmer(
-            "y ~ period + (1 | herd)",
-            data,
-            family=families.Binomial(),
-            weights=data["size"].values
+            "y ~ period + (1 | herd)", data, family=families.Binomial(), weights=data["size"].values
         )
         fig = result.plot()
 
@@ -4133,6 +4060,7 @@ class TestPlotDiagnostics:
 
     def test_plot_subset_which(self) -> None:
         import matplotlib
+
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
 
@@ -4144,6 +4072,7 @@ class TestPlotDiagnostics:
 
     def test_plot_single_which(self) -> None:
         import matplotlib
+
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
 
@@ -4155,6 +4084,7 @@ class TestPlotDiagnostics:
 
     def test_plot_custom_figsize(self) -> None:
         import matplotlib
+
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
 
@@ -4166,6 +4096,7 @@ class TestPlotDiagnostics:
 
     def test_plot_all_panels(self) -> None:
         import matplotlib
+
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
 
@@ -4178,6 +4109,7 @@ class TestPlotDiagnostics:
 
     def test_plot_no_random_effects_skips_panel4(self) -> None:
         import matplotlib
+
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
         from mixedlm.diagnostics.plots import plot_diagnostics
@@ -4191,6 +4123,7 @@ class TestPlotDiagnostics:
 
     def test_plot_ranef_function(self) -> None:
         import matplotlib
+
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
         from mixedlm.diagnostics import plot_ranef
@@ -4203,6 +4136,7 @@ class TestPlotDiagnostics:
 
     def test_plot_individual_functions(self) -> None:
         import matplotlib
+
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
         from mixedlm.diagnostics import (
@@ -4422,11 +4356,7 @@ class TestModularInterface:
         weights = np.ones(180)
         weights[:90] = 2.0
 
-        parsed = lFormula(
-            "Reaction ~ Days + (1 | Subject)",
-            SLEEPSTUDY,
-            weights=weights
-        )
+        parsed = lFormula("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY, weights=weights)
 
         assert np.allclose(parsed.matrices.weights[:90], 2.0)
         assert np.allclose(parsed.matrices.weights[90:], 1.0)
@@ -4437,11 +4367,7 @@ class TestModularInterface:
         offset = np.zeros(180)
         offset[:90] = 10.0
 
-        parsed = lFormula(
-            "Reaction ~ Days + (1 | Subject)",
-            SLEEPSTUDY,
-            offset=offset
-        )
+        parsed = lFormula("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY, offset=offset)
 
         assert np.allclose(parsed.matrices.offset[:90], 10.0)
         assert np.allclose(parsed.matrices.offset[90:], 0.0)
@@ -4634,9 +4560,7 @@ class TestUpdateSleepstudy:
 
         data["count"] = np.round(data["incidence"]).astype(int)
         result2 = result1.update(
-            formula="count ~ period + (1 | herd)",
-            data=data,
-            family=families.Poisson()
+            formula="count ~ period + (1 | herd)", data=data, family=families.Poisson()
         )
 
         assert isinstance(result1.getME("family"), families.Binomial)

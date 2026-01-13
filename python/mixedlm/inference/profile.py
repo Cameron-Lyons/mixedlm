@@ -259,18 +259,22 @@ def splom_profiles(
 
                 try:
                     f_i = interp1d(
-                        p_i.zeta, p_i.values, kind="linear",
-                        bounds_error=False, fill_value="extrapolate"
+                        p_i.zeta,
+                        p_i.values,
+                        kind="linear",
+                        bounds_error=False,
+                        fill_value="extrapolate",
                     )
                     f_j = interp1d(
-                        p_j.zeta, p_j.values, kind="linear",
-                        bounds_error=False, fill_value="extrapolate"
+                        p_j.zeta,
+                        p_j.values,
+                        kind="linear",
+                        bounds_error=False,
+                        fill_value="extrapolate",
                     )
 
                     zeta_common = np.linspace(
-                        max(p_i.zeta.min(), p_j.zeta.min()),
-                        min(p_i.zeta.max(), p_j.zeta.max()),
-                        50
+                        max(p_i.zeta.min(), p_j.zeta.min()), min(p_i.zeta.max(), p_j.zeta.max()), 50
                     )
 
                     vals_i = f_i(zeta_common)
@@ -280,8 +284,7 @@ def splom_profiles(
                     ax.axhline(p_i.mle, color="gray", linestyle="--", alpha=0.3)
                     ax.axvline(p_j.mle, color="gray", linestyle="--", alpha=0.3)
                 except Exception:
-                    ax.text(0.5, 0.5, "N/A", ha="center", va="center",
-                            transform=ax.transAxes)
+                    ax.text(0.5, 0.5, "N/A", ha="center", va="center", transform=ax.transAxes)
 
             if i < n - 1:
                 ax.set_xlabel("")

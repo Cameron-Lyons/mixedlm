@@ -232,9 +232,7 @@ class GlmerResult:
         """
         return self.family
 
-    def model_matrix(
-        self, type: str = "fixed"
-    ) -> NDArray[np.floating] | sparse.csc_matrix:
+    def model_matrix(self, type: str = "fixed") -> NDArray[np.floating] | sparse.csc_matrix:
         """Get the model design matrix.
 
         Parameters
@@ -257,9 +255,7 @@ class GlmerResult:
         elif type == "both":
             return (self.matrices.X, self.matrices.Z)
         else:
-            raise ValueError(
-                f"Unknown type '{type}'. Use 'fixed', 'random', 'X', 'Z', or 'both'."
-            )
+            raise ValueError(f"Unknown type '{type}'. Use 'fixed', 'random', 'X', 'Z', or 'both'.")
 
     def terms(self):
         """Get information about the model terms.
@@ -1284,14 +1280,33 @@ class GlmerResult:
             return self.nAGQ
         else:
             valid_names = [
-                "X", "Z", "Zt", "y", "beta", "theta", "Lambda", "Lambdat",
-                "u", "b", "n", "n_obs", "p", "n_fixed", "q", "n_random",
-                "lower", "weights", "offset", "deviance", "flist", "cnms", "Gp",
-                "family", "nAGQ"
+                "X",
+                "Z",
+                "Zt",
+                "y",
+                "beta",
+                "theta",
+                "Lambda",
+                "Lambdat",
+                "u",
+                "b",
+                "n",
+                "n_obs",
+                "p",
+                "n_fixed",
+                "q",
+                "n_random",
+                "lower",
+                "weights",
+                "offset",
+                "deviance",
+                "flist",
+                "cnms",
+                "Gp",
+                "family",
+                "nAGQ",
             ]
-            raise ValueError(
-                f"Unknown component name: '{name}'. Valid names are: {valid_names}"
-            )
+            raise ValueError(f"Unknown component name: '{name}'. Valid names are: {valid_names}")
 
     def update(
         self,
@@ -1368,13 +1383,7 @@ class GlmerResult:
             nAGQ = self.nAGQ
 
         return glmer(
-            new_formula,
-            data,
-            family=family,
-            weights=weights,
-            offset=offset,
-            nAGQ=nAGQ,
-            **kwargs
+            new_formula, data, family=family, weights=weights, offset=offset, nAGQ=nAGQ, **kwargs
         )
 
     def _update_formula(self, new_formula: str) -> str:
@@ -1866,8 +1875,12 @@ class GlmerMod:
         self.control = control if control is not None else GlmerControl()
 
         self.matrices = build_model_matrices(
-            self.formula, self.data, weights=weights, offset=offset,
-            na_action=na_action, contrasts=contrasts
+            self.formula,
+            self.data,
+            weights=weights,
+            offset=offset,
+            na_action=na_action,
+            contrasts=contrasts,
         )
 
     def fit(
@@ -1991,8 +2004,14 @@ def glmer(
     >>> result = glmer("y ~ x + (1|group)", data, family=Binomial(), control=ctrl)
     """
     model = GlmerMod(
-        formula, data, family=family, verbose=verbose,
-        weights=weights, offset=offset, na_action=na_action,
-        contrasts=contrasts, control=control
+        formula,
+        data,
+        family=family,
+        verbose=verbose,
+        weights=weights,
+        offset=offset,
+        na_action=na_action,
+        contrasts=contrasts,
+        control=control,
     )
     return model.fit(nAGQ=nAGQ, **kwargs)

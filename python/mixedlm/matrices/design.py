@@ -67,9 +67,7 @@ def build_model_matrices(
     from mixedlm.utils.na_action import handle_na
 
     if na_action is not None:
-        clean_data, na_info, weights, offset = handle_na(
-            data, formula, na_action, weights, offset
-        )
+        clean_data, na_info, weights, offset = handle_na(data, formula, na_action, weights, offset)
     else:
         clean_data = data
         na_info = None

@@ -344,9 +344,7 @@ class LmerResult:
         """
         return self.matrices.offset.copy()
 
-    def model_matrix(
-        self, type: str = "fixed"
-    ) -> NDArray[np.floating] | sparse.csc_matrix:
+    def model_matrix(self, type: str = "fixed") -> NDArray[np.floating] | sparse.csc_matrix:
         """Get the model design matrix.
 
         Parameters
@@ -376,9 +374,7 @@ class LmerResult:
         elif type == "both":
             return (self.matrices.X, self.matrices.Z)
         else:
-            raise ValueError(
-                f"Unknown type '{type}'. Use 'fixed', 'random', 'X', 'Z', or 'both'."
-            )
+            raise ValueError(f"Unknown type '{type}'. Use 'fixed', 'random', 'X', 'Z', or 'both'.")
 
     def terms(self) -> ModelTerms:
         """Get information about the model terms.
@@ -1466,14 +1462,34 @@ class LmerResult:
             return np.array(gp)
         else:
             valid_names = [
-                "X", "Z", "Zt", "y", "beta", "theta", "Lambda", "Lambdat",
-                "u", "b", "sigma", "n", "n_obs", "p", "n_fixed", "q", "n_random",
-                "lower", "weights", "offset", "REML", "deviance", "fixef_names",
-                "flist", "cnms", "Gp"
+                "X",
+                "Z",
+                "Zt",
+                "y",
+                "beta",
+                "theta",
+                "Lambda",
+                "Lambdat",
+                "u",
+                "b",
+                "sigma",
+                "n",
+                "n_obs",
+                "p",
+                "n_fixed",
+                "q",
+                "n_random",
+                "lower",
+                "weights",
+                "offset",
+                "REML",
+                "deviance",
+                "fixef_names",
+                "flist",
+                "cnms",
+                "Gp",
             ]
-            raise ValueError(
-                f"Unknown component name: '{name}'. Valid names are: {valid_names}"
-            )
+            raise ValueError(f"Unknown component name: '{name}'. Valid names are: {valid_names}")
 
     def update(
         self,
@@ -1548,14 +1564,7 @@ class LmerResult:
         if offset is None and not data_size_changed:
             offset = self.matrices.offset
 
-        return lmer(
-            new_formula,
-            data,
-            REML=REML,
-            weights=weights,
-            offset=offset,
-            **kwargs
-        )
+        return lmer(new_formula, data, REML=REML, weights=weights, offset=offset, **kwargs)
 
     def _update_formula(self, new_formula: str) -> str:
         """Process formula update syntax with '.' placeholders."""
@@ -2076,8 +2085,12 @@ class LmerMod:
         self.control = control if control is not None else LmerControl()
 
         self.matrices = build_model_matrices(
-            self.formula, self.data, weights=weights, offset=offset,
-            na_action=na_action, contrasts=contrasts
+            self.formula,
+            self.data,
+            weights=weights,
+            offset=offset,
+            na_action=na_action,
+            contrasts=contrasts,
         )
 
     def fit(
@@ -2198,8 +2211,14 @@ def lmer(
     >>> result = lmer("y ~ x + (1|group)", data, control=ctrl)
     """
     model = LmerMod(
-        formula, data, REML=REML, verbose=verbose,
-        weights=weights, offset=offset, na_action=na_action,
-        contrasts=contrasts, control=control
+        formula,
+        data,
+        REML=REML,
+        verbose=verbose,
+        weights=weights,
+        offset=offset,
+        na_action=na_action,
+        contrasts=contrasts,
+        control=control,
     )
     return model.fit(**kwargs)

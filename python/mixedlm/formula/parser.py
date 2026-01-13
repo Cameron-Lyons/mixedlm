@@ -565,11 +565,7 @@ def subbars(formula: Formula | str) -> str:
             fixed_parts.append(":".join(term.variables))
 
     for rterm in formula.random:
-        grouping = (
-            "/".join(rterm.grouping)
-            if isinstance(rterm.grouping, tuple)
-            else rterm.grouping
-        )
+        grouping = "/".join(rterm.grouping) if isinstance(rterm.grouping, tuple) else rterm.grouping
 
         if rterm.has_intercept:
             fixed_parts.append(grouping)

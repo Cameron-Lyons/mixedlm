@@ -30,10 +30,7 @@ class NAAction(Enum):
         elif value_lower in ("fail", "na.fail", "na_fail"):
             return cls.FAIL
         else:
-            raise ValueError(
-                f"Unknown na_action: '{value}'. "
-                "Use 'omit', 'exclude', or 'fail'."
-            )
+            raise ValueError(f"Unknown na_action: '{value}'. Use 'omit', 'exclude', or 'fail'.")
 
 
 @dataclass
