@@ -53,8 +53,10 @@ class Lexer:
         return ch
 
     def skip_whitespace(self) -> None:
-        while self.peek() is not None and self.peek() in " \t\n\r":
+        ch = self.peek()
+        while ch is not None and ch in " \t\n\r":
             self.advance()
+            ch = self.peek()
 
     def tokenize(self) -> Iterator[Token]:
         while True:
@@ -99,15 +101,17 @@ class Lexer:
                 yield Token(TokenType.RPAREN, ")", start_pos)
             elif ch.isdigit():
                 num = ""
-                while self.peek() is not None and self.peek().isdigit():
+                next_ch = self.peek()
+                while next_ch is not None and next_ch.isdigit():
                     num += self.advance()  # type: ignore[operator]
+                    next_ch = self.peek()
                 yield Token(TokenType.NUMBER, num, start_pos)
             elif ch.isalpha() or ch == "_" or ch == ".":
                 ident = ""
-                while (
-                    self.peek() is not None and (self.peek().isalnum() or self.peek() in "_.")  # type: ignore[union-attr]
-                ):
+                next_ch = self.peek()
+                while next_ch is not None and (next_ch.isalnum() or next_ch in "_."):
                     ident += self.advance()  # type: ignore[operator]
+                    next_ch = self.peek()
                 yield Token(TokenType.IDENTIFIER, ident, start_pos)
             else:
                 raise ValueError(f"Unexpected character '{ch}' at position {start_pos}")
@@ -261,7 +265,11 @@ class Parser:
             elif self.peek().type == TokenType.IDENTIFIER:
                 term = self._parse_term()
                 if term is not None:
-                    expr_terms.append(term)
+                    if isinstance(term, tuple):
+                        if term == ("no_intercept",):
+                            has_intercept = False
+                    else:
+                        expr_terms.append(term)
             elif self.peek().type == TokenType.PLUS:
                 self.advance()
             elif self.peek().type == TokenType.MINUS:
@@ -419,24 +427,24 @@ def update_formula(old_formula: Formula, new_formula_str: str) -> Formula:
             has_intercept = False
         elif ":" in term_str:
             vars_tuple = tuple(term_str.split(":"))
-            new_term = InteractionTerm(vars_tuple)
-            if new_term not in new_fixed_terms:
-                new_fixed_terms.append(new_term)
+            interaction_term = InteractionTerm(vars_tuple)
+            if interaction_term not in new_fixed_terms:
+                new_fixed_terms.append(interaction_term)
         else:
-            new_term = VariableTerm(term_str)
-            if new_term not in new_fixed_terms:
-                new_fixed_terms.append(new_term)
+            variable_term = VariableTerm(term_str)
+            if variable_term not in new_fixed_terms:
+                new_fixed_terms.append(variable_term)
 
     for term_str in removals:
         if term_str == "1":
             has_intercept = False
         elif ":" in term_str:
             vars_tuple = tuple(term_str.split(":"))
-            term_to_remove = InteractionTerm(vars_tuple)
-            new_fixed_terms = [t for t in new_fixed_terms if t != term_to_remove]
+            interaction_to_remove = InteractionTerm(vars_tuple)
+            new_fixed_terms = [t for t in new_fixed_terms if t != interaction_to_remove]
         else:
-            term_to_remove = VariableTerm(term_str)
-            new_fixed_terms = [t for t in new_fixed_terms if t != term_to_remove]
+            variable_to_remove = VariableTerm(term_str)
+            new_fixed_terms = [t for t in new_fixed_terms if t != variable_to_remove]
 
     for random_str in random_additions:
         temp_formula = parse_formula(f"y ~ 1 + {random_str}")

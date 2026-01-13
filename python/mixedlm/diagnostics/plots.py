@@ -350,13 +350,19 @@ def plot_ranef(
 
     ranef_result = result.ranef(condVar=condVar)
 
-    if group is None:
-        group = list(ranef_result.values.keys())[0]
+    from mixedlm.models.lmer import RanefResult
 
-    if group not in ranef_result.values:
+    ranef_values = (
+        ranef_result.values if isinstance(ranef_result, RanefResult) else ranef_result
+    )
+
+    if group is None:
+        group = list(ranef_values.keys())[0]
+
+    if group not in ranef_values:
         raise ValueError(f"Grouping factor '{group}' not found")
 
-    group_ranef = ranef_result.values[group]
+    group_ranef = ranef_values[group]
 
     if term is None:
         term = list(group_ranef.keys())[0]
@@ -389,6 +395,7 @@ def plot_ranef(
 
     if (
         condVar
+        and isinstance(ranef_result, RanefResult)
         and ranef_result.condVar is not None
         and group in ranef_result.condVar
         and term in ranef_result.condVar[group]

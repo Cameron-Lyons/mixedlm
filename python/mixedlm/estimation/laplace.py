@@ -121,6 +121,7 @@ def pirls(
 
     Zt = matrices.Zt
 
+    beta: NDArray[np.floating]
     if beta_start is None:
         beta = np.zeros(p, dtype=np.float64)
         eta = matrices.X @ beta + offset
@@ -355,7 +356,7 @@ class GLMMOptimizer:
         self._beta_cache = None
         self._u_cache = None
 
-        bounds = [(None, None)] * len(start)
+        bounds: list[tuple[float | None, float | None]] = [(None, None)] * len(start)
         idx = 0
         for struct in self.matrices.random_structures:
             q = struct.n_terms

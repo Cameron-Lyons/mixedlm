@@ -24,13 +24,16 @@ jobs:
       - name: Create venv and install dependencies
         run: |
           uv venv
-          uv pip install ruff
+          uv pip install ruff mypy
 
       - name: Run ruff check
         run: uv run ruff check python/ tests/
 
       - name: Run ruff format check
         run: uv run ruff format --check python/ tests/
+
+      - name: Run mypy type check
+        run: uv run mypy python/ --ignore-missing-imports
 
   test:
     runs-on: ubuntu-latest

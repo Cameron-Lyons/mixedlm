@@ -281,6 +281,7 @@ class NlmerMod:
         else:
             self.random_params = list(random_params)  # type: ignore
 
+        self.start_phi: NDArray[np.floating]
         if start is not None:
             self.start_phi = np.array(
                 [start.get(name, 1.0) for name in model.param_names],

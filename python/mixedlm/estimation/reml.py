@@ -255,7 +255,7 @@ class LMMOptimizer:
         if start is None:
             start = self.get_start_theta()
 
-        bounds = [(None, None)] * len(start)
+        bounds: list[tuple[float | None, float | None]] = [(None, None)] * len(start)
         idx = 0
         for struct in self.matrices.random_structures:
             q = struct.n_terms

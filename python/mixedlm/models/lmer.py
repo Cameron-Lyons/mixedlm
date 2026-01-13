@@ -164,7 +164,7 @@ class RePCA:
         return self.groups[key]
 
     def is_singular(self, tol: float = 1e-4) -> dict[str, bool]:
-        return {name: np.any(group.sdev < tol) for name, group in self.groups.items()}
+        return {name: bool(np.any(group.sdev < tol)) for name, group in self.groups.items()}
 
 
 @dataclass
@@ -494,6 +494,7 @@ class LmerResult:
         """
         values = self._fitted_values
         if na_expand and self._should_expand_na():
+            assert self.matrices.na_info is not None
             return self.matrices.na_info.expand_to_original(values)
         return values
 
@@ -530,6 +531,7 @@ class LmerResult:
             raise ValueError(f"Unknown residual type: {type}")
 
         if na_expand and self._should_expand_na():
+            assert self.matrices.na_info is not None
             return self.matrices.na_info.expand_to_original(resid)
         return resid
 

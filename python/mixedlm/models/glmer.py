@@ -356,6 +356,7 @@ class GlmerResult:
     def linear_predictor(self, na_expand: bool = True) -> NDArray[np.floating]:
         values = self._linear_predictor
         if na_expand and self._should_expand_na():
+            assert self.matrices.na_info is not None
             return self.matrices.na_info.expand_to_original(values)
         return values
 
@@ -378,6 +379,7 @@ class GlmerResult:
         values = eta if type == "link" else self.family.link.inverse(eta)
 
         if na_expand and self._should_expand_na():
+            assert self.matrices.na_info is not None
             return self.matrices.na_info.expand_to_original(values)
         return values
 
@@ -411,6 +413,7 @@ class GlmerResult:
             raise ValueError(f"Unknown residual type: {type}")
 
         if na_expand and self._should_expand_na():
+            assert self.matrices.na_info is not None
             return self.matrices.na_info.expand_to_original(resid)
         return resid
 
@@ -1693,7 +1696,7 @@ class GlmerResult:
             y_sim = np.random.poisson(mu).astype(np.float64)
         elif family_name == "NegativeBinomial":
             mu = np.clip(mu, 1e-6, 1e10)
-            theta = self.family.theta
+            theta = self.family.theta  # type: ignore[attr-defined]
             y_sim = np.random.negative_binomial(theta, theta / (mu + theta)).astype(np.float64)
         elif family_name == "Gamma":
             mu = np.clip(mu, 1e-6, 1e10)

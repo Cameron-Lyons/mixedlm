@@ -173,7 +173,7 @@ def allfit_lmer(
     weights = model.matrices.weights if np.any(model.matrices.weights != 1.0) else None
     offset = model.matrices.offset if np.any(model.matrices.offset != 0.0) else None
 
-    fits: dict[str, LmerResult | None] = {}
+    fits: dict[str, LmerResult | GlmerResult | None] = {}
     errors: dict[str, str] = {}
     warnings: dict[str, list[str]] = {}
 
@@ -214,15 +214,15 @@ def allfit_lmer(
             futures = {executor.submit(_allfit_lmer_worker, task): task[0] for task in tasks}
 
             for future in as_completed(futures):
-                opt_name, fit, error, warn_list = future.result()
+                fut_opt_name, fut_fit, fut_error, fut_warn_list = future.result()
 
                 if verbose:
-                    print(f"Completed {opt_name}")
+                    print(f"Completed {fut_opt_name}")
 
-                fits[opt_name] = fit
-                if error is not None:
-                    errors[opt_name] = error
-                warnings[opt_name] = warn_list
+                fits[fut_opt_name] = fut_fit
+                if fut_error is not None:
+                    errors[fut_opt_name] = fut_error
+                warnings[fut_opt_name] = fut_warn_list
 
     return AllFitResult(fits=fits, errors=errors, warnings=warnings)
 
@@ -242,7 +242,7 @@ def allfit_glmer(
     weights = model.matrices.weights if np.any(model.matrices.weights != 1.0) else None
     offset = model.matrices.offset if np.any(model.matrices.offset != 0.0) else None
 
-    fits: dict[str, GlmerResult | None] = {}
+    fits: dict[str, LmerResult | GlmerResult | None] = {}
     errors: dict[str, str] = {}
     warnings: dict[str, list[str]] = {}
 
@@ -284,14 +284,14 @@ def allfit_glmer(
             futures = {executor.submit(_allfit_glmer_worker, task): task[0] for task in tasks}
 
             for future in as_completed(futures):
-                opt_name, fit, error, warn_list = future.result()
+                fut_opt_name, fut_fit, fut_error, fut_warn_list = future.result()
 
                 if verbose:
-                    print(f"Completed {opt_name}")
+                    print(f"Completed {fut_opt_name}")
 
-                fits[opt_name] = fit
-                if error is not None:
-                    errors[opt_name] = error
-                warnings[opt_name] = warn_list
+                fits[fut_opt_name] = fut_fit
+                if fut_error is not None:
+                    errors[fut_opt_name] = fut_error
+                warnings[fut_opt_name] = fut_warn_list
 
     return AllFitResult(fits=fits, errors=errors, warnings=warnings)

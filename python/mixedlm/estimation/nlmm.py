@@ -219,7 +219,7 @@ def pnls_step(
             with ThreadPoolExecutor(max_workers=n_jobs) as executor:
                 futures = [
                     executor.submit(
-                        _update_group_random_effects,
+                        _update_group_random_effects,  # type: ignore[arg-type]
                         g,
                         groups,
                         x,
@@ -234,8 +234,8 @@ def pnls_step(
                     for g in range(n_groups)
                 ]
                 for future in futures:
-                    g, b_g = future.result()
-                    b_new[g, :] = b_g
+                    result = future.result()
+                    b_new[result[0], :] = result[1]
         else:
             sigma2 = sigma**2
             for g in range(n_groups):
@@ -267,15 +267,17 @@ def pnls_step(
         phi = phi_new
         b = b_new
 
+    rss: float
     if use_parallel:
         with ThreadPoolExecutor(max_workers=n_jobs) as executor:
             futures = [
                 executor.submit(
-                    _compute_group_rss, g, groups, x, y, phi_new, b_new, random_params, model
+                    _compute_group_rss,  # type: ignore[arg-type]
+                    g, groups, x, y, phi_new, b_new, random_params, model
                 )
                 for g in range(n_groups)
             ]
-            rss = sum(future.result() for future in futures)
+            rss = float(sum(future.result() for future in futures))  # type: ignore[misc]
     else:
         rss = 0.0
         for g in range(n_groups):
@@ -287,7 +289,7 @@ def pnls_step(
             np.add.at(params_g, random_params, b_new[g, :])
 
             pred_g = model.predict(params_g, x_g)
-            rss += np.sum((y_g - pred_g) ** 2)
+            rss += float(np.sum((y_g - pred_g) ** 2))
 
     sigma_new = np.sqrt(rss / n)
 
@@ -321,15 +323,17 @@ def nlmm_deviance(
 
     use_parallel = n_jobs > 1 and n_groups >= n_jobs
 
+    rss: float
     if use_parallel:
         with ThreadPoolExecutor(max_workers=n_jobs) as executor:
             futures = [
                 executor.submit(
-                    _compute_group_rss, g, groups, x, y, phi_new, b_new, random_params, model
+                    _compute_group_rss,  # type: ignore[arg-type]
+                    g, groups, x, y, phi_new, b_new, random_params, model
                 )
                 for g in range(n_groups)
             ]
-            rss = sum(future.result() for future in futures)
+            rss = float(sum(future.result() for future in futures))  # type: ignore[misc]
     else:
         rss = 0.0
         for g in range(n_groups):
@@ -341,7 +345,7 @@ def nlmm_deviance(
             np.add.at(params_g, random_params, b_new[g, :])
 
             pred_g = model.predict(params_g, x_g)
-            rss += np.sum((y_g - pred_g) ** 2)
+            rss += float(np.sum((y_g - pred_g) ** 2))
 
     deviance = n * np.log(2 * np.pi * sigma_new**2) + rss / sigma_new**2
 

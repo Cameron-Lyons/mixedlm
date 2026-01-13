@@ -144,11 +144,11 @@ def drop1_lmer(
     from mixedlm.formula.terms import InteractionTerm, VariableTerm
 
     droppable_terms: list[str] = []
-    for term in model.formula.fixed.terms:
-        if isinstance(term, VariableTerm):
-            droppable_terms.append(term.name)
-        elif isinstance(term, InteractionTerm):
-            droppable_terms.append(":".join(term.variables))
+    for formula_term in model.formula.fixed.terms:
+        if isinstance(formula_term, VariableTerm):
+            droppable_terms.append(formula_term.name)
+        elif isinstance(formula_term, InteractionTerm):
+            droppable_terms.append(":".join(formula_term.variables))
 
     n_theta = _count_theta(model.matrices.random_structures)
     full_n_params = model.matrices.n_fixed + n_theta + 1
@@ -158,13 +158,13 @@ def drop1_lmer(
     weights = model.matrices.weights if np.any(model.matrices.weights != 1.0) else None
     offset = model.matrices.offset if np.any(model.matrices.offset != 0.0) else None
 
-    if n_jobs == 1:
-        terms: list[str] = []
-        df_list: list[int] = []
-        aic_list: list[float] = []
-        lrt_list: list[float | None] = []
-        p_value_list: list[float | None] = []
+    terms: list[str] = []
+    df_list: list[int] = []
+    aic_list: list[float] = []
+    lrt_list: list[float | None] = []
+    p_value_list: list[float | None] = []
 
+    if n_jobs == 1:
         for term in droppable_terms:
             try:
                 reduced_model = model.update(f". ~ . - {term}", data=data)
@@ -217,30 +217,24 @@ def drop1_lmer(
                 )
             )
 
-        results: dict[str, tuple[int | None, float | None, float | None, float | None]] = {}
+        results: dict[str, tuple[int, float, float | None, float | None]] = {}
 
         with ProcessPoolExecutor(max_workers=n_jobs) as executor:
             futures = {executor.submit(_drop1_lmer_worker, task): task[0] for task in tasks}
 
             for future in as_completed(futures):
-                term, n_params, aic, lrt, p_val, error = future.result()
-                if error is None and n_params is not None:
-                    results[term] = (n_params, aic, lrt, p_val)
+                fut_term, fut_n_params, fut_aic, fut_lrt, fut_p_val, fut_error = future.result()
+                if fut_error is None and fut_n_params is not None and fut_aic is not None:
+                    results[fut_term] = (fut_n_params, fut_aic, fut_lrt, fut_p_val)
 
-        terms = []
-        df_list = []
-        aic_list = []
-        lrt_list = []
-        p_value_list = []
-
-        for term in droppable_terms:
-            if term in results:
-                n_params, aic, lrt, p_val = results[term]
-                terms.append(term)
-                df_list.append(n_params)
-                aic_list.append(aic)
-                lrt_list.append(lrt)
-                p_value_list.append(p_val)
+        for term_name in droppable_terms:
+            if term_name in results:
+                res_n_params, res_aic, res_lrt, res_p_val = results[term_name]
+                terms.append(term_name)
+                df_list.append(res_n_params)
+                aic_list.append(res_aic)
+                lrt_list.append(res_lrt)
+                p_value_list.append(res_p_val)
 
     return Drop1Result(
         terms=terms,
@@ -263,11 +257,11 @@ def drop1_glmer(
     from mixedlm.formula.terms import InteractionTerm, VariableTerm
 
     droppable_terms: list[str] = []
-    for term in model.formula.fixed.terms:
-        if isinstance(term, VariableTerm):
-            droppable_terms.append(term.name)
-        elif isinstance(term, InteractionTerm):
-            droppable_terms.append(":".join(term.variables))
+    for formula_term in model.formula.fixed.terms:
+        if isinstance(formula_term, VariableTerm):
+            droppable_terms.append(formula_term.name)
+        elif isinstance(formula_term, InteractionTerm):
+            droppable_terms.append(":".join(formula_term.variables))
 
     n_theta = _count_theta(model.matrices.random_structures)
     full_n_params = model.matrices.n_fixed + n_theta
@@ -277,13 +271,13 @@ def drop1_glmer(
     weights = model.matrices.weights if np.any(model.matrices.weights != 1.0) else None
     offset = model.matrices.offset if np.any(model.matrices.offset != 0.0) else None
 
-    if n_jobs == 1:
-        terms: list[str] = []
-        df_list: list[int] = []
-        aic_list: list[float] = []
-        lrt_list: list[float | None] = []
-        p_value_list: list[float | None] = []
+    terms: list[str] = []
+    df_list: list[int] = []
+    aic_list: list[float] = []
+    lrt_list: list[float | None] = []
+    p_value_list: list[float | None] = []
 
+    if n_jobs == 1:
         for term in droppable_terms:
             try:
                 reduced_model = model.update(f". ~ . - {term}", data=data)
@@ -337,30 +331,24 @@ def drop1_glmer(
                 )
             )
 
-        results: dict[str, tuple[int | None, float | None, float | None, float | None]] = {}
+        results: dict[str, tuple[int, float, float | None, float | None]] = {}
 
         with ProcessPoolExecutor(max_workers=n_jobs) as executor:
             futures = {executor.submit(_drop1_glmer_worker, task): task[0] for task in tasks}
 
             for future in as_completed(futures):
-                term, n_params, aic, lrt, p_val, error = future.result()
-                if error is None and n_params is not None:
-                    results[term] = (n_params, aic, lrt, p_val)
+                fut_term, fut_n_params, fut_aic, fut_lrt, fut_p_val, fut_error = future.result()
+                if fut_error is None and fut_n_params is not None and fut_aic is not None:
+                    results[fut_term] = (fut_n_params, fut_aic, fut_lrt, fut_p_val)
 
-        terms = []
-        df_list = []
-        aic_list = []
-        lrt_list = []
-        p_value_list = []
-
-        for term in droppable_terms:
-            if term in results:
-                n_params, aic, lrt, p_val = results[term]
-                terms.append(term)
-                df_list.append(n_params)
-                aic_list.append(aic)
-                lrt_list.append(lrt)
-                p_value_list.append(p_val)
+        for term_name in droppable_terms:
+            if term_name in results:
+                res_n_params, res_aic, res_lrt, res_p_val = results[term_name]
+                terms.append(term_name)
+                df_list.append(res_n_params)
+                aic_list.append(res_aic)
+                lrt_list.append(res_lrt)
+                p_value_list.append(res_p_val)
 
     return Drop1Result(
         terms=terms,
