@@ -683,3 +683,109 @@ def _simulate_glmer(result: GlmerResult) -> NDArray[np.floating]:
         y_sim = mu + np.random.randn(n) * 0.1
 
     return y_sim
+
+
+def bootMer(
+    model: LmerResult | GlmerResult,
+    nsim: int = 1000,
+    seed: int | None = None,
+    n_jobs: int = 1,
+    verbose: bool = False,
+    bootstrap_type: str = "parametric",
+) -> BootstrapResult:
+    """Model-based (semi-)parametric bootstrap for mixed models.
+
+    This function provides an lme4-compatible interface for bootstrapping
+    mixed models. It is a convenience wrapper around bootstrap_lmer and
+    bootstrap_glmer that automatically selects the appropriate bootstrap
+    function based on the model type.
+
+    Parameters
+    ----------
+    model : LmerResult or GlmerResult
+        A fitted mixed model.
+    nsim : int, default 1000
+        Number of bootstrap samples.
+    seed : int, optional
+        Random seed for reproducibility.
+    n_jobs : int, default 1
+        Number of parallel jobs. Use -1 for all available cores.
+    verbose : bool, default False
+        Print progress information.
+    bootstrap_type : str, default "parametric"
+        Type of bootstrap. Currently only "parametric" is supported.
+        Parametric bootstrap simulates new responses from the fitted
+        model and refits.
+
+    Returns
+    -------
+    BootstrapResult
+        Bootstrap results containing:
+        - n_boot: Number of bootstrap samples
+        - beta_samples: Fixed effects estimates from each sample
+        - theta_samples: Variance parameter estimates from each sample
+        - sigma_samples: Residual SD estimates (LMM only)
+        - Methods: ci(), se(), summary()
+
+    Raises
+    ------
+    ValueError
+        If an unsupported bootstrap type is requested.
+    TypeError
+        If model is not a supported type.
+
+    Examples
+    --------
+    >>> result = lmer("Reaction ~ Days + (Days|Subject)", sleepstudy)
+    >>> boot = bootMer(result, nsim=500, seed=42)
+    >>> boot.ci(level=0.95)
+    {'(Intercept)': (230.5, 270.3), 'Days': (7.5, 13.2)}
+    >>> boot.se()
+    {'(Intercept)': 9.8, 'Days': 1.4}
+
+    >>> result = glmer("y ~ x + (1|group)", data, family=Binomial())
+    >>> boot = bootMer(result, nsim=200)
+    >>> print(boot.summary())
+
+    Notes
+    -----
+    The parametric bootstrap:
+    1. Simulates new response vectors from the fitted model
+    2. Refits the model to each simulated dataset
+    3. Collects the parameter estimates
+
+    This provides valid inference even when standard errors may be
+    unreliable, such as for variance components or in small samples.
+
+    See Also
+    --------
+    bootstrap_lmer : Bootstrap for linear mixed models.
+    bootstrap_glmer : Bootstrap for generalized linear mixed models.
+    confint : Confidence intervals (supports bootstrap method).
+    """
+    if bootstrap_type != "parametric":
+        raise ValueError(
+            f"Bootstrap type '{bootstrap_type}' not supported. Only 'parametric' is available."
+        )
+
+    if hasattr(model, "isLMM") and model.isLMM():
+        return bootstrap_lmer(
+            model,  # type: ignore[arg-type]
+            n_boot=nsim,
+            seed=seed,
+            n_jobs=n_jobs,
+            verbose=verbose,
+        )
+    elif hasattr(model, "isGLMM") and model.isGLMM():
+        return bootstrap_glmer(
+            model,  # type: ignore[arg-type]
+            n_boot=nsim,
+            seed=seed,
+            n_jobs=n_jobs,
+            verbose=verbose,
+        )
+    else:
+        raise TypeError(
+            f"Model type {type(model).__name__} not supported. "
+            "Use LmerResult or GlmerResult."
+        )

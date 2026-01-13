@@ -1,10 +1,28 @@
-from mixedlm import datasets, diagnostics, families, inference, nlme
-from mixedlm.datasets import load_cbpp, load_sleepstudy
+from mixedlm import datasets, diagnostics, families, inference, nlme, utils
+from mixedlm.datasets import load_cake, load_cbpp, load_dyestuff, load_dyestuff2, load_insteval, load_pastes, load_penicillin, load_sleepstudy
 from mixedlm.formula.parser import findbars, is_mixed_formula, nobars, parse_formula, subbars
 from mixedlm.inference.anova import AnovaResult, anova
+from mixedlm.inference.bootstrap import bootMer
 from mixedlm.inference.emmeans import Emmeans, emmeans
+from mixedlm.inference.profile import plot_profiles, splom_profiles
 from mixedlm.models.control import GlmerControl, LmerControl, glmerControl, lmerControl
-from mixedlm.models.glmer import GlmerMod, GlmerVarCorr, glmer
+from mixedlm.models.glmer import GlmerMod, GlmerVarCorr, glmer, glmer_nb
+from mixedlm.utils.lme4_compat import (
+    ConvergenceInfo,
+    DevComp,
+    GHrule,
+    checkConv,
+    convergence_ok,
+    devcomp,
+    factorize,
+    fortify,
+    lmList,
+    mkMerMod,
+    ngrps,
+    pvalues,
+    sigma,
+    vcconv,
+)
 from mixedlm.models.lmer import (
     LmerMod,
     LogLik,
@@ -42,6 +60,7 @@ __all__ = [
     "lmerControl",
     "LmerControl",
     "glmer",
+    "glmer_nb",
     "GlmerMod",
     "glmerControl",
     "GlmerControl",
@@ -51,6 +70,16 @@ __all__ = [
     "AnovaResult",
     "emmeans",
     "Emmeans",
+    "bootMer",
+    "sigma",
+    "ngrps",
+    "lmList",
+    "pvalues",
+    "checkConv",
+    "ConvergenceInfo",
+    "convergence_ok",
+    "plot_profiles",
+    "splom_profiles",
     "parse_formula",
     "nobars",
     "findbars",
@@ -61,8 +90,22 @@ __all__ = [
     "inference",
     "diagnostics",
     "datasets",
+    "utils",
     "load_sleepstudy",
     "load_cbpp",
+    "load_dyestuff",
+    "load_dyestuff2",
+    "load_penicillin",
+    "load_cake",
+    "load_pastes",
+    "load_insteval",
+    "fortify",
+    "devcomp",
+    "DevComp",
+    "vcconv",
+    "GHrule",
+    "factorize",
+    "mkMerMod",
     "LogLik",
     "ModelTerms",
     "PredictResult",

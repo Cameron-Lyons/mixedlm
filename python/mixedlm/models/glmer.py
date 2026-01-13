@@ -1943,6 +1943,92 @@ class GlmerMod:
         return result
 
 
+def glmer_nb(
+    formula: str,
+    data: pd.DataFrame,
+    verbose: int = 0,
+    nAGQ: int = 1,
+    weights: NDArray[np.floating] | None = None,
+    offset: NDArray[np.floating] | None = None,
+    na_action: str | None = "omit",
+    contrasts: dict[str, str | NDArray[np.floating]] | None = None,
+    control: GlmerControl | None = None,
+    theta: float = 1.0,
+    **kwargs,
+) -> GlmerResult:
+    """Fit a negative binomial generalized linear mixed-effects model.
+
+    This is a convenience wrapper around glmer() that uses the negative
+    binomial family. It's equivalent to calling glmer() with
+    family=NegativeBinomial(theta).
+
+    Parameters
+    ----------
+    formula : str
+        Model formula in lme4 syntax (e.g., "y ~ x + (1|group)").
+    data : DataFrame
+        Data containing the variables in the formula.
+    verbose : int, default 0
+        Verbosity level for optimization output.
+    nAGQ : int, default 1
+        Number of adaptive Gauss-Hermite quadrature points.
+    weights : array-like, optional
+        Prior weights for observations.
+    offset : array-like, optional
+        Offset term for the linear predictor.
+    na_action : str, optional
+        How to handle missing values ("omit", "exclude", "fail").
+    contrasts : dict, optional
+        Contrast specifications for categorical variables.
+    control : GlmerControl, optional
+        Control parameters for the optimizer.
+    theta : float, default 1.0
+        The theta (dispersion) parameter for the negative binomial
+        distribution. Larger values indicate less overdispersion.
+    **kwargs
+        Additional arguments passed to the optimizer.
+
+    Returns
+    -------
+    GlmerResult
+        Fitted model result.
+
+    Examples
+    --------
+    >>> result = glmer_nb("count ~ treatment + (1|subject)", data)
+
+    >>> result = glmer_nb("count ~ x + (1|group)", data, theta=2.0)
+
+    Notes
+    -----
+    The negative binomial distribution is useful for count data that
+    exhibits overdispersion (variance > mean). The theta parameter
+    controls the degree of overdispersion: as theta -> infinity, the
+    negative binomial approaches the Poisson distribution.
+
+    See Also
+    --------
+    glmer : General GLMM fitting function.
+    NegativeBinomial : The negative binomial family class.
+    """
+    from mixedlm.families.negative_binomial import NegativeBinomial
+
+    family = NegativeBinomial(theta=theta)
+    return glmer(
+        formula=formula,
+        data=data,
+        family=family,
+        verbose=verbose,
+        nAGQ=nAGQ,
+        weights=weights,
+        offset=offset,
+        na_action=na_action,
+        contrasts=contrasts,
+        control=control,
+        **kwargs,
+    )
+
+
 def glmer(
     formula: str,
     data: pd.DataFrame,

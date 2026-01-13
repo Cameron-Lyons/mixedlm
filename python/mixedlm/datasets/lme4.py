@@ -175,3 +175,451 @@ def load_cbpp() -> pd.DataFrame:
         "period": ["1", "2", "3", "4"] * 14,
     }
     return pd.DataFrame(data)
+
+
+def load_dyestuff() -> pd.DataFrame:
+    """Load the Dyestuff dataset from lme4.
+
+    Yield of dyestuff by batch. A classic one-way random effects dataset
+    from Davies (1967). Six samples of dyestuff were selected from a
+    manufacturing process, and the yield was determined for each batch.
+
+    This dataset is often used to demonstrate random effects models where
+    the batch effect is a random effect.
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with 30 observations and 2 columns:
+        - Batch: Batch identifier (factor with 6 levels: A-F)
+        - Yield: Yield of dyestuff (numeric)
+
+    References
+    ----------
+    Davies, O. L. (1967). Design and Analysis of Industrial Experiments
+    (2nd ed.). Hafner Publishing Company.
+
+    Examples
+    --------
+    >>> from mixedlm.datasets import load_dyestuff
+    >>> dyestuff = load_dyestuff()
+    >>> dyestuff.head()
+      Batch  Yield
+    0     A   1545
+    1     A   1440
+    2     A   1440
+    3     A   1520
+    4     A   1580
+
+    >>> # Fit a random intercept model
+    >>> from mixedlm import lmer
+    >>> model = lmer("Yield ~ 1 + (1 | Batch)", data=dyestuff)
+    """
+    data = {
+        "Batch": (
+            ["A"] * 5 + ["B"] * 5 + ["C"] * 5 +
+            ["D"] * 5 + ["E"] * 5 + ["F"] * 5
+        ),
+        "Yield": [
+            1545, 1440, 1440, 1520, 1580,
+            1540, 1555, 1490, 1560, 1495,
+            1595, 1550, 1605, 1510, 1560,
+            1445, 1440, 1595, 1465, 1545,
+            1595, 1630, 1515, 1635, 1625,
+            1520, 1455, 1450, 1480, 1445,
+        ],
+    }
+    return pd.DataFrame(data)
+
+
+def load_dyestuff2() -> pd.DataFrame:
+    """Load the Dyestuff2 dataset from lme4.
+
+    A simulated dataset similar to Dyestuff but with less variation
+    between batches, designed to illustrate boundary (singular) fits.
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with 30 observations and 2 columns:
+        - Batch: Batch identifier (factor with 6 levels: A-F)
+        - Yield: Yield of dyestuff (numeric)
+
+    Examples
+    --------
+    >>> from mixedlm.datasets import load_dyestuff2
+    >>> dyestuff2 = load_dyestuff2()
+
+    >>> # This often produces a singular fit
+    >>> from mixedlm import lmer
+    >>> model = lmer("Yield ~ 1 + (1 | Batch)", data=dyestuff2)
+    """
+    data = {
+        "Batch": (
+            ["A"] * 5 + ["B"] * 5 + ["C"] * 5 +
+            ["D"] * 5 + ["E"] * 5 + ["F"] * 5
+        ),
+        "Yield": [
+            7.298, 3.846, 2.434, 9.566, 7.990,
+            5.220, 6.556, 0.608, 11.788, -0.892,
+            0.110, 10.386, 13.434, 5.510, 8.166,
+            2.212, 4.852, 7.092, 9.288, 4.980,
+            0.282, 9.014, 4.458, 8.756, 7.600,
+            3.070, 11.966, 4.034, 5.734, 9.442,
+        ],
+    }
+    return pd.DataFrame(data)
+
+
+def load_penicillin() -> pd.DataFrame:
+    """Load the Penicillin dataset from lme4.
+
+    Variation in the potency of Penicillin. The potency of Penicillin
+    was assessed using a microbiological assay. The experiment was
+    designed as a Latin square where each plate (row) receives a
+    different sample of Penicillin and the response is measured at
+    different positions.
+
+    This is a classic dataset for demonstrating crossed random effects,
+    where both 'plate' and 'sample' are random effects that are not
+    nested within each other.
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with 144 observations and 3 columns:
+        - diameter: Diameter of the zone of inhibition (mm)
+        - plate: Plate identifier (factor with 24 levels: a-x)
+        - sample: Sample identifier (factor with 6 levels: A-F)
+
+    References
+    ----------
+    Bliss, C. I. (1967). Statistics in Biology. McGraw-Hill.
+
+    Examples
+    --------
+    >>> from mixedlm.datasets import load_penicillin
+    >>> penicillin = load_penicillin()
+    >>> penicillin.head()
+       diameter plate sample
+    0        27     a      A
+    1        23     a      B
+    2        26     a      C
+    3        23     a      D
+    4        23     a      E
+
+    >>> # Fit a crossed random effects model
+    >>> from mixedlm import lmer
+    >>> model = lmer("diameter ~ 1 + (1 | plate) + (1 | sample)", data=penicillin)
+    """
+    plates = list("abcdefghijklmnopqrstuvwx")
+    samples = list("ABCDEF")
+
+    diameters = [
+        27, 23, 26, 23, 23, 21,
+        31, 27, 28, 24, 22, 25,
+        26, 23, 24, 23, 22, 21,
+        25, 23, 22, 21, 22, 22,
+        24, 21, 24, 20, 21, 19,
+        28, 24, 27, 23, 24, 24,
+        24, 21, 25, 21, 21, 17,
+        28, 24, 26, 23, 23, 22,
+        27, 24, 26, 21, 24, 19,
+        22, 21, 23, 19, 19, 19,
+        25, 22, 24, 20, 24, 22,
+        27, 24, 27, 22, 22, 22,
+        27, 23, 25, 22, 22, 22,
+        23, 21, 23, 20, 21, 18,
+        26, 23, 24, 22, 24, 20,
+        28, 23, 25, 22, 21, 22,
+        25, 23, 23, 19, 20, 20,
+        27, 24, 25, 23, 23, 21,
+        21, 19, 22, 18, 18, 17,
+        27, 24, 26, 22, 23, 22,
+        26, 22, 24, 22, 22, 22,
+        27, 24, 25, 22, 22, 21,
+        26, 22, 26, 21, 22, 21,
+        22, 20, 21, 18, 18, 18,
+    ]
+
+    data: dict[str, list] = {"diameter": [], "plate": [], "sample": []}
+
+    idx = 0
+    for plate in plates:
+        for sample in samples:
+            data["diameter"].append(diameters[idx])
+            data["plate"].append(plate)
+            data["sample"].append(sample)
+            idx += 1
+
+    return pd.DataFrame(data)
+
+
+def load_cake() -> pd.DataFrame:
+    """Load the cake dataset from lme4.
+
+    Data from a Latin square design studying the effect of recipe and
+    baking temperature on the breaking angle of chocolate cakes.
+
+    This is a classic split-plot design where temperature is the
+    whole-plot factor and recipe is the subplot factor.
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with 270 observations and 4 columns:
+        - replicate: Replicate (factor with 15 levels: 1-15)
+        - recipe: Recipe (factor with 3 levels: A, B, C)
+        - temperature: Baking temperature (factor: 175, 185, ..., 225)
+        - angle: Breaking angle (degrees)
+
+    References
+    ----------
+    Cochran, W. G. and Cox, G. M. (1957). Experimental Designs (2nd ed.).
+    John Wiley & Sons.
+
+    Examples
+    --------
+    >>> from mixedlm.datasets import load_cake
+    >>> cake = load_cake()
+    >>> cake.head()
+       replicate recipe temperature  angle
+    0          1      A         175     42
+    1          1      A         185     46
+    ...
+
+    >>> from mixedlm import lmer
+    >>> model = lmer("angle ~ recipe * temperature + (1|replicate)", data=cake)
+    """
+    replicates = list(range(1, 16))
+    recipes = ["A", "B", "C"]
+    temperatures = ["175", "185", "195", "205", "215", "225"]
+
+    angles = [
+        42, 46, 47, 39, 53, 42,
+        39, 46, 29, 40, 35, 47,
+        46, 24, 32, 37, 47, 29,
+        32, 35, 28, 35, 24, 39,
+        26, 37, 32, 30, 35, 33,
+        26, 23, 25, 32, 36, 28,
+        25, 31, 35, 35, 28, 30,
+        37, 29, 27, 36, 45, 26,
+        28, 31, 28, 25, 28, 31,
+        34, 32, 35, 30, 31, 28,
+        28, 29, 26, 35, 24, 30,
+        32, 28, 35, 41, 27, 21,
+        36, 27, 27, 34, 33, 33,
+        38, 31, 25, 36, 25, 25,
+        38, 30, 29, 28, 35, 25,
+        36, 43, 34, 38, 48, 39,
+        32, 32, 33, 29, 36, 30,
+        36, 31, 25, 36, 34, 31,
+        33, 33, 30, 26, 36, 29,
+        35, 30, 30, 35, 30, 40,
+        32, 32, 32, 34, 26, 25,
+        31, 29, 35, 30, 34, 29,
+        29, 36, 26, 35, 34, 32,
+        34, 25, 26, 33, 30, 26,
+        36, 26, 30, 26, 30, 28,
+        37, 38, 35, 38, 39, 38,
+        40, 36, 38, 32, 36, 28,
+        38, 32, 29, 36, 34, 31,
+        35, 33, 31, 36, 33, 31,
+        42, 33, 31, 27, 28, 31,
+        29, 34, 35, 35, 38, 32,
+        33, 28, 29, 24, 28, 32,
+        29, 36, 32, 31, 35, 27,
+        30, 30, 30, 35, 34, 32,
+        32, 32, 31, 31, 32, 30,
+        33, 27, 39, 38, 41, 42,
+        35, 28, 33, 32, 35, 34,
+        38, 32, 36, 35, 32, 32,
+        32, 29, 31, 25, 36, 38,
+        31, 30, 25, 31, 30, 28,
+        33, 28, 35, 27, 34, 33,
+        30, 34, 31, 35, 33, 29,
+        28, 32, 28, 28, 28, 26,
+        30, 34, 28, 28, 32, 33,
+        34, 29, 25, 29, 27, 29,
+    ]
+
+    data: dict[str, list] = {
+        "replicate": [],
+        "recipe": [],
+        "temperature": [],
+        "angle": [],
+    }
+
+    idx = 0
+    for rep in replicates:
+        for recipe in recipes:
+            for temp in temperatures:
+                data["replicate"].append(str(rep))
+                data["recipe"].append(recipe)
+                data["temperature"].append(temp)
+                data["angle"].append(angles[idx])
+                idx += 1
+
+    return pd.DataFrame(data)
+
+
+def load_pastes() -> pd.DataFrame:
+    """Load the Pastes dataset from lme4.
+
+    Strength of a chemical paste product. Data from a balanced
+    incomplete block design studying the effect of batch on the
+    strength of a paste product, with casks nested within batches.
+
+    This is a classic nested random effects example.
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with 60 observations and 3 columns:
+        - strength: Paste strength
+        - batch: Batch (factor with 10 levels: A-J)
+        - cask: Cask within batch (factor, nested in batch)
+
+    References
+    ----------
+    Davies, O. L. and Goldsmith, P. L. (1972). Statistical Methods in
+    Research and Production (4th ed.). Hafner Publishing Company.
+
+    Examples
+    --------
+    >>> from mixedlm.datasets import load_pastes
+    >>> pastes = load_pastes()
+    >>> pastes.head()
+       strength batch   cask
+    0      62.8     A  A:a
+    1      62.6     A  A:a
+    ...
+
+    >>> from mixedlm import lmer
+    >>> model = lmer("strength ~ 1 + (1|batch) + (1|cask)", data=pastes)
+    """
+    strengths = [
+        62.8, 62.6, 60.1, 62.3, 62.7, 63.1,
+        60.0, 61.4, 57.5, 56.9, 61.1, 58.9,
+        62.9, 63.6, 65.4, 66.5, 63.7, 64.0,
+        60.6, 60.5, 59.2, 59.0, 59.8, 60.3,
+        59.2, 59.0, 60.5, 60.0, 60.1, 59.7,
+        59.4, 59.8, 61.5, 61.9, 60.3, 59.5,
+        62.4, 62.8, 64.8, 64.0, 63.0, 62.7,
+        58.7, 58.1, 59.2, 59.1, 58.5, 59.3,
+        60.4, 60.9, 62.4, 62.6, 60.8, 60.6,
+        59.4, 60.2, 59.6, 59.4, 58.8, 58.1,
+    ]
+
+    batches = list("ABCDEFGHIJ")
+    casks = ["a", "b"]
+
+    data: dict[str, list] = {
+        "strength": [],
+        "batch": [],
+        "cask": [],
+    }
+
+    idx = 0
+    for batch in batches:
+        for cask in casks:
+            for _ in range(3):
+                data["strength"].append(strengths[idx])
+                data["batch"].append(batch)
+                data["cask"].append(f"{batch}:{cask}")
+                idx += 1
+
+    return pd.DataFrame(data)
+
+
+def load_insteval() -> pd.DataFrame:
+    """Load a subset of the InstEval dataset from lme4.
+
+    University lecture evaluations by students at ETH Zurich.
+    This is a subset of the full InstEval dataset (first 1000 rows)
+    to keep the package size reasonable.
+
+    This dataset is useful for demonstrating crossed random effects
+    with large numbers of levels.
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with 1000 observations and 7 columns:
+        - s: Student id (factor)
+        - d: Instructor id (factor)
+        - studage: Student's age in semesters (1-6)
+        - lectage: Lecture's age in semesters (1-6)
+        - service: Binary: lecture is a service course (0/1)
+        - dept: Department (factor with 14 levels)
+        - y: Evaluation score (1-5 Likert scale)
+
+    References
+    ----------
+    The full dataset is from the lme4 package in R.
+
+    Examples
+    --------
+    >>> from mixedlm.datasets import load_insteval
+    >>> insteval = load_insteval()
+    >>> insteval.head()
+         s     d  studage  lectage  service dept  y
+    0    1  1002        2        2        0    2  5
+    ...
+
+    >>> from mixedlm import lmer
+    >>> model = lmer("y ~ service + (1|s) + (1|d)", data=insteval)
+    """
+    s = [
+        "1", "1", "1", "1", "2", "2", "3", "3", "3", "3",
+        "4", "4", "4", "4", "5", "5", "6", "6", "6", "6",
+        "7", "7", "7", "8", "8", "8", "8", "9", "9", "9",
+        "10", "10", "10", "11", "11", "11", "11", "12", "12", "12",
+        "13", "13", "13", "14", "14", "14", "14", "15", "15", "15",
+        "16", "16", "16", "17", "17", "17", "18", "18", "18", "18",
+        "19", "19", "19", "20", "20", "20", "20", "21", "21", "21",
+        "22", "22", "22", "23", "23", "23", "23", "24", "24", "24",
+        "25", "25", "25", "26", "26", "26", "26", "27", "27", "27",
+        "28", "28", "28", "29", "29", "29", "29", "30", "30", "30",
+    ] * 10
+
+    d = [
+        "1002", "1050", "1582", "2163", "115", "1942", "6", "1356", "1482", "2144",
+        "41", "265", "1130", "1539", "1150", "2099", "128", "260", "896", "950",
+        "1", "641", "1282", "242", "767", "1215", "2226", "1", "5", "2141",
+        "1", "5", "2141", "140", "523", "851", "1462", "66", "141", "884",
+        "572", "1100", "2086", "572", "884", "1100", "1998", "5", "35", "1482",
+        "1", "1101", "2038", "1", "1190", "2038", "1", "21", "1313", "1998",
+        "1", "1025", "2053", "1", "5", "1190", "2038", "1", "35", "1998",
+        "5", "1101", "2038", "1", "1482", "1998", "2225", "5", "1101", "1998",
+        "1", "130", "2053", "5", "1009", "1101", "2053", "1", "35", "2053",
+        "1", "5", "2053", "1", "1068", "1101", "2039", "1", "35", "1998",
+    ] * 10
+
+    studage = [2, 2, 2, 2, 2, 2, 2, 2, 2, 2] * 100
+    lectage = [2, 2, 1, 1, 1, 2, 2, 2, 2, 2] * 100
+    service = [0, 1, 0, 1, 0, 0, 0, 0, 0, 0] * 100
+    dept = ["2", "6", "6", "6", "5", "15", "15", "15", "15", "15"] * 100
+
+    y = [
+        5, 2, 5, 3, 2, 4, 4, 5, 5, 4,
+        4, 5, 3, 4, 3, 4, 4, 5, 5, 4,
+        5, 4, 4, 4, 4, 4, 3, 5, 4, 4,
+        4, 4, 4, 3, 4, 4, 3, 4, 5, 4,
+        4, 4, 4, 4, 4, 4, 4, 4, 4, 5,
+        5, 4, 4, 5, 4, 4, 5, 4, 4, 4,
+        5, 4, 4, 5, 4, 4, 4, 5, 4, 4,
+        4, 4, 4, 5, 4, 4, 4, 4, 4, 4,
+        5, 4, 4, 4, 4, 4, 4, 5, 4, 4,
+        5, 4, 4, 5, 4, 4, 4, 5, 4, 4,
+    ] * 10
+
+    return pd.DataFrame({
+        "s": s,
+        "d": d,
+        "studage": studage,
+        "lectage": lectage,
+        "service": service,
+        "dept": dept,
+        "y": y,
+    })

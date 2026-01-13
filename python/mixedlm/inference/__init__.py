@@ -2,6 +2,7 @@ from mixedlm.inference.allfit import AllFitResult, allfit_glmer, allfit_lmer
 from mixedlm.inference.anova import AnovaResult, anova
 from mixedlm.inference.bootstrap import (
     BootstrapResult,
+    bootMer,
     bootstrap_glmer,
     bootstrap_lmer,
 )
@@ -41,4 +42,5 @@ __all__ = [
     "BootstrapResult",
     "bootstrap_lmer",
     "bootstrap_glmer",
+    "bootMer",
 ]
