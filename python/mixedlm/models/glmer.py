@@ -715,6 +715,38 @@ class GlmerResult:
 
         return "\n".join(lines)
 
+    def plot(
+        self,
+        which: list[int] | None = None,
+        figsize: tuple[float, float] | None = None,
+    ):
+        """Create diagnostic plots for the model.
+
+        Parameters
+        ----------
+        which : list of int, optional
+            Which plots to include. Default is [1, 2, 3, 4].
+            1 = Residuals vs Fitted
+            2 = Normal Q-Q
+            3 = Scale-Location
+            4 = Residuals by Group
+        figsize : tuple, optional
+            Figure size (width, height) in inches.
+
+        Returns
+        -------
+        Figure
+            Matplotlib figure with diagnostic plots.
+
+        Raises
+        ------
+        ImportError
+            If matplotlib is not installed.
+        """
+        from mixedlm.diagnostics.plots import plot_diagnostics
+
+        return plot_diagnostics(self, which=which, figsize=figsize)
+
     def __str__(self) -> str:
         return self.summary()
 

@@ -1,4 +1,4 @@
-from mixedlm import families, inference, nlme
+from mixedlm import diagnostics, families, inference, nlme
 from mixedlm.formula.parser import parse_formula
 from mixedlm.inference.anova import AnovaResult, anova
 from mixedlm.models.glmer import GlmerMod, GlmerVarCorr, glmer
@@ -20,6 +20,7 @@ __all__ = [
     "families",
     "nlme",
     "inference",
+    "diagnostics",
     "LogLik",
     "VarCorr",
     "VarCorrGroup",
