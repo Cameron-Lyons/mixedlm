@@ -12,6 +12,7 @@ from scipy import stats
 if TYPE_CHECKING:
     from mixedlm.models.glmer import GlmerResult
     from mixedlm.models.lmer import LmerResult
+    from mixedlm.models.nlmer import NlmerResult
 
 
 @dataclass
@@ -692,7 +693,7 @@ def bootMer(
     n_jobs: int = 1,
     verbose: bool = False,
     bootstrap_type: str = "parametric",
-) -> BootstrapResult:
+) -> BootstrapResult | NlmerBootstrapResult:
     """Model-based (semi-)parametric bootstrap for mixed models.
 
     This function provides an lme4-compatible interface for bootstrapping
@@ -784,7 +785,164 @@ def bootMer(
             n_jobs=n_jobs,
             verbose=verbose,
         )
+    elif hasattr(model, "isNLMM") and model.isNLMM():
+        return bootstrap_nlmer(
+            model,  # type: ignore[arg-type]
+            n_boot=nsim,
+            seed=seed,
+            verbose=verbose,
+        )
     else:
         raise TypeError(
-            f"Model type {type(model).__name__} not supported. Use LmerResult or GlmerResult."
+            f"Model type {type(model).__name__} not supported. "
+            "Use LmerResult, GlmerResult, or NlmerResult."
         )
+
+
+@dataclass
+class NlmerBootstrapResult:
+    n_boot: int
+    phi_samples: NDArray[np.floating]
+    theta_samples: NDArray[np.floating]
+    sigma_samples: NDArray[np.floating]
+    param_names: list[str]
+    original_phi: NDArray[np.floating]
+    original_theta: NDArray[np.floating]
+    original_sigma: float
+    n_failed: int
+
+    def ci(
+        self,
+        level: float = 0.95,
+        method: str = "percentile",
+    ) -> dict[str, tuple[float, float]]:
+        alpha = 1 - level
+
+        result: dict[str, tuple[float, float]] = {}
+
+        for i, name in enumerate(self.param_names):
+            samples = self.phi_samples[:, i]
+            samples = samples[~np.isnan(samples)]
+
+            if len(samples) == 0:
+                result[name] = (np.nan, np.nan)
+                continue
+
+            if method == "percentile":
+                lower = np.percentile(samples, 100 * alpha / 2)
+                upper = np.percentile(samples, 100 * (1 - alpha / 2))
+            elif method == "basic":
+                lower = 2 * self.original_phi[i] - np.percentile(samples, 100 * (1 - alpha / 2))
+                upper = 2 * self.original_phi[i] - np.percentile(samples, 100 * alpha / 2)
+            elif method == "normal":
+                se = np.std(samples)
+                z = stats.norm.ppf(1 - alpha / 2)
+                lower = self.original_phi[i] - z * se
+                upper = self.original_phi[i] + z * se
+            else:
+                raise ValueError(f"Unknown method: {method}")
+
+            result[name] = (float(lower), float(upper))
+
+        return result
+
+    def se(self) -> dict[str, float]:
+        result: dict[str, float] = {}
+        for i, name in enumerate(self.param_names):
+            samples = self.phi_samples[:, i]
+            samples = samples[~np.isnan(samples)]
+            result[name] = float(np.std(samples)) if len(samples) > 0 else np.nan
+        return result
+
+    def summary(self) -> str:
+        lines = []
+        lines.append(f"Parametric bootstrap with {self.n_boot} samples ({self.n_failed} failed)")
+        lines.append("")
+        lines.append("Fixed effects bootstrap statistics:")
+        lines.append("             Original    Mean       Bias     Std.Err")
+
+        for i, name in enumerate(self.param_names):
+            samples = self.phi_samples[:, i]
+            samples = samples[~np.isnan(samples)]
+            if len(samples) > 0:
+                mean = np.mean(samples)
+                bias = mean - self.original_phi[i]
+                se = np.std(samples)
+                lines.append(
+                    f"{name:12} {self.original_phi[i]:10.4f} {mean:10.4f} {bias:10.4f} {se:10.4f}"
+                )
+
+        return "\n".join(lines)
+
+
+def bootstrap_nlmer(
+    result: NlmerResult,
+    n_boot: int = 1000,
+    seed: int | None = None,
+    verbose: bool = False,
+) -> NlmerBootstrapResult:
+    """Parametric bootstrap for nonlinear mixed models.
+
+    Parameters
+    ----------
+    result : NlmerResult
+        A fitted nonlinear mixed model.
+    n_boot : int, default 1000
+        Number of bootstrap samples.
+    seed : int, optional
+        Random seed for reproducibility.
+    verbose : bool, default False
+        Print progress information.
+
+    Returns
+    -------
+    NlmerBootstrapResult
+        Bootstrap results containing parameter samples and methods
+        for computing confidence intervals and standard errors.
+
+    Examples
+    --------
+    >>> from mixedlm.nlme.models import SSasymp
+    >>> result = nlmer(SSasymp(), data, x_var="time", y_var="conc", group_var="subject")
+    >>> boot = bootstrap_nlmer(result, n_boot=500, seed=42)
+    >>> boot.ci(level=0.95)
+    """
+    n_params = len(result.phi)
+    n_theta = len(result.theta)
+
+    phi_samples = np.full((n_boot, n_params), np.nan)
+    theta_samples = np.full((n_boot, n_theta), np.nan)
+    sigma_samples = np.full(n_boot, np.nan)
+
+    if seed is not None:
+        np.random.seed(seed)
+
+    n_failed = 0
+
+    for b in range(n_boot):
+        if verbose and (b + 1) % 100 == 0:
+            print(f"Bootstrap iteration {b + 1}/{n_boot}")
+
+        try:
+            y_sim = result.simulate(nsim=1, use_re=True)
+            boot_result = result.refit(y_sim)
+
+            phi_samples[b, :] = boot_result.phi
+            theta_samples[b, :] = boot_result.theta
+            sigma_samples[b] = boot_result.sigma
+
+        except Exception:
+            n_failed += 1
+            continue
+
+    return NlmerBootstrapResult(
+        n_boot=n_boot,
+        phi_samples=phi_samples,
+        theta_samples=theta_samples,
+        sigma_samples=sigma_samples,
+        param_names=list(result.model.param_names),
+        original_phi=result.phi.copy(),
+        original_theta=result.theta.copy(),
+        original_sigma=result.sigma,
+        n_failed=n_failed,
+    )

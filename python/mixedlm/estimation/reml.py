@@ -2,12 +2,13 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 from numpy.typing import NDArray
 from scipy import linalg, sparse
-from scipy.optimize import minimize
 
+from mixedlm.estimation.optimizers import run_optimizer
 from mixedlm.matrices.design import ModelMatrices, RandomEffectStructure
 
 try:
@@ -29,6 +30,39 @@ class OptimizationResult:
     n_iter: int
 
 
+def _build_cs_cholesky(q: int, rho: float) -> NDArray[np.floating]:
+    """Build Cholesky factor for compound symmetry correlation matrix."""
+    if q == 1:
+        return np.array([[1.0]])
+    R = np.full((q, q), rho, dtype=np.float64)
+    np.fill_diagonal(R, 1.0)
+    try:
+        return linalg.cholesky(R, lower=True)
+    except linalg.LinAlgError:
+        rho_safe = np.clip(rho, -1.0 / (q - 1) + 1e-6, 1.0 - 1e-6)
+        R = np.full((q, q), rho_safe, dtype=np.float64)
+        np.fill_diagonal(R, 1.0)
+        return linalg.cholesky(R, lower=True)
+
+
+def _build_ar1_cholesky(q: int, rho: float) -> NDArray[np.floating]:
+    """Build Cholesky factor for AR(1) correlation matrix."""
+    if q == 1:
+        return np.array([[1.0]])
+    R = np.zeros((q, q), dtype=np.float64)
+    for i in range(q):
+        for j in range(q):
+            R[i, j] = rho ** abs(i - j)
+    try:
+        return linalg.cholesky(R, lower=True)
+    except linalg.LinAlgError:
+        rho_safe = np.clip(rho, -1.0 + 1e-6, 1.0 - 1e-6)
+        for i in range(q):
+            for j in range(q):
+                R[i, j] = rho_safe ** abs(i - j)
+        return linalg.cholesky(R, lower=True)
+
+
 def _build_lambda(
     theta: NDArray[np.floating],
     structures: list[RandomEffectStructure],
@@ -39,8 +73,29 @@ def _build_lambda(
     for struct in structures:
         q = struct.n_terms
         n_levels = struct.n_levels
+        cov_type = getattr(struct, "cov_type", "us")
 
-        if struct.correlated:
+        if cov_type == "cs":
+            sigma_rel = theta[theta_idx]
+            rho = theta[theta_idx + 1] if q > 1 else 0.0
+            theta_idx += 2 if q > 1 else 1
+            L_corr = _build_cs_cholesky(q, rho)
+            L_block = sigma_rel * L_corr
+            block = sparse.kron(
+                sparse.eye(n_levels, format="csc"),
+                sparse.csc_matrix(L_block),
+            )
+        elif cov_type == "ar1":
+            sigma_rel = theta[theta_idx]
+            rho = theta[theta_idx + 1] if q > 1 else 0.0
+            theta_idx += 2 if q > 1 else 1
+            L_corr = _build_ar1_cholesky(q, rho)
+            L_block = sigma_rel * L_corr
+            block = sparse.kron(
+                sparse.eye(n_levels, format="csc"),
+                sparse.csc_matrix(L_block),
+            )
+        elif struct.correlated:
             n_theta = q * (q + 1) // 2
             theta_block = theta[theta_idx : theta_idx + n_theta]
             theta_idx += n_theta
@@ -75,7 +130,10 @@ def _count_theta(structures: list[RandomEffectStructure]) -> int:
     count = 0
     for struct in structures:
         q = struct.n_terms
-        if struct.correlated:
+        cov_type = getattr(struct, "cov_type", "us")
+        if cov_type == "cs" or cov_type == "ar1":
+            count += 2 if q > 1 else 1
+        elif struct.correlated:
             count += q * (q + 1) // 2
         else:
             count += q
@@ -235,11 +293,30 @@ class LMMOptimizer:
         self.REML = REML
         self.verbose = verbose
         self.n_theta = _count_theta(matrices.random_structures)
-        self.use_rust = use_rust and _HAS_RUST
+        has_special_cov = any(
+            getattr(s, "cov_type", "us") in ("cs", "ar1") for s in matrices.random_structures
+        )
+        self.use_rust = use_rust and _HAS_RUST and not has_special_cov
 
     def get_start_theta(self) -> NDArray[np.floating]:
-        theta = np.ones(self.n_theta, dtype=np.float64)
-        return theta
+        theta_list: list[float] = []
+        for struct in self.matrices.random_structures:
+            q = struct.n_terms
+            cov_type = getattr(struct, "cov_type", "us")
+            if cov_type == "cs" or cov_type == "ar1":
+                theta_list.append(1.0)
+                if q > 1:
+                    theta_list.append(0.0)
+            elif struct.correlated:
+                for i in range(q):
+                    for j in range(i + 1):
+                        if i == j:
+                            theta_list.append(1.0)
+                        else:
+                            theta_list.append(0.0)
+            else:
+                theta_list.extend([1.0] * q)
+        return np.array(theta_list, dtype=np.float64)
 
     def objective(self, theta: NDArray[np.floating]) -> float:
         if self.use_rust:
@@ -251,6 +328,7 @@ class LMMOptimizer:
         start: NDArray[np.floating] | None = None,
         method: str = "L-BFGS-B",
         maxiter: int = 1000,
+        options: dict[str, Any] | None = None,
     ) -> OptimizationResult:
         if start is None:
             start = self.get_start_theta()
@@ -259,7 +337,20 @@ class LMMOptimizer:
         idx = 0
         for struct in self.matrices.random_structures:
             q = struct.n_terms
-            if struct.correlated:
+            cov_type = getattr(struct, "cov_type", "us")
+            if cov_type == "cs":
+                bounds[idx] = (0.0, None)
+                idx += 1
+                if q > 1:
+                    bounds[idx] = (-1.0 / (q - 1) + 1e-6, 1.0 - 1e-6)
+                    idx += 1
+            elif cov_type == "ar1":
+                bounds[idx] = (0.0, None)
+                idx += 1
+                if q > 1:
+                    bounds[idx] = (-1.0 + 1e-6, 1.0 - 1e-6)
+                    idx += 1
+            elif struct.correlated:
                 for i in range(q):
                     for j in range(i + 1):
                         if i == j:
@@ -277,12 +368,16 @@ class LMMOptimizer:
                 dev = self.objective(x)
                 print(f"theta = {x}, deviance = {dev:.6f}")
 
-        result = minimize(
+        opt_options = {"maxiter": maxiter}
+        if options:
+            opt_options.update(options)
+
+        result = run_optimizer(
             self.objective,
             start,
             method=method,
             bounds=bounds,
-            options={"maxiter": maxiter},
+            options=opt_options,
             callback=callback,
         )
 

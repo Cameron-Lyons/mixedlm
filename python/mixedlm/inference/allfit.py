@@ -14,7 +14,7 @@ if TYPE_CHECKING:
     from mixedlm.models.lmer import LmerResult
 
 
-OPTIMIZERS = [
+SCIPY_OPTIMIZERS = [
     "L-BFGS-B",
     "Nelder-Mead",
     "Powell",
@@ -22,6 +22,29 @@ OPTIMIZERS = [
     "TNC",
     "SLSQP",
 ]
+
+
+def _get_available_optimizers() -> list[str]:
+    from mixedlm.estimation.optimizers import has_bobyqa, has_nlopt
+
+    optimizers = list(SCIPY_OPTIMIZERS)
+    if has_bobyqa():
+        optimizers.append("bobyqa")
+    if has_nlopt():
+        optimizers.extend(
+            [
+                "nloptwrap_BOBYQA",
+                "nloptwrap_NEWUOA",
+                "nloptwrap_PRAXIS",
+                "nloptwrap_SBPLX",
+                "nloptwrap_COBYLA",
+                "nloptwrap_NELDERMEAD",
+            ]
+        )
+    return optimizers
+
+
+OPTIMIZERS = SCIPY_OPTIMIZERS
 
 
 @dataclass
@@ -168,7 +191,7 @@ def allfit_lmer(
     from mixedlm.models.lmer import LmerMod
 
     if optimizers is None:
-        optimizers = OPTIMIZERS
+        optimizers = _get_available_optimizers()
 
     weights = model.matrices.weights if np.any(model.matrices.weights != 1.0) else None
     offset = model.matrices.offset if np.any(model.matrices.offset != 0.0) else None
@@ -237,7 +260,7 @@ def allfit_glmer(
     from mixedlm.models.glmer import GlmerMod
 
     if optimizers is None:
-        optimizers = OPTIMIZERS
+        optimizers = _get_available_optimizers()
 
     weights = model.matrices.weights if np.any(model.matrices.weights != 1.0) else None
     offset = model.matrices.offset if np.any(model.matrices.offset != 0.0) else None

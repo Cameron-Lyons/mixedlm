@@ -34,6 +34,7 @@ class RandomTerm:
     grouping: str | tuple[str, ...]
     correlated: bool = True
     has_intercept: bool = True
+    cov_type: str = "us"
 
     @property
     def is_nested(self) -> bool:

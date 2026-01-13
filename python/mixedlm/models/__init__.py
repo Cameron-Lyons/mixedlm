@@ -1,5 +1,24 @@
 from mixedlm.models.glmer import GlmerMod, GlmerResult, glmer
 from mixedlm.models.lmer import LmerMod, LmerResult, lmer
+from mixedlm.models.modular import (
+    GlmerDevfun,
+    GlmerParsedFormula,
+    LmerDevfun,
+    LmerParsedFormula,
+    OptimizeResult,
+    ReTrms,
+    devfun2,
+    glFormula,
+    lFormula,
+    mkGlmerDevfun,
+    mkGlmerMod,
+    mkLmerDevfun,
+    mkLmerMod,
+    mkReTrms,
+    optimizeGlmer,
+    optimizeLmer,
+    simulate_formula,
+)
 from mixedlm.models.nlmer import NlmerMod, NlmerResult, nlmer
 
 __all__ = [
@@ -12,4 +31,21 @@ __all__ = [
     "nlmer",
     "NlmerMod",
     "NlmerResult",
+    "lFormula",
+    "glFormula",
+    "mkLmerDevfun",
+    "mkGlmerDevfun",
+    "optimizeLmer",
+    "optimizeGlmer",
+    "mkLmerMod",
+    "mkGlmerMod",
+    "mkReTrms",
+    "simulate_formula",
+    "devfun2",
+    "LmerParsedFormula",
+    "GlmerParsedFormula",
+    "LmerDevfun",
+    "GlmerDevfun",
+    "OptimizeResult",
+    "ReTrms",
 ]

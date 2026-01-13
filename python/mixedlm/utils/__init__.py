@@ -11,6 +11,7 @@ from mixedlm.utils.lme4_compat import (
     fixef,
     fortify,
     getME,
+    isNested,
     lmList,
     mkMerMod,
     ngrps,
@@ -40,4 +41,5 @@ __all__ = [
     "GHrule",
     "factorize",
     "mkMerMod",
+    "isNested",
 ]
