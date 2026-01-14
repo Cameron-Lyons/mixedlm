@@ -1,5 +1,5 @@
 use faer::Mat;
-use numpy::{PyArray1, PyArray2, PyReadonlyArray1};
+use numpy::{PyArray1, PyArray2, PyArrayLike1};
 use pyo3::prelude::*;
 use rand::prelude::*;
 use rand_distr::StandardNormal;
@@ -105,9 +105,9 @@ pub fn simulate_re_batch_impl(
     seed = None
 ))]
 #[allow(clippy::too_many_arguments)]
-pub fn simulate_re_batch(
-    py: Python<'_>,
-    theta: PyReadonlyArray1<'_, f64>,
+pub fn simulate_re_batch<'py>(
+    py: Python<'py>,
+    theta: PyArrayLike1<'py, f64>,
     sigma: f64,
     n_levels: Vec<usize>,
     n_terms: Vec<usize>,
@@ -144,12 +144,12 @@ pub fn simulate_re_batch(
     z_shape,
     n_obs
 ))]
-pub fn compute_zu(
-    py: Python<'_>,
-    u: PyReadonlyArray1<'_, f64>,
-    z_data: PyReadonlyArray1<'_, f64>,
-    z_indices: PyReadonlyArray1<'_, i64>,
-    z_indptr: PyReadonlyArray1<'_, i64>,
+pub fn compute_zu<'py>(
+    py: Python<'py>,
+    u: PyArrayLike1<'py, f64>,
+    z_data: PyArrayLike1<'py, f64>,
+    z_indices: PyArrayLike1<'py, i64>,
+    z_indptr: PyArrayLike1<'py, i64>,
     z_shape: (usize, usize),
     n_obs: usize,
 ) -> PyResult<Py<PyArray1<f64>>> {

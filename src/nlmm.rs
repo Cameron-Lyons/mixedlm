@@ -516,14 +516,14 @@ pub fn nlmm_deviance_impl(
     random_params
 ))]
 #[allow(clippy::too_many_arguments)]
-pub fn pnls_step(
-    y: numpy::PyReadonlyArray1<'_, f64>,
-    x: numpy::PyReadonlyArray1<'_, f64>,
-    groups: numpy::PyReadonlyArray1<'_, i64>,
+pub fn pnls_step<'py>(
+    y: numpy::PyArrayLike1<'py, f64>,
+    x: numpy::PyArrayLike1<'py, f64>,
+    groups: numpy::PyArrayLike1<'py, i64>,
     model_name: &str,
-    phi: numpy::PyReadonlyArray1<'_, f64>,
-    b: numpy::PyReadonlyArray2<'_, f64>,
-    theta: numpy::PyReadonlyArray1<'_, f64>,
+    phi: numpy::PyArrayLike1<'py, f64>,
+    b: numpy::PyArrayLike2<'py, f64>,
+    theta: numpy::PyArrayLike1<'py, f64>,
     sigma: f64,
     random_params: Vec<usize>,
 ) -> PyResult<(Vec<f64>, Vec<Vec<f64>>, f64)> {
@@ -593,14 +593,14 @@ pub fn pnls_step(
     sigma
 ))]
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
-pub fn nlmm_deviance(
-    theta: numpy::PyReadonlyArray1<'_, f64>,
-    y: numpy::PyReadonlyArray1<'_, f64>,
-    x: numpy::PyReadonlyArray1<'_, f64>,
-    groups: numpy::PyReadonlyArray1<'_, i64>,
+pub fn nlmm_deviance<'py>(
+    theta: numpy::PyArrayLike1<'py, f64>,
+    y: numpy::PyArrayLike1<'py, f64>,
+    x: numpy::PyArrayLike1<'py, f64>,
+    groups: numpy::PyArrayLike1<'py, i64>,
     model_name: &str,
-    phi: numpy::PyReadonlyArray1<'_, f64>,
-    b: numpy::PyReadonlyArray2<'_, f64>,
+    phi: numpy::PyArrayLike1<'py, f64>,
+    b: numpy::PyArrayLike2<'py, f64>,
     random_params: Vec<usize>,
     sigma: f64,
 ) -> PyResult<(f64, Vec<f64>, Vec<Vec<f64>>, f64)> {

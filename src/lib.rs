@@ -1,4 +1,4 @@
-use numpy::{PyArray1, PyArray2, PyReadonlyArray1, PyReadonlyArray2};
+use numpy::{PyArray1, PyArray2, PyArrayLike1, PyArrayLike2};
 use pyo3::prelude::*;
 
 mod glmm;
@@ -9,13 +9,13 @@ mod quadrature;
 mod simulation;
 
 #[pyfunction]
-fn sparse_cholesky_solve(
-    py: Python<'_>,
-    a_data: PyReadonlyArray1<'_, f64>,
-    a_indices: PyReadonlyArray1<'_, i64>,
-    a_indptr: PyReadonlyArray1<'_, i64>,
+fn sparse_cholesky_solve<'py>(
+    py: Python<'py>,
+    a_data: PyArrayLike1<'py, f64>,
+    a_indices: PyArrayLike1<'py, i64>,
+    a_indptr: PyArrayLike1<'py, i64>,
     a_shape: (usize, usize),
-    b: PyReadonlyArray2<'_, f64>,
+    b: PyArrayLike2<'py, f64>,
 ) -> PyResult<Py<PyArray2<f64>>> {
     let result = linalg::sparse_cholesky_solve(
         a_data.as_slice()?,
@@ -28,10 +28,10 @@ fn sparse_cholesky_solve(
 }
 
 #[pyfunction]
-fn sparse_cholesky_logdet(
-    a_data: PyReadonlyArray1<'_, f64>,
-    a_indices: PyReadonlyArray1<'_, i64>,
-    a_indptr: PyReadonlyArray1<'_, i64>,
+fn sparse_cholesky_logdet<'py>(
+    a_data: PyArrayLike1<'py, f64>,
+    a_indices: PyArrayLike1<'py, i64>,
+    a_indptr: PyArrayLike1<'py, i64>,
     a_shape: (usize, usize),
 ) -> PyResult<f64> {
     linalg::sparse_cholesky_logdet(
@@ -44,13 +44,13 @@ fn sparse_cholesky_logdet(
 
 #[pyfunction]
 #[allow(clippy::type_complexity)]
-fn update_cholesky_factor(
-    py: Python<'_>,
-    l_data: PyReadonlyArray1<'_, f64>,
-    l_indices: PyReadonlyArray1<'_, i64>,
-    l_indptr: PyReadonlyArray1<'_, i64>,
+fn update_cholesky_factor<'py>(
+    py: Python<'py>,
+    l_data: PyArrayLike1<'py, f64>,
+    l_indices: PyArrayLike1<'py, i64>,
+    l_indptr: PyArrayLike1<'py, i64>,
     l_shape: (usize, usize),
-    theta: PyReadonlyArray1<'_, f64>,
+    theta: PyArrayLike1<'py, f64>,
 ) -> PyResult<(Py<PyArray1<f64>>, Py<PyArray1<i64>>, Py<PyArray1<i64>>)> {
     let (data, indices, indptr) = linalg::update_cholesky_factor(
         l_data.as_slice()?,

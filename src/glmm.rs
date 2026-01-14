@@ -900,16 +900,16 @@ pub fn adaptive_gh_deviance_impl(
     link
 ))]
 #[allow(clippy::too_many_arguments)]
-pub fn pirls(
-    y: numpy::PyReadonlyArray1<'_, f64>,
-    x: numpy::PyReadonlyArray2<'_, f64>,
-    z_data: numpy::PyReadonlyArray1<'_, f64>,
-    z_indices: numpy::PyReadonlyArray1<'_, i64>,
-    z_indptr: numpy::PyReadonlyArray1<'_, i64>,
+pub fn pirls<'py>(
+    y: numpy::PyArrayLike1<'py, f64>,
+    x: numpy::PyArrayLike2<'py, f64>,
+    z_data: numpy::PyArrayLike1<'py, f64>,
+    z_indices: numpy::PyArrayLike1<'py, i64>,
+    z_indptr: numpy::PyArrayLike1<'py, i64>,
     z_shape: (usize, usize),
-    weights: numpy::PyReadonlyArray1<'_, f64>,
-    offset: numpy::PyReadonlyArray1<'_, f64>,
-    theta: numpy::PyReadonlyArray1<'_, f64>,
+    weights: numpy::PyArrayLike1<'py, f64>,
+    offset: numpy::PyArrayLike1<'py, f64>,
+    theta: numpy::PyArrayLike1<'py, f64>,
     n_levels: Vec<usize>,
     n_terms: Vec<usize>,
     correlated: Vec<bool>,
@@ -998,16 +998,16 @@ pub fn pirls(
     link
 ))]
 #[allow(clippy::too_many_arguments)]
-pub fn laplace_deviance(
-    y: numpy::PyReadonlyArray1<'_, f64>,
-    x: numpy::PyReadonlyArray2<'_, f64>,
-    z_data: numpy::PyReadonlyArray1<'_, f64>,
-    z_indices: numpy::PyReadonlyArray1<'_, i64>,
-    z_indptr: numpy::PyReadonlyArray1<'_, i64>,
+pub fn laplace_deviance<'py>(
+    y: numpy::PyArrayLike1<'py, f64>,
+    x: numpy::PyArrayLike2<'py, f64>,
+    z_data: numpy::PyArrayLike1<'py, f64>,
+    z_indices: numpy::PyArrayLike1<'py, i64>,
+    z_indptr: numpy::PyArrayLike1<'py, i64>,
     z_shape: (usize, usize),
-    weights: numpy::PyReadonlyArray1<'_, f64>,
-    offset: numpy::PyReadonlyArray1<'_, f64>,
-    theta: numpy::PyReadonlyArray1<'_, f64>,
+    weights: numpy::PyArrayLike1<'py, f64>,
+    offset: numpy::PyArrayLike1<'py, f64>,
+    theta: numpy::PyArrayLike1<'py, f64>,
     n_levels: Vec<usize>,
     n_terms: Vec<usize>,
     correlated: Vec<bool>,
@@ -1094,16 +1094,16 @@ pub fn laplace_deviance(
     n_agq
 ))]
 #[allow(clippy::too_many_arguments)]
-pub fn adaptive_gh_deviance(
-    y: numpy::PyReadonlyArray1<'_, f64>,
-    x: numpy::PyReadonlyArray2<'_, f64>,
-    z_data: numpy::PyReadonlyArray1<'_, f64>,
-    z_indices: numpy::PyReadonlyArray1<'_, i64>,
-    z_indptr: numpy::PyReadonlyArray1<'_, i64>,
+pub fn adaptive_gh_deviance<'py>(
+    y: numpy::PyArrayLike1<'py, f64>,
+    x: numpy::PyArrayLike2<'py, f64>,
+    z_data: numpy::PyArrayLike1<'py, f64>,
+    z_indices: numpy::PyArrayLike1<'py, i64>,
+    z_indptr: numpy::PyArrayLike1<'py, i64>,
     z_shape: (usize, usize),
-    weights: numpy::PyReadonlyArray1<'_, f64>,
-    offset: numpy::PyReadonlyArray1<'_, f64>,
-    theta: numpy::PyReadonlyArray1<'_, f64>,
+    weights: numpy::PyArrayLike1<'py, f64>,
+    offset: numpy::PyArrayLike1<'py, f64>,
+    theta: numpy::PyArrayLike1<'py, f64>,
     n_levels: Vec<usize>,
     n_terms: Vec<usize>,
     correlated: Vec<bool>,

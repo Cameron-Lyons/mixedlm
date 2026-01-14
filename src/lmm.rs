@@ -456,16 +456,16 @@ pub fn profiled_deviance_impl(
     reml = true
 ))]
 #[allow(clippy::too_many_arguments)]
-pub fn profiled_deviance(
-    theta: numpy::PyReadonlyArray1<'_, f64>,
-    y: numpy::PyReadonlyArray1<'_, f64>,
-    x: numpy::PyReadonlyArray2<'_, f64>,
-    z_data: numpy::PyReadonlyArray1<'_, f64>,
-    z_indices: numpy::PyReadonlyArray1<'_, i64>,
-    z_indptr: numpy::PyReadonlyArray1<'_, i64>,
+pub fn profiled_deviance<'py>(
+    theta: numpy::PyArrayLike1<'py, f64>,
+    y: numpy::PyArrayLike1<'py, f64>,
+    x: numpy::PyArrayLike2<'py, f64>,
+    z_data: numpy::PyArrayLike1<'py, f64>,
+    z_indices: numpy::PyArrayLike1<'py, i64>,
+    z_indptr: numpy::PyArrayLike1<'py, i64>,
     z_shape: (usize, usize),
-    weights: numpy::PyReadonlyArray1<'_, f64>,
-    offset: numpy::PyReadonlyArray1<'_, f64>,
+    weights: numpy::PyArrayLike1<'py, f64>,
+    offset: numpy::PyArrayLike1<'py, f64>,
     n_levels: Vec<usize>,
     n_terms: Vec<usize>,
     correlated: Vec<bool>,
