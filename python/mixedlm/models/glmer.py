@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import cached_property
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from numpy.typing import NDArray
@@ -1281,6 +1281,15 @@ class GlmerResult:
             return self.family
         elif name == "nAGQ":
             return self.nAGQ
+        elif name == "RX":
+            _, R = linalg.qr(self.matrices.X, mode="economic")
+            return R
+        elif name == "RZX":
+            return self._compute_RZX()
+        elif name == "Lind":
+            return self._build_Lind()
+        elif name == "devcomp":
+            return self._get_devcomp()
         else:
             valid_names = [
                 "X",
@@ -1308,8 +1317,104 @@ class GlmerResult:
                 "Gp",
                 "family",
                 "nAGQ",
+                "RX",
+                "RZX",
+                "Lind",
+                "devcomp",
             ]
             raise ValueError(f"Unknown component name: '{name}'. Valid names are: {valid_names}")
+
+    def _compute_RZX(self) -> NDArray[np.floating]:
+        """Compute RZX, the cross-term in the mixed model equations."""
+        Z = self.matrices.Z
+        X = self.matrices.X
+        Lambda = _build_lambda(self.theta, self.matrices.random_structures)
+
+        if sparse.issparse(Z):
+            Zt = Z.T
+            ZtZ = Zt @ Z
+        else:
+            Zt = Z.T
+            ZtZ = Zt @ Z
+
+        LambdatLambda = Lambda.T @ Lambda
+        C = ZtZ + LambdatLambda
+
+        if sparse.issparse(C):
+            C = C.toarray()
+
+        try:
+            L_C = linalg.cholesky(C, lower=True)
+        except linalg.LinAlgError:
+            C = C + 1e-6 * np.eye(C.shape[0])
+            L_C = linalg.cholesky(C, lower=True)
+
+        XtZ = X.T @ Z
+        if sparse.issparse(XtZ):
+            XtZ = XtZ.toarray()
+
+        RZX = linalg.solve_triangular(L_C, XtZ.T, lower=True)
+        return RZX
+
+    def _build_Lind(self) -> NDArray[np.int64]:
+        """Build Lind, the index mapping from theta to Lambda entries."""
+        indices = []
+        theta_idx = 0
+
+        for struct in self.matrices.random_structures:
+            n_terms = struct.n_terms
+
+            if struct.correlated:
+                n_theta = n_terms * (n_terms + 1) // 2
+                template_indices = []
+                idx = 0
+                for i in range(n_terms):
+                    for _j in range(i + 1):
+                        template_indices.append(theta_idx + idx)
+                        idx += 1
+            else:
+                n_theta = n_terms
+                template_indices = list(range(theta_idx, theta_idx + n_terms))
+
+            for _ in range(struct.n_levels):
+                indices.extend(template_indices)
+
+            theta_idx += n_theta
+
+        return np.array(indices, dtype=np.int64)
+
+    def _get_devcomp(self) -> dict[str, Any]:
+        """Get deviance components and model dimensions."""
+        n = self.matrices.n_obs
+        p = self.matrices.n_fixed
+        q = self.matrices.n_random
+        n_theta = len(self.theta)
+
+        cmp = {
+            "ldL2": 0.0,
+            "ldRX2": 0.0,
+            "pwrss": 0.0,
+            "drsum": 0.0,
+            "dev": float(self.deviance),
+            "ussq": float(np.sum(self.u**2)) if self.u is not None else 0.0,
+        }
+
+        dims = {
+            "n": n,
+            "p": p,
+            "q": q,
+            "nmp": n - p,
+            "nth": n_theta,
+            "REML": 0,
+            "useSc": 0,
+            "nAGQ": self.nAGQ,
+            "q0": q,
+            "q1": 0,
+            "qrx": p,
+            "ngrps": len(self.matrices.random_structures),
+        }
+
+        return {"cmp": cmp, "dims": dims}
 
     def update(
         self,
@@ -1698,6 +1803,7 @@ class GlmerResult:
             new_matrices,
             self.family,
             verbose=0,
+            nAGQ=self.nAGQ,
         )
 
         start = kwargs.pop("start", self.theta)
@@ -1897,6 +2003,7 @@ class GlmerMod:
             self.matrices,
             self.family,
             verbose=self.verbose,
+            nAGQ=nAGQ,
         )
 
         opt_result = optimizer.optimize(

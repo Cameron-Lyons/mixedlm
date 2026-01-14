@@ -223,6 +223,178 @@ def laplace_deviance(
     return deviance, beta, u
 
 
+def _get_gh_nodes_weights(n: int) -> tuple[NDArray[np.floating], NDArray[np.floating]]:
+    """Get Gauss-Hermite quadrature nodes and weights.
+
+    Returns nodes and weights for integrating functions of the form
+    f(x) * exp(-x^2) over (-inf, inf).
+    """
+    from numpy.polynomial.hermite import hermgauss
+
+    nodes, weights = hermgauss(n)
+    return np.array(nodes), np.array(weights)
+
+
+def adaptive_gh_deviance(
+    theta: NDArray[np.floating],
+    matrices: ModelMatrices,
+    family: Family,
+    nAGQ: int = 1,
+    beta_start: NDArray[np.floating] | None = None,
+    u_start: NDArray[np.floating] | None = None,
+) -> tuple[float, NDArray[np.floating], NDArray[np.floating]]:
+    """Compute deviance using adaptive Gauss-Hermite quadrature.
+
+    For nAGQ=1, this is equivalent to the Laplace approximation.
+    For nAGQ>1, uses adaptive GH quadrature for more accurate integration
+    over the random effects.
+
+    Parameters
+    ----------
+    theta : NDArray
+        Variance component parameters.
+    matrices : ModelMatrices
+        Model design matrices.
+    family : Family
+        GLM family with link function.
+    nAGQ : int, default 1
+        Number of quadrature points. 1 gives Laplace approximation.
+    beta_start : NDArray, optional
+        Starting values for fixed effects.
+    u_start : NDArray, optional
+        Starting values for random effects.
+
+    Returns
+    -------
+    deviance : float
+        -2 * log-likelihood approximation.
+    beta : NDArray
+        Fixed effect estimates.
+    u : NDArray
+        Random effect estimates (conditional modes).
+
+    Notes
+    -----
+    Adaptive GH quadrature centers the quadrature nodes at the conditional
+    modes and scales them by the Cholesky factor of the conditional variance.
+    This works well for scalar random effects or models with a single random
+    effect per group.
+
+    For models with crossed or nested random effects with multiple terms per
+    grouping factor, the integration becomes high-dimensional and nAGQ > 1
+    may not provide benefits (the integral is approximated group-by-group
+    for the first grouping factor only, matching lme4's behavior).
+    """
+    if nAGQ == 1:
+        return laplace_deviance(theta, matrices, family, beta_start, u_start)
+
+    q = matrices.n_random
+    prior_weights = matrices.weights
+    offset = matrices.offset
+
+    if q == 0:
+        beta, _, deviance, _ = pirls(matrices, family, theta, beta_start, u_start)
+        return deviance, beta, np.array([])
+
+    beta, u, _, _ = pirls(matrices, family, theta, beta_start, u_start)
+
+    Lambda = _build_lambda(theta, matrices.random_structures)
+    LambdatLambda = Lambda.T @ Lambda
+    if sparse.issparse(LambdatLambda):
+        LambdatLambda = LambdatLambda.toarray()
+
+    eta = matrices.X @ beta + matrices.Z @ u + offset
+    mu = family.link.inverse(eta)
+    mu = np.clip(mu, 1e-10, 1 - 1e-10)
+
+    W = family.weights(mu) * prior_weights
+    W = np.maximum(W, 1e-10)
+    W_diag = sparse.diags(W, format="csc")
+
+    Zt = matrices.Zt
+    ZtWZ = Zt @ W_diag @ matrices.Z
+    if sparse.issparse(ZtWZ):
+        ZtWZ = ZtWZ.toarray()
+
+    H = ZtWZ + LambdatLambda
+
+    try:
+        linalg.cholesky(H, lower=True)
+    except linalg.LinAlgError:
+        H = H + 1e-6 * np.eye(q)
+
+    first_struct = matrices.random_structures[0]
+    n_terms_first = first_struct.n_terms
+    n_levels_first = first_struct.n_levels
+
+    if n_terms_first > 1:
+        return laplace_deviance(theta, matrices, family, beta_start, u_start)
+
+    nodes, weights = _get_gh_nodes_weights(nAGQ)
+    sqrt2 = np.sqrt(2.0)
+
+    log_integral = 0.0
+
+    for g in range(n_levels_first):
+        idx_start = g * n_terms_first
+        idx_end = idx_start + n_terms_first
+
+        u_mode = u[idx_start:idx_end]
+        H_block = H[idx_start:idx_end, idx_start:idx_end]
+
+        try:
+            L_block = linalg.cholesky(H_block, lower=True)
+            scale = 1.0 / L_block[0, 0]
+        except linalg.LinAlgError:
+            scale = 1.0 / np.sqrt(H_block[0, 0] + 1e-10)
+
+        group_contrib = 0.0
+
+        for _k, (node, weight) in enumerate(zip(nodes, weights, strict=False)):
+            u_quad = u.copy()
+            u_quad[idx_start:idx_end] = u_mode + sqrt2 * scale * node
+
+            eta_quad = matrices.X @ beta + matrices.Z @ u_quad + offset
+            mu_quad = family.link.inverse(eta_quad)
+            mu_quad = np.clip(mu_quad, 1e-10, 1 - 1e-10)
+
+            log_lik_y = -0.5 * np.sum(family.deviance_resids(matrices.y, mu_quad, prior_weights))
+
+            u_block = u_quad[idx_start:idx_end]
+            Lambda_block = LambdatLambda[idx_start:idx_end, idx_start:idx_end]
+            log_prior = -0.5 * np.dot(
+                u_block, linalg.solve(Lambda_block + 1e-10 * np.eye(n_terms_first), u_block)
+            )
+
+            integrand = np.exp(log_lik_y + log_prior)
+            group_contrib += weight * integrand
+
+        group_contrib *= scale * np.sqrt(np.pi)
+        log_integral += np.log(max(group_contrib, 1e-300))
+
+    other_u_start = first_struct.n_levels * first_struct.n_terms
+    if other_u_start < q:
+        u_other = u[other_u_start:]
+        Lambda_other = LambdatLambda[other_u_start:, other_u_start:]
+        u_penalty_other = np.dot(
+            u_other,
+            linalg.solve(Lambda_other + 1e-10 * np.eye(q - other_u_start), u_other),
+        )
+        H_other = H[other_u_start:, other_u_start:]
+        try:
+            L_H_other = linalg.cholesky(H_other, lower=True)
+            logdet_other = 2.0 * np.sum(np.log(np.diag(L_H_other)))
+        except linalg.LinAlgError:
+            eigvals = linalg.eigvalsh(H_other)
+            eigvals = np.maximum(eigvals, 1e-10)
+            logdet_other = np.sum(np.log(eigvals))
+        log_integral -= 0.5 * (u_penalty_other + logdet_other)
+
+    deviance = -2.0 * log_integral
+
+    return deviance, beta, u
+
+
 def _laplace_deviance_rust(
     theta: NDArray[np.floating],
     matrices: ModelMatrices,
@@ -277,10 +449,12 @@ class GLMMOptimizer:
         matrices: ModelMatrices,
         family: Family,
         verbose: int = 0,
+        nAGQ: int = 1,
     ) -> None:
         self.matrices = matrices
         self.family = family
         self.verbose = verbose
+        self.nAGQ = nAGQ
         self.n_theta = _count_theta(matrices.random_structures)
         self._beta_cache: NDArray[np.floating] | None = None
         self._u_cache: NDArray[np.floating] | None = None
@@ -306,9 +480,19 @@ class GLMMOptimizer:
         return np.array(theta_list, dtype=np.float64)
 
     def objective(self, theta: NDArray[np.floating]) -> float:
-        dev, beta, u = laplace_deviance(
-            theta, self.matrices, self.family, self._beta_cache, self._u_cache
-        )
+        if self.nAGQ > 1:
+            dev, beta, u = adaptive_gh_deviance(
+                theta,
+                self.matrices,
+                self.family,
+                nAGQ=self.nAGQ,
+                beta_start=self._beta_cache,
+                u_start=self._u_cache,
+            )
+        else:
+            dev, beta, u = laplace_deviance(
+                theta, self.matrices, self.family, self._beta_cache, self._u_cache
+            )
         self._beta_cache = beta
         self._u_cache = u
         return dev
@@ -376,9 +560,19 @@ class GLMMOptimizer:
 
         theta_opt = result.x
 
-        final_dev, beta, u = laplace_deviance(
-            theta_opt, self.matrices, self.family, self._beta_cache, self._u_cache
-        )
+        if self.nAGQ > 1:
+            final_dev, beta, u = adaptive_gh_deviance(
+                theta_opt,
+                self.matrices,
+                self.family,
+                nAGQ=self.nAGQ,
+                beta_start=self._beta_cache,
+                u_start=self._u_cache,
+            )
+        else:
+            final_dev, beta, u = laplace_deviance(
+                theta_opt, self.matrices, self.family, self._beta_cache, self._u_cache
+            )
 
         return GLMMOptimizationResult(
             theta=theta_opt,

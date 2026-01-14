@@ -19,6 +19,27 @@ from mixedlm.formula.terms import Formula
 from mixedlm.matrices.design import ModelMatrices, build_model_matrices
 
 
+def _get_signif_code(p: float) -> str:
+    if p < 0.001:
+        return "***"
+    elif p < 0.01:
+        return "**"
+    elif p < 0.05:
+        return "*"
+    elif p < 0.1:
+        return "."
+    return ""
+
+
+def _format_pvalue(p: float) -> str:
+    if p < 2.2e-16:
+        return "< 2e-16"
+    elif p < 0.001:
+        return f"{p:.2e}"
+    else:
+        return f"{p:.4f}"
+
+
 @dataclass
 class RanefResult:
     values: dict[str, dict[str, NDArray[np.floating]]]
@@ -1475,6 +1496,15 @@ class LmerResult:
             for s in self.matrices.random_structures:
                 gp.append(gp[-1] + s.n_levels * s.n_terms)
             return np.array(gp)
+        elif name == "RX":
+            _, R = linalg.qr(self.matrices.X, mode="economic")
+            return R
+        elif name == "RZX":
+            return self._compute_RZX()
+        elif name == "Lind":
+            return self._build_Lind()
+        elif name == "devcomp":
+            return self._get_devcomp()
         else:
             valid_names = [
                 "X",
@@ -1503,8 +1533,160 @@ class LmerResult:
                 "flist",
                 "cnms",
                 "Gp",
+                "RX",
+                "RZX",
+                "Lind",
+                "devcomp",
             ]
             raise ValueError(f"Unknown component name: '{name}'. Valid names are: {valid_names}")
+
+    def _compute_RZX(self) -> NDArray[np.floating]:
+        """Compute RZX, the cross-term in the mixed model equations."""
+        Z = self.matrices.Z
+        X = self.matrices.X
+        sigma = self.sigma
+        Lambda = _build_lambda(self.theta, self.matrices.random_structures)
+
+        if sparse.issparse(Z):
+            Zt = Z.T
+            ZtZ = Zt @ Z
+        else:
+            Zt = Z.T
+            ZtZ = Zt @ Z
+
+        LambdatLambda = Lambda.T @ Lambda
+        C = ZtZ + LambdatLambda / sigma**2
+
+        if sparse.issparse(C):
+            C = C.toarray()
+
+        try:
+            L_C = linalg.cholesky(C, lower=True)
+        except linalg.LinAlgError:
+            C = C + 1e-6 * np.eye(C.shape[0])
+            L_C = linalg.cholesky(C, lower=True)
+
+        XtZ = X.T @ Z
+        if sparse.issparse(XtZ):
+            XtZ = XtZ.toarray()
+
+        RZX = linalg.solve_triangular(L_C, XtZ.T, lower=True)
+        return RZX
+
+    def _build_Lind(self) -> NDArray[np.int64]:
+        """Build Lind, the index mapping from theta to Lambda entries."""
+        indices = []
+        theta_idx = 0
+
+        for struct in self.matrices.random_structures:
+            n_terms = struct.n_terms
+
+            if struct.correlated:
+                n_theta = n_terms * (n_terms + 1) // 2
+                template_indices = []
+                idx = 0
+                for i in range(n_terms):
+                    for _j in range(i + 1):
+                        template_indices.append(theta_idx + idx)
+                        idx += 1
+            else:
+                n_theta = n_terms
+                template_indices = list(range(theta_idx, theta_idx + n_terms))
+
+            for _ in range(struct.n_levels):
+                indices.extend(template_indices)
+
+            theta_idx += n_theta
+
+        return np.array(indices, dtype=np.int64)
+
+    def _get_devcomp(self) -> dict[str, Any]:
+        """Get deviance components and model dimensions."""
+        from mixedlm.estimation.reml import profiled_deviance_components
+
+        n = self.matrices.n_obs
+        p = self.matrices.n_fixed
+        q = self.matrices.n_random
+        n_theta = len(self.theta)
+
+        try:
+            dc = profiled_deviance_components(self.theta, self.matrices, self.REML)
+            cmp = {
+                "ldL2": dc.ldL2,
+                "ldRX2": dc.ldRX2,
+                "wrss": dc.wrss,
+                "ussq": dc.ussq,
+                "pwrss": dc.pwrss,
+                "drsum": 0.0,
+                "REML": float(self.deviance) if self.REML else np.nan,
+                "dev": float(self.deviance) if not self.REML else np.nan,
+                "sigmaML": np.sqrt(dc.sigma2) if not self.REML else np.nan,
+                "sigmaREML": np.sqrt(dc.sigma2) if self.REML else np.nan,
+            }
+        except Exception:
+            cmp = {
+                "ldL2": 0.0,
+                "ldRX2": 0.0,
+                "wrss": 0.0,
+                "ussq": float(np.sum(self.u**2)) if self.u is not None else 0.0,
+                "pwrss": 0.0,
+                "drsum": 0.0,
+                "REML": float(self.deviance) if self.REML else np.nan,
+                "dev": float(self.deviance) if not self.REML else np.nan,
+                "sigmaML": self.sigma,
+                "sigmaREML": self.sigma,
+            }
+
+        dims = {
+            "n": n,
+            "p": p,
+            "q": q,
+            "nmp": n - p,
+            "nth": n_theta,
+            "REML": 1 if self.REML else 0,
+            "useSc": 1,
+            "nAGQ": 1,
+            "q0": q,
+            "q1": 0,
+            "qrx": p,
+            "ngrps": len(self.matrices.random_structures),
+        }
+
+        return {"cmp": cmp, "dims": dims}
+
+    def get_deviance_components(self):
+        """Get detailed deviance components for the fitted model.
+
+        Returns a DevianceComponents object containing the breakdown of
+        deviance into its constituent parts, including log-determinants,
+        weighted RSS, and random effect penalty terms.
+
+        Returns
+        -------
+        DevianceComponents
+            Object with fields:
+            - total: Total deviance
+            - ldL2: 2 * log|L| (log-determinant of L)
+            - ldRX2: 2 * log|RX| (REML adjustment)
+            - wrss: Weighted residual sum of squares
+            - ussq: Sum of squared random effects (u'u)
+            - pwrss: Penalized WRSS (wrss + ussq)
+            - sigma2: Residual variance estimate
+            - REML: Whether REML estimation was used
+
+        Examples
+        --------
+        >>> result = lmer("y ~ x + (1|group)", data)
+        >>> dc = result.get_deviance_components()
+        >>> print(dc)
+        Deviance Components:
+          Total deviance:     ...
+          log|L|^2 (ldL2):    ...
+          ...
+        """
+        from mixedlm.estimation.reml import profiled_deviance_components
+
+        return profiled_deviance_components(self.theta, self.matrices, self.REML)
 
     def update(
         self,
@@ -2066,7 +2248,21 @@ class LmerResult:
 
         return allfit_lmer(self, data, optimizers=optimizers, verbose=verbose)
 
-    def summary(self) -> str:
+    def summary(self, ddf_method: str | None = "Satterthwaite") -> str:
+        """Generate summary of linear mixed model fit.
+
+        Parameters
+        ----------
+        ddf_method : str, optional
+            Method for computing denominator degrees of freedom and p-values.
+            Options: "Satterthwaite", "Kenward-Roger", None (no p-values).
+            Default is "Satterthwaite".
+
+        Returns
+        -------
+        str
+            Summary string formatted like lme4/lmerTest output.
+        """
         lines = []
         lines.append("Linear mixed model fit by " + ("REML" if self.REML else "ML"))
         lines.append(f"Formula: {self.formula}")
@@ -2082,10 +2278,41 @@ class LmerResult:
         vcov = self.vcov()
         se = np.sqrt(np.diag(vcov))
 
-        lines.append("             Estimate  Std. Error  t value")
-        for i, name in enumerate(self.matrices.fixed_names):
-            t_val = self.beta[i] / se[i] if se[i] > 0 else np.nan
-            lines.append(f"{name:12} {self.beta[i]:10.4f}  {se[i]:10.4f}  {t_val:7.3f}")
+        if ddf_method is not None:
+            from mixedlm.inference.ddf import kenward_roger_df, pvalues_with_ddf, satterthwaite_df
+
+            if ddf_method == "Satterthwaite":
+                ddf_result = satterthwaite_df(self)
+            elif ddf_method == "Kenward-Roger":
+                ddf_result = kenward_roger_df(self)
+            else:
+                raise ValueError(
+                    f"Unknown ddf_method: {ddf_method}. "
+                    "Use 'Satterthwaite', 'Kenward-Roger', or None."
+                )
+
+            pval_dict = pvalues_with_ddf(self, method=ddf_method)
+
+            lines.append(
+                f"{'':12} {'Estimate':>10}  {'Std.Error':>10}  {'df':>8}  "
+                f"{'t value':>8}  {'Pr(>|t|)':>10}"
+            )
+            for i, name in enumerate(self.matrices.fixed_names):
+                t_val = self.beta[i] / se[i] if se[i] > 0 else np.nan
+                df = ddf_result.df[i]
+                _, _, p_val = pval_dict[name]
+                sig = _get_signif_code(p_val)
+                lines.append(
+                    f"{name:12} {self.beta[i]:10.4f}  {se[i]:10.4f}  {df:8.2f}  "
+                    f"{t_val:8.3f}  {_format_pvalue(p_val):>10} {sig}"
+                )
+            lines.append("---")
+            lines.append("Signif. codes: 0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1 ' ' 1")
+        else:
+            lines.append("             Estimate  Std. Error  t value")
+            for i, name in enumerate(self.matrices.fixed_names):
+                t_val = self.beta[i] / se[i] if se[i] > 0 else np.nan
+                lines.append(f"{name:12} {self.beta[i]:10.4f}  {se[i]:10.4f}  {t_val:7.3f}")
 
         lines.append("")
         if self.converged:

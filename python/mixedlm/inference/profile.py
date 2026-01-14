@@ -1120,3 +1120,356 @@ def confint_profile(
         )
 
     return pd.DataFrame(rows)
+
+
+@dataclass
+class Profile2DResult:
+    """Result of 2D profile likelihood slice.
+
+    Represents the profile likelihood surface over a 2D grid of
+    parameter values, useful for visualizing parameter correlations
+    and joint confidence regions.
+    """
+
+    param1: str
+    param2: str
+    values1: NDArray[np.floating]
+    values2: NDArray[np.floating]
+    zeta: NDArray[np.floating]
+    mle1: float
+    mle2: float
+    level: float
+
+    def plot(
+        self,
+        ax: Any | None = None,
+        show_ci: bool = True,
+        show_mle: bool = True,
+        n_levels: int = 10,
+        **kwargs: Any,
+    ) -> Any:
+        """Plot the 2D profile likelihood surface as contours.
+
+        Parameters
+        ----------
+        ax : matplotlib.axes.Axes, optional
+            Axes to plot on. If None, creates a new figure.
+        show_ci : bool, default True
+            Whether to highlight the confidence region.
+        show_mle : bool, default True
+            Whether to show the MLE point.
+        n_levels : int, default 10
+            Number of contour levels.
+        **kwargs
+            Additional arguments passed to contour().
+
+        Returns
+        -------
+        matplotlib.axes.Axes
+            The axes with the 2D profile plot.
+        """
+        try:
+            import matplotlib.pyplot as plt
+        except ImportError:
+            raise ImportError("matplotlib is required for plotting") from None
+
+        if ax is None:
+            fig, ax = plt.subplots(figsize=(8, 6))
+
+        V1, V2 = np.meshgrid(self.values1, self.values2, indexing="ij")
+
+        contour = ax.contour(V2, V1, self.zeta, levels=n_levels, **kwargs)
+        ax.clabel(contour, inline=True, fontsize=8, fmt="%.1f")
+
+        if show_ci:
+            z_crit_sq = stats.chi2.ppf(self.level, df=2)
+            ax.contour(
+                V2,
+                V1,
+                self.zeta**2,
+                levels=[z_crit_sq],
+                colors="red",
+                linewidths=2,
+                linestyles="--",
+            )
+
+        if show_mle:
+            ax.plot(self.mle2, self.mle1, "ro", markersize=8, label="MLE")
+
+        ax.set_xlabel(self.param2)
+        ax.set_ylabel(self.param1)
+        ax.set_title(f"2D Profile: {self.param1} vs {self.param2}")
+
+        return ax
+
+    def plot_filled(
+        self,
+        ax: Any | None = None,
+        show_ci: bool = True,
+        show_mle: bool = True,
+        **kwargs: Any,
+    ) -> Any:
+        """Plot the 2D profile as a filled contour plot.
+
+        Parameters
+        ----------
+        ax : matplotlib.axes.Axes, optional
+            Axes to plot on. If None, creates a new figure.
+        show_ci : bool, default True
+            Whether to highlight the confidence region boundary.
+        show_mle : bool, default True
+            Whether to show the MLE point.
+        **kwargs
+            Additional arguments passed to contourf().
+
+        Returns
+        -------
+        matplotlib.axes.Axes
+            The axes with the filled contour plot.
+        """
+        try:
+            import matplotlib.pyplot as plt
+        except ImportError:
+            raise ImportError("matplotlib is required for plotting") from None
+
+        if ax is None:
+            fig, ax = plt.subplots(figsize=(8, 6))
+
+        V1, V2 = np.meshgrid(self.values1, self.values2, indexing="ij")
+
+        lik_surface = np.exp(-0.5 * self.zeta**2)
+
+        contourf = ax.contourf(V2, V1, lik_surface, levels=20, cmap="viridis", **kwargs)
+        plt.colorbar(contourf, ax=ax, label="Relative likelihood")
+
+        if show_ci:
+            z_crit_sq = stats.chi2.ppf(self.level, df=2)
+            ax.contour(
+                V2,
+                V1,
+                self.zeta**2,
+                levels=[z_crit_sq],
+                colors="white",
+                linewidths=2,
+                linestyles="--",
+            )
+
+        if show_mle:
+            ax.plot(self.mle2, self.mle1, "w*", markersize=12, label="MLE")
+
+        ax.set_xlabel(self.param2)
+        ax.set_ylabel(self.param1)
+        ax.set_title(f"2D Profile Likelihood: {self.param1} vs {self.param2}")
+
+        return ax
+
+
+def slice2D(
+    result: LmerResult,
+    param1: str,
+    param2: str,
+    n_points: int = 15,
+    level: float = 0.95,
+    n_jobs: int = 1,
+) -> Profile2DResult:
+    """Compute 2D profile likelihood slice for two parameters.
+
+    This function evaluates the profile deviance over a grid of values
+    for two parameters, while optimizing over all other parameters.
+    The result can be used to visualize joint confidence regions and
+    parameter correlations.
+
+    Parameters
+    ----------
+    result : LmerResult
+        A fitted linear mixed model.
+    param1 : str
+        Name of the first parameter.
+    param2 : str
+        Name of the second parameter.
+    n_points : int, default 15
+        Number of grid points in each dimension.
+    level : float, default 0.95
+        Confidence level for the joint region.
+    n_jobs : int, default 1
+        Number of parallel jobs. Use -1 for all available cores.
+
+    Returns
+    -------
+    Profile2DResult
+        Object containing the 2D profile surface.
+
+    Examples
+    --------
+    >>> result = lmer("Reaction ~ Days + (Days|Subject)", sleepstudy)
+    >>> slice2d = slice2D(result, "(Intercept)", "Days", n_points=10)
+    >>> slice2d.plot()
+    """
+    if param1 not in result.matrices.fixed_names:
+        raise ValueError(f"Parameter '{param1}' not found in fixed effects")
+    if param2 not in result.matrices.fixed_names:
+        raise ValueError(f"Parameter '{param2}' not found in fixed effects")
+
+    idx1 = result.matrices.fixed_names.index(param1)
+    idx2 = result.matrices.fixed_names.index(param2)
+
+    vcov = result.vcov()
+    mle1 = result.beta[idx1]
+    mle2 = result.beta[idx2]
+    se1 = np.sqrt(vcov[idx1, idx1])
+    se2 = np.sqrt(vcov[idx2, idx2])
+
+    values1 = np.linspace(mle1 - 3 * se1, mle1 + 3 * se1, n_points)
+    values2 = np.linspace(mle2 - 3 * se2, mle2 + 3 * se2, n_points)
+
+    dev_mle = result.deviance
+
+    zeta = np.zeros((n_points, n_points))
+
+    if n_jobs == 1:
+        for i, v1 in enumerate(values1):
+            for j, v2 in enumerate(values2):
+                dev = _profile_deviance_2d(result, idx1, v1, idx2, v2)
+                diff = dev - dev_mle
+                sign = 1 if diff >= 0 else -1
+                zeta[i, j] = sign * np.sqrt(abs(diff))
+    else:
+        n_jobs_actual = os.cpu_count() or 1 if n_jobs == -1 else n_jobs
+
+        tasks = []
+        for i, v1 in enumerate(values1):
+            for j, v2 in enumerate(values2):
+                tasks.append((i, j, v1, v2, idx1, idx2, result))
+
+        with ProcessPoolExecutor(max_workers=n_jobs_actual) as executor:
+            futures = {executor.submit(_slice2d_worker, task): task[:2] for task in tasks}
+            for future in as_completed(futures):
+                i, j, dev = future.result()
+                diff = dev - dev_mle
+                sign = 1 if diff >= 0 else -1
+                zeta[i, j] = sign * np.sqrt(abs(diff))
+
+    return Profile2DResult(
+        param1=param1,
+        param2=param2,
+        values1=values1,
+        values2=values2,
+        zeta=zeta,
+        mle1=mle1,
+        mle2=mle2,
+        level=level,
+    )
+
+
+def _slice2d_worker(
+    args: tuple[Any, ...],
+) -> tuple[int, int, float]:
+    i, j, v1, v2, idx1, idx2, result = args
+    dev = _profile_deviance_2d(result, idx1, v1, idx2, v2)
+    return i, j, dev
+
+
+def _profile_deviance_2d(
+    result: LmerResult,
+    idx1: int,
+    value1: float,
+    idx2: int,
+    value2: float,
+) -> float:
+    """Compute deviance with two fixed effects parameters held constant."""
+    from scipy import linalg, sparse
+
+    from mixedlm.estimation.reml import _build_lambda
+
+    matrices = result.matrices
+    theta = result.theta
+    n = matrices.n_obs
+    p = matrices.n_fixed
+    q = matrices.n_random
+
+    keep_idx = [i for i in range(p) if i not in (idx1, idx2)]
+    X_reduced = matrices.X[:, keep_idx]
+    y_adjusted = matrices.y - value1 * matrices.X[:, idx1] - value2 * matrices.X[:, idx2]
+
+    p_reduced = len(keep_idx)
+
+    if q == 0:
+        XtX = X_reduced.T @ X_reduced
+        Xty = X_reduced.T @ y_adjusted
+        try:
+            beta_reduced = linalg.solve(XtX, Xty, assume_a="pos")
+        except linalg.LinAlgError:
+            beta_reduced = linalg.lstsq(X_reduced, y_adjusted)[0]
+
+        resid = y_adjusted - X_reduced @ beta_reduced
+        rss = np.dot(resid, resid)
+
+        if result.REML:
+            denom = n - p
+            sigma2 = rss / denom
+            logdet_XtX = np.linalg.slogdet(XtX)[1] if p_reduced > 0 else 0.0
+            dev = denom * (1.0 + np.log(2.0 * np.pi * sigma2)) + logdet_XtX
+        else:
+            sigma2 = rss / n
+            dev = n * (1.0 + np.log(2.0 * np.pi * sigma2))
+
+        return float(dev)
+
+    Lambda = _build_lambda(theta, matrices.random_structures)
+
+    Zt = matrices.Zt
+    ZtZ = Zt @ Zt.T
+    LambdatZtZLambda = Lambda.T @ ZtZ @ Lambda
+
+    I_q = sparse.eye(q, format="csc")
+    V_factor = LambdatZtZLambda + I_q
+
+    V_factor_dense = V_factor.toarray()
+    try:
+        L_V = linalg.cholesky(V_factor_dense, lower=True)
+    except linalg.LinAlgError:
+        return 1e10
+
+    logdet_V = 2.0 * np.sum(np.log(np.diag(L_V)))
+
+    Zty = Zt @ y_adjusted
+    cu = Lambda.T @ Zty
+    cu_star = linalg.solve_triangular(L_V, cu, lower=True)
+
+    ZtX = Zt @ X_reduced
+    Lambdat_ZtX = Lambda.T @ ZtX
+    RZX = linalg.solve_triangular(L_V, Lambdat_ZtX, lower=True)
+
+    XtX = X_reduced.T @ X_reduced
+    Xty = X_reduced.T @ y_adjusted
+
+    RZX_tRZX = RZX.T @ RZX
+    XtVinvX = XtX - RZX_tRZX
+
+    try:
+        L_XtVinvX = linalg.cholesky(XtVinvX, lower=True)
+    except linalg.LinAlgError:
+        return 1e10
+
+    logdet_XtVinvX = 2.0 * np.sum(np.log(np.diag(L_XtVinvX)))
+
+    cu_star_RZX_beta_term = RZX.T @ cu_star
+    Xty_adj = Xty - cu_star_RZX_beta_term
+    beta_reduced = linalg.cho_solve((L_XtVinvX, True), Xty_adj)
+
+    resid = y_adjusted - X_reduced @ beta_reduced
+    Zt_resid = Zt @ resid
+    Lambda_t_Zt_resid = Lambda.T @ Zt_resid
+    u_star = linalg.cho_solve((L_V, True), Lambda_t_Zt_resid)
+
+    pwrss = np.dot(resid, resid) + np.dot(u_star, u_star)
+
+    denom = n - p if result.REML else n
+
+    sigma2 = pwrss / denom
+
+    dev = denom * (1.0 + np.log(2.0 * np.pi * sigma2)) + logdet_V
+    if result.REML:
+        dev += logdet_XtVinvX
+
+    return float(dev)
