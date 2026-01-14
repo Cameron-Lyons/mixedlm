@@ -265,3 +265,51 @@ def apply_contrasts(
 
 
 ContrastsSpec = dict[str, str | ContrastType | NDArray[np.floating]]
+
+
+def apply_contrasts_array(
+    col_values: NDArray,
+    name: str,
+    contrast_matrix: NDArray[np.floating],
+    categories: list,
+) -> tuple[list[NDArray[np.floating]], list[str]]:
+    """Apply contrast matrix to a categorical column represented as a numpy array.
+
+    Parameters
+    ----------
+    col_values : NDArray
+        Values from the categorical column.
+    name : str
+        Variable name for creating column names.
+    contrast_matrix : NDArray
+        Contrast matrix of shape (n_levels, n_cols).
+    categories : list
+        List of category levels in order.
+
+    Returns
+    -------
+    tuple
+        (list of encoded columns, list of column names)
+    """
+    n = len(col_values)
+    n_contrasts = contrast_matrix.shape[1]
+
+    level_to_idx = {cat: i for i, cat in enumerate(categories)}
+
+    columns: list[NDArray[np.floating]] = []
+    names: list[str] = []
+
+    for j in range(n_contrasts):
+        encoded = np.zeros(n, dtype=np.float64)
+        for i in range(n):
+            val = col_values[i]
+            if val in level_to_idx:
+                idx = level_to_idx[val]
+                encoded[i] = contrast_matrix[idx, j]
+            else:
+                encoded[i] = np.nan
+
+        columns.append(encoded)
+        names.append(f"{name}.{j + 1}")
+
+    return columns, names
