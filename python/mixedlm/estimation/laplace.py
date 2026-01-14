@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any
 
@@ -17,6 +18,7 @@ from mixedlm.families.base import Family
 from mixedlm.matrices.design import ModelMatrices
 
 try:
+    from mixedlm._rust import adaptive_gh_deviance as _rust_adaptive_gh_deviance
     from mixedlm._rust import laplace_deviance as _rust_laplace_deviance
 
     _HAS_RUST = True
@@ -86,40 +88,46 @@ def pirls(
         except linalg.LinAlgError:
             beta = linalg.lstsq(matrices.X, y_work)[0]
     else:
-        beta = beta_start.copy()
+        beta = beta_start
 
-    u = np.zeros(q, dtype=np.float64) if u_start is None else u_start.copy()
+    u = np.zeros(q, dtype=np.float64) if u_start is None else u_start
 
     Lambda = _build_lambda(theta, matrices.random_structures)
 
     LambdatLambda = Lambda.T @ Lambda
-    if sparse.issparse(LambdatLambda):
-        LambdatLambda = LambdatLambda.toarray()
+    LambdatLambda_dense = (
+        LambdatLambda.toarray() if sparse.issparse(LambdatLambda) else LambdatLambda
+    )
+
+    W = np.empty(matrices.n_obs, dtype=np.float64)
+    z = np.empty(matrices.n_obs, dtype=np.float64)
 
     converged = False
     for _iteration in range(maxiter):
         eta = matrices.X @ beta + matrices.Z @ u + offset
         mu = family.link.inverse(eta)
+        np.clip(mu, 1e-10, 1 - 1e-10, out=mu)
 
-        mu = np.clip(mu, 1e-10, 1 - 1e-10)
+        np.multiply(family.weights(mu), prior_weights, out=W)
+        np.maximum(W, 1e-10, out=W)
 
-        W = family.weights(mu) * prior_weights
-        W = np.maximum(W, 1e-10)
+        deriv = family.link.deriv(mu)
+        np.subtract(eta, offset, out=z)
+        z += deriv * (matrices.y - mu)
 
-        z = eta - offset + family.link.deriv(mu) * (matrices.y - mu)
+        W_sqrt = np.sqrt(W)
+        WX = W_sqrt[:, None] * matrices.X
+        WZ = sparse.diags(W_sqrt, format="csc") @ matrices.Z
 
-        W_diag = sparse.diags(W, format="csc")
-
-        XtWX = matrices.X.T @ W_diag @ matrices.X
-        XtWZ = matrices.X.T @ W_diag @ matrices.Z
-        ZtWZ = Zt @ W_diag @ matrices.Z
+        XtWX = WX.T @ WX
+        ZtWZ = WZ.T @ WZ
+        XtWZ = WX.T @ WZ
 
         XtWz = matrices.X.T @ (W * z)
         ZtWz = Zt @ (W * z)
 
         ZtWZ_dense = ZtWZ.toarray() if sparse.issparse(ZtWZ) else ZtWZ
-
-        C = ZtWZ_dense + LambdatLambda
+        C = ZtWZ_dense + LambdatLambda_dense
 
         try:
             L_C = linalg.cholesky(C, lower=True)
@@ -155,12 +163,12 @@ def pirls(
 
     eta = matrices.X @ beta + matrices.Z @ u + offset
     mu = family.link.inverse(eta)
-    mu = np.clip(mu, 1e-10, 1 - 1e-10)
+    np.clip(mu, 1e-10, 1 - 1e-10, out=mu)
 
     dev_resids = family.deviance_resids(matrices.y, mu, prior_weights)
     deviance = np.sum(dev_resids)
 
-    deviance += np.dot(u, linalg.solve(LambdatLambda + 1e-10 * np.eye(q), u))
+    deviance += np.dot(u, linalg.solve(LambdatLambda_dense + 1e-10 * np.eye(q), u))
 
     return beta, u, deviance, converged
 
@@ -193,22 +201,22 @@ def laplace_deviance(
     deviance = np.sum(dev_resids)
 
     LambdatLambda = Lambda.T @ Lambda
-    if sparse.issparse(LambdatLambda):
-        LambdatLambda = LambdatLambda.toarray()
+    LambdatLambda_dense = (
+        LambdatLambda.toarray() if sparse.issparse(LambdatLambda) else LambdatLambda
+    )
 
-    u_penalty = np.dot(u, linalg.solve(LambdatLambda + 1e-10 * np.eye(q), u))
+    u_penalty = np.dot(u, linalg.solve(LambdatLambda_dense + 1e-10 * np.eye(q), u))
     deviance += u_penalty
 
     W = family.weights(mu) * prior_weights
     W = np.maximum(W, 1e-10)
-    W_diag = sparse.diags(W, format="csc")
 
-    Zt = matrices.Zt
-    ZtWZ = Zt @ W_diag @ matrices.Z
-    if sparse.issparse(ZtWZ):
-        ZtWZ = ZtWZ.toarray()
+    W_sqrt = np.sqrt(W)
+    WZ = sparse.diags(W_sqrt, format="csc") @ matrices.Z
+    ZtWZ = WZ.T @ WZ
+    ZtWZ_dense = ZtWZ.toarray() if sparse.issparse(ZtWZ) else ZtWZ
 
-    H = ZtWZ + LambdatLambda
+    H = ZtWZ_dense + LambdatLambda_dense
 
     try:
         L_H = linalg.cholesky(H, lower=True)
@@ -224,15 +232,65 @@ def laplace_deviance(
 
 
 def _get_gh_nodes_weights(n: int) -> tuple[NDArray[np.floating], NDArray[np.floating]]:
-    """Get Gauss-Hermite quadrature nodes and weights.
-
-    Returns nodes and weights for integrating functions of the form
-    f(x) * exp(-x^2) over (-inf, inf).
-    """
+    """Get Gauss-Hermite quadrature nodes and weights."""
     from numpy.polynomial.hermite import hermgauss
 
     nodes, weights = hermgauss(n)
-    return np.array(nodes), np.array(weights)
+    return np.asarray(nodes), np.asarray(weights)
+
+
+def _compute_group_quadrature(
+    g: int,
+    n_terms_first: int,
+    u: NDArray[np.floating],
+    H: NDArray[np.floating],
+    LambdatLambda: NDArray[np.floating],
+    nodes: NDArray[np.floating],
+    weights: NDArray[np.floating],
+    matrices: ModelMatrices,
+    family: Family,
+    beta: NDArray[np.floating],
+    prior_weights: NDArray[np.floating],
+    offset: NDArray[np.floating],
+) -> float:
+    """Compute quadrature contribution for a single group."""
+    sqrt2 = np.sqrt(2.0)
+
+    idx_start = g * n_terms_first
+    idx_end = idx_start + n_terms_first
+
+    u_mode = u[idx_start:idx_end]
+    H_block = H[idx_start:idx_end, idx_start:idx_end]
+
+    try:
+        L_block = linalg.cholesky(H_block, lower=True)
+        scale = 1.0 / L_block[0, 0]
+    except linalg.LinAlgError:
+        scale = 1.0 / np.sqrt(H_block[0, 0] + 1e-10)
+
+    group_contrib = 0.0
+    u_quad = u.copy()
+
+    for node, weight in zip(nodes, weights, strict=False):
+        u_quad[idx_start:idx_end] = u_mode + sqrt2 * scale * node
+
+        eta_quad = matrices.X @ beta + matrices.Z @ u_quad + offset
+        mu_quad = family.link.inverse(eta_quad)
+        mu_quad = np.clip(mu_quad, 1e-10, 1 - 1e-10)
+
+        log_lik_y = -0.5 * np.sum(family.deviance_resids(matrices.y, mu_quad, prior_weights))
+
+        u_block = u_quad[idx_start:idx_end]
+        Lambda_block = LambdatLambda[idx_start:idx_end, idx_start:idx_end]
+        log_prior = -0.5 * np.dot(
+            u_block, linalg.solve(Lambda_block + 1e-10 * np.eye(n_terms_first), u_block)
+        )
+
+        integrand = np.exp(log_lik_y + log_prior)
+        group_contrib += weight * integrand
+
+    group_contrib *= scale * np.sqrt(np.pi)
+    return np.log(max(group_contrib, 1e-300))
 
 
 def adaptive_gh_deviance(
@@ -242,12 +300,12 @@ def adaptive_gh_deviance(
     nAGQ: int = 1,
     beta_start: NDArray[np.floating] | None = None,
     u_start: NDArray[np.floating] | None = None,
+    n_jobs: int = 1,
 ) -> tuple[float, NDArray[np.floating], NDArray[np.floating]]:
     """Compute deviance using adaptive Gauss-Hermite quadrature.
 
     For nAGQ=1, this is equivalent to the Laplace approximation.
-    For nAGQ>1, uses adaptive GH quadrature for more accurate integration
-    over the random effects.
+    For nAGQ>1, uses adaptive GH quadrature for more accurate integration.
 
     Parameters
     ----------
@@ -258,11 +316,13 @@ def adaptive_gh_deviance(
     family : Family
         GLM family with link function.
     nAGQ : int, default 1
-        Number of quadrature points. 1 gives Laplace approximation.
+        Number of quadrature points.
     beta_start : NDArray, optional
         Starting values for fixed effects.
     u_start : NDArray, optional
         Starting values for random effects.
+    n_jobs : int, default 1
+        Number of parallel jobs for group quadrature. Use -1 for all CPUs.
 
     Returns
     -------
@@ -271,19 +331,7 @@ def adaptive_gh_deviance(
     beta : NDArray
         Fixed effect estimates.
     u : NDArray
-        Random effect estimates (conditional modes).
-
-    Notes
-    -----
-    Adaptive GH quadrature centers the quadrature nodes at the conditional
-    modes and scales them by the Cholesky factor of the conditional variance.
-    This works well for scalar random effects or models with a single random
-    effect per group.
-
-    For models with crossed or nested random effects with multiple terms per
-    grouping factor, the integration becomes high-dimensional and nAGQ > 1
-    may not provide benefits (the integral is approximated group-by-group
-    for the first grouping factor only, matching lme4's behavior).
+        Random effect estimates.
     """
     if nAGQ == 1:
         return laplace_deviance(theta, matrices, family, beta_start, u_start)
@@ -300,8 +348,9 @@ def adaptive_gh_deviance(
 
     Lambda = _build_lambda(theta, matrices.random_structures)
     LambdatLambda = Lambda.T @ Lambda
-    if sparse.issparse(LambdatLambda):
-        LambdatLambda = LambdatLambda.toarray()
+    LambdatLambda_dense = (
+        LambdatLambda.toarray() if sparse.issparse(LambdatLambda) else LambdatLambda
+    )
 
     eta = matrices.X @ beta + matrices.Z @ u + offset
     mu = family.link.inverse(eta)
@@ -309,14 +358,13 @@ def adaptive_gh_deviance(
 
     W = family.weights(mu) * prior_weights
     W = np.maximum(W, 1e-10)
-    W_diag = sparse.diags(W, format="csc")
 
-    Zt = matrices.Zt
-    ZtWZ = Zt @ W_diag @ matrices.Z
-    if sparse.issparse(ZtWZ):
-        ZtWZ = ZtWZ.toarray()
+    W_sqrt = np.sqrt(W)
+    WZ = sparse.diags(W_sqrt, format="csc") @ matrices.Z
+    ZtWZ = WZ.T @ WZ
+    ZtWZ_dense = ZtWZ.toarray() if sparse.issparse(ZtWZ) else ZtWZ
 
-    H = ZtWZ + LambdatLambda
+    H = ZtWZ_dense + LambdatLambda_dense
 
     try:
         linalg.cholesky(H, lower=True)
@@ -331,51 +379,55 @@ def adaptive_gh_deviance(
         return laplace_deviance(theta, matrices, family, beta_start, u_start)
 
     nodes, weights = _get_gh_nodes_weights(nAGQ)
-    sqrt2 = np.sqrt(2.0)
 
-    log_integral = 0.0
+    if n_jobs == -1:
+        import os
 
-    for g in range(n_levels_first):
-        idx_start = g * n_terms_first
-        idx_end = idx_start + n_terms_first
+        n_jobs = os.cpu_count() or 1
 
-        u_mode = u[idx_start:idx_end]
-        H_block = H[idx_start:idx_end, idx_start:idx_end]
-
-        try:
-            L_block = linalg.cholesky(H_block, lower=True)
-            scale = 1.0 / L_block[0, 0]
-        except linalg.LinAlgError:
-            scale = 1.0 / np.sqrt(H_block[0, 0] + 1e-10)
-
-        group_contrib = 0.0
-
-        for _k, (node, weight) in enumerate(zip(nodes, weights, strict=False)):
-            u_quad = u.copy()
-            u_quad[idx_start:idx_end] = u_mode + sqrt2 * scale * node
-
-            eta_quad = matrices.X @ beta + matrices.Z @ u_quad + offset
-            mu_quad = family.link.inverse(eta_quad)
-            mu_quad = np.clip(mu_quad, 1e-10, 1 - 1e-10)
-
-            log_lik_y = -0.5 * np.sum(family.deviance_resids(matrices.y, mu_quad, prior_weights))
-
-            u_block = u_quad[idx_start:idx_end]
-            Lambda_block = LambdatLambda[idx_start:idx_end, idx_start:idx_end]
-            log_prior = -0.5 * np.dot(
-                u_block, linalg.solve(Lambda_block + 1e-10 * np.eye(n_terms_first), u_block)
+    if n_jobs > 1 and n_levels_first > 4:
+        with ThreadPoolExecutor(max_workers=min(n_jobs, n_levels_first)) as executor:
+            futures = [
+                executor.submit(
+                    _compute_group_quadrature,
+                    g,
+                    n_terms_first,
+                    u,
+                    H,
+                    LambdatLambda_dense,
+                    nodes,
+                    weights,
+                    matrices,
+                    family,
+                    beta,
+                    prior_weights,
+                    offset,
+                )
+                for g in range(n_levels_first)
+            ]
+            log_integral = sum(f.result() for f in futures)
+    else:
+        log_integral = 0.0
+        for g in range(n_levels_first):
+            log_integral += _compute_group_quadrature(
+                g,
+                n_terms_first,
+                u,
+                H,
+                LambdatLambda_dense,
+                nodes,
+                weights,
+                matrices,
+                family,
+                beta,
+                prior_weights,
+                offset,
             )
-
-            integrand = np.exp(log_lik_y + log_prior)
-            group_contrib += weight * integrand
-
-        group_contrib *= scale * np.sqrt(np.pi)
-        log_integral += np.log(max(group_contrib, 1e-300))
 
     other_u_start = first_struct.n_levels * first_struct.n_terms
     if other_u_start < q:
         u_other = u[other_u_start:]
-        Lambda_other = LambdatLambda[other_u_start:, other_u_start:]
+        Lambda_other = LambdatLambda_dense[other_u_start:, other_u_start:]
         u_penalty_other = np.dot(
             u_other,
             linalg.solve(Lambda_other + 1e-10 * np.eye(q - other_u_start), u_other),
@@ -410,20 +462,56 @@ def _laplace_deviance_rust(
     link_name = _get_link_name(family)
 
     deviance, beta, u = _rust_laplace_deviance(
-        matrices.y,
-        matrices.X,
-        z_csc.data,
-        z_csc.indices.astype(np.int64),
-        z_csc.indptr.astype(np.int64),
+        np.ascontiguousarray(matrices.y, dtype=np.float64),
+        np.ascontiguousarray(matrices.X, dtype=np.float64),
+        np.ascontiguousarray(z_csc.data, dtype=np.float64),
+        np.ascontiguousarray(z_csc.indices, dtype=np.int64),
+        np.ascontiguousarray(z_csc.indptr, dtype=np.int64),
         (z_csc.shape[0], z_csc.shape[1]),
-        matrices.weights,
-        matrices.offset,
-        theta,
+        np.ascontiguousarray(matrices.weights, dtype=np.float64),
+        np.ascontiguousarray(matrices.offset, dtype=np.float64),
+        np.ascontiguousarray(theta, dtype=np.float64),
         n_levels,
         n_terms,
         correlated,
         family_name,
         link_name,
+    )
+
+    return deviance, np.array(beta), np.array(u)
+
+
+def _adaptive_gh_deviance_rust(
+    theta: NDArray[np.floating],
+    matrices: ModelMatrices,
+    family: Family,
+    nAGQ: int,
+) -> tuple[float, NDArray[np.floating], NDArray[np.floating]]:
+    n_levels = [s.n_levels for s in matrices.random_structures]
+    n_terms = [s.n_terms for s in matrices.random_structures]
+    correlated = [s.correlated for s in matrices.random_structures]
+
+    z_csc = matrices.Z.tocsc()
+
+    family_name = _get_family_name(family)
+    link_name = _get_link_name(family)
+
+    deviance, beta, u = _rust_adaptive_gh_deviance(
+        np.ascontiguousarray(matrices.y, dtype=np.float64),
+        np.ascontiguousarray(matrices.X, dtype=np.float64),
+        np.ascontiguousarray(z_csc.data, dtype=np.float64),
+        np.ascontiguousarray(z_csc.indices, dtype=np.int64),
+        np.ascontiguousarray(z_csc.indptr, dtype=np.int64),
+        (z_csc.shape[0], z_csc.shape[1]),
+        np.ascontiguousarray(matrices.weights, dtype=np.float64),
+        np.ascontiguousarray(matrices.offset, dtype=np.float64),
+        np.ascontiguousarray(theta, dtype=np.float64),
+        n_levels,
+        n_terms,
+        correlated,
+        family_name,
+        link_name,
+        nAGQ,
     )
 
     return deviance, np.array(beta), np.array(u)
@@ -441,6 +529,27 @@ def laplace_deviance_fast(
         if family_name in ("binomial", "poisson", "gaussian"):
             return _laplace_deviance_rust(theta, matrices, family)
     return laplace_deviance(theta, matrices, family, beta_start, u_start)
+
+
+def adaptive_gh_deviance_fast(
+    theta: NDArray[np.floating],
+    matrices: ModelMatrices,
+    family: Family,
+    nAGQ: int = 1,
+    beta_start: NDArray[np.floating] | None = None,
+    u_start: NDArray[np.floating] | None = None,
+) -> tuple[float, NDArray[np.floating], NDArray[np.floating]]:
+    if nAGQ == 1:
+        return laplace_deviance_fast(theta, matrices, family, beta_start, u_start)
+
+    if _HAS_RUST and beta_start is None and u_start is None:
+        family_name = _get_family_name(family)
+        if family_name in ("binomial", "poisson", "gaussian"):
+            first_struct = matrices.random_structures[0] if matrices.random_structures else None
+            if first_struct and first_struct.n_terms == 1:
+                return _adaptive_gh_deviance_rust(theta, matrices, family, nAGQ)
+
+    return adaptive_gh_deviance(theta, matrices, family, nAGQ, beta_start, u_start)
 
 
 class GLMMOptimizer:
@@ -471,17 +580,14 @@ class GLMMOptimizer:
             elif struct.correlated:
                 for i in range(q):
                     for j in range(i + 1):
-                        if i == j:
-                            theta_list.append(1.0)
-                        else:
-                            theta_list.append(0.0)
+                        theta_list.append(1.0 if i == j else 0.0)
             else:
                 theta_list.extend([1.0] * q)
         return np.array(theta_list, dtype=np.float64)
 
     def objective(self, theta: NDArray[np.floating]) -> float:
         if self.nAGQ > 1:
-            dev, beta, u = adaptive_gh_deviance(
+            dev, beta, u = adaptive_gh_deviance_fast(
                 theta,
                 self.matrices,
                 self.family,
@@ -490,7 +596,7 @@ class GLMMOptimizer:
                 u_start=self._u_cache,
             )
         else:
-            dev, beta, u = laplace_deviance(
+            dev, beta, u = laplace_deviance_fast(
                 theta, self.matrices, self.family, self._beta_cache, self._u_cache
             )
         self._beta_cache = beta
@@ -561,7 +667,7 @@ class GLMMOptimizer:
         theta_opt = result.x
 
         if self.nAGQ > 1:
-            final_dev, beta, u = adaptive_gh_deviance(
+            final_dev, beta, u = adaptive_gh_deviance_fast(
                 theta_opt,
                 self.matrices,
                 self.family,
@@ -570,7 +676,7 @@ class GLMMOptimizer:
                 u_start=self._u_cache,
             )
         else:
-            final_dev, beta, u = laplace_deviance(
+            final_dev, beta, u = laplace_deviance_fast(
                 theta_opt, self.matrices, self.family, self._beta_cache, self._u_cache
             )
 

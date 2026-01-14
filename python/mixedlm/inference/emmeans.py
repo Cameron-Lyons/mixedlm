@@ -298,7 +298,7 @@ def _adjust_pvalues(
 def emmeans(
     model: LmerResult | GlmerResult,
     specs: str | list[str],
-    by: str | list[str] | None = None,
+    _by: str | list[str] | None = None,
     at: dict[str, Any] | None = None,
     cov_reduce: Callable[[pd.Series], float] = np.mean,  # type: ignore[type-arg]
     type: str = "response",

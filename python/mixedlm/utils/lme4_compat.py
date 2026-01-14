@@ -142,7 +142,7 @@ def ranef(model: MerMod, condVar: bool = False) -> dict[str, dict[str, NDArray[n
     from mixedlm.models.glmer import GlmerResult
     from mixedlm.models.lmer import LmerResult, RanefResult
 
-    if isinstance(model, (LmerResult, GlmerResult)):
+    if isinstance(model, LmerResult | GlmerResult):
         result = model.ranef(condVar=condVar)
         if isinstance(result, RanefResult):
             return result.values
@@ -326,7 +326,7 @@ def pvalues(
     from mixedlm.models.glmer import GlmerResult
     from mixedlm.models.lmer import LmerResult
 
-    if not isinstance(model, (LmerResult, GlmerResult)):
+    if not isinstance(model, LmerResult | GlmerResult):
         for i, name in enumerate(names):
             p = 2 * (1 - stats.norm.cdf(np.abs(t_vals[i])))
             result[name] = float(p)
@@ -347,7 +347,7 @@ def pvalues(
     return result
 
 
-def _satterthwaite_df(model: MerMod, param_idx: int, se: float) -> float:
+def _satterthwaite_df(model: MerMod, _param_idx: int, _se: float) -> float:
     """Compute Satterthwaite degrees of freedom approximation.
 
     This is a simplified approximation based on the variance components.
@@ -368,7 +368,7 @@ def _satterthwaite_df(model: MerMod, param_idx: int, se: float) -> float:
     df_within = n - n_groups - p + 1
 
     model_sigma = getattr(model, "sigma", 1.0)
-    var_ratio = model_sigma**2 / (se**2 * n + 1e-10)
+    var_ratio = model_sigma**2 / (_se**2 * n + 1e-10)
 
     df = max(df_between, 1) if var_ratio > avg_obs_per_group else df_within
 

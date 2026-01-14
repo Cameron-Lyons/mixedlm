@@ -22,21 +22,21 @@ class InfluenceResult:
     beta: NDArray[np.floating]
     vcov: NDArray[np.floating]
     model_type: str
+    _X_XtXinv: NDArray[np.floating] | None = None
 
     @property
     def dfbeta(self) -> NDArray[np.floating]:
+        h = self.hat_values
+        r = self.residuals
+        denom = 1 - h
+        denom = np.where(denom > 1e-10, denom, np.inf)
+        scale = r / denom
+
+        if self._X_XtXinv is not None:
+            return self._X_XtXinv * scale[:, None]
+
         XtX_inv = self.vcov / (self.sigma**2)
-        n = len(self.residuals)
-        dfb = np.zeros((n, len(self.beta)))
-
-        for i in range(n):
-            h_i = self.hat_values[i]
-            r_i = self.residuals[i]
-            x_i = self.X[i, :]
-            if h_i < 1.0 - 1e-10:
-                dfb[i, :] = (XtX_inv @ x_i) * r_i / (1 - h_i)
-
-        return dfb
+        return (self.X @ XtX_inv) * scale[:, None]
 
     @property
     def dfbetas(self) -> NDArray[np.floating]:
@@ -92,8 +92,8 @@ def _influence_lmer(model: LmerResult) -> InfluenceResult:
     except linalg.LinAlgError:
         XtX_inv = linalg.pinv(XtX)
 
-    H = X @ XtX_inv @ X.T
-    hat_values = np.diag(H)
+    X_XtXinv = X @ XtX_inv
+    hat_values = np.einsum("ij,ij->i", X_XtXinv, X)
 
     vcov = sigma**2 * XtX_inv
 
@@ -105,6 +105,7 @@ def _influence_lmer(model: LmerResult) -> InfluenceResult:
         beta=beta,
         vcov=vcov,
         model_type="lmer",
+        _X_XtXinv=X_XtXinv,
     )
 
 
@@ -118,23 +119,25 @@ def _influence_glmer(model: GlmerResult) -> InfluenceResult:
     residuals = y - mu
 
     weights = model.family.variance(mu)
-    W = np.diag(weights)
+    sqrt_w = np.sqrt(weights)
 
-    XtWX = X.T @ W @ X
+    WX = sqrt_w[:, None] * X
+    XtWX = WX.T @ WX
     try:
         XtWX_inv = linalg.inv(XtWX)
     except linalg.LinAlgError:
         XtWX_inv = linalg.pinv(XtWX)
 
-    W_sqrt = np.diag(np.sqrt(weights))
-    H = W_sqrt @ X @ XtWX_inv @ X.T @ W_sqrt
-    hat_values = np.diag(H)
+    WX_XtWXinv = WX @ XtWX_inv
+    hat_values = np.einsum("ij,ij->i", WX_XtWXinv, WX)
 
     scale = 1.0
     if hasattr(model.family, "scale") and model.family.scale is not None:
         scale = model.family.scale
 
     vcov = scale * XtWX_inv
+
+    X_XtWXinv = X @ XtWX_inv
 
     return InfluenceResult(
         hat_values=hat_values,
@@ -144,6 +147,7 @@ def _influence_glmer(model: GlmerResult) -> InfluenceResult:
         beta=beta,
         vcov=vcov,
         model_type="glmer",
+        _X_XtXinv=X_XtWXinv,
     )
 
 

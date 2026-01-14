@@ -304,112 +304,6 @@ def splom_profiles(
     return fig
 
 
-def _profile_grid_worker(
-    args: tuple[Any, ...],
-) -> tuple[int, float]:
-    from scipy import linalg, sparse
-
-    from mixedlm.estimation.reml import _build_lambda
-
-    (
-        grid_idx,
-        val,
-        idx,
-        theta,
-        y,
-        X,
-        Zt_data,
-        Zt_indices,
-        Zt_indptr,
-        Zt_shape,
-        random_structures,
-        n,
-        p,
-        q,
-        REML,
-    ) = args
-
-    X_reduced = np.delete(X, idx, axis=1)
-    y_adjusted = y - val * X[:, idx]
-
-    if q == 0:
-        XtX = X_reduced.T @ X_reduced
-        Xty = X_reduced.T @ y_adjusted
-        try:
-            beta_reduced = linalg.solve(XtX, Xty, assume_a="pos")
-        except linalg.LinAlgError:
-            beta_reduced = linalg.lstsq(X_reduced, y_adjusted)[0]
-
-        resid = y_adjusted - X_reduced @ beta_reduced
-        rss = np.dot(resid, resid)
-
-        if REML:
-            sigma2 = rss / (n - p)
-            logdet_XtX = np.linalg.slogdet(XtX)[1]
-            dev = (n - p) * (1.0 + np.log(2.0 * np.pi * sigma2)) + logdet_XtX
-        else:
-            sigma2 = rss / n
-            dev = n * (1.0 + np.log(2.0 * np.pi * sigma2))
-
-        return (grid_idx, float(dev))
-
-    Zt = sparse.csc_matrix((Zt_data, Zt_indices, Zt_indptr), shape=Zt_shape)
-    Lambda = _build_lambda(theta, random_structures)
-
-    ZtZ = Zt @ Zt.T
-    LambdatZtZLambda = Lambda.T @ ZtZ @ Lambda
-
-    I_q = sparse.eye(q, format="csc")
-    V_factor = LambdatZtZLambda + I_q
-
-    V_factor_dense = V_factor.toarray()
-    L_V = linalg.cholesky(V_factor_dense, lower=True)
-
-    logdet_V = 2.0 * np.sum(np.log(np.diag(L_V)))
-
-    Zty = Zt @ y_adjusted
-    cu = Lambda.T @ Zty
-    cu_star = linalg.solve_triangular(L_V, cu, lower=True)
-
-    ZtX = Zt @ X_reduced
-    Lambdat_ZtX = Lambda.T @ ZtX
-    RZX = linalg.solve_triangular(L_V, Lambdat_ZtX, lower=True)
-
-    XtX = X_reduced.T @ X_reduced
-    Xty = X_reduced.T @ y_adjusted
-
-    RZX_tRZX = RZX.T @ RZX
-    XtVinvX = XtX - RZX_tRZX
-
-    try:
-        L_XtVinvX = linalg.cholesky(XtVinvX, lower=True)
-    except linalg.LinAlgError:
-        return (grid_idx, 1e10)
-
-    logdet_XtVinvX = 2.0 * np.sum(np.log(np.diag(L_XtVinvX)))
-
-    cu_star_RZX_beta_term = RZX.T @ cu_star
-    Xty_adj = Xty - cu_star_RZX_beta_term
-    beta_reduced = linalg.cho_solve((L_XtVinvX, True), Xty_adj)
-
-    resid = y_adjusted - X_reduced @ beta_reduced
-    Zt_resid = Zt @ resid
-    Lambda_t_Zt_resid = Lambda.T @ Zt_resid
-    u_star = linalg.cho_solve((L_V, True), Lambda_t_Zt_resid)
-
-    pwrss = np.dot(resid, resid) + np.dot(u_star, u_star)
-
-    denom = n - p if REML else n
-
-    sigma2 = pwrss / denom
-
-    dev = denom * (1.0 + np.log(2.0 * np.pi * sigma2)) + logdet_V
-    if REML:
-        dev += logdet_XtVinvX
-
-    return (grid_idx, float(dev))
-
-
 def _profile_param_worker(
     args: tuple[Any, ...],
 ) -> tuple[str, ProfileResult | None]:
@@ -663,17 +557,19 @@ def profile_lmer(
             range_low = mle - 4 * se
             range_high = mle + 4 * se
 
+            cache = _ProfileCache.build(result, idx)
+
             param_values = np.linspace(range_low, range_high, n_points)
             zeta_values = np.zeros(n_points)
 
             for i, val in enumerate(param_values):
-                dev = _profile_deviance_at_beta(result, idx, val)
+                dev = _profile_deviance_cached(cache, val)
                 sign = 1 if val >= mle else -1
                 zeta_values[i] = sign * np.sqrt(max(0, dev - dev_mle))
 
-            def zeta_func(val: float, idx: int = idx, mle: float = mle) -> float:
-                dev = _profile_deviance_at_beta(result, idx, val)
-                sign = 1 if val >= mle else -1
+            def zeta_func(val: float, c: _ProfileCache = cache, m: float = mle) -> float:
+                dev = _profile_deviance_cached(c, val)
+                sign = 1 if val >= m else -1
                 return sign * np.sqrt(max(0, dev - dev_mle))
 
             try:
@@ -752,100 +648,174 @@ def profile_lmer(
     return profiles
 
 
+@dataclass
+class _ProfileCache:
+    """Cache for invariant computations in profile likelihood."""
+
+    n: int
+    p: int
+    q: int
+    REML: bool
+    X_reduced: NDArray[np.floating]
+    X_col: NDArray[np.floating]
+    y: NDArray[np.floating]
+    logdet_V: float
+    L_V: NDArray[np.floating] | None
+    Lambda_T: Any | None
+    Zt: Any | None
+    RZX: NDArray[np.floating] | None
+    L_XtVinvX: NDArray[np.floating] | None
+    logdet_XtVinvX: float
+    XtX_chol: NDArray[np.floating] | None
+    logdet_XtX: float
+
+    @classmethod
+    def build(cls, result: LmerResult, idx: int) -> _ProfileCache:
+        from scipy import linalg, sparse
+
+        from mixedlm.estimation.reml import _build_lambda
+
+        matrices = result.matrices
+        theta = result.theta
+        n = matrices.n_obs
+        p = matrices.n_fixed
+        q = matrices.n_random
+
+        X_reduced = np.delete(matrices.X, idx, axis=1)
+        X_col = matrices.X[:, idx]
+
+        if q == 0:
+            XtX = X_reduced.T @ X_reduced
+            try:
+                XtX_chol = linalg.cholesky(XtX, lower=True)
+            except linalg.LinAlgError:
+                XtX_chol = None
+            logdet_XtX = np.linalg.slogdet(XtX)[1] if result.REML else 0.0
+
+            return cls(
+                n=n,
+                p=p,
+                q=q,
+                REML=result.REML,
+                X_reduced=X_reduced,
+                X_col=X_col,
+                y=matrices.y,
+                logdet_V=0.0,
+                L_V=None,
+                Lambda_T=None,
+                Zt=None,
+                RZX=None,
+                L_XtVinvX=None,
+                logdet_XtVinvX=0.0,
+                XtX_chol=XtX_chol,
+                logdet_XtX=logdet_XtX,
+            )
+
+        Lambda = _build_lambda(theta, matrices.random_structures)
+        Zt = matrices.Zt
+        ZtZ = Zt @ Zt.T
+        LambdatZtZLambda = Lambda.T @ ZtZ @ Lambda
+
+        I_q = sparse.eye(q, format="csc")
+        V_factor = LambdatZtZLambda + I_q
+        V_factor_dense = V_factor.toarray()
+        L_V = linalg.cholesky(V_factor_dense, lower=True)
+        logdet_V = 2.0 * np.sum(np.log(np.diag(L_V)))
+
+        ZtX = Zt @ X_reduced
+        Lambdat_ZtX = Lambda.T @ ZtX
+        RZX = linalg.solve_triangular(L_V, Lambdat_ZtX, lower=True)
+
+        XtX = X_reduced.T @ X_reduced
+        RZX_tRZX = RZX.T @ RZX
+        XtVinvX = XtX - RZX_tRZX
+
+        try:
+            L_XtVinvX = linalg.cholesky(XtVinvX, lower=True)
+            logdet_XtVinvX = 2.0 * np.sum(np.log(np.diag(L_XtVinvX)))
+        except linalg.LinAlgError:
+            L_XtVinvX = None
+            logdet_XtVinvX = 0.0
+
+        return cls(
+            n=n,
+            p=p,
+            q=q,
+            REML=result.REML,
+            X_reduced=X_reduced,
+            X_col=X_col,
+            y=matrices.y,
+            logdet_V=logdet_V,
+            L_V=L_V,
+            Lambda_T=Lambda.T,
+            Zt=Zt,
+            RZX=RZX,
+            L_XtVinvX=L_XtVinvX,
+            logdet_XtVinvX=logdet_XtVinvX,
+            XtX_chol=None,
+            logdet_XtX=0.0,
+        )
+
+
+def _profile_deviance_cached(cache: _ProfileCache, value: float) -> float:
+    from scipy import linalg
+
+    y_adjusted = cache.y - value * cache.X_col
+
+    if cache.q == 0:
+        Xty = cache.X_reduced.T @ y_adjusted
+        if cache.XtX_chol is not None:
+            beta_reduced = linalg.cho_solve((cache.XtX_chol, True), Xty)
+        else:
+            beta_reduced = linalg.lstsq(cache.X_reduced, y_adjusted)[0]
+
+        resid = y_adjusted - cache.X_reduced @ beta_reduced
+        rss = np.dot(resid, resid)
+
+        if cache.REML:
+            sigma2 = rss / (cache.n - cache.p)
+            dev = (cache.n - cache.p) * (1.0 + np.log(2.0 * np.pi * sigma2)) + cache.logdet_XtX
+        else:
+            sigma2 = rss / cache.n
+            dev = cache.n * (1.0 + np.log(2.0 * np.pi * sigma2))
+
+        return float(dev)
+
+    if cache.L_XtVinvX is None:
+        return 1e10
+
+    Zty = cache.Zt @ y_adjusted
+    cu = cache.Lambda_T @ Zty
+    cu_star = linalg.solve_triangular(cache.L_V, cu, lower=True)
+
+    Xty = cache.X_reduced.T @ y_adjusted
+    cu_star_RZX_beta_term = cache.RZX.T @ cu_star
+    Xty_adj = Xty - cu_star_RZX_beta_term
+    beta_reduced = linalg.cho_solve((cache.L_XtVinvX, True), Xty_adj)
+
+    resid = y_adjusted - cache.X_reduced @ beta_reduced
+    Zt_resid = cache.Zt @ resid
+    Lambda_t_Zt_resid = cache.Lambda_T @ Zt_resid
+    u_star = linalg.cho_solve((cache.L_V, True), Lambda_t_Zt_resid)
+
+    pwrss = np.dot(resid, resid) + np.dot(u_star, u_star)
+    denom = cache.n - cache.p if cache.REML else cache.n
+    sigma2 = pwrss / denom
+
+    dev = denom * (1.0 + np.log(2.0 * np.pi * sigma2)) + cache.logdet_V
+    if cache.REML:
+        dev += cache.logdet_XtVinvX
+
+    return float(dev)
+
+
 def _profile_deviance_at_beta(
     result: LmerResult,
     idx: int,
     value: float,
 ) -> float:
-    from scipy import linalg, sparse
-
-    from mixedlm.estimation.reml import _build_lambda
-
-    matrices = result.matrices
-    theta = result.theta
-    n = matrices.n_obs
-    p = matrices.n_fixed
-    q = matrices.n_random
-
-    X_reduced = np.delete(matrices.X, idx, axis=1)
-    y_adjusted = matrices.y - value * matrices.X[:, idx]
-
-    if q == 0:
-        XtX = X_reduced.T @ X_reduced
-        Xty = X_reduced.T @ y_adjusted
-        try:
-            beta_reduced = linalg.solve(XtX, Xty, assume_a="pos")
-        except linalg.LinAlgError:
-            beta_reduced = linalg.lstsq(X_reduced, y_adjusted)[0]
-
-        resid = y_adjusted - X_reduced @ beta_reduced
-        rss = np.dot(resid, resid)
-
-        if result.REML:
-            sigma2 = rss / (n - p)
-            logdet_XtX = np.linalg.slogdet(XtX)[1]
-            dev = (n - p) * (1.0 + np.log(2.0 * np.pi * sigma2)) + logdet_XtX
-        else:
-            sigma2 = rss / n
-            dev = n * (1.0 + np.log(2.0 * np.pi * sigma2))
-
-        return float(dev)
-
-    Lambda = _build_lambda(theta, matrices.random_structures)
-
-    Zt = matrices.Zt
-    ZtZ = Zt @ Zt.T
-    LambdatZtZLambda = Lambda.T @ ZtZ @ Lambda
-
-    I_q = sparse.eye(q, format="csc")
-    V_factor = LambdatZtZLambda + I_q
-
-    V_factor_dense = V_factor.toarray()
-    L_V = linalg.cholesky(V_factor_dense, lower=True)
-
-    logdet_V = 2.0 * np.sum(np.log(np.diag(L_V)))
-
-    Zty = Zt @ y_adjusted
-    cu = Lambda.T @ Zty
-    cu_star = linalg.solve_triangular(L_V, cu, lower=True)
-
-    ZtX = Zt @ X_reduced
-    Lambdat_ZtX = Lambda.T @ ZtX
-    RZX = linalg.solve_triangular(L_V, Lambdat_ZtX, lower=True)
-
-    XtX = X_reduced.T @ X_reduced
-    Xty = X_reduced.T @ y_adjusted
-
-    RZX_tRZX = RZX.T @ RZX
-    XtVinvX = XtX - RZX_tRZX
-
-    try:
-        L_XtVinvX = linalg.cholesky(XtVinvX, lower=True)
-    except linalg.LinAlgError:
-        return 1e10
-
-    logdet_XtVinvX = 2.0 * np.sum(np.log(np.diag(L_XtVinvX)))
-
-    cu_star_RZX_beta_term = RZX.T @ cu_star
-    Xty_adj = Xty - cu_star_RZX_beta_term
-    beta_reduced = linalg.cho_solve((L_XtVinvX, True), Xty_adj)
-
-    resid = y_adjusted - X_reduced @ beta_reduced
-    Zt_resid = Zt @ resid
-    Lambda_t_Zt_resid = Lambda.T @ Zt_resid
-    u_star = linalg.cho_solve((L_V, True), Lambda_t_Zt_resid)
-
-    pwrss = np.dot(resid, resid) + np.dot(u_star, u_star)
-
-    denom = n - p if result.REML else n
-
-    sigma2 = pwrss / denom
-
-    dev = denom * (1.0 + np.log(2.0 * np.pi * sigma2)) + logdet_V
-    if result.REML:
-        dev += logdet_XtVinvX
-
-    return float(dev)
+    cache = _ProfileCache.build(result, idx)
+    return _profile_deviance_cached(cache, value)
 
 
 def profile_glmer(

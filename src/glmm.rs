@@ -2,8 +2,10 @@ use nalgebra::{Cholesky, DMatrix, DVector};
 use nalgebra_sparse::csc::CscMatrix;
 use pyo3::PyResult;
 use pyo3::prelude::*;
+use rayon::prelude::*;
 
 use crate::linalg::LinalgError;
+use crate::quadrature::gauss_hermite_nodes_weights;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum LinkFunction {
@@ -606,6 +608,270 @@ pub fn laplace_deviance_impl(
     (deviance, beta, u)
 }
 
+fn compute_group_log_integral(
+    g: usize,
+    n_terms: usize,
+    u: &DVector<f64>,
+    h: &DMatrix<f64>,
+    lambda_t_lambda: &DMatrix<f64>,
+    nodes: &[f64],
+    weights: &[f64],
+    y: &DVector<f64>,
+    x: &DMatrix<f64>,
+    z: &CscMatrix<f64>,
+    beta: &DVector<f64>,
+    offset: &DVector<f64>,
+    prior_weights: &[f64],
+    family: FamilyType,
+    link: LinkFunction,
+) -> f64 {
+    let sqrt2 = std::f64::consts::SQRT_2;
+    let n = y.len();
+    let q = z.ncols();
+
+    let idx_start = g * n_terms;
+
+    let u_mode = u.rows(idx_start, n_terms).clone_owned();
+
+    let h_block = h.view((idx_start, idx_start), (n_terms, n_terms));
+
+    let scale = if n_terms == 1 {
+        1.0 / (h_block[(0, 0)] + 1e-10).sqrt()
+    } else {
+        match Cholesky::new(h_block.clone_owned()) {
+            Some(chol) => 1.0 / chol.l()[(0, 0)],
+            None => 1.0 / (h_block[(0, 0)] + 1e-10).sqrt(),
+        }
+    };
+
+    let lambda_block = lambda_t_lambda.view((idx_start, idx_start), (n_terms, n_terms));
+
+    let mut group_contrib = 0.0;
+
+    for (node, weight) in nodes.iter().zip(weights.iter()) {
+        let mut u_quad = u.clone();
+        for i in 0..n_terms {
+            u_quad[idx_start + i] = u_mode[i] + sqrt2 * scale * node;
+        }
+
+        let mut eta_quad = x * beta + offset;
+        for j in 0..q {
+            let col_start = z.col_offsets()[j];
+            let col_end = z.col_offsets()[j + 1];
+            for idx in col_start..col_end {
+                let i = z.row_indices()[idx];
+                eta_quad[i] += z.values()[idx] * u_quad[j];
+            }
+        }
+
+        let mu_quad = link.inverse(&eta_quad);
+        let mu_clamped = DVector::from_fn(n, |i, _| mu_quad[i].clamp(1e-10, 1.0 - 1e-10));
+
+        let dev_resids = family.deviance_resids(y, &mu_clamped, prior_weights);
+        let log_lik_y = -0.5 * dev_resids;
+
+        let u_block: DVector<f64> = u_quad.rows(idx_start, n_terms).into_owned();
+
+        let lambda_block_reg = if n_terms == 1 {
+            DMatrix::from_element(1, 1, lambda_block[(0, 0)] + 1e-10)
+        } else {
+            let mut reg = lambda_block.clone_owned();
+            for i in 0..n_terms {
+                reg[(i, i)] += 1e-10;
+            }
+            reg
+        };
+
+        let log_prior = match Cholesky::new(lambda_block_reg.clone()) {
+            Some(chol) => {
+                let solved = chol.solve(&u_block);
+                -0.5 * u_block.dot(&solved)
+            }
+            None => -0.5 * u_block.dot(&u_block) / (lambda_block[(0, 0)] + 1e-10),
+        };
+
+        let integrand = (log_lik_y + log_prior).exp();
+        group_contrib += weight * integrand;
+    }
+
+    group_contrib *= scale * std::f64::consts::PI.sqrt();
+    (group_contrib.max(1e-300)).ln()
+}
+
+pub fn adaptive_gh_deviance_impl(
+    y: &DVector<f64>,
+    x: &DMatrix<f64>,
+    z: &CscMatrix<f64>,
+    weights: &[f64],
+    offset: &DVector<f64>,
+    theta: &[f64],
+    structures: &[RandomEffectStructure],
+    family: FamilyType,
+    link: LinkFunction,
+    n_agq: usize,
+    beta_start: Option<&DVector<f64>>,
+    u_start: Option<&DVector<f64>>,
+) -> (f64, DVector<f64>, DVector<f64>) {
+    let q = z.ncols();
+
+    if n_agq <= 1 || q == 0 {
+        return laplace_deviance_impl(
+            y, x, z, weights, offset, theta, structures, family, link, beta_start, u_start,
+        );
+    }
+
+    if structures.is_empty() {
+        return laplace_deviance_impl(
+            y, x, z, weights, offset, theta, structures, family, link, beta_start, u_start,
+        );
+    }
+
+    let first_struct = &structures[0];
+    let n_terms_first = first_struct.n_terms;
+    let n_levels_first = first_struct.n_levels;
+
+    if n_terms_first > 1 {
+        return laplace_deviance_impl(
+            y, x, z, weights, offset, theta, structures, family, link, beta_start, u_start,
+        );
+    }
+
+    let result = pirls_impl(
+        y, x, z, weights, offset, theta, structures, family, link, beta_start, u_start, 25, 1e-6,
+    );
+
+    let beta = result.beta;
+    let u = result.u;
+
+    let n = y.len();
+    let lambda = build_lambda_dense(theta, structures);
+    let lambda_t_lambda = lambda.transpose() * &lambda;
+
+    let mut eta = x * &beta + offset;
+    for j in 0..q {
+        let col_start = z.col_offsets()[j];
+        let col_end = z.col_offsets()[j + 1];
+        for idx in col_start..col_end {
+            let i = z.row_indices()[idx];
+            eta[i] += z.values()[idx] * u[j];
+        }
+    }
+
+    let mut mu = link.inverse(&eta);
+    for i in 0..n {
+        mu[i] = mu[i].clamp(1e-10, 1.0 - 1e-10);
+    }
+
+    let mut w_vec = family.weights(&mu, link);
+    for i in 0..n {
+        w_vec[i] = (w_vec[i] * weights[i]).max(1e-10);
+    }
+
+    let mut ztwz = DMatrix::zeros(q, q);
+    for j1 in 0..q {
+        let col1_start = z.col_offsets()[j1];
+        let col1_end = z.col_offsets()[j1 + 1];
+
+        for j2 in 0..=j1 {
+            let col2_start = z.col_offsets()[j2];
+            let col2_end = z.col_offsets()[j2 + 1];
+
+            let mut sum = 0.0;
+            let mut idx1 = col1_start;
+            let mut idx2 = col2_start;
+
+            while idx1 < col1_end && idx2 < col2_end {
+                let row1 = z.row_indices()[idx1];
+                let row2 = z.row_indices()[idx2];
+
+                if row1 == row2 {
+                    sum += z.values()[idx1] * w_vec[row1] * z.values()[idx2];
+                    idx1 += 1;
+                    idx2 += 1;
+                } else if row1 < row2 {
+                    idx1 += 1;
+                } else {
+                    idx2 += 1;
+                }
+            }
+
+            ztwz[(j1, j2)] = sum;
+            ztwz[(j2, j1)] = sum;
+        }
+    }
+
+    let mut lambda_t_lambda_reg = lambda_t_lambda.clone();
+    for i in 0..q {
+        lambda_t_lambda_reg[(i, i)] += 1e-10;
+    }
+
+    let h = &ztwz + &lambda_t_lambda_reg;
+
+    let (nodes, gh_weights) = gauss_hermite_nodes_weights(n_agq);
+
+    let log_integral: f64 = (0..n_levels_first)
+        .into_par_iter()
+        .map(|g| {
+            compute_group_log_integral(
+                g,
+                n_terms_first,
+                &u,
+                &h,
+                &lambda_t_lambda_reg,
+                &nodes,
+                &gh_weights,
+                y,
+                x,
+                z,
+                &beta,
+                offset,
+                weights,
+                family,
+                link,
+            )
+        })
+        .sum();
+
+    let other_u_start = n_levels_first * n_terms_first;
+    let mut log_integral_total = log_integral;
+
+    if other_u_start < q {
+        let u_other: DVector<f64> = u.rows(other_u_start, q - other_u_start).into_owned();
+        let lambda_other = lambda_t_lambda_reg
+            .view((other_u_start, other_u_start), (q - other_u_start, q - other_u_start))
+            .clone_owned();
+
+        let u_penalty_other = match Cholesky::new(lambda_other.clone()) {
+            Some(chol) => {
+                let solved = chol.solve(&u_other);
+                u_other.dot(&solved)
+            }
+            None => 0.0,
+        };
+
+        let h_other = h
+            .view((other_u_start, other_u_start), (q - other_u_start, q - other_u_start))
+            .clone_owned();
+
+        let logdet_other = match Cholesky::new(h_other.clone()) {
+            Some(chol) => {
+                let l = chol.l();
+                2.0 * (0..q - other_u_start).map(|i| l[(i, i)].ln()).sum::<f64>()
+            }
+            None => {
+                let eigvals = h_other.symmetric_eigenvalues();
+                eigvals.iter().map(|&e| e.max(1e-10).ln()).sum::<f64>()
+            }
+        };
+
+        log_integral_total -= 0.5 * (u_penalty_other + logdet_other);
+    }
+
+    let deviance = -2.0 * log_integral_total;
+
+    (deviance, beta, u)
+}
+
 #[pyfunction]
 #[pyo3(signature = (
     y,
@@ -786,6 +1052,103 @@ pub fn laplace_deviance(
         &structures,
         family_type,
         link_fn,
+        None,
+        None,
+    );
+
+    Ok((
+        deviance,
+        beta.iter().cloned().collect(),
+        u.iter().cloned().collect(),
+    ))
+}
+
+#[pyfunction]
+#[pyo3(signature = (
+    y,
+    x,
+    z_data,
+    z_indices,
+    z_indptr,
+    z_shape,
+    weights,
+    offset,
+    theta,
+    n_levels,
+    n_terms,
+    correlated,
+    family,
+    link,
+    n_agq
+))]
+pub fn adaptive_gh_deviance(
+    y: numpy::PyReadonlyArray1<'_, f64>,
+    x: numpy::PyReadonlyArray2<'_, f64>,
+    z_data: numpy::PyReadonlyArray1<'_, f64>,
+    z_indices: numpy::PyReadonlyArray1<'_, i64>,
+    z_indptr: numpy::PyReadonlyArray1<'_, i64>,
+    z_shape: (usize, usize),
+    weights: numpy::PyReadonlyArray1<'_, f64>,
+    offset: numpy::PyReadonlyArray1<'_, f64>,
+    theta: numpy::PyReadonlyArray1<'_, f64>,
+    n_levels: Vec<usize>,
+    n_terms: Vec<usize>,
+    correlated: Vec<bool>,
+    family: &str,
+    link: &str,
+    n_agq: usize,
+) -> PyResult<(f64, Vec<f64>, Vec<f64>)> {
+    let structures: Vec<RandomEffectStructure> = n_levels
+        .into_iter()
+        .zip(n_terms)
+        .zip(correlated)
+        .map(|((nl, nt), c)| RandomEffectStructure {
+            n_levels: nl,
+            n_terms: nt,
+            correlated: c,
+        })
+        .collect();
+
+    let family_type = match family {
+        "gaussian" => FamilyType::Gaussian,
+        "binomial" => FamilyType::Binomial,
+        "poisson" => FamilyType::Poisson,
+        _ => FamilyType::Gaussian,
+    };
+
+    let link_fn = match link {
+        "identity" => LinkFunction::Identity,
+        "log" => LinkFunction::Log,
+        "logit" => LinkFunction::Logit,
+        _ => family_type.default_link(),
+    };
+
+    let y_arr = y.as_array();
+    let x_arr = x.as_array();
+    let n = y_arr.len();
+    let p = x_arr.ncols();
+
+    let y_vec = DVector::from_iterator(n, y_arr.iter().cloned());
+    let x_mat = DMatrix::from_fn(n, p, |i, j| x_arr[[i, j]]);
+    let z_mat = csc_from_scipy(
+        z_data.as_slice()?,
+        z_indices.as_slice()?,
+        z_indptr.as_slice()?,
+        z_shape,
+    )?;
+    let offset_vec = DVector::from_iterator(n, offset.as_array().iter().cloned());
+
+    let (deviance, beta, u) = adaptive_gh_deviance_impl(
+        &y_vec,
+        &x_mat,
+        &z_mat,
+        weights.as_slice()?,
+        &offset_vec,
+        theta.as_slice()?,
+        &structures,
+        family_type,
+        link_fn,
+        n_agq,
         None,
         None,
     );
