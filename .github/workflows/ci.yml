@@ -77,7 +77,7 @@ jobs:
         run: uv run maturin develop
 
       - name: Install test dependencies
-        run: uv pip install pytest
+        run: uv pip install pytest pandas polars
 
       - name: Run tests
         run: uv run pytest tests/ -v

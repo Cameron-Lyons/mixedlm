@@ -1242,3 +1242,256 @@ def mkMerMod(
             raise TypeError(f"{type(model).__name__} does not support beta modification")
 
     return new_model
+
+
+def dummy(
+    x: pd.Series | NDArray | list,
+    base: int | str | None = None,
+    contrasts: str = "treatment",
+) -> NDArray[np.floating]:
+    """Create dummy (indicator) variables from a categorical variable.
+
+    Parameters
+    ----------
+    x : array-like
+        Categorical variable (factor).
+    base : int or str, optional
+        Base level to exclude (reference category). If int, the index
+        of the level to use as base. If str, the level name. If None,
+        uses the first level.
+    contrasts : str, default "treatment"
+        Type of contrast coding:
+        - "treatment": Treatment (dummy) coding with base level excluded
+        - "sum": Sum (deviation) coding
+        - "helmert": Helmert contrasts
+        - "poly": Polynomial contrasts (for ordered factors)
+
+    Returns
+    -------
+    ndarray
+        Dummy variable matrix with shape (n, k-1) for k levels.
+
+    Examples
+    --------
+    >>> x = ['A', 'B', 'C', 'A', 'B']
+    >>> dummy(x)
+    array([[0., 0.],
+           [1., 0.],
+           [0., 1.],
+           [0., 0.],
+           [1., 0.]])
+
+    >>> dummy(x, base='B')
+    array([[1., 0.],
+           [0., 0.],
+           [0., 1.],
+           [1., 0.],
+           [0., 0.]])
+    """
+    x = np.asarray(x)
+    levels = np.unique(x)
+    n = len(x)
+    k = len(levels)
+
+    if base is None:
+        base_idx = 0
+    elif isinstance(base, int):
+        base_idx = base
+    else:
+        base_idx = int(np.where(levels == base)[0][0])
+
+    if contrasts == "treatment":
+        non_base = [i for i in range(k) if i != base_idx]
+        result = np.zeros((n, k - 1), dtype=np.float64)
+        for j, lvl_idx in enumerate(non_base):
+            result[:, j] = (x == levels[lvl_idx]).astype(float)
+    elif contrasts == "sum":
+        result = np.zeros((n, k - 1), dtype=np.float64)
+        for j in range(k - 1):
+            result[x == levels[j], j] = 1.0
+            result[x == levels[k - 1], j] = -1.0
+    elif contrasts == "helmert":
+        result = np.zeros((n, k - 1), dtype=np.float64)
+        for j in range(k - 1):
+            for i in range(j + 1):
+                result[x == levels[i], j] = -1.0 / (j + 1)
+            result[x == levels[j + 1], j] = 1.0
+    elif contrasts == "poly":
+        from numpy.polynomial.legendre import legvander
+
+        poly_matrix = legvander(np.arange(k), k - 1)[:, 1:]
+        level_to_idx = {lvl: i for i, lvl in enumerate(levels)}
+        x_idx = np.array([level_to_idx[val] for val in x])
+        result = np.asarray(poly_matrix[x_idx], dtype=np.float64)
+    else:
+        raise ValueError(f"Unknown contrast type: {contrasts}")
+
+    return result
+
+
+def REMLcrit(model: MerMod) -> float:
+    """Extract the REML criterion from a fitted model.
+
+    For models fit with REML=True, this returns the REML criterion.
+    For models fit with ML, this returns the deviance.
+
+    Parameters
+    ----------
+    model : LmerResult, GlmerResult, or NlmerResult
+        A fitted mixed model.
+
+    Returns
+    -------
+    float
+        The REML criterion or deviance.
+
+    Examples
+    --------
+    >>> result = lmer("Reaction ~ Days + (Days|Subject)", sleepstudy, REML=True)
+    >>> REMLcrit(result)
+    1743.6283
+
+    >>> result_ml = lmer("Reaction ~ Days + (Days|Subject)", sleepstudy, REML=False)
+    >>> REMLcrit(result_ml)  # Returns deviance
+    1751.9393
+    """
+    return float(model.deviance)
+
+
+def scale_vcov(
+    vcov: NDArray[np.floating],
+    center: NDArray[np.floating] | None = None,
+    scale: NDArray[np.floating] | None = None,
+) -> NDArray[np.floating]:
+    """Adjust variance-covariance matrix for centering and scaling.
+
+    When predictors are centered and/or scaled, the variance-covariance
+    matrix of coefficients needs to be adjusted to be on the original
+    scale.
+
+    Parameters
+    ----------
+    vcov : ndarray
+        Variance-covariance matrix of coefficients (p x p).
+    center : ndarray, optional
+        Centering values used for each predictor. If None, no centering
+        adjustment is made.
+    scale : ndarray, optional
+        Scaling values used for each predictor. If None, no scaling
+        adjustment is made.
+
+    Returns
+    -------
+    ndarray
+        Adjusted variance-covariance matrix.
+
+    Examples
+    --------
+    >>> # If x was scaled by dividing by 2:
+    >>> vcov = np.array([[1.0, 0.1], [0.1, 0.5]])
+    >>> scale = np.array([1.0, 2.0])
+    >>> scale_vcov(vcov, scale=scale)
+    array([[1. , 0.2],
+           [0.2, 2. ]])
+    """
+    vcov = np.asarray(vcov).copy()
+    p = vcov.shape[0]
+
+    if scale is not None:
+        scale = np.asarray(scale)
+        if len(scale) != p:
+            raise ValueError(f"scale length {len(scale)} != vcov dimension {p}")
+        D = np.diag(scale)
+        vcov = D @ vcov @ D
+
+    return vcov
+
+
+def quickSimulate(
+    formula: str,
+    data: pd.DataFrame,
+    beta: NDArray[np.floating] | dict[str, float] | None = None,
+    theta: NDArray[np.floating] | None = None,
+    sigma: float = 1.0,
+    family: str | None = None,
+    nsim: int = 1,
+    seed: int | None = None,
+) -> pd.DataFrame | list[pd.DataFrame]:
+    """Quickly simulate response data from a formula specification.
+
+    This is a convenience wrapper around simulate_formula that provides
+    a simpler interface for common use cases.
+
+    Parameters
+    ----------
+    formula : str
+        Model formula with random effects (e.g., "y ~ x + (1|group)").
+    data : pd.DataFrame
+        Data frame containing the predictor variables.
+    beta : array-like or dict, optional
+        Fixed effects coefficients. If dict, keys should be coefficient
+        names. If None, uses zeros.
+    theta : array-like, optional
+        Variance component parameters. If None, uses ones.
+    sigma : float, default 1.0
+        Residual standard deviation (for Gaussian family).
+    family : str, optional
+        Distribution family name: "gaussian", "binomial", "poisson".
+        Default is "gaussian".
+    nsim : int, default 1
+        Number of simulations to generate.
+    seed : int, optional
+        Random seed for reproducibility.
+
+    Returns
+    -------
+    DataFrame or list of DataFrame
+        Simulated data with response variable.
+
+    Examples
+    --------
+    >>> import numpy as np
+    >>> data = pd.DataFrame({
+    ...     'x': np.random.randn(100),
+    ...     'group': np.repeat(['A', 'B', 'C', 'D', 'E'], 20)
+    ... })
+    >>> sim = quickSimulate(
+    ...     "y ~ x + (1|group)",
+    ...     data,
+    ...     beta={'(Intercept)': 5.0, 'x': 2.0},
+    ...     sigma=1.0
+    ... )
+
+    See Also
+    --------
+    simulate_formula : Full simulation function with more options.
+    """
+    from mixedlm.families.base import Family
+    from mixedlm.models.modular import simulate_formula
+
+    family_obj: Family | None = None
+    if family is not None:
+        family_lower = family.lower()
+        if family_lower == "binomial":
+            from mixedlm.families import Binomial
+
+            family_obj = Binomial()
+        elif family_lower == "poisson":
+            from mixedlm.families import Poisson
+
+            family_obj = Poisson()
+        elif family_lower == "gaussian":
+            from mixedlm.families import Gaussian
+
+            family_obj = Gaussian()
+
+    return simulate_formula(
+        formula=formula,
+        data=data,
+        beta=beta,
+        theta=theta,
+        sigma=sigma,
+        family=family_obj,
+        nsim=nsim,
+        seed=seed,
+    )

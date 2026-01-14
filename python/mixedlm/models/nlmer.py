@@ -171,6 +171,50 @@ class NlmerResult:
         n = len(self.y)
         return -2 * self.logLik() + n_params * np.log(n)
 
+    def extractAIC(self) -> tuple[float, float]:
+        """Extract AIC with effective degrees of freedom.
+
+        Returns the effective degrees of freedom and AIC value,
+        matching the interface of R's extractAIC function.
+
+        Returns
+        -------
+        tuple of (float, float)
+            (edf, AIC) where edf is the effective degrees of freedom.
+        """
+        n_params = len(self.phi) + len(self.theta) + 1
+        edf = float(n_params)
+        aic = float(-2 * self.logLik() + 2 * n_params)
+        return (edf, aic)
+
+    def as_function(
+        self,
+        type: str = "predict",
+    ) -> object:
+        """Return the model's prediction function.
+
+        Parameters
+        ----------
+        type : str, default "predict"
+            Type of function to return. For NlmerResult, only "predict"
+            is supported.
+
+        Returns
+        -------
+        callable
+            A function that takes x values and returns predictions.
+        """
+        if type == "predict":
+            model = self.model
+            phi = self.phi
+
+            def predict_fn(x: NDArray[np.floating]) -> NDArray[np.floating]:
+                return model.predict(phi, x)
+
+            return predict_fn
+        else:
+            raise ValueError(f"Unknown type: {type}. Use 'predict'.")
+
     def isGLMM(self) -> bool:
         """Check if this is a generalized linear mixed model.
 
