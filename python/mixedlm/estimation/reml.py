@@ -32,11 +32,7 @@ class OptimizationResult:
 
 @dataclass
 class DevianceComponents:
-    """Components of the deviance calculation for linear mixed models.
-
-    This class provides a breakdown of the deviance into its constituent
-    parts, useful for diagnostics and understanding model fit.
-    """
+    """Components of the deviance calculation for linear mixed models."""
 
     total: float
     ldL2: float
@@ -61,6 +57,21 @@ class DevianceComponents:
         return "\n".join(lines)
 
 
+@dataclass
+class _DevianceCoreResult:
+    """Internal result from core deviance computation."""
+
+    deviance: float
+    beta: NDArray[np.floating]
+    sigma: float
+    u: NDArray[np.floating]
+    ldL2: float
+    ldRX2: float
+    wrss: float
+    ussq: float
+    pwrss: float
+
+
 def _build_cs_cholesky(q: int, rho: float) -> NDArray[np.floating]:
     """Build Cholesky factor for compound symmetry correlation matrix."""
     if q == 1:
@@ -77,20 +88,16 @@ def _build_cs_cholesky(q: int, rho: float) -> NDArray[np.floating]:
 
 
 def _build_ar1_cholesky(q: int, rho: float) -> NDArray[np.floating]:
-    """Build Cholesky factor for AR(1) correlation matrix."""
+    """Build Cholesky factor for AR(1) correlation matrix (vectorized)."""
     if q == 1:
         return np.array([[1.0]])
-    R = np.zeros((q, q), dtype=np.float64)
-    for i in range(q):
-        for j in range(q):
-            R[i, j] = rho ** abs(i - j)
+    indices = np.arange(q)
+    R = rho ** np.abs(indices[:, None] - indices[None, :])
     try:
         return linalg.cholesky(R, lower=True)
     except linalg.LinAlgError:
         rho_safe = np.clip(rho, -1.0 + 1e-6, 1.0 - 1e-6)
-        for i in range(q):
-            for j in range(q):
-                R[i, j] = rho_safe ** abs(i - j)
+        R = rho_safe ** np.abs(indices[:, None] - indices[None, :])
         return linalg.cholesky(R, lower=True)
 
 
@@ -171,125 +178,16 @@ def _count_theta(structures: list[RandomEffectStructure]) -> int:
     return count
 
 
-def profiled_deviance(
+def _profiled_deviance_core(
     theta: NDArray[np.floating],
     matrices: ModelMatrices,
     REML: bool = True,
-) -> float:
-    n = matrices.n_obs
-    p = matrices.n_fixed
-    q = matrices.n_random
+) -> _DevianceCoreResult | None:
+    """Core deviance computation returning all components.
 
-    w = matrices.weights
-    y_adj = matrices.y - matrices.offset
-
-    sqrtW = sparse.diags(np.sqrt(w), format="csc")
-
-    if q == 0:
-        WX = sqrtW @ matrices.X
-        Wy = sqrtW @ y_adj
-        XtWX = WX.T @ WX
-        XtWy = WX.T @ Wy
-        try:
-            beta = linalg.solve(XtWX, XtWy, assume_a="pos")
-        except linalg.LinAlgError:
-            beta = linalg.lstsq(WX, Wy)[0]
-
-        resid = y_adj - matrices.X @ beta
-        wrss = np.dot(w * resid, resid)
-        sigma2 = wrss / (n - p if REML else n)
-
-        logdet_XtWX = np.linalg.slogdet(XtWX)[1] if REML else 0.0
-        dev = n * np.log(2 * np.pi * sigma2) + wrss / sigma2
-        if REML:
-            dev += logdet_XtWX - p * np.log(sigma2)
-        return float(dev)
-
-    Lambda = _build_lambda(theta, matrices.random_structures)
-
-    Zt = matrices.Zt
-    WZ = sqrtW @ matrices.Z
-    ZtWZ = WZ.T @ WZ
-    LambdatZtWZLambda = Lambda.T @ ZtWZ @ Lambda
-
-    I_q = sparse.eye(q, format="csc")
-    V_factor = LambdatZtWZLambda + I_q
-
-    try:
-        V_factor_dense = V_factor.toarray()
-        L_V = linalg.cholesky(V_factor_dense, lower=True)
-    except linalg.LinAlgError:
-        return 1e10
-
-    logdet_V = 2.0 * np.sum(np.log(np.diag(L_V)))
-
-    ZtWy = Zt @ (w * y_adj)
-    cu = Lambda.T @ ZtWy
-    cu_star = linalg.solve_triangular(L_V, cu, lower=True)
-
-    WX = sqrtW @ matrices.X
-    ZtWX = Zt @ (sqrtW.T @ WX)
-    Lambdat_ZtWX = Lambda.T @ ZtWX
-    RZX = linalg.solve_triangular(L_V, Lambdat_ZtWX, lower=True)
-
-    XtWX = WX.T @ WX
-    XtWy = WX.T @ (sqrtW @ y_adj)
-
-    RZX_tRZX = RZX.T @ RZX
-    XtVinvX = XtWX - RZX_tRZX
-
-    try:
-        L_XtVinvX = linalg.cholesky(XtVinvX, lower=True)
-    except linalg.LinAlgError:
-        return 1e10
-
-    logdet_XtVinvX = 2.0 * np.sum(np.log(np.diag(L_XtVinvX)))
-
-    cu_star_RZX_beta_term = RZX.T @ cu_star
-    Xty_adj = XtWy - cu_star_RZX_beta_term
-    beta = linalg.cho_solve((L_XtVinvX, True), Xty_adj)
-
-    resid = y_adj - matrices.X @ beta
-    Zt_resid = Zt @ (w * resid)
-    Lambda_t_Zt_resid = Lambda.T @ Zt_resid
-    u_star = linalg.cho_solve((L_V, True), Lambda_t_Zt_resid)
-
-    pwrss = np.dot(w * resid, resid) + np.dot(u_star, u_star)
-
-    denom = n - p if REML else n
-
-    sigma2 = pwrss / denom
-
-    dev = denom * (1.0 + np.log(2.0 * np.pi * sigma2)) + logdet_V
-    if REML:
-        dev += logdet_XtVinvX
-
-    return float(dev)
-
-
-def profiled_deviance_components(
-    theta: NDArray[np.floating],
-    matrices: ModelMatrices,
-    REML: bool = True,
-) -> DevianceComponents:
-    """Compute deviance and return all components.
-
-    This function returns the same deviance as profiled_deviance() but also
-    returns the individual components for diagnostic purposes.
-
-    Parameters
-    ----------
-    theta : NDArray
-        Variance component parameters.
-    matrices : ModelMatrices
-        Model design matrices.
-    REML : bool, default True
-        Whether to compute REML (True) or ML (False) deviance.
-
-    Returns
-    -------
-    DevianceComponents
-        Object containing deviance and all component values.
+    This unified function computes the profiled deviance and all intermediate
+    values needed for both the deviance itself and for extracting estimates.
+    Returns None if the Cholesky decomposition fails.
     """
     n = matrices.n_obs
     p = matrices.n_fixed
@@ -297,12 +195,11 @@ def profiled_deviance_components(
 
     w = matrices.weights
     y_adj = matrices.y - matrices.offset
-
-    sqrtW = sparse.diags(np.sqrt(w), format="csc")
+    sqrt_w = np.sqrt(w)
 
     if q == 0:
-        WX = sqrtW @ matrices.X
-        Wy = sqrtW @ y_adj
+        WX = sqrt_w[:, None] * matrices.X
+        Wy = sqrt_w * y_adj
         XtWX = WX.T @ WX
         XtWy = WX.T @ Wy
         try:
@@ -320,49 +217,62 @@ def profiled_deviance_components(
         if REML:
             dev += ldRX2 - p * np.log(sigma2)
 
-        return DevianceComponents(
-            total=float(dev),
+        return _DevianceCoreResult(
+            deviance=float(dev),
+            beta=beta,
+            sigma=np.sqrt(sigma2),
+            u=np.array([]),
             ldL2=0.0,
             ldRX2=float(ldRX2),
             wrss=float(wrss),
             ussq=0.0,
             pwrss=float(wrss),
-            sigma2=float(sigma2),
-            REML=REML,
         )
 
     Lambda = _build_lambda(theta, matrices.random_structures)
 
     Zt = matrices.Zt
-    WZ = sqrtW @ matrices.Z
+    WZ = (
+        sqrt_w[:, None] * matrices.Z
+        if not sparse.issparse(matrices.Z)
+        else sparse.diags(sqrt_w, format="csc") @ matrices.Z
+    )
     ZtWZ = WZ.T @ WZ
     LambdatZtWZLambda = Lambda.T @ ZtWZ @ Lambda
 
     I_q = sparse.eye(q, format="csc")
     V_factor = LambdatZtWZLambda + I_q
 
-    V_factor_dense = V_factor.toarray()
-    L_V = linalg.cholesky(V_factor_dense, lower=True)
+    try:
+        V_factor_dense = V_factor.toarray() if sparse.issparse(V_factor) else V_factor
+        L_V = linalg.cholesky(V_factor_dense, lower=True)
+    except linalg.LinAlgError:
+        return None
 
-    logdet_V = 2.0 * np.sum(np.log(np.diag(L_V)))
+    ldL2 = 2.0 * np.sum(np.log(np.diag(L_V)))
 
     ZtWy = Zt @ (w * y_adj)
     cu = Lambda.T @ ZtWy
     cu_star = linalg.solve_triangular(L_V, cu, lower=True)
 
-    WX = sqrtW @ matrices.X
-    ZtWX = Zt @ (sqrtW.T @ WX)
+    WX = sqrt_w[:, None] * matrices.X
+    sqrtW_sparse = sparse.diags(sqrt_w, format="csc")
+    ZtWX = Zt @ (sqrtW_sparse.T @ WX)
     Lambdat_ZtWX = Lambda.T @ ZtWX
     RZX = linalg.solve_triangular(L_V, Lambdat_ZtWX, lower=True)
 
     XtWX = WX.T @ WX
-    XtWy = WX.T @ (sqrtW @ y_adj)
+    XtWy = WX.T @ (sqrt_w * y_adj)
 
     RZX_tRZX = RZX.T @ RZX
     XtVinvX = XtWX - RZX_tRZX
 
-    L_XtVinvX = linalg.cholesky(XtVinvX, lower=True)
-    logdet_XtVinvX = 2.0 * np.sum(np.log(np.diag(L_XtVinvX)))
+    try:
+        L_XtVinvX = linalg.cholesky(XtVinvX, lower=True)
+    except linalg.LinAlgError:
+        return None
+
+    ldRX2 = 2.0 * np.sum(np.log(np.diag(L_XtVinvX)))
 
     cu_star_RZX_beta_term = RZX.T @ cu_star
     Xty_adj = XtWy - cu_star_RZX_beta_term
@@ -381,19 +291,120 @@ def profiled_deviance_components(
     denom = n - p if REML else n
     sigma2 = pwrss / denom
 
-    dev = denom * (1.0 + np.log(2.0 * np.pi * sigma2)) + logdet_V
+    dev = denom * (1.0 + np.log(2.0 * np.pi * sigma2)) + ldL2
     if REML:
-        dev += logdet_XtVinvX
+        dev += ldRX2
 
-    return DevianceComponents(
-        total=float(dev),
-        ldL2=float(logdet_V),
-        ldRX2=float(logdet_XtVinvX) if REML else 0.0,
+    u = Lambda @ u_star
+
+    return _DevianceCoreResult(
+        deviance=float(dev),
+        beta=beta,
+        sigma=np.sqrt(sigma2),
+        u=u,
+        ldL2=float(ldL2),
+        ldRX2=float(ldRX2) if REML else 0.0,
         wrss=float(wrss),
         ussq=float(ussq),
         pwrss=float(pwrss),
-        sigma2=float(sigma2),
+    )
+
+
+def profiled_deviance(
+    theta: NDArray[np.floating],
+    matrices: ModelMatrices,
+    REML: bool = True,
+) -> float:
+    """Compute profiled deviance for linear mixed model."""
+    result = _profiled_deviance_core(theta, matrices, REML)
+    if result is None:
+        return 1e10
+    return result.deviance
+
+
+def profiled_deviance_components(
+    theta: NDArray[np.floating],
+    matrices: ModelMatrices,
+    REML: bool = True,
+) -> DevianceComponents:
+    """Compute deviance and return all components."""
+    result = _profiled_deviance_core(theta, matrices, REML)
+    if result is None:
+        return DevianceComponents(
+            total=1e10,
+            ldL2=0.0,
+            ldRX2=0.0,
+            wrss=0.0,
+            ussq=0.0,
+            pwrss=0.0,
+            sigma2=1.0,
+            REML=REML,
+        )
+    return DevianceComponents(
+        total=result.deviance,
+        ldL2=result.ldL2,
+        ldRX2=result.ldRX2,
+        wrss=result.wrss,
+        ussq=result.ussq,
+        pwrss=result.pwrss,
+        sigma2=result.sigma**2,
         REML=REML,
+    )
+
+
+@dataclass
+class _RustMatrixCache:
+    """Cached data for Rust profiled_deviance calls."""
+
+    y: NDArray[np.floating]
+    X: NDArray[np.floating]
+    z_data: NDArray[np.floating]
+    z_indices: NDArray[np.int64]
+    z_indptr: NDArray[np.int64]
+    z_shape: tuple[int, int]
+    weights: NDArray[np.floating]
+    offset: NDArray[np.floating]
+    n_levels: list[int]
+    n_terms: list[int]
+    correlated: list[bool]
+
+    @classmethod
+    def from_matrices(cls, matrices: ModelMatrices) -> _RustMatrixCache:
+        z_csc = matrices.Z.tocsc()
+        return cls(
+            y=np.ascontiguousarray(matrices.y),
+            X=np.ascontiguousarray(matrices.X),
+            z_data=np.ascontiguousarray(z_csc.data),
+            z_indices=np.ascontiguousarray(z_csc.indices.astype(np.int64)),
+            z_indptr=np.ascontiguousarray(z_csc.indptr.astype(np.int64)),
+            z_shape=(z_csc.shape[0], z_csc.shape[1]),
+            weights=np.ascontiguousarray(matrices.weights),
+            offset=np.ascontiguousarray(matrices.offset),
+            n_levels=[s.n_levels for s in matrices.random_structures],
+            n_terms=[s.n_terms for s in matrices.random_structures],
+            correlated=[s.correlated for s in matrices.random_structures],
+        )
+
+
+def _profiled_deviance_rust_cached(
+    theta: NDArray[np.floating],
+    cache: _RustMatrixCache,
+    REML: bool = True,
+) -> float:
+    return _rust_profiled_deviance(
+        theta,
+        cache.y,
+        cache.X,
+        cache.z_data,
+        cache.z_indices,
+        cache.z_indptr,
+        cache.z_shape,
+        cache.weights,
+        cache.offset,
+        cache.n_levels,
+        cache.n_terms,
+        cache.correlated,
+        REML,
     )
 
 
@@ -402,35 +413,17 @@ def _profiled_deviance_rust(
     matrices: ModelMatrices,
     REML: bool = True,
 ) -> float:
-    n_levels = [s.n_levels for s in matrices.random_structures]
-    n_terms = [s.n_terms for s in matrices.random_structures]
-    correlated = [s.correlated for s in matrices.random_structures]
-
-    z_csc = matrices.Z.tocsc()
-
-    return _rust_profiled_deviance(
-        theta,
-        matrices.y,
-        matrices.X,
-        z_csc.data,
-        z_csc.indices.astype(np.int64),
-        z_csc.indptr.astype(np.int64),
-        (z_csc.shape[0], z_csc.shape[1]),
-        matrices.weights,
-        matrices.offset,
-        n_levels,
-        n_terms,
-        correlated,
-        REML,
-    )
+    cache = _RustMatrixCache.from_matrices(matrices)
+    return _profiled_deviance_rust_cached(theta, cache, REML)
 
 
 def profiled_deviance_fast(
     theta: NDArray[np.floating],
     matrices: ModelMatrices,
     REML: bool = True,
+    use_rust: bool = False,
 ) -> float:
-    if _HAS_RUST:
+    if use_rust and _HAS_RUST:
         return _profiled_deviance_rust(theta, matrices, REML)
     return profiled_deviance(theta, matrices, REML)
 
@@ -448,7 +441,7 @@ class LMMOptimizer:
         matrices: ModelMatrices,
         REML: bool = True,
         verbose: int = 0,
-        use_rust: bool = False,
+        use_rust: bool | None = None,
     ) -> None:
         self.matrices = matrices
         self.REML = REML
@@ -457,7 +450,12 @@ class LMMOptimizer:
         has_special_cov = any(
             getattr(s, "cov_type", "us") in ("cs", "ar1") for s in matrices.random_structures
         )
+        if use_rust is None:
+            use_rust = _HAS_RUST and not has_special_cov and matrices.n_random < 50
         self.use_rust = use_rust and _HAS_RUST and not has_special_cov
+        self._rust_cache: _RustMatrixCache | None = None
+        if self.use_rust:
+            self._rust_cache = _RustMatrixCache.from_matrices(matrices)
 
     def get_start_theta(self) -> NDArray[np.floating]:
         theta_list: list[float] = []
@@ -471,18 +469,24 @@ class LMMOptimizer:
             elif struct.correlated:
                 for i in range(q):
                     for j in range(i + 1):
-                        if i == j:
-                            theta_list.append(1.0)
-                        else:
-                            theta_list.append(0.0)
+                        theta_list.append(1.0 if i == j else 0.0)
             else:
                 theta_list.extend([1.0] * q)
         return np.array(theta_list, dtype=np.float64)
 
     def objective(self, theta: NDArray[np.floating]) -> float:
-        if self.use_rust:
-            return _profiled_deviance_rust(theta, self.matrices, self.REML)
+        if self.use_rust and self._rust_cache is not None:
+            return _profiled_deviance_rust_cached(theta, self._rust_cache, self.REML)
         return profiled_deviance(theta, self.matrices, self.REML)
+
+    def _extract_estimates(
+        self, theta: NDArray[np.floating]
+    ) -> tuple[NDArray[np.floating], float, NDArray[np.floating]]:
+        """Extract beta, sigma, and u from fitted theta."""
+        result = _profiled_deviance_core(theta, self.matrices, self.REML)
+        if result is None:
+            return np.zeros(self.matrices.n_fixed), 1.0, np.zeros(self.matrices.n_random)
+        return result.beta, result.sigma, result.u
 
     def optimize(
         self,
@@ -543,85 +547,25 @@ class LMMOptimizer:
         )
 
         theta_opt = result.x
-        beta, sigma, u = self._extract_estimates(theta_opt)
+        core_result = _profiled_deviance_core(theta_opt, self.matrices, self.REML)
+
+        if core_result is None:
+            return OptimizationResult(
+                theta=theta_opt,
+                beta=np.zeros(self.matrices.n_fixed),
+                sigma=1.0,
+                u=np.zeros(self.matrices.n_random),
+                deviance=result.fun,
+                converged=False,
+                n_iter=result.nit,
+            )
 
         return OptimizationResult(
             theta=theta_opt,
-            beta=beta,
-            sigma=sigma,
-            u=u,
+            beta=core_result.beta,
+            sigma=core_result.sigma,
+            u=core_result.u,
             deviance=result.fun,
             converged=result.success,
             n_iter=result.nit,
         )
-
-    def _extract_estimates(
-        self, theta: NDArray[np.floating]
-    ) -> tuple[NDArray[np.floating], float, NDArray[np.floating]]:
-        n = self.matrices.n_obs
-        p = self.matrices.n_fixed
-        q = self.matrices.n_random
-
-        w = self.matrices.weights
-        y_adj = self.matrices.y - self.matrices.offset
-        sqrtW = sparse.diags(np.sqrt(w), format="csc")
-
-        if q == 0:
-            WX = sqrtW @ self.matrices.X
-            Wy = sqrtW @ y_adj
-            XtWX = WX.T @ WX
-            XtWy = WX.T @ Wy
-            try:
-                beta = linalg.solve(XtWX, XtWy, assume_a="pos")
-            except linalg.LinAlgError:
-                beta = linalg.lstsq(WX, Wy)[0]
-            resid = y_adj - self.matrices.X @ beta
-            wrss = np.dot(w * resid, resid)
-            sigma = np.sqrt(wrss / (n - p if self.REML else n))
-            return beta, sigma, np.array([])
-
-        Lambda = _build_lambda(theta, self.matrices.random_structures)
-
-        Zt = self.matrices.Zt
-        WZ = sqrtW @ self.matrices.Z
-        ZtWZ = WZ.T @ WZ
-        LambdatZtWZLambda = Lambda.T @ ZtWZ @ Lambda
-
-        I_q = sparse.eye(q, format="csc")
-        V_factor = LambdatZtWZLambda + I_q
-
-        V_factor_dense = V_factor.toarray()
-        L_V = linalg.cholesky(V_factor_dense, lower=True)
-
-        ZtWy = Zt @ (w * y_adj)
-        cu = Lambda.T @ ZtWy
-        cu_star = linalg.solve_triangular(L_V, cu, lower=True)
-
-        WX = sqrtW @ self.matrices.X
-        ZtWX = Zt @ (sqrtW.T @ WX)
-        Lambdat_ZtWX = Lambda.T @ ZtWX
-        RZX = linalg.solve_triangular(L_V, Lambdat_ZtWX, lower=True)
-
-        XtWX = WX.T @ WX
-        XtWy = WX.T @ (sqrtW @ y_adj)
-
-        RZX_tRZX = RZX.T @ RZX
-        XtVinvX = XtWX - RZX_tRZX
-        L_XtVinvX = linalg.cholesky(XtVinvX, lower=True)
-
-        cu_star_RZX_beta_term = RZX.T @ cu_star
-        Xty_adj = XtWy - cu_star_RZX_beta_term
-        beta = linalg.cho_solve((L_XtVinvX, True), Xty_adj)
-
-        resid = y_adj - self.matrices.X @ beta
-        Zt_resid = Zt @ (w * resid)
-        Lambda_t_Zt_resid = Lambda.T @ Zt_resid
-        u_star = linalg.cho_solve((L_V, True), Lambda_t_Zt_resid)
-
-        u = Lambda @ u_star
-
-        pwrss = np.dot(w * resid, resid) + np.dot(u_star, u_star)
-        denom = n - p if self.REML else n
-        sigma = np.sqrt(pwrss / denom)
-
-        return beta, sigma, u

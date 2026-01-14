@@ -142,7 +142,7 @@ def ranef(model: MerMod, condVar: bool = False) -> dict[str, dict[str, NDArray[n
     from mixedlm.models.glmer import GlmerResult
     from mixedlm.models.lmer import LmerResult, RanefResult
 
-    if isinstance(model, (LmerResult, GlmerResult)):
+    if isinstance(model, LmerResult | GlmerResult):
         result = model.ranef(condVar=condVar)
         if isinstance(result, RanefResult):
             return result.values
@@ -326,7 +326,7 @@ def pvalues(
     from mixedlm.models.glmer import GlmerResult
     from mixedlm.models.lmer import LmerResult
 
-    if not isinstance(model, (LmerResult, GlmerResult)):
+    if not isinstance(model, LmerResult | GlmerResult):
         for i, name in enumerate(names):
             p = 2 * (1 - stats.norm.cdf(np.abs(t_vals[i])))
             result[name] = float(p)

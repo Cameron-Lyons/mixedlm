@@ -2,8 +2,9 @@ use faer::linalg::solvers::{Llt, Solve};
 use faer::{Mat, Side};
 use nalgebra_sparse::csc::CscMatrix;
 use ndarray::{ArrayView1, ArrayView2};
-use pyo3::PyResult;
 use pyo3::prelude::*;
+use pyo3::PyResult;
+use rayon::prelude::*;
 
 use crate::linalg::LinalgError;
 
@@ -28,34 +29,23 @@ fn csc_from_scipy(
         .map_err(|e| LinalgError::InvalidSparseFormat(format!("{:?}", e)))
 }
 
-fn build_lambda_faer(theta: &[f64], structures: &[RandomEffectStructure]) -> Mat<f64> {
-    let mut total_dim = 0;
-    for s in structures {
-        total_dim += s.n_levels * s.n_terms;
-    }
-
-    if total_dim == 0 {
-        return Mat::zeros(0, 0);
-    }
-
-    let mut lambda = Mat::zeros(total_dim, total_dim);
+fn build_lambda_blocks(theta: &[f64], structures: &[RandomEffectStructure]) -> Vec<Mat<f64>> {
+    let mut blocks = Vec::new();
     let mut theta_idx = 0;
-    let mut block_offset = 0;
 
     for structure in structures {
         let q = structure.n_terms;
-        let n_levels = structure.n_levels;
 
-        let l_block: Vec<Vec<f64>> = if structure.correlated {
+        let l_block = if structure.correlated {
             let n_theta = q * (q + 1) / 2;
             let theta_block = &theta[theta_idx..theta_idx + n_theta];
             theta_idx += n_theta;
 
-            let mut l = vec![vec![0.0; q]; q];
+            let mut l = Mat::zeros(q, q);
             let mut idx = 0;
             for i in 0..q {
                 for j in 0..=i {
-                    l[i][j] = theta_block[idx];
+                    l[(i, j)] = theta_block[idx];
                     idx += 1;
                 }
             }
@@ -64,43 +54,242 @@ fn build_lambda_faer(theta: &[f64], structures: &[RandomEffectStructure]) -> Mat
             let theta_block = &theta[theta_idx..theta_idx + q];
             theta_idx += q;
 
-            let mut l = vec![vec![0.0; q]; q];
+            let mut l = Mat::zeros(q, q);
             for i in 0..q {
-                l[i][i] = theta_block[i];
+                l[(i, i)] = theta_block[i];
             }
             l
         };
 
-        for level in 0..n_levels {
-            let level_offset = block_offset + level * q;
-            for i in 0..q {
-                for j in 0..=i {
-                    lambda[(level_offset + i, level_offset + j)] = l_block[i][j];
+        blocks.push(l_block);
+    }
+
+    blocks
+}
+
+fn compute_ztwz_entry(
+    z: &CscMatrix<f64>,
+    weights: &[f64],
+    j: usize,
+    k: usize,
+) -> f64 {
+    let col_j_start = z.col_offsets()[j];
+    let col_j_end = z.col_offsets()[j + 1];
+    let col_k_start = z.col_offsets()[k];
+    let col_k_end = z.col_offsets()[k + 1];
+
+    let mut sum = 0.0;
+    let mut idx_j = col_j_start;
+    let mut idx_k = col_k_start;
+
+    while idx_j < col_j_end && idx_k < col_k_end {
+        let row_j = z.row_indices()[idx_j];
+        let row_k = z.row_indices()[idx_k];
+
+        if row_j == row_k {
+            sum += z.values()[idx_j] * weights[row_j] * z.values()[idx_k];
+            idx_j += 1;
+            idx_k += 1;
+        } else if row_j < row_k {
+            idx_j += 1;
+        } else {
+            idx_k += 1;
+        }
+    }
+
+    sum
+}
+
+fn compute_ztwz_sparse(z: &CscMatrix<f64>, weights: &[f64], q: usize) -> Mat<f64> {
+    let mut ztwz = Mat::zeros(q, q);
+
+    if q <= 50 {
+        for j in 0..q {
+            for k in j..q {
+                let val = compute_ztwz_entry(z, weights, j, k);
+                ztwz[(j, k)] = val;
+                if j != k {
+                    ztwz[(k, j)] = val;
+                }
+            }
+        }
+    } else {
+        let entries: Vec<(usize, usize, f64)> = (0..q)
+            .into_par_iter()
+            .flat_map(|j| {
+                (j..q)
+                    .map(|k| (j, k, compute_ztwz_entry(z, weights, j, k)))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+
+        for (j, k, val) in entries {
+            ztwz[(j, k)] = val;
+            if j != k {
+                ztwz[(k, j)] = val;
+            }
+        }
+    }
+
+    ztwz
+}
+
+fn apply_lambda_block_transform(
+    ztwz: &Mat<f64>,
+    lambda_blocks: &[Mat<f64>],
+    structures: &[RandomEffectStructure],
+) -> Mat<f64> {
+    let q = ztwz.nrows();
+    let mut result = Mat::zeros(q, q);
+
+    let mut block_offset_i = 0;
+    for (struct_i, (structure_i, lambda_i)) in
+        structures.iter().zip(lambda_blocks.iter()).enumerate()
+    {
+        let qi = structure_i.n_terms;
+        let ni = structure_i.n_levels;
+
+        let mut block_offset_j = 0;
+        for (struct_j, (structure_j, lambda_j)) in
+            structures.iter().zip(lambda_blocks.iter()).enumerate()
+        {
+            let qj = structure_j.n_terms;
+            let nj = structure_j.n_levels;
+
+            if struct_i == struct_j {
+                for level in 0..ni {
+                    let offset = block_offset_i + level * qi;
+
+                    let mut block = Mat::zeros(qi, qi);
+                    for ii in 0..qi {
+                        for jj in 0..qi {
+                            block[(ii, jj)] = ztwz[(offset + ii, offset + jj)];
+                        }
+                    }
+
+                    let lambda_t = lambda_i.transpose();
+                    let temp = &lambda_t * &block;
+                    let transformed = &temp * lambda_i;
+
+                    for ii in 0..qi {
+                        for jj in 0..qi {
+                            result[(offset + ii, offset + jj)] = transformed[(ii, jj)];
+                        }
+                    }
+                }
+            } else {
+                for level_i in 0..ni {
+                    let offset_i = block_offset_i + level_i * qi;
+                    for level_j in 0..nj {
+                        let offset_j = block_offset_j + level_j * qj;
+
+                        let mut block = Mat::zeros(qi, qj);
+                        for ii in 0..qi {
+                            for jj in 0..qj {
+                                block[(ii, jj)] = ztwz[(offset_i + ii, offset_j + jj)];
+                            }
+                        }
+
+                        let lambda_i_t = lambda_i.transpose();
+                        let temp = &lambda_i_t * &block;
+                        let transformed = &temp * lambda_j;
+
+                        for ii in 0..qi {
+                            for jj in 0..qj {
+                                result[(offset_i + ii, offset_j + jj)] = transformed[(ii, jj)];
+                            }
+                        }
+                    }
+                }
+            }
+
+            block_offset_j += nj * qj;
+        }
+
+        block_offset_i += ni * qi;
+    }
+
+    result
+}
+
+fn apply_lambda_transpose_vector(
+    v: &Mat<f64>,
+    lambda_blocks: &[Mat<f64>],
+    structures: &[RandomEffectStructure],
+) -> Mat<f64> {
+    let q = v.nrows();
+    let mut result = Mat::zeros(q, v.ncols());
+
+    let mut block_offset = 0;
+    for (structure, lambda) in structures.iter().zip(lambda_blocks.iter()) {
+        let qi = structure.n_terms;
+        let ni = structure.n_levels;
+        let lambda_t = lambda.transpose();
+
+        for level in 0..ni {
+            let offset = block_offset + level * qi;
+
+            for col in 0..v.ncols() {
+                let mut block_v = Mat::zeros(qi, 1);
+                for i in 0..qi {
+                    block_v[(i, 0)] = v[(offset + i, col)];
+                }
+
+                let transformed = &lambda_t * &block_v;
+
+                for i in 0..qi {
+                    result[(offset + i, col)] = transformed[(i, 0)];
                 }
             }
         }
 
-        block_offset += n_levels * q;
+        block_offset += ni * qi;
     }
 
-    lambda
+    result
 }
 
-fn forward_solve_faer(l: &Mat<f64>, b: &Mat<f64>) -> Mat<f64> {
-    let n = l.nrows();
-    let ncols = b.ncols();
-    let mut x = b.clone();
+fn compute_ztwy_sparse(z: &CscMatrix<f64>, w: &[f64], y: &[f64], q: usize) -> Mat<f64> {
+    let mut result = Mat::zeros(q, 1);
 
-    for col in 0..ncols {
-        for i in 0..n {
-            let mut sum = x[(i, col)];
-            for j in 0..i {
-                sum -= l[(i, j)] * x[(j, col)];
+    for j in 0..q {
+        let col_start = z.col_offsets()[j];
+        let col_end = z.col_offsets()[j + 1];
+        let mut sum = 0.0;
+        for idx in col_start..col_end {
+            let i = z.row_indices()[idx];
+            sum += z.values()[idx] * w[i] * y[i];
+        }
+        result[(j, 0)] = sum;
+    }
+
+    result
+}
+
+fn compute_ztwx_sparse(
+    z: &CscMatrix<f64>,
+    w: &[f64],
+    x: &Mat<f64>,
+    q: usize,
+    p: usize,
+) -> Mat<f64> {
+    let mut result = Mat::zeros(q, p);
+
+    for j in 0..q {
+        let col_start = z.col_offsets()[j];
+        let col_end = z.col_offsets()[j + 1];
+
+        for pj in 0..p {
+            let mut sum = 0.0;
+            for idx in col_start..col_end {
+                let i = z.row_indices()[idx];
+                sum += z.values()[idx] * w[i] * x[(i, pj)];
             }
-            x[(i, col)] = sum / l[(i, i)];
+            result[(j, pj)] = sum;
         }
     }
-    x
+
+    result
 }
 
 pub fn profiled_deviance_impl(
@@ -125,7 +314,8 @@ pub fn profiled_deviance_impl(
         .zip(offset.iter())
         .map(|(yi, oi)| yi - oi)
         .collect();
-    let sqrt_w: Vec<f64> = weights.iter().map(|w| w.sqrt()).collect();
+    let w: Vec<f64> = weights.iter().copied().collect();
+    let sqrt_w: Vec<f64> = weights.iter().map(|wi| wi.sqrt()).collect();
 
     let x = Mat::from_fn(n, p, |i, j| x_data[[i, j]]);
 
@@ -150,7 +340,7 @@ pub fn profiled_deviance_impl(
                 pred += x[(i, j)] * beta[(j, 0)];
             }
             let resid = y_adj[i] - pred;
-            wrss += weights[i] * resid * resid;
+            wrss += w[i] * resid * resid;
         }
 
         let denom = if reml { n - p } else { n } as f64;
@@ -172,22 +362,10 @@ pub fn profiled_deviance_impl(
     }
 
     let z = csc_from_scipy(z_data, z_indices, z_indptr, z_shape)?;
+    let lambda_blocks = build_lambda_blocks(theta, structures);
 
-    let lambda = build_lambda_faer(theta, structures);
-
-    let mut wz = Mat::zeros(n, q);
-    for j in 0..q {
-        let col_start = z.col_offsets()[j];
-        let col_end = z.col_offsets()[j + 1];
-        for idx in col_start..col_end {
-            let i = z.row_indices()[idx];
-            wz[(i, j)] = sqrt_w[i] * z.values()[idx];
-        }
-    }
-
-    let ztwz = wz.transpose() * &wz;
-    let lambdat_ztwz = lambda.transpose() * &ztwz;
-    let lambdat_ztwz_lambda = &lambdat_ztwz * &lambda;
+    let ztwz = compute_ztwz_sparse(&z, &w, q);
+    let lambdat_ztwz_lambda = apply_lambda_block_transform(&ztwz, &lambda_blocks, structures);
 
     let mut v_factor = lambdat_ztwz_lambda;
     for i in 0..q {
@@ -202,39 +380,15 @@ pub fn profiled_deviance_impl(
     let l_v = chol_v.L();
     let logdet_v: f64 = 2.0 * (0..q).map(|i| l_v[(i, i)].ln()).sum::<f64>();
 
-    let mut zt_wy_adj = Mat::zeros(q, 1);
-    for j in 0..q {
-        let col_start = z.col_offsets()[j];
-        let col_end = z.col_offsets()[j + 1];
-        let mut sum = 0.0;
-        for idx in col_start..col_end {
-            let i = z.row_indices()[idx];
-            sum += z.values()[idx] * weights[i] * y_adj[i];
-        }
-        zt_wy_adj[(j, 0)] = sum;
-    }
-
-    let cu = lambda.transpose() * &zt_wy_adj;
-    let cu_star = forward_solve_faer(&l_v.to_owned(), &cu);
+    let ztwy = compute_ztwy_sparse(&z, &w, &y_adj, q);
+    let cu = apply_lambda_transpose_vector(&ztwy, &lambda_blocks, structures);
+    let cu_star = chol_v.solve(&cu);
 
     let wx = Mat::from_fn(n, p, |i, j| sqrt_w[i] * x[(i, j)]);
 
-    let mut zt_sqrtw_wx = Mat::zeros(q, p);
-    for j in 0..q {
-        let col_start = z.col_offsets()[j];
-        let col_end = z.col_offsets()[j + 1];
-        for pj in 0..p {
-            let mut sum = 0.0;
-            for idx in col_start..col_end {
-                let i = z.row_indices()[idx];
-                sum += z.values()[idx] * sqrt_w[i] * wx[(i, pj)];
-            }
-            zt_sqrtw_wx[(j, pj)] = sum;
-        }
-    }
-
-    let lambdat_ztwx = lambda.transpose() * &zt_sqrtw_wx;
-    let rzx = forward_solve_faer(&l_v.to_owned(), &lambdat_ztwx);
+    let ztwx = compute_ztwx_sparse(&z, &w, &x, q, p);
+    let lambdat_ztwx = apply_lambda_transpose_vector(&ztwx, &lambda_blocks, structures);
+    let rzx = chol_v.solve(&lambdat_ztwx);
 
     let xtwx = wx.transpose() * &wx;
     let mut xtwy = Mat::zeros(p, 1);
@@ -270,22 +424,11 @@ pub fn profiled_deviance_impl(
         resid.push(y_adj[i] - pred);
     }
 
-    let mut zt_w_resid = Mat::zeros(q, 1);
-    for j in 0..q {
-        let col_start = z.col_offsets()[j];
-        let col_end = z.col_offsets()[j + 1];
-        let mut sum = 0.0;
-        for idx in col_start..col_end {
-            let i = z.row_indices()[idx];
-            sum += z.values()[idx] * weights[i] * resid[i];
-        }
-        zt_w_resid[(j, 0)] = sum;
-    }
-
-    let lambda_t_zt_resid = lambda.transpose() * &zt_w_resid;
+    let zt_w_resid = compute_ztwy_sparse(&z, &w, &resid, q);
+    let lambda_t_zt_resid = apply_lambda_transpose_vector(&zt_w_resid, &lambda_blocks, structures);
     let u_star = chol_v.solve(&lambda_t_zt_resid);
 
-    let w_resid_sq: f64 = (0..n).map(|i| weights[i] * resid[i] * resid[i]).sum();
+    let w_resid_sq: f64 = (0..n).map(|i| w[i] * resid[i] * resid[i]).sum();
     let u_star_sq: f64 = (0..q).map(|i| u_star[(i, 0)].powi(2)).sum();
     let pwrss = w_resid_sq + u_star_sq;
 
