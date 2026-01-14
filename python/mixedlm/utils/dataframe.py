@@ -94,7 +94,21 @@ def is_categorical_or_string(data: Any, col_name: str) -> bool:
         return col.dtype in (pl.Utf8, pl.String, pl.Categorical, pl.Enum)
 
     col = data[col_name]
-    return col.dtype == object or col.dtype.name == "category"
+
+    # Check for categorical
+    if col.dtype.name == "category":
+        return True
+
+    # Check for object dtype (strings in older pandas)
+    if col.dtype == object:
+        return True
+
+    # Check for pandas 2.x StringDtype
+    dtype_str = str(col.dtype)
+    if "string" in dtype_str.lower() or "str" in dtype_str.lower():
+        return True
+
+    return False
 
 
 def dataframe_length(data: Any) -> int:
