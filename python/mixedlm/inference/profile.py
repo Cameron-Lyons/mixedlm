@@ -781,7 +781,7 @@ def _profile_deviance_cached(cache: _ProfileCache, value: float) -> float:
 
         return float(dev)
 
-    if cache.L_XtVinvX is None:
+    if cache.L_XtVinvX is None or cache.RZX is None or cache.L_V is None:
         return 1e10
 
     Zty = cache.Zt @ y_adjusted
