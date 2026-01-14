@@ -44,9 +44,6 @@ def _get_available_optimizers() -> list[str]:
     return optimizers
 
 
-OPTIMIZERS = SCIPY_OPTIMIZERS
-
-
 @dataclass
 class AllFitResult:
     fits: dict[str, LmerResult | GlmerResult | None]

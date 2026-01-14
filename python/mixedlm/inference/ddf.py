@@ -69,69 +69,9 @@ def _build_lambda_from_theta(
     return Lambda
 
 
-def _compute_vcov_gradient(
-    result: LmerResult,
-    param_idx: int,
-    eps: float = _NUMERICAL_EPS,
-) -> NDArray[np.floating]:
-    theta = result.theta.copy()
-    n_theta = len(theta)
-    sigma = result.sigma
-    X = result.matrices.X
-    Z = result.matrices.Z if result.matrices.Z is not None else None
-    n = result.matrices.n_obs
-    p = result.matrices.n_fixed
-    q = result.matrices.n_random
-
-    def compute_vcov_beta(theta_vec: NDArray, sigma_val: float) -> NDArray:
-        if q == 0 or Z is None:
-            XtX = X.T @ X
-            try:
-                return sigma_val**2 * linalg.inv(XtX)
-            except linalg.LinAlgError:
-                return sigma_val**2 * linalg.pinv(XtX)
-
-        Lambda = _build_lambda_from_theta(theta_vec, result.matrices.random_structures)
-
-        LambdatLambda = Lambda.T @ Lambda
-        sigma2 = sigma_val**2
-
-        Z_dense = Z.toarray() if sparse.issparse(Z) else Z
-
-        ZLambda = Z_dense @ Lambda
-        V = np.eye(n) * sigma2 + ZLambda @ LambdatLambda @ ZLambda.T * sigma2
-
-        try:
-            L_V = linalg.cholesky(V, lower=True)
-            V_inv = linalg.cho_solve((L_V, True), np.eye(n))
-        except linalg.LinAlgError:
-            V_inv = linalg.pinv(V)
-
-        XtVinvX = X.T @ V_inv @ X
-        try:
-            return linalg.inv(XtVinvX)
-        except linalg.LinAlgError:
-            return linalg.pinv(XtVinvX)
-
-    grad = np.zeros((p, p), dtype=np.float64)
-
-    for k in range(n_theta):
-        theta_plus = theta.copy()
-        theta_plus[k] += eps
-        vcov_plus = compute_vcov_beta(theta_plus, sigma)
-
-        theta_minus = theta.copy()
-        theta_minus[k] -= eps
-        vcov_minus = compute_vcov_beta(theta_minus, sigma)
-
-        grad += (vcov_plus - vcov_minus) / (2 * eps)
-
-    return grad
-
-
 def satterthwaite_df(
     result: LmerResult,
-    param_idx: int | None = None,
+    _param_idx: int | None = None,
 ) -> DenomDFResult:
     """Compute Satterthwaite denominator degrees of freedom.
 
@@ -253,7 +193,7 @@ def satterthwaite_df(
 
 def kenward_roger_df(
     result: LmerResult,
-    param_idx: int | None = None,
+    _param_idx: int | None = None,
 ) -> DenomDFResult:
     """Compute Kenward-Roger denominator degrees of freedom.
 
