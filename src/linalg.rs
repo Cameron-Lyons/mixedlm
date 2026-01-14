@@ -37,6 +37,7 @@ fn csc_from_scipy(
         .map_err(|e| LinalgError::InvalidSparseFormat(format!("{:?}", e)))
 }
 
+#[allow(clippy::needless_range_loop)]
 pub fn sparse_cholesky_solve(
     a_data: &[f64],
     a_indices: &[i64],
@@ -55,8 +56,8 @@ pub fn sparse_cholesky_solve(
         let col: Vec<f64> = b.column(j).to_vec();
         let b_matrix = DMatrix::from_vec(n, 1, col);
         let x = cholesky.solve(&b_matrix);
-        for i in 0..n {
-            result[i][j] = x[(i, 0)];
+        for (i, row) in result.iter_mut().enumerate() {
+            row[j] = x[(i, 0)];
         }
     }
 

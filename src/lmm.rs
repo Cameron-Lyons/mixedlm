@@ -2,8 +2,8 @@ use faer::linalg::solvers::{Llt, Solve};
 use faer::{Mat, Side};
 use nalgebra_sparse::csc::CscMatrix;
 use ndarray::{ArrayView1, ArrayView2};
-use pyo3::prelude::*;
 use pyo3::PyResult;
+use pyo3::prelude::*;
 use rayon::prelude::*;
 
 use crate::linalg::LinalgError;
@@ -67,12 +67,7 @@ fn build_lambda_blocks(theta: &[f64], structures: &[RandomEffectStructure]) -> V
     blocks
 }
 
-fn compute_ztwz_entry(
-    z: &CscMatrix<f64>,
-    weights: &[f64],
-    j: usize,
-    k: usize,
-) -> f64 {
+fn compute_ztwz_entry(z: &CscMatrix<f64>, weights: &[f64], j: usize, k: usize) -> f64 {
     let col_j_start = z.col_offsets()[j];
     let col_j_end = z.col_offsets()[j + 1];
     let col_k_start = z.col_offsets()[k];
@@ -168,7 +163,7 @@ fn apply_lambda_block_transform(
                     }
 
                     let lambda_t = lambda_i.transpose();
-                    let temp = &lambda_t * &block;
+                    let temp = lambda_t * &block;
                     let transformed = &temp * lambda_i;
 
                     for ii in 0..qi {
@@ -191,7 +186,7 @@ fn apply_lambda_block_transform(
                         }
 
                         let lambda_i_t = lambda_i.transpose();
-                        let temp = &lambda_i_t * &block;
+                        let temp = lambda_i_t * &block;
                         let transformed = &temp * lambda_j;
 
                         for ii in 0..qi {
@@ -235,7 +230,7 @@ fn apply_lambda_transpose_vector(
                     block_v[(i, 0)] = v[(offset + i, col)];
                 }
 
-                let transformed = &lambda_t * &block_v;
+                let transformed = lambda_t * &block_v;
 
                 for i in 0..qi {
                     result[(offset + i, col)] = transformed[(i, 0)];
@@ -292,6 +287,7 @@ fn compute_ztwx_sparse(
     result
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn profiled_deviance_impl(
     theta: &[f64],
     y: ArrayView1<'_, f64>,
@@ -459,6 +455,7 @@ pub fn profiled_deviance_impl(
     correlated,
     reml = true
 ))]
+#[allow(clippy::too_many_arguments)]
 pub fn profiled_deviance(
     theta: numpy::PyReadonlyArray1<'_, f64>,
     y: numpy::PyReadonlyArray1<'_, f64>,

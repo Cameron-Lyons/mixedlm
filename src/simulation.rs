@@ -104,6 +104,7 @@ pub fn simulate_re_batch_impl(
     n_sim,
     seed = None
 ))]
+#[allow(clippy::too_many_arguments)]
 pub fn simulate_re_batch(
     py: Python<'_>,
     theta: PyReadonlyArray1<'_, f64>,
@@ -125,16 +126,10 @@ pub fn simulate_re_batch(
         })
         .collect();
 
-    let results = simulate_re_batch_impl(
-        theta.as_slice()?,
-        sigma,
-        &structures,
-        n_sim,
-        seed,
-    );
+    let results = simulate_re_batch_impl(theta.as_slice()?, sigma, &structures, n_sim, seed);
 
     if results.is_empty() {
-        return Ok(PyArray2::from_vec2(py, &vec![])?.into());
+        return Ok(PyArray2::from_vec2(py, &[])?.into());
     }
 
     Ok(PyArray2::from_vec2(py, &results)?.into())
