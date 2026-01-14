@@ -105,17 +105,21 @@ def pirls(
     converged = False
     for _iteration in range(maxiter):
         eta = matrices.X @ beta + matrices.Z @ u + offset
+        np.clip(eta, -30, 30, out=eta)
         mu = family.link.inverse(eta)
-        np.clip(mu, 1e-10, 1 - 1e-10, out=mu)
+        np.clip(mu, 1e-7, 1 - 1e-7, out=mu)
 
         np.multiply(family.weights(mu), prior_weights, out=W)
-        np.maximum(W, 1e-10, out=W)
+        np.clip(W, 1e-10, 1e10, out=W)
 
         deriv = family.link.deriv(mu)
+        np.clip(deriv, -1e10, 1e10, out=deriv)
         np.subtract(eta, offset, out=z)
         z += deriv * (matrices.y - mu)
+        np.clip(z, -1e10, 1e10, out=z)
 
         W_sqrt = np.sqrt(W)
+        np.clip(W_sqrt, 0, 1e5, out=W_sqrt)
         WX = W_sqrt[:, None] * matrices.X
         WZ = sparse.diags(W_sqrt, format="csc") @ matrices.Z
 
@@ -123,32 +127,58 @@ def pirls(
         ZtWZ = WZ.T @ WZ
         XtWZ = WX.T @ WZ
 
-        XtWz = matrices.X.T @ (W * z)
-        ZtWz = Zt @ (W * z)
+        if not np.all(np.isfinite(XtWX)):
+            XtWX = np.nan_to_num(XtWX, nan=0.0, posinf=1e10, neginf=-1e10)
+
+        Wz = W * z
+        if not np.all(np.isfinite(Wz)):
+            Wz = np.nan_to_num(Wz, nan=0.0, posinf=1e10, neginf=-1e10)
+
+        XtWz = matrices.X.T @ Wz
+        ZtWz = Zt @ Wz
 
         ZtWZ_dense = ZtWZ.toarray() if sparse.issparse(ZtWZ) else ZtWZ
+        if not np.all(np.isfinite(ZtWZ_dense)):
+            ZtWZ_dense = np.nan_to_num(ZtWZ_dense, nan=0.0, posinf=1e10, neginf=-1e10)
         C = ZtWZ_dense + LambdatLambda_dense
 
         try:
             L_C = linalg.cholesky(C, lower=True)
-        except linalg.LinAlgError:
+        except (linalg.LinAlgError, ValueError):
+            C = np.nan_to_num(C, nan=0.0, posinf=1e10, neginf=-1e10)
             C += 1e-6 * np.eye(q)
             L_C = linalg.cholesky(C, lower=True)
 
         ZtWX_dense = XtWZ.T.toarray() if sparse.issparse(XtWZ) else XtWZ.T
+        if not np.all(np.isfinite(ZtWX_dense)):
+            ZtWX_dense = np.nan_to_num(ZtWX_dense, nan=0.0, posinf=1e10, neginf=-1e10)
+
+        if not np.all(np.isfinite(ZtWz)):
+            ZtWz = np.nan_to_num(ZtWz, nan=0.0, posinf=1e10, neginf=-1e10)
 
         RZX = linalg.solve_triangular(L_C, ZtWX_dense, lower=True)
         cu = linalg.solve_triangular(L_C, ZtWz, lower=True)
 
+        if not np.all(np.isfinite(cu)):
+            cu = np.nan_to_num(cu, nan=0.0, posinf=1e10, neginf=-1e10)
+
         XtVinvX = XtWX - RZX.T @ RZX
         XtVinvz = XtWz - RZX.T @ cu
 
+        if not np.all(np.isfinite(XtVinvX)):
+            XtVinvX = np.nan_to_num(XtVinvX, nan=0.0, posinf=1e10, neginf=-1e10)
+        if not np.all(np.isfinite(XtVinvz)):
+            XtVinvz = np.nan_to_num(XtVinvz, nan=0.0, posinf=1e10, neginf=-1e10)
+
         try:
             beta_new = linalg.solve(XtVinvX, XtVinvz, assume_a="pos")
-        except linalg.LinAlgError:
+        except (linalg.LinAlgError, ValueError):
+            XtVinvX += 1e-6 * np.eye(XtVinvX.shape[0])
             beta_new = linalg.lstsq(XtVinvX, XtVinvz)[0]
 
         u_rhs = ZtWz - ZtWX_dense @ beta_new
+        if not np.all(np.isfinite(u_rhs)):
+            u_rhs = np.nan_to_num(u_rhs, nan=0.0, posinf=1e10, neginf=-1e10)
         u_new = linalg.cho_solve((L_C, True), u_rhs)
 
         delta_beta = np.max(np.abs(beta_new - beta))
@@ -209,19 +239,24 @@ def laplace_deviance(
     deviance += u_penalty
 
     W = family.weights(mu) * prior_weights
-    W = np.maximum(W, 1e-10)
+    W = np.clip(W, 1e-10, 1e10)
 
     W_sqrt = np.sqrt(W)
+    np.clip(W_sqrt, 0, 1e5, out=W_sqrt)
     WZ = sparse.diags(W_sqrt, format="csc") @ matrices.Z
     ZtWZ = WZ.T @ WZ
     ZtWZ_dense = ZtWZ.toarray() if sparse.issparse(ZtWZ) else ZtWZ
+    if not np.all(np.isfinite(ZtWZ_dense)):
+        ZtWZ_dense = np.nan_to_num(ZtWZ_dense, nan=0.0, posinf=1e10, neginf=-1e10)
 
     H = ZtWZ_dense + LambdatLambda_dense
 
     try:
         L_H = linalg.cholesky(H, lower=True)
         logdet_H = 2.0 * np.sum(np.log(np.diag(L_H)))
-    except linalg.LinAlgError:
+    except (linalg.LinAlgError, ValueError):
+        H = np.nan_to_num(H, nan=0.0, posinf=1e10, neginf=-1e10)
+        H += 1e-6 * np.eye(q)
         eigvals = linalg.eigvalsh(H)
         eigvals = np.maximum(eigvals, 1e-10)
         logdet_H = np.sum(np.log(eigvals))
