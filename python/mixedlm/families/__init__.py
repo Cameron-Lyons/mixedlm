@@ -1,5 +1,6 @@
 from mixedlm.families.base import Family
 from mixedlm.families.binomial import Binomial
+from mixedlm.families.custom import CustomFamily, QuasiFamily, validate_family
 from mixedlm.families.gamma import Gamma, GammaInverse
 from mixedlm.families.gaussian import Gaussian
 from mixedlm.families.inverse_gaussian import InverseGaussian, InverseGaussianCanonical
@@ -16,4 +17,7 @@ __all__ = [
     "InverseGaussian",
     "InverseGaussianCanonical",
     "NegativeBinomial",
+    "CustomFamily",
+    "QuasiFamily",
+    "validate_family",
 ]
