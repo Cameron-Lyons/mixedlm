@@ -3,6 +3,7 @@ use pyo3::PyResult;
 use pyo3::prelude::*;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[allow(clippy::enum_variant_names)]
 pub enum NlmeModel {
     SSasymp,
     SSlogis,
@@ -210,6 +211,7 @@ pub struct PnlsResult {
     pub sigma: f64,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn pnls_step_impl(
     y: &[f64],
     x: &[f64],
@@ -402,6 +404,7 @@ pub fn pnls_step_impl(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn nlmm_deviance_impl(
     theta: &[f64],
     y: &[f64],
@@ -512,6 +515,7 @@ pub fn nlmm_deviance_impl(
     sigma,
     random_params
 ))]
+#[allow(clippy::too_many_arguments)]
 pub fn pnls_step(
     y: numpy::PyReadonlyArray1<'_, f64>,
     x: numpy::PyReadonlyArray1<'_, f64>,
@@ -588,6 +592,7 @@ pub fn pnls_step(
     random_params,
     sigma
 ))]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn nlmm_deviance(
     theta: numpy::PyReadonlyArray1<'_, f64>,
     y: numpy::PyReadonlyArray1<'_, f64>,

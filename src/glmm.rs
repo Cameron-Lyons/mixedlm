@@ -172,9 +172,9 @@ fn build_lambda_dense(theta: &[f64], structures: &[RandomEffectStructure]) -> DM
 
             let mut l = vec![vec![0.0; q]; q];
             let mut idx = 0;
-            for i in 0..q {
-                for j in 0..=i {
-                    l[i][j] = theta_block[idx];
+            for (i, row) in l.iter_mut().enumerate() {
+                for cell in row.iter_mut().take(i + 1) {
+                    *cell = theta_block[idx];
                     idx += 1;
                 }
             }
@@ -242,6 +242,7 @@ pub struct PirlsResult {
     pub converged: bool,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn pirls_impl(
     y: &DVector<f64>,
     x: &DMatrix<f64>,
@@ -486,6 +487,7 @@ pub fn pirls_impl(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn laplace_deviance_impl(
     y: &DVector<f64>,
     x: &DMatrix<f64>,
@@ -608,6 +610,7 @@ pub fn laplace_deviance_impl(
     (deviance, beta, u)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn compute_group_log_integral(
     g: usize,
     n_terms: usize,
@@ -698,6 +701,7 @@ fn compute_group_log_integral(
     (group_contrib.max(1e-300)).ln()
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn adaptive_gh_deviance_impl(
     y: &DVector<f64>,
     x: &DMatrix<f64>,
@@ -838,7 +842,10 @@ pub fn adaptive_gh_deviance_impl(
     if other_u_start < q {
         let u_other: DVector<f64> = u.rows(other_u_start, q - other_u_start).into_owned();
         let lambda_other = lambda_t_lambda_reg
-            .view((other_u_start, other_u_start), (q - other_u_start, q - other_u_start))
+            .view(
+                (other_u_start, other_u_start),
+                (q - other_u_start, q - other_u_start),
+            )
             .clone_owned();
 
         let u_penalty_other = match Cholesky::new(lambda_other.clone()) {
@@ -850,7 +857,10 @@ pub fn adaptive_gh_deviance_impl(
         };
 
         let h_other = h
-            .view((other_u_start, other_u_start), (q - other_u_start, q - other_u_start))
+            .view(
+                (other_u_start, other_u_start),
+                (q - other_u_start, q - other_u_start),
+            )
             .clone_owned();
 
         let logdet_other = match Cholesky::new(h_other.clone()) {
@@ -889,6 +899,7 @@ pub fn adaptive_gh_deviance_impl(
     family,
     link
 ))]
+#[allow(clippy::too_many_arguments)]
 pub fn pirls(
     y: numpy::PyReadonlyArray1<'_, f64>,
     x: numpy::PyReadonlyArray2<'_, f64>,
@@ -986,6 +997,7 @@ pub fn pirls(
     family,
     link
 ))]
+#[allow(clippy::too_many_arguments)]
 pub fn laplace_deviance(
     y: numpy::PyReadonlyArray1<'_, f64>,
     x: numpy::PyReadonlyArray2<'_, f64>,
@@ -1081,6 +1093,7 @@ pub fn laplace_deviance(
     link,
     n_agq
 ))]
+#[allow(clippy::too_many_arguments)]
 pub fn adaptive_gh_deviance(
     y: numpy::PyReadonlyArray1<'_, f64>,
     x: numpy::PyReadonlyArray2<'_, f64>,

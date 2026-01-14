@@ -10,7 +10,7 @@ fn compute_gauss_hermite(n: usize) -> (Vec<f64>, Vec<f64>) {
 
     let pi = std::f64::consts::PI;
 
-    let m = (n + 1) / 2;
+    let m = n.div_ceil(2);
 
     for i in 0..m {
         let mut z = if i == 0 {

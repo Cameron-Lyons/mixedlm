@@ -43,6 +43,7 @@ fn sparse_cholesky_logdet(
 }
 
 #[pyfunction]
+#[allow(clippy::type_complexity)]
 fn update_cholesky_factor(
     py: Python<'_>,
     l_data: PyReadonlyArray1<'_, f64>,
