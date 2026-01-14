@@ -2,15 +2,25 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from functools import cached_property
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from numpy.typing import NDArray
 from scipy import sparse
 
-if TYPE_CHECKING:
-    import pandas as pd
+from mixedlm.utils.dataframe import (
+    concat_columns_as_string,
+    dataframe_length,
+    ensure_dataframe,
+    get_categories,
+    get_column_numpy,
+    get_columns,
+    get_unique_sorted,
+    is_categorical_or_string,
+    select_columns,
+)
 
+if TYPE_CHECKING:
     from mixedlm.utils.na_action import NAInfo
 
 from mixedlm.formula.terms import (
@@ -45,7 +55,7 @@ class ModelMatrices:
     n_random: int
     weights: NDArray[np.floating]
     offset: NDArray[np.floating]
-    frame: pd.DataFrame | None = field(default=None)
+    frame: Any | None = field(default=None)
     na_info: NAInfo | None = field(default=None)
 
     @cached_property
@@ -59,13 +69,15 @@ def _get_formula_variables(formula: Formula) -> set[str]:
 
 def build_model_matrices(
     formula: Formula,
-    data: pd.DataFrame,
+    data: Any,
     weights: NDArray[np.floating] | None = None,
     offset: NDArray[np.floating] | None = None,
     na_action: str | None = None,
     contrasts: dict[str, str | NDArray[np.floating]] | None = None,
 ) -> ModelMatrices:
     from mixedlm.utils.na_action import handle_na
+
+    data = ensure_dataframe(data)
 
     if na_action is not None:
         clean_data, na_info, weights, offset = handle_na(data, formula, na_action, weights, offset)
@@ -78,8 +90,9 @@ def build_model_matrices(
     Z, random_structures = build_random_matrix(formula, clean_data, contrasts=contrasts)
 
     frame_vars = _get_formula_variables(formula)
-    available_vars = [v for v in frame_vars if v in clean_data.columns]
-    model_frame = clean_data[available_vars].copy()
+    available_cols = get_columns(clean_data)
+    available_vars = [v for v in frame_vars if v in available_cols]
+    model_frame = select_columns(clean_data, available_vars)
 
     n = len(y)
     if weights is None:
@@ -103,16 +116,17 @@ def build_model_matrices(
     )
 
 
-def _build_response(formula: Formula, data: pd.DataFrame) -> NDArray[np.floating]:
-    return data[formula.response].to_numpy(dtype=np.float64)
+def _build_response(formula: Formula, data: Any) -> NDArray[np.floating]:
+    arr = get_column_numpy(data, formula.response, dtype=np.float64)
+    return arr
 
 
 def build_fixed_matrix(
     formula: Formula,
-    data: pd.DataFrame,
+    data: Any,
     contrasts: dict[str, str | NDArray[np.floating]] | None = None,
 ) -> tuple[NDArray[np.floating], list[str]]:
-    n = len(data)
+    n = dataframe_length(data)
     columns: list[NDArray[np.floating]] = []
     names: list[str] = []
 
@@ -142,33 +156,29 @@ def build_fixed_matrix(
 
 def _encode_variable(
     name: str,
-    data: pd.DataFrame,
+    data: Any,
     contrasts: dict[str, str | NDArray[np.floating]] | None = None,
 ) -> tuple[list[NDArray[np.floating]], list[str]]:
-    col = data[name]
-
-    if col.dtype == object or col.dtype.name == "category":
-        return _encode_categorical(name, col, contrasts)
+    if is_categorical_or_string(data, name):
+        return _encode_categorical(name, data, contrasts)
     else:
-        return [col.to_numpy(dtype=np.float64)], [name]
+        arr = get_column_numpy(data, name, dtype=np.float64)
+        return [arr], [name]
 
 
 def _encode_categorical(
     name: str,
-    col: pd.Series,  # type: ignore[type-arg]
+    data: Any,
     contrasts: dict[str, str | NDArray[np.floating]] | None = None,
 ) -> tuple[list[NDArray[np.floating]], list[str]]:
-    from mixedlm.utils.contrasts import apply_contrasts, get_contrast_matrix
+    from mixedlm.utils.contrasts import apply_contrasts_array, get_contrast_matrix
 
-    if col.dtype.name == "category":
-        categories = col.cat.categories.tolist()
-    else:
-        categories = sorted(col.dropna().unique().tolist())
-
+    categories = get_categories(data, name)
     n_levels = len(categories)
+    n = dataframe_length(data)
 
     if n_levels < 2:
-        return [np.ones(len(col), dtype=np.float64)], [f"{name}"]
+        return [np.ones(n, dtype=np.float64)], [f"{name}"]
 
     contrast_spec = None
     if contrasts is not None and name in contrasts:
@@ -176,12 +186,13 @@ def _encode_categorical(
 
     contrast_matrix = get_contrast_matrix(n_levels, contrast_spec)
 
-    return apply_contrasts(col, name, contrast_matrix, categories)
+    col_values = get_column_numpy(data, name)  # Keep original dtype for categorical
+    return apply_contrasts_array(col_values, name, contrast_matrix, categories)
 
 
 def _encode_interaction(
     variables: tuple[str, ...],
-    data: pd.DataFrame,
+    data: Any,
     contrasts: dict[str, str | NDArray[np.floating]] | None = None,
 ) -> tuple[list[NDArray[np.floating]], list[str]]:
     encoded_vars: list[tuple[list[NDArray[np.floating]], list[str]]] = []
@@ -208,16 +219,17 @@ def _encode_interaction(
             new_name = f"{current_name}:{nm}" if current_name else nm
             _product(idx + 1, new_col, new_name)
 
-    _product(0, np.ones(len(data), dtype=np.float64), "")
+    n = dataframe_length(data)
+    _product(0, np.ones(n, dtype=np.float64), "")
     return result_cols, result_names
 
 
 def build_random_matrix(
     formula: Formula,
-    data: pd.DataFrame,
+    data: Any,
     contrasts: dict[str, str | NDArray[np.floating]] | None = None,
 ) -> tuple[sparse.csc_matrix, list[RandomEffectStructure]]:
-    n = len(data)
+    n = dataframe_length(data)
     Z_blocks: list[sparse.csc_matrix] = []
     structures: list[RandomEffectStructure] = []
 
@@ -235,7 +247,7 @@ def build_random_matrix(
 
 def _build_random_block(
     rterm: RandomTerm,
-    data: pd.DataFrame,
+    data: Any,
     n: int,
     contrasts: dict[str, str | NDArray[np.floating]] | None = None,
 ) -> tuple[sparse.csc_matrix, RandomEffectStructure]:
@@ -245,10 +257,11 @@ def _build_random_block(
     grouping_factor = rterm.grouping
     assert isinstance(grouping_factor, str)
 
-    group_col = data[grouping_factor]
-    levels = sorted(group_col.dropna().unique().tolist())
+    levels = get_unique_sorted(data, grouping_factor)
     level_map = {lv: i for i, lv in enumerate(levels)}
     n_levels = len(levels)
+
+    group_values = get_column_numpy(data, grouping_factor)  # Keep original dtype for grouping
 
     term_cols: list[NDArray[np.floating]] = []
     term_names: list[str] = []
@@ -277,7 +290,7 @@ def _build_random_block(
     values: list[float] = []
 
     for i in range(n):
-        group_val = group_col.iloc[i]
+        group_val = group_values[i]
         if group_val not in level_map:
             continue
         level_idx = level_map[group_val]
@@ -311,16 +324,19 @@ def _build_random_block(
 
 def _build_nested_random_block(
     rterm: RandomTerm,
-    data: pd.DataFrame,
+    data: Any,
     n: int,
     contrasts: dict[str, str | NDArray[np.floating]] | None = None,
 ) -> tuple[sparse.csc_matrix, RandomEffectStructure]:
     grouping_factors = rterm.grouping_factors
-    combined_group = data[list(grouping_factors)].apply(
-        lambda row: "/".join(str(x) for x in row), axis=1
-    )
+    combined_group = concat_columns_as_string(data, list(grouping_factors), separator="/")
 
-    levels = sorted(combined_group.dropna().unique().tolist())
+    if np.issubdtype(combined_group.dtype, np.floating):
+        valid_mask = ~np.isnan(combined_group.astype(float, casting="safe"))
+    else:
+        valid_mask = np.ones(len(combined_group), dtype=bool)
+    unique_combined = np.unique(combined_group[valid_mask])
+    levels = sorted([str(x) for x in unique_combined if x is not None and str(x) != "nan"])
     level_map = {lv: i for i, lv in enumerate(levels)}
     n_levels = len(levels)
 
@@ -351,7 +367,7 @@ def _build_nested_random_block(
     values: list[float] = []
 
     for i in range(n):
-        group_val = combined_group.iloc[i]
+        group_val = str(combined_group[i])
         if group_val not in level_map:
             continue
         level_idx = level_map[group_val]

@@ -6,7 +6,7 @@ build-backend = "maturin"
 name = "mixedlm"
 version = "0.1.1"
 description = "Mixed-effects models in Python with Rust backend"
-requires-python = ">=3.14"
+requires-python = ">=3.10"
 license = {text = "MIT"}
 keywords = ["statistics", "mixed-effects", "lmer", "glmer", "regression"]
 classifiers = [
@@ -14,14 +14,18 @@ classifiers = [
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
     "Programming Language :: Rust",
     "Topic :: Scientific/Engineering :: Mathematics",
 ]
 dependencies = [
-    "numpy>=1.24",
-    "scipy>=1.10",
-    "pandas>=2.0",
+    "numpy>=1.21",
+    "scipy>=1.8",
+    "narwhals>=1.0",
 ]
 
 [project.optional-dependencies]
@@ -30,6 +34,8 @@ dev = [
     "pytest-cov>=4.0",
     "ruff>=0.1",
     "mypy>=1.0",
+    "polars>=0.20",
+    "pandas>=1.4",
 ]
 plots = [
     "matplotlib>=3.5",
@@ -37,6 +43,12 @@ plots = [
 optimizers = [
     "Py-BOBYQA>=1.4",
     "nlopt>=2.7",
+]
+polars = [
+    "polars>=0.20",
+]
+pandas = [
+    "pandas>=1.4",
 ]
 
 [tool.maturin]
@@ -46,13 +58,13 @@ features = ["pyo3/extension-module"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py313"
+target-version = "py310"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "SIM"]
 
 [tool.mypy]
-python_version = "3.13"
+python_version = "3.10"
 warn_return_any = false
 warn_unused_ignores = false
 ignore_missing_imports = true
@@ -60,3 +72,8 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-v"
+
+[dependency-groups]
+dev = [
+    "polars>=1.37.1",
+]

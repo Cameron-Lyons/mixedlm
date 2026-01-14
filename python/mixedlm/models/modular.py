@@ -1121,6 +1121,350 @@ def simulate_formula(
     return results
 
 
+def mkDataTemplate(
+    formula: str,
+    nlevs: dict[str, int] | None = None,
+    balanced: bool = True,
+) -> pd.DataFrame:
+    """Create a template data frame for a mixed model formula.
+
+    This function generates a data frame with the structure implied by
+    a model formula, useful for simulation studies and power analysis.
+
+    Parameters
+    ----------
+    formula : str
+        Model formula with random effects (e.g., "y ~ x + (1|group)").
+    nlevs : dict, optional
+        Dictionary mapping grouping factor names to number of levels.
+        If not specified, uses 10 levels per factor.
+    balanced : bool, default True
+        If True, creates a balanced design. If False, creates an
+        unbalanced design with varying observations per group.
+
+    Returns
+    -------
+    pd.DataFrame
+        Template data frame with appropriate structure.
+
+    Examples
+    --------
+    >>> df = mkDataTemplate("y ~ x + (1|subject)", nlevs={"subject": 20})
+    >>> df.shape
+    (20, 3)
+
+    >>> df = mkDataTemplate(
+    ...     "y ~ x + (1|subject) + (1|item)",
+    ...     nlevs={"subject": 10, "item": 5}
+    ... )
+    >>> df.shape
+    (50, 4)
+    """
+    import re
+
+    bar_pattern = r"\(([^|]+)\|([^)]+)\)"
+    matches = re.findall(bar_pattern, formula)
+
+    grouping_factors = [match[1].strip() for match in matches]
+
+    if nlevs is None:
+        nlevs = {g: 10 for g in grouping_factors}
+
+    lhs_rhs = formula.split("~")
+    response = lhs_rhs[0].strip()
+
+    rhs = lhs_rhs[1] if len(lhs_rhs) > 1 else ""
+    rhs_no_bars = re.sub(bar_pattern, "", rhs)
+    rhs_no_bars = re.sub(r"\s*\+\s*\+\s*", " + ", rhs_no_bars)
+    rhs_no_bars = rhs_no_bars.strip(" +")
+
+    fixed_vars = []
+    if rhs_no_bars:
+        terms = [t.strip() for t in rhs_no_bars.split("+")]
+        for term in terms:
+            if term and term != "1" and term != "0":
+                fixed_vars.append(term)
+
+    if balanced:
+        total_levels = 1
+        for g in grouping_factors:
+            total_levels *= nlevs.get(g, 10)
+        n = total_levels
+    else:
+        n = sum(nlevs.get(g, 10) for g in grouping_factors) * 2
+
+    data: dict[str, object] = {response: np.random.randn(n)}
+
+    for var in fixed_vars:
+        data[var] = np.random.randn(n)
+
+    if balanced and len(grouping_factors) >= 2:
+        levels_list = [list(range(1, nlevs.get(g, 10) + 1)) for g in grouping_factors]
+        grids = np.meshgrid(*levels_list, indexing="ij")
+        for i, g in enumerate(grouping_factors):
+            data[g] = [f"{g}{v}" for v in grids[i].ravel()]
+    else:
+        for g in grouping_factors:
+            n_levels = nlevs.get(g, 10)
+            if balanced:
+                obs_per_level = max(1, n // n_levels)
+                levels = [f"{g}{i + 1}" for i in range(n_levels) for _ in range(obs_per_level)]
+                data[g] = levels[:n]
+            else:
+                obs_per_level_arr = np.random.randint(1, 5, n_levels)
+                levels = []
+                for i, count in enumerate(obs_per_level_arr.tolist()):
+                    levels.extend([f"{g}{i + 1}"] * count)
+                if len(levels) < n:
+                    levels.extend(levels[: n - len(levels)])
+                else:
+                    levels = levels[:n]
+                data[g] = levels
+
+    return pd.DataFrame(data)
+
+
+def mkParsTemplate(
+    formula: str,
+    data: pd.DataFrame,
+) -> dict[str, object]:
+    """Generate a parameter structure template from formula and data.
+
+    This function creates a template dictionary showing the parameter
+    structure implied by a model formula, including fixed effects
+    names and variance component structure.
+
+    Parameters
+    ----------
+    formula : str
+        Model formula with random effects.
+    data : pd.DataFrame
+        Data frame containing the variables.
+
+    Returns
+    -------
+    dict
+        Dictionary with:
+        - 'beta': dict of fixed effect names with None placeholders
+        - 'theta': list of theta parameter descriptions
+        - 'sigma': placeholder for residual SD
+        - 'n_fixed': number of fixed effects
+        - 'n_theta': number of variance parameters
+
+    Examples
+    --------
+    >>> data = pd.DataFrame({'y': [1,2,3], 'x': [1,2,3], 'g': ['A','B','A']})
+    >>> template = mkParsTemplate("y ~ x + (1|g)", data)
+    >>> template['beta']
+    {'(Intercept)': None, 'x': None}
+    >>> template['n_theta']
+    1
+    """
+    parsed = lFormula(formula, data)
+
+    beta_template = {name: None for name in parsed.matrices.fixed_names}
+
+    theta_template = []
+    for struct in parsed.matrices.random_structures:
+        group = struct.grouping_factor
+        terms = struct.term_names
+        q = struct.n_terms
+
+        if struct.correlated:
+            for i in range(q):
+                for j in range(i + 1):
+                    if i == j:
+                        theta_template.append(f"sd_{terms[i]}|{group}")
+                    else:
+                        theta_template.append(f"cor_{terms[j]}_{terms[i]}|{group}")
+        else:
+            for term in terms:
+                theta_template.append(f"sd_{term}|{group}")
+
+    return {
+        "beta": beta_template,
+        "theta": theta_template,
+        "sigma": None,
+        "n_fixed": len(beta_template),
+        "n_theta": len(theta_template),
+    }
+
+
+def mkMinimalData(
+    formula: str,
+    n: int = 10,
+) -> pd.DataFrame:
+    """Create minimal test data from a formula.
+
+    This function generates a minimal data frame suitable for testing
+    that a formula can be parsed and model matrices can be built.
+
+    Parameters
+    ----------
+    formula : str
+        Model formula with random effects.
+    n : int, default 10
+        Number of observations.
+
+    Returns
+    -------
+    pd.DataFrame
+        Minimal data frame with required variables.
+
+    Examples
+    --------
+    >>> df = mkMinimalData("y ~ x + z + (1|group)")
+    >>> list(df.columns)
+    ['y', 'x', 'z', 'group']
+    """
+    import re
+
+    lhs_rhs = formula.split("~")
+    response = lhs_rhs[0].strip()
+
+    bar_pattern = r"\(([^|]+)\|([^)]+)\)"
+    matches = re.findall(bar_pattern, formula)
+    grouping_factors = list(set(match[1].strip() for match in matches))
+
+    re_terms = set()
+    for terms_str, _ in matches:
+        for term in terms_str.split("+"):
+            term = term.strip()
+            if term and term != "1" and term != "0":
+                re_terms.add(term)
+
+    rhs = lhs_rhs[1] if len(lhs_rhs) > 1 else ""
+    rhs_no_bars = re.sub(bar_pattern, "", rhs)
+    rhs_no_bars = re.sub(r"\s*\+\s*\+\s*", " + ", rhs_no_bars)
+    rhs_no_bars = rhs_no_bars.strip(" +")
+
+    fixed_vars = set()
+    if rhs_no_bars:
+        for term in rhs_no_bars.split("+"):
+            term = term.strip()
+            if term and term != "1" and term != "0" and ":" not in term and "*" not in term:
+                fixed_vars.add(term)
+
+    all_numeric = fixed_vars | re_terms
+
+    data: dict[str, object] = {response: np.random.randn(n)}
+
+    for var in all_numeric:
+        data[var] = np.random.randn(n)
+
+    for g in grouping_factors:
+        n_levels = min(n, 5)
+        levels = [f"{g}{i % n_levels + 1}" for i in range(n)]
+        data[g] = levels
+
+    return pd.DataFrame(data)
+
+
+def mkNewReTrms(
+    reTrms: ReTrms,
+    newdata: pd.DataFrame,
+) -> ReTrms:
+    """Create new random effect terms structure from existing one and new data.
+
+    This function constructs random effect design matrices for new data
+    using the structure from an existing ReTrms object. This is useful
+    for prediction with new groups or new observations.
+
+    Parameters
+    ----------
+    reTrms : ReTrms
+        Existing random effect terms from a fitted model.
+    newdata : pd.DataFrame
+        New data for which to create design matrices.
+
+    Returns
+    -------
+    ReTrms
+        New random effect terms for the new data.
+
+    Notes
+    -----
+    If new data contains group levels not in the original data, the
+    corresponding rows in Z will be all zeros unless allow_new_levels
+    is handled by the caller.
+
+    Examples
+    --------
+    >>> # Fit a model and get ReTrms
+    >>> reTrms = mkReTrms("y ~ x + (1|group)", train_data)
+    >>> # Create ReTrms for new data
+    >>> new_reTrms = mkNewReTrms(reTrms, test_data)
+    """
+    from scipy import sparse
+
+    n_new = len(newdata)
+    total_re = sum(len(levels) * len(reTrms.cnms[g]) for g, levels in reTrms.flist.items())
+
+    Z_rows = []
+    Z_cols = []
+    Z_data = []
+
+    col_offset = 0
+    new_flist: dict[str, NDArray] = {}
+    new_nl: list[int] = []
+
+    for group_name in reTrms.flist:
+        original_levels = list(reTrms.flist[group_name])
+        term_names = reTrms.cnms[group_name]
+        n_terms = len(term_names)
+        n_levels = len(original_levels)
+
+        level_map = {lvl: i for i, lvl in enumerate(original_levels)}
+
+        new_flist[group_name] = np.array(original_levels)
+        new_nl.append(n_levels)
+
+        if group_name not in newdata.columns:
+            col_offset += n_levels * n_terms
+            continue
+
+        group_col = newdata[group_name].values
+
+        for row_idx, level in enumerate(group_col):
+            if level in level_map:
+                level_idx = level_map[level]
+                for t, term in enumerate(term_names):
+                    col_idx = col_offset + level_idx * n_terms + t
+                    if term == "(Intercept)" or term == "1":
+                        val = 1.0
+                    elif term in newdata.columns:
+                        val = float(newdata[term].iloc[row_idx])
+                    else:
+                        val = 1.0
+
+                    Z_rows.append(row_idx)
+                    Z_cols.append(col_idx)
+                    Z_data.append(val)
+
+        col_offset += n_levels * n_terms
+
+    if Z_rows:
+        Z = sparse.csr_matrix(
+            (Z_data, (Z_rows, Z_cols)),
+            shape=(n_new, total_re),
+            dtype=np.float64,
+        )
+    else:
+        Z = sparse.csr_matrix((n_new, total_re), dtype=np.float64)
+
+    Zt = Z.T.tocsc()
+
+    return ReTrms(
+        Zt=Zt,
+        theta=reTrms.theta.copy(),
+        Lind=reTrms.Lind.copy(),
+        Gp=list(reTrms.Gp),
+        flist=new_flist,
+        cnms=dict(reTrms.cnms),
+        nl=new_nl,
+    )
+
+
 def devfun2(
     devfun: LmerDevfun | GlmerDevfun,
     theta_opt: NDArray[np.floating],

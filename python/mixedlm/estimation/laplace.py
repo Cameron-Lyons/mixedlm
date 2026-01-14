@@ -723,3 +723,107 @@ class GLMMOptimizer:
             converged=result.success,
             n_iter=result.nit,
         )
+
+
+def GQdk(d: int, k: int) -> tuple[NDArray[np.floating], NDArray[np.floating]]:
+    """Generate d-dimensional Gauss-Hermite quadrature rule with k points per dimension.
+
+    Creates a tensor product grid of Gauss-Hermite quadrature nodes and weights
+    for integration over R^d with respect to the multivariate normal distribution.
+
+    Parameters
+    ----------
+    d : int
+        Dimension of the integration domain.
+    k : int
+        Number of quadrature points per dimension.
+
+    Returns
+    -------
+    nodes : ndarray
+        Quadrature nodes with shape (k^d, d).
+    weights : ndarray
+        Quadrature weights with shape (k^d,).
+
+    Examples
+    --------
+    >>> nodes, weights = GQdk(2, 3)
+    >>> nodes.shape
+    (9, 2)
+    >>> weights.shape
+    (9,)
+
+    Notes
+    -----
+    The nodes and weights are scaled for integration with respect to
+    the standard multivariate normal distribution N(0, I).
+
+    For 1D integration of f(x) * phi(x) where phi is the standard normal pdf:
+        integral ≈ sum(weights * f(nodes))
+
+    For d > 1, the total number of nodes is k^d, which grows exponentially.
+    For high dimensions, consider sparse grids or other methods.
+    """
+    nodes_1d, weights_1d = _get_gh_nodes_weights(k)
+
+    nodes_1d = nodes_1d * np.sqrt(2)
+    weights_1d = weights_1d / np.sqrt(np.pi)
+
+    if d == 1:
+        return nodes_1d.reshape(-1, 1), weights_1d
+
+    grids = [nodes_1d] * d
+    weight_grids = [weights_1d] * d
+
+    mesh = np.meshgrid(*grids, indexing="ij")
+    weight_mesh = np.meshgrid(*weight_grids, indexing="ij")
+
+    nodes = np.column_stack([m.ravel() for m in mesh])
+    weights = np.prod(np.column_stack([w.ravel() for w in weight_mesh]), axis=1)
+
+    return nodes, weights
+
+
+def GQN(n: int) -> tuple[NDArray[np.floating], NDArray[np.floating]]:
+    """Generate normalized Gauss-Hermite quadrature rule for N(0,1).
+
+    Returns quadrature nodes and weights scaled for integration with
+    respect to the standard normal distribution. This is a convenience
+    wrapper around GHrule with proper scaling.
+
+    Parameters
+    ----------
+    n : int
+        Number of quadrature points.
+
+    Returns
+    -------
+    nodes : ndarray
+        Quadrature nodes of shape (n,).
+    weights : ndarray
+        Quadrature weights of shape (n,), sum to 1.
+
+    Examples
+    --------
+    >>> nodes, weights = GQN(5)
+    >>> np.sum(weights)  # Should be approximately 1
+    1.0
+
+    >>> # Approximate E[X^2] for X ~ N(0,1)
+    >>> nodes, weights = GQN(10)
+    >>> np.sum(weights * nodes**2)  # Should be approximately 1
+    1.0
+
+    Notes
+    -----
+    For integration of f(x) with respect to the standard normal:
+        integral of f(x) * phi(x) dx ≈ sum(weights * f(nodes))
+
+    where phi(x) is the standard normal density.
+    """
+    nodes, weights = _get_gh_nodes_weights(n)
+
+    nodes = nodes * np.sqrt(2)
+    weights = weights / np.sqrt(np.pi)
+
+    return nodes, weights
