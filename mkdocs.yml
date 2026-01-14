@@ -1,0 +1,89 @@
+site_name: mixedlm
+site_description: Mixed-effects models in Python with Rust backend
+site_url: https://mixedlm.readthedocs.io
+repo_url: https://github.com/cameronlyons/mixedlm
+repo_name: cameronlyons/mixedlm
+
+theme:
+  name: material
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - content.code.copy
+    - content.code.annotate
+    - navigation.instant
+    - navigation.tracking
+    - navigation.sections
+    - navigation.expand
+    - navigation.top
+    - search.suggest
+    - search.highlight
+    - toc.follow
+  icon:
+    repo: fontawesome/brands/github
+
+plugins:
+  - search
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.tabbed:
+      alternate_style: true
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.arithmatex:
+      generic: true
+
+extra_javascript:
+  - javascripts/mathjax.js
+  - https://unpkg.com/mathjax@3/es5/tex-mml-chtml.js
+
+nav:
+  - Home: index.md
+  - Getting Started:
+      - Installation: getting-started/installation.md
+      - Quickstart: getting-started/quickstart.md
+      - Coming from R: getting-started/coming-from-r.md
+  - Tutorials:
+      - Linear Mixed Models: tutorials/linear-mixed-models.md
+      - Generalized Linear Mixed Models: tutorials/glmm.md
+      - Nonlinear Mixed Models: tutorials/nlmm.md
+      - Statistical Inference: tutorials/inference.md
+      - Power Analysis: tutorials/power-analysis.md
+  - Background:
+      - Estimation Methods: background/estimation.md
+      - Degrees of Freedom: background/degrees-of-freedom.md
+      - Formula Syntax: background/formula-syntax.md
+  - API Reference:
+      - Models: api/models.md
+      - Results: api/results.md
+      - Inference: api/inference.md
+      - Families: api/families.md
+      - Diagnostics: api/diagnostics.md
+      - Power Analysis: api/power.md
+      - Datasets: api/datasets.md
+      - Utilities: api/utilities.md
+  - Changelog: changelog.md
+  - Contributing: contributing.md

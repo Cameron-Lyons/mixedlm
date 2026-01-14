@@ -7,6 +7,8 @@ import numpy as np
 from numpy.typing import NDArray
 from scipy import stats
 
+from mixedlm.utils import _get_signif_code
+
 if TYPE_CHECKING:
     from mixedlm.models.glmer import GlmerResult
     from mixedlm.models.lmer import LmerResult
@@ -56,18 +58,6 @@ class AnovaType3Result:
 
     def __repr__(self) -> str:
         return f"AnovaType3Result(terms={self.terms})"
-
-
-def _get_signif_code(p: float) -> str:
-    if p < 0.001:
-        return "***"
-    elif p < 0.01:
-        return "**"
-    elif p < 0.05:
-        return "*"
-    elif p < 0.1:
-        return "."
-    return ""
 
 
 @dataclass

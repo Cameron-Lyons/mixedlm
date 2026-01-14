@@ -164,10 +164,24 @@ def drop1_lmer(
     lrt_list: list[float | None] = []
     p_value_list: list[float | None] = []
 
+    from mixedlm.formula.parser import update_formula
+    from mixedlm.models.lmer import LmerMod
+
+    reduced_formulas = {
+        term: update_formula(model.formula, f". ~ . - {term}") for term in droppable_terms
+    }
+
     if n_jobs == 1:
         for term in droppable_terms:
             try:
-                reduced_model = model.update(f". ~ . - {term}", data=data)
+                lmer_model = LmerMod(
+                    reduced_formulas[term],
+                    data,
+                    REML=model.REML,
+                    weights=weights,
+                    offset=offset,
+                )
+                reduced_model = lmer_model.fit()
 
                 reduced_n_theta = _count_theta(reduced_model.matrices.random_structures)
                 reduced_n_params = reduced_model.matrices.n_fixed + reduced_n_theta + 1
@@ -198,24 +212,20 @@ def drop1_lmer(
         if n_jobs == -1:
             n_jobs = os.cpu_count() or 1
 
-        from mixedlm.formula.parser import update_formula
-
-        tasks = []
-        for term in droppable_terms:
-            reduced_formula = update_formula(model.formula, f". ~ . - {term}")
-            tasks.append(
-                (
-                    term,
-                    reduced_formula,
-                    data,
-                    model.REML,
-                    weights,
-                    offset,
-                    full_n_params,
-                    full_loglik,
-                    test,
-                )
+        tasks = [
+            (
+                term,
+                reduced_formulas[term],
+                data,
+                model.REML,
+                weights,
+                offset,
+                full_n_params,
+                full_loglik,
+                test,
             )
+            for term in droppable_terms
+        ]
 
         results: dict[str, tuple[int, float, float | None, float | None]] = {}
 
@@ -277,10 +287,24 @@ def drop1_glmer(
     lrt_list: list[float | None] = []
     p_value_list: list[float | None] = []
 
+    from mixedlm.formula.parser import update_formula
+    from mixedlm.models.glmer import GlmerMod
+
+    reduced_formulas = {
+        term: update_formula(model.formula, f". ~ . - {term}") for term in droppable_terms
+    }
+
     if n_jobs == 1:
         for term in droppable_terms:
             try:
-                reduced_model = model.update(f". ~ . - {term}", data=data)
+                glmer_model = GlmerMod(
+                    reduced_formulas[term],
+                    data,
+                    family=model.family,
+                    weights=weights,
+                    offset=offset,
+                )
+                reduced_model = glmer_model.fit(nAGQ=model.nAGQ)
 
                 reduced_n_theta = _count_theta(reduced_model.matrices.random_structures)
                 reduced_n_params = reduced_model.matrices.n_fixed + reduced_n_theta
@@ -311,25 +335,21 @@ def drop1_glmer(
         if n_jobs == -1:
             n_jobs = os.cpu_count() or 1
 
-        from mixedlm.formula.parser import update_formula
-
-        tasks = []
-        for term in droppable_terms:
-            reduced_formula = update_formula(model.formula, f". ~ . - {term}")
-            tasks.append(
-                (
-                    term,
-                    reduced_formula,
-                    data,
-                    model.family,
-                    weights,
-                    offset,
-                    model.nAGQ,
-                    full_n_params,
-                    full_loglik,
-                    test,
-                )
+        tasks = [
+            (
+                term,
+                reduced_formulas[term],
+                data,
+                model.family,
+                weights,
+                offset,
+                model.nAGQ,
+                full_n_params,
+                full_loglik,
+                test,
             )
+            for term in droppable_terms
+        ]
 
         results: dict[str, tuple[int, float, float | None, float | None]] = {}
 

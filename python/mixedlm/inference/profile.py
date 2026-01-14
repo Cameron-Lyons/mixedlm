@@ -336,6 +336,10 @@ def _profile_param_worker(
     param_values = np.linspace(range_low, range_high, n_points)
     zeta_values = np.zeros(n_points)
 
+    precomputed = _precompute_profile_matrices(
+        theta, Zt_data, Zt_indices, Zt_indptr, Zt_shape, random_structures, q
+    )
+
     for i, val in enumerate(param_values):
         dev = _profile_deviance_at_beta_direct(
             idx,
@@ -352,6 +356,7 @@ def _profile_param_worker(
             p,
             q,
             REML,
+            precomputed=precomputed,
         )
         sign = 1 if val >= mle else -1
         zeta_values[i] = sign * np.sqrt(max(0, dev - dev_mle))
@@ -372,6 +377,7 @@ def _profile_param_worker(
             p,
             q,
             REML,
+            precomputed=precomputed,
         )
         sign = 1 if val >= mle else -1
         return sign * np.sqrt(max(0, dev - dev_mle))
@@ -408,6 +414,44 @@ def _profile_param_worker(
     )
 
 
+def _precompute_profile_matrices(
+    theta: NDArray,
+    Zt_data: NDArray,
+    Zt_indices: NDArray,
+    Zt_indptr: NDArray,
+    Zt_shape: tuple[int, int],
+    random_structures: list,
+    q: int,
+) -> dict[str, Any] | None:
+    if q == 0:
+        return None
+
+    from scipy import linalg, sparse
+
+    from mixedlm.estimation.reml import _build_lambda
+
+    Zt = sparse.csc_matrix((Zt_data, Zt_indices, Zt_indptr), shape=Zt_shape)
+    Lambda = _build_lambda(theta, random_structures)
+
+    ZtZ = Zt @ Zt.T
+    LambdatZtZLambda = Lambda.T @ ZtZ @ Lambda
+
+    I_q = sparse.eye(q, format="csc")
+    V_factor = LambdatZtZLambda + I_q
+
+    V_factor_dense = V_factor.toarray()
+    L_V = linalg.cholesky(V_factor_dense, lower=True)
+
+    logdet_V = 2.0 * np.sum(np.log(np.diag(L_V)))
+
+    return {
+        "Zt": Zt,
+        "Lambda": Lambda,
+        "L_V": L_V,
+        "logdet_V": logdet_V,
+    }
+
+
 def _profile_deviance_at_beta_direct(
     idx: int,
     value: float,
@@ -423,6 +467,7 @@ def _profile_deviance_at_beta_direct(
     p: int,
     q: int,
     REML: bool,
+    precomputed: dict[str, Any] | None = None,
 ) -> float:
     from scipy import linalg, sparse
 
@@ -452,19 +497,25 @@ def _profile_deviance_at_beta_direct(
 
         return float(dev)
 
-    Zt = sparse.csc_matrix((Zt_data, Zt_indices, Zt_indptr), shape=Zt_shape)
-    Lambda = _build_lambda(theta, random_structures)
+    if precomputed is not None:
+        Zt = precomputed["Zt"]
+        Lambda = precomputed["Lambda"]
+        L_V = precomputed["L_V"]
+        logdet_V = precomputed["logdet_V"]
+    else:
+        Zt = sparse.csc_matrix((Zt_data, Zt_indices, Zt_indptr), shape=Zt_shape)
+        Lambda = _build_lambda(theta, random_structures)
 
-    ZtZ = Zt @ Zt.T
-    LambdatZtZLambda = Lambda.T @ ZtZ @ Lambda
+        ZtZ = Zt @ Zt.T
+        LambdatZtZLambda = Lambda.T @ ZtZ @ Lambda
 
-    I_q = sparse.eye(q, format="csc")
-    V_factor = LambdatZtZLambda + I_q
+        I_q = sparse.eye(q, format="csc")
+        V_factor = LambdatZtZLambda + I_q
 
-    V_factor_dense = V_factor.toarray()
-    L_V = linalg.cholesky(V_factor_dense, lower=True)
+        V_factor_dense = V_factor.toarray()
+        L_V = linalg.cholesky(V_factor_dense, lower=True)
 
-    logdet_V = 2.0 * np.sum(np.log(np.diag(L_V)))
+        logdet_V = 2.0 * np.sum(np.log(np.diag(L_V)))
 
     Zty = Zt @ y_adjusted
     cu = Lambda.T @ Zty

@@ -138,11 +138,8 @@ def _lmer_bootstrap_worker(
                 else:
                     cov = np.diag(theta_block**2) * sigma**2
 
-                for g in range(n_levels):
-                    b_g = np.random.multivariate_normal(np.zeros(n_terms), cov)
-                    for j in range(n_terms):
-                        u_new[u_idx + g * n_terms + j] = b_g[j]
-
+                b_all = np.random.multivariate_normal(np.zeros(n_terms), cov, size=n_levels)
+                u_new[u_idx : u_idx + n_levels * n_terms] = b_all.ravel()
                 u_idx += n_levels * n_terms
 
             random_part = Z @ u_new
@@ -218,13 +215,10 @@ def _glmer_bootstrap_worker(args: tuple[Any, ...]) -> tuple[int, NDArray | None,
                 else:
                     cov = np.diag(theta_block**2)
 
-                for g in range(n_levels):
-                    b_g = np.random.multivariate_normal(
-                        np.zeros(n_terms), cov + 1e-8 * np.eye(n_terms)
-                    )
-                    for j in range(n_terms):
-                        u_new[u_idx + g * n_terms + j] = b_g[j]
-
+                b_all = np.random.multivariate_normal(
+                    np.zeros(n_terms), cov + 1e-8 * np.eye(n_terms), size=n_levels
+                )
+                u_new[u_idx : u_idx + n_levels * n_terms] = b_all.ravel()
                 u_idx += n_levels * n_terms
 
             eta = X @ beta + Z @ u_new
@@ -493,14 +487,8 @@ def _simulate_lmer(result: LmerResult) -> NDArray[np.floating]:
             else:
                 cov = np.diag(theta_block**2) * result.sigma**2
 
-            for g in range(n_levels):
-                b_g = np.random.multivariate_normal(
-                    np.zeros(n_terms),
-                    cov,
-                )
-                for j in range(n_terms):
-                    u_new[u_idx + g * n_terms + j] = b_g[j]
-
+            b_all = np.random.multivariate_normal(np.zeros(n_terms), cov, size=n_levels)
+            u_new[u_idx : u_idx + n_levels * n_terms] = b_all.ravel()
             u_idx += n_levels * n_terms
             theta_start += n_theta
 
@@ -654,14 +642,10 @@ def _simulate_glmer(result: GlmerResult) -> NDArray[np.floating]:
             else:
                 cov = np.diag(theta_block**2)
 
-            for g in range(n_levels):
-                b_g = np.random.multivariate_normal(
-                    np.zeros(n_terms),
-                    cov + 1e-8 * np.eye(n_terms),
-                )
-                for j in range(n_terms):
-                    u_new[u_idx + g * n_terms + j] = b_g[j]
-
+            b_all = np.random.multivariate_normal(
+                np.zeros(n_terms), cov + 1e-8 * np.eye(n_terms), size=n_levels
+            )
+            u_new[u_idx : u_idx + n_levels * n_terms] = b_all.ravel()
             u_idx += n_levels * n_terms
             theta_start += n_theta
 

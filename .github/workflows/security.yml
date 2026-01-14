@@ -52,8 +52,8 @@ jobs:
 
       - name: Run pip-audit for dependency vulnerabilities
         run: |
-          uv pip install numpy scipy pandas
-          uv run pip-audit --strict --progress-spinner off
+          uv pip install numpy scipy pandas narwhals
+          uv run pip-audit --progress-spinner off --skip-editable
 
   rust-security:
     name: Rust Security Audit

@@ -15,7 +15,7 @@ from mixedlm.datasets import (
 from mixedlm.estimation.laplace import GQN, GQdk
 from mixedlm.estimation.optimizers import NelderMead, NelderMeadState, golden, nlminbwrap
 from mixedlm.estimation.reml import DevianceComponents
-from mixedlm.families.custom import CustomFamily, validate_family
+from mixedlm.families.custom import CustomFamily, QuasiFamily, validate_family
 from mixedlm.formula.parser import (
     dropOffset,
     expandDoubleVerts,
@@ -30,7 +30,7 @@ from mixedlm.formula.parser import (
     set_cov_type,
     subbars,
 )
-from mixedlm.inference.anova import AnovaResult, anova, anova_type3
+from mixedlm.inference.anova import AnovaResult, AnovaType3Result, anova, anova_type3
 from mixedlm.inference.bootstrap import bootMer, bootstrap_nlmer
 from mixedlm.inference.ddf import (
     DenomDFResult,
@@ -122,7 +122,7 @@ from mixedlm.utils.variance import (
     vec2STlist,
 )
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     "lmer",
@@ -140,6 +140,7 @@ __all__ = [
     "anova",
     "anova_type3",
     "AnovaResult",
+    "AnovaType3Result",
     "emmeans",
     "Emmeans",
     "bootMer",
@@ -181,6 +182,7 @@ __all__ = [
     "getNGroups",
     "families",
     "CustomFamily",
+    "QuasiFamily",
     "validate_family",
     "DevianceComponents",
     "nlme",

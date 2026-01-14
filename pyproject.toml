@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "mixedlm"
-version = "0.1.1"
+version = "0.2.0"
 description = "Mixed-effects models in Python with Rust backend"
 requires-python = ">=3.10"
 license = {text = "MIT"}
@@ -49,6 +49,11 @@ polars = [
 ]
 pandas = [
     "pandas>=1.4",
+]
+docs = [
+    "mkdocs>=1.5",
+    "mkdocs-material>=9.5",
+    "mkdocstrings[python]>=0.24",
 ]
 
 [tool.maturin]

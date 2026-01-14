@@ -15,7 +15,38 @@ from mixedlm.estimation.reml import (
     _count_theta,
 )
 from mixedlm.families.base import Family
-from mixedlm.matrices.design import ModelMatrices
+from mixedlm.matrices.design import ModelMatrices, RandomEffectStructure
+
+_lambda_cache: dict[
+    tuple[bytes, tuple[tuple[int, int, bool], ...]], tuple[sparse.csc_matrix, NDArray[np.floating]]
+] = {}
+_LAMBDA_CACHE_MAX_SIZE = 8
+
+
+def _get_lambda_cached(
+    theta: NDArray[np.floating], random_structures: list[RandomEffectStructure]
+) -> tuple[sparse.csc_matrix, NDArray[np.floating]]:
+    struct_key = tuple((s.n_levels, s.n_terms, s.correlated) for s in random_structures)
+    key = (theta.tobytes(), struct_key)
+    if key in _lambda_cache:
+        return _lambda_cache[key]
+
+    Lambda = _build_lambda(theta, random_structures)
+    LambdatLambda = Lambda.T @ Lambda
+    LambdatLambda_dense = (
+        LambdatLambda.toarray() if sparse.issparse(LambdatLambda) else LambdatLambda
+    )
+
+    if len(_lambda_cache) >= _LAMBDA_CACHE_MAX_SIZE:
+        _lambda_cache.pop(next(iter(_lambda_cache)))
+    _lambda_cache[key] = (Lambda, LambdatLambda_dense)
+
+    return Lambda, LambdatLambda_dense
+
+
+def clear_lambda_cache() -> None:
+    _lambda_cache.clear()
+
 
 try:
     from mixedlm._rust import adaptive_gh_deviance as _rust_adaptive_gh_deviance
@@ -92,12 +123,7 @@ def pirls(
 
     u = np.zeros(q, dtype=np.float64) if u_start is None else u_start
 
-    Lambda = _build_lambda(theta, matrices.random_structures)
-
-    LambdatLambda = Lambda.T @ Lambda
-    LambdatLambda_dense = (
-        LambdatLambda.toarray() if sparse.issparse(LambdatLambda) else LambdatLambda
-    )
+    Lambda, LambdatLambda_dense = _get_lambda_cached(theta, matrices.random_structures)
 
     W = np.empty(matrices.n_obs, dtype=np.float64)
     z = np.empty(matrices.n_obs, dtype=np.float64)
@@ -221,7 +247,7 @@ def laplace_deviance(
 
     beta, u, _, _ = pirls(matrices, family, theta, beta_start, u_start)
 
-    Lambda = _build_lambda(theta, matrices.random_structures)
+    _, LambdatLambda_dense = _get_lambda_cached(theta, matrices.random_structures)
 
     eta = matrices.X @ beta + matrices.Z @ u + offset
     mu = family.link.inverse(eta)
@@ -229,11 +255,6 @@ def laplace_deviance(
 
     dev_resids = family.deviance_resids(matrices.y, mu, prior_weights)
     deviance = np.sum(dev_resids)
-
-    LambdatLambda = Lambda.T @ Lambda
-    LambdatLambda_dense = (
-        LambdatLambda.toarray() if sparse.issparse(LambdatLambda) else LambdatLambda
-    )
 
     u_penalty = np.dot(u, linalg.solve(LambdatLambda_dense + 1e-10 * np.eye(q), u))
     deviance += u_penalty
@@ -381,11 +402,7 @@ def adaptive_gh_deviance(
 
     beta, u, _, _ = pirls(matrices, family, theta, beta_start, u_start)
 
-    Lambda = _build_lambda(theta, matrices.random_structures)
-    LambdatLambda = Lambda.T @ Lambda
-    LambdatLambda_dense = (
-        LambdatLambda.toarray() if sparse.issparse(LambdatLambda) else LambdatLambda
-    )
+    Lambda, LambdatLambda_dense = _get_lambda_cached(theta, matrices.random_structures)
 
     eta = matrices.X @ beta + matrices.Z @ u + offset
     mu = family.link.inverse(eta)
@@ -420,7 +437,7 @@ def adaptive_gh_deviance(
 
         n_jobs = os.cpu_count() or 1
 
-    if n_jobs > 1 and n_levels_first > 4:
+    if n_jobs > 1 and n_levels_first > 2:
         with ThreadPoolExecutor(max_workers=min(n_jobs, n_levels_first)) as executor:
             futures = [
                 executor.submit(
