@@ -471,16 +471,6 @@ class LmerResult:
             has_intercept=self.formula.fixed.has_intercept,
         )
 
-    def get_formula(self) -> Formula:
-        """Get the model formula.
-
-        Returns
-        -------
-        Formula
-            The formula object used to specify the model.
-        """
-        return self.formula
-
     def model_frame(self) -> pd.DataFrame:
         """Get the model frame.
 
@@ -1862,6 +1852,118 @@ class LmerResult:
     def BIC(self) -> float:
         ll = self.logLik()
         return -2 * ll.value + ll.df * np.log(ll.nobs)
+
+    def extractAIC(self) -> tuple[float, float]:
+        """Extract AIC with effective degrees of freedom.
+
+        Returns the effective degrees of freedom and AIC value,
+        matching the interface of R's extractAIC function.
+
+        Returns
+        -------
+        tuple of (float, float)
+            (edf, AIC) where edf is the effective degrees of freedom.
+
+        Examples
+        --------
+        >>> result = lmer("Reaction ~ Days + (Days|Subject)", sleepstudy)
+        >>> edf, aic = result.extractAIC()
+        """
+        ll = self.logLik()
+        edf = float(ll.df)
+        aic = float(-2 * ll.value + 2 * ll.df)
+        return (edf, aic)
+
+    def get_formula(
+        self,
+        random_only: bool = False,
+        fixed_only: bool = False,
+    ) -> Formula | str:
+        """Get the model formula.
+
+        When called without arguments, returns the Formula object.
+        When random_only or fixed_only is specified, returns a string.
+
+        Parameters
+        ----------
+        random_only : bool, default False
+            If True, return only the random effects part as a string.
+        fixed_only : bool, default False
+            If True, return only the fixed effects part as a string.
+
+        Returns
+        -------
+        Formula or str
+            The Formula object (default), or a string if random_only
+            or fixed_only is specified.
+
+        Examples
+        --------
+        >>> result = lmer("Reaction ~ Days + (Days|Subject)", sleepstudy)
+        >>> f = result.get_formula()
+        >>> f.response
+        'Reaction'
+        >>> result.get_formula(fixed_only=True)
+        'Reaction ~ Days'
+        >>> result.get_formula(random_only=True)
+        '(Days | Subject)'
+        """
+        from mixedlm.formula.parser import (
+            getFixedFormulaStr,
+            getRandomFormulaStr,
+        )
+
+        if random_only and fixed_only:
+            raise ValueError("Cannot specify both random_only and fixed_only")
+
+        if random_only:
+            return getRandomFormulaStr(str(self.formula))
+        elif fixed_only:
+            return getFixedFormulaStr(str(self.formula))
+        else:
+            return self.formula
+
+    def as_function(
+        self,
+        type: str = "deviance",
+    ) -> object:
+        """Return the model's objective function.
+
+        Parameters
+        ----------
+        type : str, default "deviance"
+            Type of function to return:
+            - "deviance": returns the deviance function
+            - "predict": returns a prediction function
+
+        Returns
+        -------
+        callable
+            The requested function.
+
+        Examples
+        --------
+        >>> result = lmer("Reaction ~ Days + (Days|Subject)", sleepstudy)
+        >>> devfun = result.as_function("deviance")
+        >>> devfun(result.theta)  # Should equal result.deviance
+        """
+        from mixedlm.estimation.reml import LMMOptimizer
+
+        if type == "deviance":
+            optimizer = LMMOptimizer(
+                self.matrices,
+                REML=self.REML,
+                verbose=0,
+            )
+            return optimizer.objective
+        elif type == "predict":
+
+            def predict_fn(X: NDArray[np.floating]) -> NDArray[np.floating]:
+                return X @ self.beta
+
+            return predict_fn
+        else:
+            raise ValueError(f"Unknown type: {type}. Use 'deviance' or 'predict'.")
 
     def confint(
         self,

@@ -1,6 +1,6 @@
 # mixedlm
 
-A Python implementation of mixed-effects models inspired by R's [lme4](https://github.com/lme4/lme4) package. Features a Rust backend for performance-critical operations.
+A Python implementation of mixed-effects models inspired by R's [lme4](https://github.com/lme4/lme4) package. Features a Rust backend for performance-critical operations and native support for both **pandas** and **polars** DataFrames.
 
 ## Features
 
@@ -8,8 +8,10 @@ A Python implementation of mixed-effects models inspired by R's [lme4](https://g
 - **Generalized Linear Mixed Models (GLMM)** via `glmer()` - Laplace approximation and adaptive Gauss-Hermite quadrature
 - **Nonlinear Mixed Models (NLMM)** via `nlmer()` - Self-starting models (SSasymp, SSlogis, SSmicmen)
 - **Formula interface** - lme4-style formulas with random effects syntax
-- **Inference tools** - Profile likelihood, parametric bootstrap, confidence intervals
-- **Model comparison** - ANOVA, drop1, allFit
+- **Inference tools** - Profile likelihood, parametric bootstrap, confidence intervals, Satterthwaite/Kenward-Roger degrees of freedom
+- **Model comparison** - ANOVA (including Type III), drop1, allFit
+- **Power analysis** - powerSim, powerCurve for sample size planning
+- **Diagnostics** - Influence measures, Cook's distance, leverage
 
 ## Installation
 
@@ -31,11 +33,13 @@ pip install -e .
 
 ```python
 import mixedlm as mlm
-import pandas as pd
 
-# Fit a random intercept model
-result = mlm.lmer("Reaction ~ Days + (1 | Subject)", data)
-print(result.summary())
+# Works with pandas
+data = mlm.load_sleepstudy()  # Returns pandas DataFrame
+
+# Fit a random intercept and slope model
+result = mlm.lmer("Reaction ~ Days + (Days | Subject)", data)
+print(result.summary())  # Includes p-values via Satterthwaite DF
 
 # Extract components
 result.fixef()      # Fixed effects
@@ -48,23 +52,58 @@ result.confint(method="profile")  # Profile confidence intervals
 result.confint(method="boot")     # Bootstrap confidence intervals
 ```
 
+### Using Polars
+
+```python
+import polars as pl
+import mixedlm as mlm
+
+# Works directly with polars DataFrames
+data = pl.DataFrame({
+    "y": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+    "x": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+    "group": ["A", "A", "B", "B", "C", "C"],
+})
+
+result = mlm.lmer("y ~ x + (1 | group)", data)
+print(result.summary())
+```
+
 ### Generalized Linear Mixed Model
 
 ```python
+# Load example data
+cbpp = mlm.load_cbpp()
+
 # Binomial GLMM
 result = mlm.glmer(
-    "y ~ treatment + (1 | subject)",
-    data,
+    "incidence / size ~ period + (1 | herd)",
+    cbpp,
     family=mlm.families.Binomial()
 )
 
-# Poisson GLMM with adaptive quadrature
+# Poisson GLMM with adaptive Gauss-Hermite quadrature
 result = mlm.glmer(
     "count ~ x + (1 | group)",
     data,
     family=mlm.families.Poisson(),
-    nAGQ=10
+    nAGQ=10  # 10-point adaptive quadrature
 )
+```
+
+### lmerTest-style P-values
+
+```python
+# Summary with Satterthwaite degrees of freedom (default)
+print(result.summary())
+
+# Or use Kenward-Roger
+print(result.summary(ddf_method="Kenward-Roger"))
+
+# Direct access to denominator DF
+from mixedlm import satterthwaite_df, pvalues_with_ddf
+ddf = satterthwaite_df(result)
+pvals = pvalues_with_ddf(result)
 ```
 
 ### Model Comparison
@@ -77,11 +116,43 @@ model2 = mlm.lmer("y ~ x + z + (1 | group)", data)
 # Likelihood ratio test
 mlm.anova(model1, model2)
 
+# Type III ANOVA for a single model
+mlm.anova_type3(model1)
+
 # Single term deletions
 result.drop1(data)
 
 # Try multiple optimizers
 result.allFit(data)
+```
+
+### Power Analysis
+
+```python
+from mixedlm import powerSim, powerCurve, extend
+
+# Simulate power for detecting an effect
+power = powerSim(fitted_model, data, nsim=100, test="fixed")
+
+# Power curve across sample sizes
+curve = powerCurve(fitted_model, data, along="n", breaks=[50, 100, 200])
+
+# Extend dataset for larger sample size simulations
+extended_data = extend(fitted_model, data, along="n", n=200)
+```
+
+### Profile Likelihood
+
+```python
+from mixedlm import plot_profiles, slice2D
+
+# 1D profile likelihood
+profiles = result.profile(data)
+plot_profiles(profiles)
+
+# 2D profile likelihood slice
+profile_2d = slice2D(result, "sigma", "theta1", n_points=20)
+profile_2d.plot()
 ```
 
 ## Formula Syntax
@@ -119,14 +190,27 @@ mixedlm supports lme4-style formula syntax for specifying random effects:
 | `confint(method)` | Confidence intervals (Wald, profile, boot) |
 | `logLik()` | Log-likelihood with df |
 | `AIC()` / `BIC()` | Information criteria |
-| `summary()` | Model summary |
+| `summary(ddf_method)` | Model summary with optional p-values |
+| `getME(name)` | Extract model components (X, Z, theta, Lambda, etc.) |
+| `get_deviance_components()` | Breakdown of deviance into components |
 
 ### Inference Functions
 
-- `anova(*models)` - Likelihood ratio tests
+- `anova(*models)` - Likelihood ratio tests between models
+- `anova_type3(model)` - Type III ANOVA for single model
 - `drop1(model, data)` - Single term deletions
-- `profile(model, data)` - Likelihood profiles
-- `bootstrap(model, data, nsim)` - Parametric bootstrap
+- `profile(model, data)` - 1D likelihood profiles
+- `slice2D(model, param1, param2)` - 2D profile likelihood
+- `bootMer(model, data, nsim)` - Parametric bootstrap
+- `satterthwaite_df(model)` - Satterthwaite denominator DF
+- `kenward_roger_df(model)` - Kenward-Roger denominator DF
+- `pvalues_with_ddf(model)` - P-values using denominator DF
+
+### Power Analysis
+
+- `powerSim(model, data, nsim)` - Simulate power
+- `powerCurve(model, data, along, breaks)` - Power across sample sizes
+- `extend(model, data, along, n)` - Extend dataset for simulations
 
 ### Families (for glmer)
 
@@ -136,13 +220,47 @@ mixedlm supports lme4-style formula syntax for specifying random effects:
 - `Gamma()` - Gamma distribution (inverse link)
 - `InverseGaussian()` - Inverse Gaussian (1/mu^2 link)
 - `NegativeBinomial(theta)` - Negative binomial (log link)
+- `CustomFamily` - Base class for user-defined families
+
+### Datasets
+
+Built-in datasets from lme4:
+
+- `load_sleepstudy()` - Sleep deprivation study
+- `load_cbpp()` - Contagious bovine pleuropneumonia
+- `load_cake()` - Cake baking experiment
+- `load_dyestuff()` / `load_dyestuff2()` - Dyestuff experiments
+- `load_penicillin()` - Penicillin assay
+- `load_pastes()` - Paste strength
+- `load_insteval()` - Instructor evaluations
+- `load_arabidopsis()` - Arabidopsis clipping experiment
+- `load_grouseticks()` - Grouse tick counts
+- `load_verbagg()` - Verbal aggression
 
 ## Requirements
 
-- Python >= 3.14
-- NumPy >= 1.24
-- SciPy >= 1.10
-- pandas >= 2.0
+- Python >= 3.10
+- NumPy >= 1.21
+- SciPy >= 1.8
+- One of: **pandas** >= 1.4 or **polars** >= 0.20
+
+The package works with either pandas or polars DataFrames. Install whichever you prefer:
+
+```bash
+pip install mixedlm pandas   # For pandas support
+pip install mixedlm polars   # For polars support
+pip install mixedlm pandas polars  # For both
+```
+
+### Optional Dependencies
+
+```bash
+# For plotting
+pip install mixedlm[plots]  # matplotlib
+
+# For additional optimizers
+pip install mixedlm[optimizers]  # Py-BOBYQA, nlopt
+```
 
 ## License
 

@@ -2,14 +2,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from numpy.typing import NDArray
 
-if TYPE_CHECKING:
-    import pandas as pd
+from mixedlm.utils.dataframe import (
+    _is_polars,
+    dataframe_length,
+    get_columns,
+)
 
+if TYPE_CHECKING:
     from mixedlm.formula.terms import Formula
 
 
@@ -86,21 +90,75 @@ def get_model_variables(formula: Formula) -> list[str]:
     return list(dict.fromkeys(variables))
 
 
+def _get_na_mask_polars(data: Any, variables: list[str]) -> NDArray[np.bool_]:
+    """Get NA mask for polars DataFrame."""
+    import polars as pl
+
+    available_cols = get_columns(data)
+    available_vars = [v for v in variables if v in available_cols]
+
+    if not available_vars:
+        return np.zeros(dataframe_length(data), dtype=bool)
+
+    null_expr = pl.any_horizontal(*[pl.col(v).is_null() for v in available_vars])
+    mask_series = data.select(null_expr.alias("_na_mask")).get_column("_na_mask")
+    return mask_series.to_numpy()
+
+
+def _get_na_mask_pandas(data: Any, variables: list[str]) -> NDArray[np.bool_]:
+    """Get NA mask for pandas DataFrame."""
+    available_cols = list(data.columns)
+    available_vars = [v for v in variables if v in available_cols]
+
+    if not available_vars:
+        return np.zeros(len(data), dtype=bool)
+
+    subset = data[available_vars]
+    return subset.isna().any(axis=1).values
+
+
+def _filter_rows_polars(data: Any, keep_mask: NDArray[np.bool_]) -> Any:
+    """Filter rows in polars DataFrame."""
+    import polars as pl
+
+    return data.filter(pl.Series(keep_mask))
+
+
+def _filter_rows_pandas(data: Any, keep_mask: NDArray[np.bool_]) -> Any:
+    """Filter rows in pandas DataFrame."""
+    return data[keep_mask].reset_index(drop=True)
+
+
+def _check_column_has_na_polars(data: Any, var: str) -> bool:
+    """Check if a column has NA values in polars."""
+    return data.get_column(var).null_count() > 0
+
+
+def _check_column_has_na_pandas(data: Any, var: str) -> bool:
+    """Check if a column has NA values in pandas."""
+    return data[var].isna().any()
+
+
 def handle_na(
-    data: pd.DataFrame,
+    data: Any,
     formula: Formula,
     na_action: NAAction | str | None = None,
     weights: NDArray[np.floating] | None = None,
     offset: NDArray[np.floating] | None = None,
-) -> tuple[pd.DataFrame, NAInfo, NDArray[np.floating] | None, NDArray[np.floating] | None]:
+) -> tuple[Any, NAInfo, NDArray[np.floating] | None, NDArray[np.floating] | None]:
     if isinstance(na_action, str) or na_action is None:
         na_action = NAAction.from_string(na_action)
 
     variables = get_model_variables(formula)
-    available_vars = [v for v in variables if v in data.columns]
+    available_cols = get_columns(data)
+    available_vars = [v for v in variables if v in available_cols]
 
-    subset = data[available_vars]
-    na_mask = subset.isna().any(axis=1)
+    is_polars = _is_polars(data)
+
+    if is_polars:
+        na_mask = _get_na_mask_polars(data, available_vars)
+    else:
+        na_mask = _get_na_mask_pandas(data, available_vars)
 
     if weights is not None:
         na_mask = na_mask | np.isnan(weights)
@@ -108,25 +166,33 @@ def handle_na(
         na_mask = na_mask | np.isnan(offset)
 
     omitted_indices = np.where(na_mask)[0]
-    n_original = len(data)
+    n_original = dataframe_length(data)
 
     if len(omitted_indices) > 0:
         if na_action == NAAction.FAIL:
             na_vars = []
             for var in available_vars:
-                if data[var].isna().any():
+                if is_polars:
+                    has_na = _check_column_has_na_polars(data, var)
+                else:
+                    has_na = _check_column_has_na_pandas(data, var)
+                if has_na:
                     na_vars.append(var)
             raise ValueError(
                 f"Missing values in data. Variables with NA: {na_vars}. "
                 "Use na_action='omit' or 'exclude' to handle missing values."
             )
 
-        clean_data = data[~na_mask].reset_index(drop=True)
+        keep_mask = ~na_mask
+        if is_polars:
+            clean_data = _filter_rows_polars(data, keep_mask)
+        else:
+            clean_data = _filter_rows_pandas(data, keep_mask)
 
         if weights is not None:
-            weights = weights[~na_mask]
+            weights = weights[keep_mask]
         if offset is not None:
-            offset = offset[~na_mask]
+            offset = offset[keep_mask]
     else:
         clean_data = data
 
