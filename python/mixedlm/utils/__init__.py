@@ -39,6 +39,28 @@ from mixedlm.utils.variance import (
     vec2STlist,
 )
 
+
+def _get_signif_code(p: float) -> str:
+    if p < 0.001:
+        return "***"
+    elif p < 0.01:
+        return "**"
+    elif p < 0.05:
+        return "*"
+    elif p < 0.1:
+        return "."
+    return ""
+
+
+def _format_pvalue(p: float) -> str:
+    if p < 2.2e-16:
+        return "< 2e-16"
+    elif p < 0.001:
+        return f"{p:.2e}"
+    else:
+        return f"{p:.4f}"
+
+
 __all__ = [
     "sigma",
     "ngrps",

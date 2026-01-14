@@ -17,27 +17,7 @@ from mixedlm.estimation.reml import LMMOptimizer, _build_lambda, _count_theta
 from mixedlm.formula.parser import parse_formula
 from mixedlm.formula.terms import Formula
 from mixedlm.matrices.design import ModelMatrices, build_model_matrices
-
-
-def _get_signif_code(p: float) -> str:
-    if p < 0.001:
-        return "***"
-    elif p < 0.01:
-        return "**"
-    elif p < 0.05:
-        return "*"
-    elif p < 0.1:
-        return "."
-    return ""
-
-
-def _format_pvalue(p: float) -> str:
-    if p < 2.2e-16:
-        return "< 2e-16"
-    elif p < 0.001:
-        return f"{p:.2e}"
-    else:
-        return f"{p:.4f}"
+from mixedlm.utils import _format_pvalue, _get_signif_code
 
 
 @dataclass
@@ -224,8 +204,49 @@ class VarCorr:
         return self.groups[group].corr
 
 
+class MerResultMixin:
+    matrices: ModelMatrices
+
+    def ranef(
+        self, condVar: bool = False
+    ) -> dict[str, dict[str, NDArray[np.floating]]] | RanefResult:
+        raise NotImplementedError
+
+    def fixef(self) -> dict[str, float]:
+        raise NotImplementedError
+
+    def coef(self) -> dict[str, dict[str, NDArray[np.floating]]]:
+        ranefs = self.ranef()
+        fixefs = self.fixef()
+        result: dict[str, dict[str, NDArray[np.floating]]] = {}
+
+        for group, terms in ranefs.items():
+            group_coef: dict[str, NDArray[np.floating]] = {}
+            for term_name, ranef_vals in terms.items():
+                if term_name in fixefs:
+                    group_coef[term_name] = ranef_vals + fixefs[term_name]
+                else:
+                    group_coef[term_name] = ranef_vals
+            result[group] = group_coef
+
+        return result
+
+    def nobs(self) -> int:
+        return self.matrices.n_obs
+
+    def ngrps(self) -> dict[str, int]:
+        return {
+            struct.grouping_factor: struct.n_levels for struct in self.matrices.random_structures
+        }
+
+    def df_residual(self) -> int:
+        n = self.matrices.n_obs
+        p = self.matrices.n_fixed
+        return n - p
+
+
 @dataclass
-class LmerResult:
+class LmerResult(MerResultMixin):
     formula: Formula
     matrices: ModelMatrices
     theta: NDArray[np.floating]
@@ -307,37 +328,8 @@ class LmerResult:
 
         return cond_var_result
 
-    def coef(self) -> dict[str, dict[str, NDArray[np.floating]]]:
-        ranefs = self.ranef()
-        fixefs = self.fixef()
-        result: dict[str, dict[str, NDArray[np.floating]]] = {}
-
-        for group, terms in ranefs.items():
-            group_coef: dict[str, NDArray[np.floating]] = {}
-            for term_name, ranef_vals in terms.items():
-                if term_name in fixefs:
-                    group_coef[term_name] = ranef_vals + fixefs[term_name]
-                else:
-                    group_coef[term_name] = ranef_vals
-            result[group] = group_coef
-
-        return result
-
-    def nobs(self) -> int:
-        return self.matrices.n_obs
-
-    def ngrps(self) -> dict[str, int]:
-        return {
-            struct.grouping_factor: struct.n_levels for struct in self.matrices.random_structures
-        }
-
     def get_sigma(self) -> float:
         return self.sigma
-
-    def df_residual(self) -> int:
-        n = self.matrices.n_obs
-        p = self.matrices.n_fixed
-        return n - p
 
     def weights(self, copy: bool = True) -> NDArray[np.floating]:
         """Get the model weights.

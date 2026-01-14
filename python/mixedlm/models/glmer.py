@@ -19,7 +19,14 @@ from mixedlm.families.binomial import Binomial
 from mixedlm.formula.parser import parse_formula
 from mixedlm.formula.terms import Formula
 from mixedlm.matrices.design import ModelMatrices, build_model_matrices
-from mixedlm.models.lmer import LogLik, PredictResult, RanefResult, VarCorrGroup
+from mixedlm.models.lmer import (
+    LogLik,
+    MerResultMixin,
+    PredictResult,
+    RanefResult,
+    VarCorrGroup,
+)
+from mixedlm.utils import _get_signif_code
 
 
 @dataclass
@@ -56,7 +63,7 @@ class GlmerVarCorr:
 
 
 @dataclass
-class GlmerResult:
+class GlmerResult(MerResultMixin):
     formula: Formula
     matrices: ModelMatrices
     family: Family
@@ -148,35 +155,6 @@ class GlmerResult:
             u_idx += n_u
 
         return result
-
-    def coef(self) -> dict[str, dict[str, NDArray[np.floating]]]:
-        ranefs = self.ranef()
-        fixefs = self.fixef()
-        result: dict[str, dict[str, NDArray[np.floating]]] = {}
-
-        for group, terms in ranefs.items():
-            group_coef: dict[str, NDArray[np.floating]] = {}
-            for term_name, ranef_vals in terms.items():
-                if term_name in fixefs:
-                    group_coef[term_name] = ranef_vals + fixefs[term_name]
-                else:
-                    group_coef[term_name] = ranef_vals
-            result[group] = group_coef
-
-        return result
-
-    def nobs(self) -> int:
-        return self.matrices.n_obs
-
-    def ngrps(self) -> dict[str, int]:
-        return {
-            struct.grouping_factor: struct.n_levels for struct in self.matrices.random_structures
-        }
-
-    def df_residual(self) -> int:
-        n = self.matrices.n_obs
-        p = self.matrices.n_fixed
-        return n - p
 
     def get_sigma(self) -> float:
         return 1.0
@@ -1990,18 +1968,8 @@ class GlmerResult:
         lines.append("             Estimate  Std. Error  z value  Pr(>|z|)")
         for i, name in enumerate(self.matrices.fixed_names):
             z_val = self.beta[i] / se[i] if se[i] > 0 else np.nan
-            from scipy import stats
-
             p_val = 2 * (1 - stats.norm.cdf(np.abs(z_val)))
-            sig = ""
-            if p_val < 0.001:
-                sig = "***"
-            elif p_val < 0.01:
-                sig = "**"
-            elif p_val < 0.05:
-                sig = "*"
-            elif p_val < 0.1:
-                sig = "."
+            sig = _get_signif_code(p_val)
             lines.append(
                 f"{name:12} {self.beta[i]:10.4f}  {se[i]:10.4f}  {z_val:7.3f}  {p_val:.4f} {sig}"
             )

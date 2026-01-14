@@ -15,6 +15,13 @@ _GRADIENT_ZERO_THRESHOLD = 1e-10
 _MIN_DF = 1.0
 _CHOLESKY_REGULARIZATION = 1e-6
 
+_vcov_grad_cache: dict[bytes, list[NDArray[np.floating]]] = {}
+_VCOV_GRAD_CACHE_MAX_SIZE = 4
+
+
+def clear_vcov_grad_cache() -> None:
+    _vcov_grad_cache.clear()
+
 
 @dataclass
 class DenomDFResult:
@@ -156,17 +163,25 @@ def satterthwaite_df(
         except linalg.LinAlgError:
             return linalg.pinv(XtVinvX)
 
-    vcov_grads = []
-    for k in range(n_theta):
-        theta_plus = theta.copy()
-        theta_plus[k] += eps
-        vcov_plus = compute_vcov_for_theta(theta_plus)
+    cache_key = theta.tobytes() + np.array([sigma]).tobytes()
+    if cache_key in _vcov_grad_cache:
+        vcov_grads = _vcov_grad_cache[cache_key]
+    else:
+        vcov_grads = []
+        for k in range(n_theta):
+            theta_plus = theta.copy()
+            theta_plus[k] += eps
+            vcov_plus = compute_vcov_for_theta(theta_plus)
 
-        theta_minus = theta.copy()
-        theta_minus[k] -= eps
-        vcov_minus = compute_vcov_for_theta(theta_minus)
+            theta_minus = theta.copy()
+            theta_minus[k] -= eps
+            vcov_minus = compute_vcov_for_theta(theta_minus)
 
-        vcov_grads.append((vcov_plus - vcov_minus) / (2 * eps))
+            vcov_grads.append((vcov_plus - vcov_minus) / (2 * eps))
+
+        if len(_vcov_grad_cache) >= _VCOV_GRAD_CACHE_MAX_SIZE:
+            _vcov_grad_cache.pop(next(iter(_vcov_grad_cache)))
+        _vcov_grad_cache[cache_key] = vcov_grads
 
     df_values = np.zeros(p, dtype=np.float64)
 
