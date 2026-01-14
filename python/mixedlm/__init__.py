@@ -12,6 +12,8 @@ from mixedlm.datasets import (
     load_sleepstudy,
     load_verbagg,
 )
+from mixedlm.estimation.reml import DevianceComponents
+from mixedlm.families.custom import CustomFamily, validate_family
 from mixedlm.formula.parser import (
     dropOffset,
     expandDoubleVerts,
@@ -26,7 +28,7 @@ from mixedlm.formula.parser import (
     set_cov_type,
     subbars,
 )
-from mixedlm.inference.anova import AnovaResult, anova
+from mixedlm.inference.anova import AnovaResult, anova, anova_type3
 from mixedlm.inference.bootstrap import bootMer, bootstrap_nlmer
 from mixedlm.inference.ddf import (
     DenomDFResult,
@@ -35,7 +37,14 @@ from mixedlm.inference.ddf import (
     satterthwaite_df,
 )
 from mixedlm.inference.emmeans import Emmeans, emmeans
-from mixedlm.inference.profile import plot_profiles, splom_profiles
+from mixedlm.inference.profile import (
+    Profile2DResult,
+    logProf,
+    plot_profiles,
+    slice2D,
+    splom_profiles,
+    varianceProf,
+)
 from mixedlm.models.control import GlmerControl, LmerControl, glmerControl, lmerControl
 from mixedlm.models.glmer import GlmerMod, GlmerVarCorr, glmer, glmer_nb
 from mixedlm.models.lmer import (
@@ -105,6 +114,7 @@ __all__ = [
     "NlmerMod",
     "NlmerResult",
     "anova",
+    "anova_type3",
     "AnovaResult",
     "emmeans",
     "Emmeans",
@@ -129,6 +139,10 @@ __all__ = [
     "convergence_ok",
     "plot_profiles",
     "splom_profiles",
+    "slice2D",
+    "Profile2DResult",
+    "logProf",
+    "varianceProf",
     "parse_formula",
     "nobars",
     "findbars",
@@ -142,6 +156,9 @@ __all__ = [
     "getRandomFormulaStr",
     "getNGroups",
     "families",
+    "CustomFamily",
+    "validate_family",
+    "DevianceComponents",
     "nlme",
     "inference",
     "diagnostics",
