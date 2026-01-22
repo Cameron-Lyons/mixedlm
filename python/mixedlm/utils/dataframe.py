@@ -139,8 +139,7 @@ def concat_columns_as_string(data: Any, columns: list[str], separator: str = "/"
         return result.to_numpy()
 
     combined = data[list(columns)].apply(lambda row: separator.join(str(x) for x in row), axis=1)
-    dtype_str = str(combined.dtype)
-    if "string" in dtype_str.lower():
+    if hasattr(combined.dtype, "storage"):
         combined = combined.astype(object)
     return combined.values
 

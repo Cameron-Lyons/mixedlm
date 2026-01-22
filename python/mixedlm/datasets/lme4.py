@@ -10,8 +10,7 @@ def _ensure_object_strings(df: pd.DataFrame) -> pd.DataFrame:
     which causes compatibility issues with numpy operations and polars conversion.
     """
     for col in df.columns:
-        dtype_str = str(df[col].dtype)
-        if "string" in dtype_str.lower():
+        if hasattr(df[col].dtype, "storage"):
             df[col] = df[col].astype(object)
     return df
 
