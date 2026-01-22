@@ -105,10 +105,7 @@ def is_categorical_or_string(data: Any, col_name: str) -> bool:
 
     # Check for pandas 2.x StringDtype
     dtype_str = str(col.dtype)
-    if "string" in dtype_str.lower() or "str" in dtype_str.lower():
-        return True
-
-    return False
+    return "string" in dtype_str.lower() or "str" in dtype_str.lower()
 
 
 def dataframe_length(data: Any) -> int:
@@ -142,7 +139,10 @@ def concat_columns_as_string(data: Any, columns: list[str], separator: str = "/"
         return result.to_numpy()
 
     combined = data[list(columns)].apply(lambda row: separator.join(str(x) for x in row), axis=1)
-    return combined.values
+    result = combined.values
+    if hasattr(result, "dtype") and "string" in str(result.dtype).lower():
+        return result.astype(object)
+    return result
 
 
 def _is_polars(data: Any) -> bool:
