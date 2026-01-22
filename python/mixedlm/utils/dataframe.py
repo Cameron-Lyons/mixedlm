@@ -139,10 +139,10 @@ def concat_columns_as_string(data: Any, columns: list[str], separator: str = "/"
         return result.to_numpy()
 
     combined = data[list(columns)].apply(lambda row: separator.join(str(x) for x in row), axis=1)
-    result = combined.values
-    if hasattr(result, "dtype") and "string" in str(result.dtype).lower():
-        return result.astype(object)
-    return result
+    dtype_str = str(combined.dtype)
+    if "string" in dtype_str.lower():
+        combined = combined.astype(object)
+    return combined.values
 
 
 def _is_polars(data: Any) -> bool:
