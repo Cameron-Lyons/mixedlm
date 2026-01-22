@@ -8,21 +8,10 @@ pl = pytest.importorskip("polars")
 import mixedlm as mlm  # noqa: E402
 
 
-def _convert_stringdtype_to_object(df):
-    """Convert StringDtype columns to object dtype for polars compatibility."""
-    for col in df.columns:
-        dtype_str = str(df[col].dtype)
-        if "string" in dtype_str.lower():
-            df = df.copy()
-            df[col] = df[col].astype(object)
-    return df
-
-
 @pytest.fixture
 def sleepstudy_polars():
     """Load sleepstudy as polars DataFrame."""
     pandas_df = mlm.load_sleepstudy()
-    pandas_df = _convert_stringdtype_to_object(pandas_df)
     return pl.from_pandas(pandas_df)
 
 
@@ -30,7 +19,6 @@ def sleepstudy_polars():
 def cbpp_polars():
     """Load cbpp as polars DataFrame."""
     pandas_df = mlm.load_cbpp()
-    pandas_df = _convert_stringdtype_to_object(pandas_df)
     return pl.from_pandas(pandas_df)
 
 

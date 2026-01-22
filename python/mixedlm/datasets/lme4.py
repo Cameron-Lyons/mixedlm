@@ -3,6 +3,19 @@ from __future__ import annotations
 import pandas as pd
 
 
+def _ensure_object_strings(df: pd.DataFrame) -> pd.DataFrame:
+    """Convert StringDtype columns to object dtype for compatibility.
+
+    In pandas 2.x with future string inference, string columns may be StringDtype
+    which causes compatibility issues with numpy operations and polars conversion.
+    """
+    for col in df.columns:
+        dtype_str = str(df[col].dtype)
+        if "string" in dtype_str.lower():
+            df[col] = df[col].astype(object)
+    return df
+
+
 def load_sleepstudy() -> pd.DataFrame:
     """Load the sleepstudy dataset from lme4.
 
@@ -240,7 +253,7 @@ def load_sleepstudy() -> pd.DataFrame:
             + ["372"] * 10
         ),
     }
-    return pd.DataFrame(data)
+    return _ensure_object_strings(pd.DataFrame(data))
 
 
 def load_cbpp() -> pd.DataFrame:
@@ -457,7 +470,7 @@ def load_cbpp() -> pd.DataFrame:
         ],
         "period": ["1", "2", "3", "4"] * 14,
     }
-    return pd.DataFrame(data)
+    return _ensure_object_strings(pd.DataFrame(data))
 
 
 def load_dyestuff() -> pd.DataFrame:
@@ -533,7 +546,7 @@ def load_dyestuff() -> pd.DataFrame:
             1445,
         ],
     }
-    return pd.DataFrame(data)
+    return _ensure_object_strings(pd.DataFrame(data))
 
 
 def load_dyestuff2() -> pd.DataFrame:
@@ -593,7 +606,7 @@ def load_dyestuff2() -> pd.DataFrame:
             9.442,
         ],
     }
-    return pd.DataFrame(data)
+    return _ensure_object_strings(pd.DataFrame(data))
 
 
 def load_penicillin() -> pd.DataFrame:
@@ -797,7 +810,7 @@ def load_penicillin() -> pd.DataFrame:
             data["sample"].append(sample)
             idx += 1
 
-    return pd.DataFrame(data)
+    return _ensure_object_strings(pd.DataFrame(data))
 
 
 def load_cake() -> pd.DataFrame:
@@ -1130,7 +1143,7 @@ def load_cake() -> pd.DataFrame:
                 data["angle"].append(angles[idx])
                 idx += 1
 
-    return pd.DataFrame(data)
+    return _ensure_object_strings(pd.DataFrame(data))
 
 
 def load_pastes() -> pd.DataFrame:
@@ -1249,7 +1262,7 @@ def load_pastes() -> pd.DataFrame:
                 data["cask"].append(f"{batch}:{cask}")
                 idx += 1
 
-    return pd.DataFrame(data)
+    return _ensure_object_strings(pd.DataFrame(data))
 
 
 def load_insteval() -> pd.DataFrame:
@@ -1604,16 +1617,18 @@ def load_insteval() -> pd.DataFrame:
         4,
     ] * 10
 
-    return pd.DataFrame(
-        {
-            "s": s,
-            "d": d,
-            "studage": studage,
-            "lectage": lectage,
-            "service": service,
-            "dept": dept,
-            "y": y,
-        }
+    return _ensure_object_strings(
+        pd.DataFrame(
+            {
+                "s": s,
+                "d": d,
+                "studage": studage,
+                "lectage": lectage,
+                "service": service,
+                "dept": dept,
+                "y": y,
+            }
+        )
     )
 
 
@@ -1695,7 +1710,7 @@ def load_arabidopsis() -> pd.DataFrame:
 
     data["total_fruits"] = fruits
 
-    return pd.DataFrame(data)
+    return _ensure_object_strings(pd.DataFrame(data))
 
 
 def load_grouseticks() -> pd.DataFrame:
@@ -1786,7 +1801,7 @@ def load_grouseticks() -> pd.DataFrame:
             data["cTICKS"].append(ticks)
             idx += 1
 
-    return pd.DataFrame(data)
+    return _ensure_object_strings(pd.DataFrame(data))
 
 
 def load_verbagg() -> pd.DataFrame:
@@ -1902,4 +1917,4 @@ def load_verbagg() -> pd.DataFrame:
             data["mode"].append(mode)
             data["r2"].append(r2)
 
-    return pd.DataFrame(data)
+    return _ensure_object_strings(pd.DataFrame(data))
