@@ -322,7 +322,9 @@ def emmeans(
         if var not in frame.columns:
             continue
         col = frame[var]
-        if col.dtype == object or col.dtype.name == "category":
+        dtype_str = str(col.dtype)
+        is_string = "string" in dtype_str.lower() or "str" in dtype_str.lower()
+        if col.dtype == object or col.dtype.name == "category" or is_string:
             if col.dtype.name == "category":
                 levels = col.cat.categories.tolist()
             else:

@@ -74,6 +74,7 @@ fn _rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(quadrature::gauss_hermite, m)?)?;
     m.add_function(wrap_pyfunction!(quadrature::adaptive_gauss_hermite_1d, m)?)?;
     m.add_function(wrap_pyfunction!(lmm::profiled_deviance, m)?)?;
+    m.add_function(wrap_pyfunction!(lmm::profiled_deviance_with_gradient, m)?)?;
     m.add_function(wrap_pyfunction!(glmm::pirls, m)?)?;
     m.add_function(wrap_pyfunction!(glmm::laplace_deviance, m)?)?;
     m.add_function(wrap_pyfunction!(glmm::adaptive_gh_deviance, m)?)?;

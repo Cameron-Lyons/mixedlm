@@ -13,6 +13,7 @@ try:
         laplace_deviance,
         pirls,
         profiled_deviance,
+        profiled_deviance_with_gradient,
         simulate_re_batch,
         sparse_cholesky_logdet,
         sparse_cholesky_solve,
@@ -857,3 +858,286 @@ class TestMultipleRandomEffects:
         result = simulate_re_batch(theta, sigma, n_levels, n_terms, correlated, n_sim, seed=42)
         result = np.array(result)
         assert result.shape == (n_sim, 8)
+
+
+class TestProfiledDevianceGradient:
+    @pytest.fixture
+    def simple_lmm_data(self):
+        np.random.seed(42)
+        n = 20
+        n_groups = 4
+        groups = np.repeat(np.arange(n_groups), n // n_groups)
+        x = np.column_stack([np.ones(n), np.random.randn(n)])
+        y = x @ np.array([1.0, 0.5]) + np.random.randn(n) * 0.5
+
+        z_dense = np.zeros((n, n_groups))
+        for i, g in enumerate(groups):
+            z_dense[i, g] = 1.0
+        z_csc = sparse.csc_matrix(z_dense)
+
+        return {
+            "y": y,
+            "x": x,
+            "z_data": z_csc.data,
+            "z_indices": z_csc.indices.astype(np.int64),
+            "z_indptr": z_csc.indptr.astype(np.int64),
+            "z_shape": z_csc.shape,
+            "theta": np.array([1.0]),
+            "weights": np.ones(n),
+            "offset": np.zeros(n),
+            "n_levels": [n_groups],
+            "n_terms": [1],
+            "correlated": [False],
+        }
+
+    def test_gradient_returns_tuple(self, simple_lmm_data):
+        d = simple_lmm_data
+        result = profiled_deviance_with_gradient(
+            d["theta"],
+            d["y"],
+            d["x"],
+            d["z_data"],
+            d["z_indices"],
+            d["z_indptr"],
+            d["z_shape"],
+            d["weights"],
+            d["offset"],
+            d["n_levels"],
+            d["n_terms"],
+            d["correlated"],
+            True,
+        )
+        assert isinstance(result, tuple)
+        assert len(result) == 2
+        dev, grad = result
+        assert isinstance(dev, float)
+        assert isinstance(grad, np.ndarray)
+
+    def test_gradient_correct_length(self, simple_lmm_data):
+        d = simple_lmm_data
+        dev, grad = profiled_deviance_with_gradient(
+            d["theta"],
+            d["y"],
+            d["x"],
+            d["z_data"],
+            d["z_indices"],
+            d["z_indptr"],
+            d["z_shape"],
+            d["weights"],
+            d["offset"],
+            d["n_levels"],
+            d["n_terms"],
+            d["correlated"],
+            True,
+        )
+        assert len(grad) == len(d["theta"])
+
+    def test_gradient_matches_deviance(self, simple_lmm_data):
+        d = simple_lmm_data
+        dev_with_grad, _ = profiled_deviance_with_gradient(
+            d["theta"],
+            d["y"],
+            d["x"],
+            d["z_data"],
+            d["z_indices"],
+            d["z_indptr"],
+            d["z_shape"],
+            d["weights"],
+            d["offset"],
+            d["n_levels"],
+            d["n_terms"],
+            d["correlated"],
+            True,
+        )
+        dev_only = profiled_deviance(
+            d["theta"],
+            d["y"],
+            d["x"],
+            d["z_data"],
+            d["z_indices"],
+            d["z_indptr"],
+            d["z_shape"],
+            d["weights"],
+            d["offset"],
+            d["n_levels"],
+            d["n_terms"],
+            d["correlated"],
+            True,
+        )
+        assert_allclose(dev_with_grad, dev_only)
+
+    def test_gradient_finite_difference(self, simple_lmm_data):
+        d = simple_lmm_data
+        theta = d["theta"].copy()
+        eps = 1e-6
+
+        _, grad = profiled_deviance_with_gradient(
+            theta,
+            d["y"],
+            d["x"],
+            d["z_data"],
+            d["z_indices"],
+            d["z_indptr"],
+            d["z_shape"],
+            d["weights"],
+            d["offset"],
+            d["n_levels"],
+            d["n_terms"],
+            d["correlated"],
+            True,
+        )
+
+        grad_fd = np.zeros_like(theta)
+        for i in range(len(theta)):
+            theta_plus = theta.copy()
+            theta_plus[i] += eps
+            theta_minus = theta.copy()
+            theta_minus[i] -= eps
+
+            dev_plus = profiled_deviance(
+                theta_plus,
+                d["y"],
+                d["x"],
+                d["z_data"],
+                d["z_indices"],
+                d["z_indptr"],
+                d["z_shape"],
+                d["weights"],
+                d["offset"],
+                d["n_levels"],
+                d["n_terms"],
+                d["correlated"],
+                True,
+            )
+            dev_minus = profiled_deviance(
+                theta_minus,
+                d["y"],
+                d["x"],
+                d["z_data"],
+                d["z_indices"],
+                d["z_indptr"],
+                d["z_shape"],
+                d["weights"],
+                d["offset"],
+                d["n_levels"],
+                d["n_terms"],
+                d["correlated"],
+                True,
+            )
+            grad_fd[i] = (dev_plus - dev_minus) / (2 * eps)
+
+        assert_allclose(grad, grad_fd, rtol=0.15)
+
+    def test_gradient_multiple_theta(self):
+        np.random.seed(42)
+        n = 30
+        n_groups = 5
+        groups = np.repeat(np.arange(n_groups), n // n_groups)
+        x = np.column_stack([np.ones(n), np.random.randn(n)])
+        y = x @ np.array([1.0, 0.5]) + np.random.randn(n) * 0.5
+
+        z_dense = np.zeros((n, n_groups * 2))
+        for i, g in enumerate(groups):
+            z_dense[i, g] = 1.0
+            z_dense[i, n_groups + g] = np.random.randn()
+        z_csc = sparse.csc_matrix(z_dense)
+
+        theta = np.array([1.0, 0.5, 0.8])
+        eps = 1e-6
+
+        _, grad = profiled_deviance_with_gradient(
+            theta,
+            y,
+            x,
+            z_csc.data,
+            z_csc.indices.astype(np.int64),
+            z_csc.indptr.astype(np.int64),
+            z_csc.shape,
+            np.ones(n),
+            np.zeros(n),
+            [n_groups],
+            [2],
+            [True],
+            True,
+        )
+
+        assert len(grad) == 3
+
+        grad_fd = np.zeros_like(theta)
+        for i in range(len(theta)):
+            theta_plus = theta.copy()
+            theta_plus[i] += eps
+            theta_minus = theta.copy()
+            theta_minus[i] -= eps
+
+            dev_plus = profiled_deviance(
+                theta_plus,
+                y,
+                x,
+                z_csc.data,
+                z_csc.indices.astype(np.int64),
+                z_csc.indptr.astype(np.int64),
+                z_csc.shape,
+                np.ones(n),
+                np.zeros(n),
+                [n_groups],
+                [2],
+                [True],
+                True,
+            )
+            dev_minus = profiled_deviance(
+                theta_minus,
+                y,
+                x,
+                z_csc.data,
+                z_csc.indices.astype(np.int64),
+                z_csc.indptr.astype(np.int64),
+                z_csc.shape,
+                np.ones(n),
+                np.zeros(n),
+                [n_groups],
+                [2],
+                [True],
+                True,
+            )
+            grad_fd[i] = (dev_plus - dev_minus) / (2 * eps)
+
+        assert_allclose(grad, grad_fd, rtol=0.15)
+
+    def test_gradient_ml_vs_reml(self, simple_lmm_data):
+        d = simple_lmm_data
+
+        dev_reml, grad_reml = profiled_deviance_with_gradient(
+            d["theta"],
+            d["y"],
+            d["x"],
+            d["z_data"],
+            d["z_indices"],
+            d["z_indptr"],
+            d["z_shape"],
+            d["weights"],
+            d["offset"],
+            d["n_levels"],
+            d["n_terms"],
+            d["correlated"],
+            True,
+        )
+
+        dev_ml, grad_ml = profiled_deviance_with_gradient(
+            d["theta"],
+            d["y"],
+            d["x"],
+            d["z_data"],
+            d["z_indices"],
+            d["z_indptr"],
+            d["z_shape"],
+            d["weights"],
+            d["offset"],
+            d["n_levels"],
+            d["n_terms"],
+            d["correlated"],
+            False,
+        )
+
+        assert dev_reml != dev_ml
+        assert not np.allclose(grad_reml, grad_ml)

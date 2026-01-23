@@ -381,9 +381,10 @@ class TestFactorize:
 
     def test_factorize_no_modification_inplace(self) -> None:
         df = pd.DataFrame({"a": ["x", "y"]})
+        original_dtype = df["a"].dtype
         result = factorize(df, columns=["a"])
 
-        assert df["a"].dtype == object
+        assert df["a"].dtype == original_dtype
         assert result["a"].dtype.name == "category"
 
 
