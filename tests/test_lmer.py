@@ -3284,7 +3284,7 @@ class TestContrasts:
 class TestControl:
     def test_lmer_control_default(self) -> None:
         ctrl = LmerControl()
-        assert ctrl.optimizer == "L-BFGS-B"
+        assert ctrl.optimizer == "bobyqa"
         assert ctrl.maxiter == 1000
         assert ctrl.ftol == 1e-8
         assert ctrl.gtol == 1e-5
@@ -3326,7 +3326,7 @@ class TestControl:
         assert ctrl.maxiter == 500
 
     def test_lmer_control_scipy_options(self) -> None:
-        ctrl = LmerControl(maxiter=500, gtol=1e-4, ftol=1e-7)
+        ctrl = LmerControl(optimizer="L-BFGS-B", maxiter=500, gtol=1e-4, ftol=1e-7)
         options = ctrl.get_scipy_options()
         assert options["maxiter"] == 500
         assert options["gtol"] == 1e-4
@@ -3345,7 +3345,7 @@ class TestControl:
 
     def test_glmer_control_default(self) -> None:
         ctrl = GlmerControl()
-        assert ctrl.optimizer == "L-BFGS-B"
+        assert ctrl.optimizer == "bobyqa"
         assert ctrl.maxiter == 1000
         assert ctrl.tolPwrss == 1e-7
         assert ctrl.compDev is True
