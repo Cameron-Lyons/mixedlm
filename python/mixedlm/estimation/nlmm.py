@@ -286,17 +286,10 @@ def pnls_step(
             ]
             rss = float(sum(future.result() for future in futures))  # type: ignore[misc]
     else:
-        rss = 0.0
-        for g in range(n_groups):
-            mask = groups == g
-            x_g = x[mask]
-            y_g = y[mask]
-
-            params_g = phi_new.copy()
-            np.add.at(params_g, random_params, b_new[g, :])
-
-            pred_g = model.predict(params_g, x_g)
-            rss += float(np.sum((y_g - pred_g) ** 2))
+        rss = sum(
+            _compute_group_rss(g, groups, x, y, phi_new, b_new, random_params, model)
+            for g in range(n_groups)
+        )
 
     sigma_new = np.sqrt(rss / n)
 
@@ -349,17 +342,10 @@ def nlmm_deviance(
             ]
             rss = float(sum(future.result() for future in futures))  # type: ignore[misc]
     else:
-        rss = 0.0
-        for g in range(n_groups):
-            mask = groups == g
-            x_g = x[mask]
-            y_g = y[mask]
-
-            params_g = phi_new.copy()
-            np.add.at(params_g, random_params, b_new[g, :])
-
-            pred_g = model.predict(params_g, x_g)
-            rss += float(np.sum((y_g - pred_g) ** 2))
+        rss = sum(
+            _compute_group_rss(g, groups, x, y, phi_new, b_new, random_params, model)
+            for g in range(n_groups)
+        )
 
     deviance = n * np.log(2 * np.pi * sigma_new**2) + rss / sigma_new**2
 
