@@ -12,10 +12,26 @@ from scipy import linalg, sparse
 from mixedlm.estimation.optimizers import run_optimizer
 from mixedlm.estimation.reml import (
     _build_lambda,
+    _build_theta_bounds,
     _count_theta,
 )
 from mixedlm.families.base import Family
 from mixedlm.matrices.design import ModelMatrices, RandomEffectStructure
+
+_ETA_CLIP_MIN = -30.0
+_ETA_CLIP_MAX = 30.0
+_MU_CLIP_MIN = 1e-7
+_MU_CLIP_MAX = 1.0 - 1e-7
+_MU_CLIP_MIN_STRICT = 1e-10
+_MU_CLIP_MAX_STRICT = 1.0 - 1e-10
+_WEIGHT_CLIP_MIN = 1e-10
+_WEIGHT_CLIP_MAX = 1e10
+_DERIV_CLIP_MIN = -1e10
+_DERIV_CLIP_MAX = 1e10
+_SQRT_WEIGHT_CLIP_MAX = 1e5
+_CHOLESKY_REGULARIZATION = 1e-6
+_EIGENVALUE_FLOOR = 1e-10
+_LOG_FLOOR = 1e-300
 
 _lambda_cache: dict[
     tuple[bytes, tuple[tuple[int, int, bool], ...]], tuple[sparse.csc_matrix, NDArray[np.floating]]
@@ -131,21 +147,21 @@ def pirls(
     converged = False
     for _iteration in range(maxiter):
         eta = matrices.X @ beta + matrices.Z @ u + offset
-        np.clip(eta, -30, 30, out=eta)
+        np.clip(eta, _ETA_CLIP_MIN, _ETA_CLIP_MAX, out=eta)
         mu = family.link.inverse(eta)
-        np.clip(mu, 1e-7, 1 - 1e-7, out=mu)
+        np.clip(mu, _MU_CLIP_MIN, _MU_CLIP_MAX, out=mu)
 
         np.multiply(family.weights(mu), prior_weights, out=W)
-        np.clip(W, 1e-10, 1e10, out=W)
+        np.clip(W, _WEIGHT_CLIP_MIN, _WEIGHT_CLIP_MAX, out=W)
 
         deriv = family.link.deriv(mu)
-        np.clip(deriv, -1e10, 1e10, out=deriv)
+        np.clip(deriv, _DERIV_CLIP_MIN, _DERIV_CLIP_MAX, out=deriv)
         np.subtract(eta, offset, out=z)
         z += deriv * (matrices.y - mu)
-        np.clip(z, -1e10, 1e10, out=z)
+        np.clip(z, _DERIV_CLIP_MIN, _DERIV_CLIP_MAX, out=z)
 
         W_sqrt = np.sqrt(W)
-        np.clip(W_sqrt, 0, 1e5, out=W_sqrt)
+        np.clip(W_sqrt, 0, _SQRT_WEIGHT_CLIP_MAX, out=W_sqrt)
         WX = W_sqrt[:, None] * matrices.X
         WZ = sparse.diags(W_sqrt, format="csc") @ matrices.Z
 
@@ -154,57 +170,65 @@ def pirls(
         XtWZ = WX.T @ WZ
 
         if not np.all(np.isfinite(XtWX)):
-            XtWX = np.nan_to_num(XtWX, nan=0.0, posinf=1e10, neginf=-1e10)
+            XtWX = np.nan_to_num(XtWX, nan=0.0, posinf=_WEIGHT_CLIP_MAX, neginf=-_WEIGHT_CLIP_MAX)
 
         Wz = W * z
         if not np.all(np.isfinite(Wz)):
-            Wz = np.nan_to_num(Wz, nan=0.0, posinf=1e10, neginf=-1e10)
+            Wz = np.nan_to_num(Wz, nan=0.0, posinf=_WEIGHT_CLIP_MAX, neginf=-_WEIGHT_CLIP_MAX)
 
         XtWz = matrices.X.T @ Wz
         ZtWz = Zt @ Wz
 
         ZtWZ_dense = ZtWZ.toarray() if sparse.issparse(ZtWZ) else ZtWZ
         if not np.all(np.isfinite(ZtWZ_dense)):
-            ZtWZ_dense = np.nan_to_num(ZtWZ_dense, nan=0.0, posinf=1e10, neginf=-1e10)
+            ZtWZ_dense = np.nan_to_num(
+                ZtWZ_dense, nan=0.0, posinf=_WEIGHT_CLIP_MAX, neginf=-_WEIGHT_CLIP_MAX
+            )
         C = ZtWZ_dense + LambdatLambda_dense
 
         try:
             L_C = linalg.cholesky(C, lower=True)
         except (linalg.LinAlgError, ValueError):
-            C = np.nan_to_num(C, nan=0.0, posinf=1e10, neginf=-1e10)
-            C += 1e-6 * np.eye(q)
+            C = np.nan_to_num(C, nan=0.0, posinf=_WEIGHT_CLIP_MAX, neginf=-_WEIGHT_CLIP_MAX)
+            C += _CHOLESKY_REGULARIZATION * np.eye(q)
             L_C = linalg.cholesky(C, lower=True)
 
-        ZtWX_dense = XtWZ.T.toarray() if sparse.issparse(XtWZ) else XtWZ.T
+        ZtWX_dense = XtWZ.toarray().T if sparse.issparse(XtWZ) else XtWZ.T
         if not np.all(np.isfinite(ZtWX_dense)):
-            ZtWX_dense = np.nan_to_num(ZtWX_dense, nan=0.0, posinf=1e10, neginf=-1e10)
+            ZtWX_dense = np.nan_to_num(
+                ZtWX_dense, nan=0.0, posinf=_WEIGHT_CLIP_MAX, neginf=-_WEIGHT_CLIP_MAX
+            )
 
         if not np.all(np.isfinite(ZtWz)):
-            ZtWz = np.nan_to_num(ZtWz, nan=0.0, posinf=1e10, neginf=-1e10)
+            ZtWz = np.nan_to_num(ZtWz, nan=0.0, posinf=_WEIGHT_CLIP_MAX, neginf=-_WEIGHT_CLIP_MAX)
 
         RZX = linalg.solve_triangular(L_C, ZtWX_dense, lower=True)
         cu = linalg.solve_triangular(L_C, ZtWz, lower=True)
 
         if not np.all(np.isfinite(cu)):
-            cu = np.nan_to_num(cu, nan=0.0, posinf=1e10, neginf=-1e10)
+            cu = np.nan_to_num(cu, nan=0.0, posinf=_WEIGHT_CLIP_MAX, neginf=-_WEIGHT_CLIP_MAX)
 
         XtVinvX = XtWX - RZX.T @ RZX
         XtVinvz = XtWz - RZX.T @ cu
 
         if not np.all(np.isfinite(XtVinvX)):
-            XtVinvX = np.nan_to_num(XtVinvX, nan=0.0, posinf=1e10, neginf=-1e10)
+            XtVinvX = np.nan_to_num(
+                XtVinvX, nan=0.0, posinf=_WEIGHT_CLIP_MAX, neginf=-_WEIGHT_CLIP_MAX
+            )
         if not np.all(np.isfinite(XtVinvz)):
-            XtVinvz = np.nan_to_num(XtVinvz, nan=0.0, posinf=1e10, neginf=-1e10)
+            XtVinvz = np.nan_to_num(
+                XtVinvz, nan=0.0, posinf=_WEIGHT_CLIP_MAX, neginf=-_WEIGHT_CLIP_MAX
+            )
 
         try:
             beta_new = linalg.solve(XtVinvX, XtVinvz, assume_a="pos")
         except (linalg.LinAlgError, ValueError):
-            XtVinvX += 1e-6 * np.eye(XtVinvX.shape[0])
+            XtVinvX += _CHOLESKY_REGULARIZATION * np.eye(XtVinvX.shape[0])
             beta_new = linalg.lstsq(XtVinvX, XtVinvz)[0]
 
         u_rhs = ZtWz - ZtWX_dense @ beta_new
         if not np.all(np.isfinite(u_rhs)):
-            u_rhs = np.nan_to_num(u_rhs, nan=0.0, posinf=1e10, neginf=-1e10)
+            u_rhs = np.nan_to_num(u_rhs, nan=0.0, posinf=_WEIGHT_CLIP_MAX, neginf=-_WEIGHT_CLIP_MAX)
         u_new = linalg.cho_solve((L_C, True), u_rhs)
 
         delta_beta = np.max(np.abs(beta_new - beta))
@@ -219,12 +243,12 @@ def pirls(
 
     eta = matrices.X @ beta + matrices.Z @ u + offset
     mu = family.link.inverse(eta)
-    np.clip(mu, 1e-10, 1 - 1e-10, out=mu)
+    np.clip(mu, _MU_CLIP_MIN_STRICT, _MU_CLIP_MAX_STRICT, out=mu)
 
     dev_resids = family.deviance_resids(matrices.y, mu, prior_weights)
     deviance = np.sum(dev_resids)
 
-    deviance += np.dot(u, linalg.solve(LambdatLambda_dense + 1e-10 * np.eye(q), u))
+    deviance += np.dot(u, linalg.solve(LambdatLambda_dense + _EIGENVALUE_FLOOR * np.eye(q), u))
 
     return beta, u, deviance, converged
 
@@ -251,24 +275,26 @@ def laplace_deviance(
 
     eta = matrices.X @ beta + matrices.Z @ u + offset
     mu = family.link.inverse(eta)
-    mu = np.clip(mu, 1e-10, 1 - 1e-10)
+    mu = np.clip(mu, _MU_CLIP_MIN_STRICT, _MU_CLIP_MAX_STRICT)
 
     dev_resids = family.deviance_resids(matrices.y, mu, prior_weights)
     deviance = np.sum(dev_resids)
 
-    u_penalty = np.dot(u, linalg.solve(LambdatLambda_dense + 1e-10 * np.eye(q), u))
+    u_penalty = np.dot(u, linalg.solve(LambdatLambda_dense + _EIGENVALUE_FLOOR * np.eye(q), u))
     deviance += u_penalty
 
     W = family.weights(mu) * prior_weights
-    W = np.clip(W, 1e-10, 1e10)
+    W = np.clip(W, _WEIGHT_CLIP_MIN, _WEIGHT_CLIP_MAX)
 
     W_sqrt = np.sqrt(W)
-    np.clip(W_sqrt, 0, 1e5, out=W_sqrt)
+    np.clip(W_sqrt, 0, _SQRT_WEIGHT_CLIP_MAX, out=W_sqrt)
     WZ = sparse.diags(W_sqrt, format="csc") @ matrices.Z
     ZtWZ = WZ.T @ WZ
     ZtWZ_dense = ZtWZ.toarray() if sparse.issparse(ZtWZ) else ZtWZ
     if not np.all(np.isfinite(ZtWZ_dense)):
-        ZtWZ_dense = np.nan_to_num(ZtWZ_dense, nan=0.0, posinf=1e10, neginf=-1e10)
+        ZtWZ_dense = np.nan_to_num(
+            ZtWZ_dense, nan=0.0, posinf=_WEIGHT_CLIP_MAX, neginf=-_WEIGHT_CLIP_MAX
+        )
 
     H = ZtWZ_dense + LambdatLambda_dense
 
@@ -276,11 +302,15 @@ def laplace_deviance(
         L_H = linalg.cholesky(H, lower=True)
         logdet_H = 2.0 * np.sum(np.log(np.diag(L_H)))
     except (linalg.LinAlgError, ValueError):
-        H = np.nan_to_num(H, nan=0.0, posinf=1e10, neginf=-1e10)
-        H += 1e-6 * np.eye(q)
-        eigvals = linalg.eigvalsh(H)
-        eigvals = np.maximum(eigvals, 1e-10)
-        logdet_H = np.sum(np.log(eigvals))
+        H = np.nan_to_num(H, nan=0.0, posinf=_WEIGHT_CLIP_MAX, neginf=-_WEIGHT_CLIP_MAX)
+        H += _CHOLESKY_REGULARIZATION * np.eye(q)
+        try:
+            L_H = linalg.cholesky(H, lower=True)
+            logdet_H = 2.0 * np.sum(np.log(np.diag(L_H)))
+        except linalg.LinAlgError:
+            eigvals = linalg.eigvalsh(H)
+            eigvals = np.maximum(eigvals, _EIGENVALUE_FLOOR)
+            logdet_H = np.sum(np.log(eigvals))
 
     deviance += logdet_H
 
@@ -322,31 +352,31 @@ def _compute_group_quadrature(
         L_block = linalg.cholesky(H_block, lower=True)
         scale = 1.0 / L_block[0, 0]
     except linalg.LinAlgError:
-        scale = 1.0 / np.sqrt(H_block[0, 0] + 1e-10)
+        scale = 1.0 / np.sqrt(H_block[0, 0] + _EIGENVALUE_FLOOR)
 
     group_contrib = 0.0
-    u_quad = u.copy()
+    u_block_orig = u_mode.copy()
+    Lambda_block = LambdatLambda[idx_start:idx_end, idx_start:idx_end]
+    Lambda_block_reg = Lambda_block + _EIGENVALUE_FLOOR * np.eye(n_terms_first)
 
     for node, weight in zip(nodes, weights, strict=False):
-        u_quad[idx_start:idx_end] = u_mode + sqrt2 * scale * node
+        u_block = u_mode + sqrt2 * scale * node
+        u[idx_start:idx_end] = u_block
 
-        eta_quad = matrices.X @ beta + matrices.Z @ u_quad + offset
+        eta_quad = matrices.X @ beta + matrices.Z @ u + offset
         mu_quad = family.link.inverse(eta_quad)
-        mu_quad = np.clip(mu_quad, 1e-10, 1 - 1e-10)
+        mu_quad = np.clip(mu_quad, _MU_CLIP_MIN_STRICT, _MU_CLIP_MAX_STRICT)
 
         log_lik_y = -0.5 * np.sum(family.deviance_resids(matrices.y, mu_quad, prior_weights))
 
-        u_block = u_quad[idx_start:idx_end]
-        Lambda_block = LambdatLambda[idx_start:idx_end, idx_start:idx_end]
-        log_prior = -0.5 * np.dot(
-            u_block, linalg.solve(Lambda_block + 1e-10 * np.eye(n_terms_first), u_block)
-        )
+        log_prior = -0.5 * np.dot(u_block, linalg.solve(Lambda_block_reg, u_block))
 
         integrand = np.exp(log_lik_y + log_prior)
         group_contrib += weight * integrand
 
+    u[idx_start:idx_end] = u_block_orig
     group_contrib *= scale * np.sqrt(np.pi)
-    return np.log(max(group_contrib, 1e-300))
+    return np.log(max(group_contrib, _LOG_FLOOR))
 
 
 def adaptive_gh_deviance(
@@ -406,10 +436,10 @@ def adaptive_gh_deviance(
 
     eta = matrices.X @ beta + matrices.Z @ u + offset
     mu = family.link.inverse(eta)
-    mu = np.clip(mu, 1e-10, 1 - 1e-10)
+    mu = np.clip(mu, _MU_CLIP_MIN_STRICT, _MU_CLIP_MAX_STRICT)
 
     W = family.weights(mu) * prior_weights
-    W = np.maximum(W, 1e-10)
+    W = np.maximum(W, _WEIGHT_CLIP_MIN)
 
     W_sqrt = np.sqrt(W)
     WZ = sparse.diags(W_sqrt, format="csc") @ matrices.Z
@@ -421,7 +451,7 @@ def adaptive_gh_deviance(
     try:
         linalg.cholesky(H, lower=True)
     except linalg.LinAlgError:
-        H = H + 1e-6 * np.eye(q)
+        H = H + _CHOLESKY_REGULARIZATION * np.eye(q)
 
     first_struct = matrices.random_structures[0]
     n_terms_first = first_struct.n_terms
@@ -482,7 +512,7 @@ def adaptive_gh_deviance(
         Lambda_other = LambdatLambda_dense[other_u_start:, other_u_start:]
         u_penalty_other = np.dot(
             u_other,
-            linalg.solve(Lambda_other + 1e-10 * np.eye(q - other_u_start), u_other),
+            linalg.solve(Lambda_other + _EIGENVALUE_FLOOR * np.eye(q - other_u_start), u_other),
         )
         H_other = H[other_u_start:, other_u_start:]
         try:
@@ -490,7 +520,7 @@ def adaptive_gh_deviance(
             logdet_other = 2.0 * np.sum(np.log(np.diag(L_H_other)))
         except linalg.LinAlgError:
             eigvals = linalg.eigvalsh(H_other)
-            eigvals = np.maximum(eigvals, 1e-10)
+            eigvals = np.maximum(eigvals, _EIGENVALUE_FLOOR)
             logdet_other = np.sum(np.log(eigvals))
         log_integral -= 0.5 * (u_penalty_other + logdet_other)
 
@@ -668,33 +698,9 @@ class GLMMOptimizer:
         self._beta_cache = None
         self._u_cache = None
 
-        bounds: list[tuple[float | None, float | None]] = [(None, None)] * len(start)
-        idx = 0
-        for struct in self.matrices.random_structures:
-            q = struct.n_terms
-            cov_type = getattr(struct, "cov_type", "us")
-            if cov_type == "cs":
-                bounds[idx] = (0.0, None)
-                idx += 1
-                if q > 1:
-                    bounds[idx] = (-1.0 / (q - 1) + 1e-6, 1.0 - 1e-6)
-                    idx += 1
-            elif cov_type == "ar1":
-                bounds[idx] = (0.0, None)
-                idx += 1
-                if q > 1:
-                    bounds[idx] = (-1.0 + 1e-6, 1.0 - 1e-6)
-                    idx += 1
-            elif struct.correlated:
-                for i in range(q):
-                    for j in range(i + 1):
-                        if i == j:
-                            bounds[idx] = (0.0, None)
-                        idx += 1
-            else:
-                for _ in range(q):
-                    bounds[idx] = (0.0, None)
-                    idx += 1
+        bounds = _build_theta_bounds(
+            self.matrices.random_structures, len(start), eps=_CHOLESKY_REGULARIZATION
+        )
 
         callback: Callable[[NDArray[np.floating]], None] | None = None
         if self.verbose > 0:

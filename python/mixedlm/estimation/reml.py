@@ -182,6 +182,57 @@ def _count_theta(structures: list[RandomEffectStructure]) -> int:
     return count
 
 
+def _build_theta_bounds(
+    structures: list[RandomEffectStructure],
+    n_theta: int,
+    eps: float = 1e-6,
+) -> list[tuple[float | None, float | None]]:
+    """Build parameter bounds for theta optimization.
+
+    Parameters
+    ----------
+    structures : list[RandomEffectStructure]
+        Random effect structures from the model.
+    n_theta : int
+        Total number of theta parameters.
+    eps : float, default 1e-6
+        Small epsilon for correlation parameter bounds.
+
+    Returns
+    -------
+    list[tuple[float | None, float | None]]
+        List of (lower, upper) bound tuples for each theta parameter.
+    """
+    bounds: list[tuple[float | None, float | None]] = [(None, None)] * n_theta
+    idx = 0
+    for struct in structures:
+        q = struct.n_terms
+        cov_type = getattr(struct, "cov_type", "us")
+        if cov_type == "cs":
+            bounds[idx] = (0.0, None)
+            idx += 1
+            if q > 1:
+                bounds[idx] = (-1.0 / (q - 1) + eps, 1.0 - eps)
+                idx += 1
+        elif cov_type == "ar1":
+            bounds[idx] = (0.0, None)
+            idx += 1
+            if q > 1:
+                bounds[idx] = (-1.0 + eps, 1.0 - eps)
+                idx += 1
+        elif struct.correlated:
+            for i in range(q):
+                for j in range(i + 1):
+                    if i == j:
+                        bounds[idx] = (0.0, None)
+                    idx += 1
+        else:
+            for _ in range(q):
+                bounds[idx] = (0.0, None)
+                idx += 1
+    return bounds
+
+
 def _profiled_deviance_core(
     theta: NDArray[np.floating],
     matrices: ModelMatrices,
@@ -644,33 +695,7 @@ class LMMOptimizer:
         if start is None:
             start = self.get_start_theta()
 
-        bounds: list[tuple[float | None, float | None]] = [(None, None)] * len(start)
-        idx = 0
-        for struct in self.matrices.random_structures:
-            q = struct.n_terms
-            cov_type = getattr(struct, "cov_type", "us")
-            if cov_type == "cs":
-                bounds[idx] = (0.0, None)
-                idx += 1
-                if q > 1:
-                    bounds[idx] = (-1.0 / (q - 1) + 1e-6, 1.0 - 1e-6)
-                    idx += 1
-            elif cov_type == "ar1":
-                bounds[idx] = (0.0, None)
-                idx += 1
-                if q > 1:
-                    bounds[idx] = (-1.0 + 1e-6, 1.0 - 1e-6)
-                    idx += 1
-            elif struct.correlated:
-                for i in range(q):
-                    for j in range(i + 1):
-                        if i == j:
-                            bounds[idx] = (0.0, None)
-                        idx += 1
-            else:
-                for _ in range(q):
-                    bounds[idx] = (0.0, None)
-                    idx += 1
+        bounds = _build_theta_bounds(self.matrices.random_structures, len(start))
 
         callback: Callable[[NDArray[np.floating]], None] | None = None
         if self.verbose > 0:

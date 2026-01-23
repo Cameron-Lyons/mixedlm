@@ -186,7 +186,7 @@ def _encode_categorical(
 
     contrast_matrix = get_contrast_matrix(n_levels, contrast_spec)
 
-    col_values = get_column_numpy(data, name)  # Keep original dtype for categorical
+    col_values = get_column_numpy(data, name)
     return apply_contrasts_array(col_values, name, contrast_matrix, categories)
 
 
@@ -222,6 +222,56 @@ def _encode_interaction(
     n = dataframe_length(data)
     _product(0, np.ones(n, dtype=np.float64), "")
     return result_cols, result_names
+
+
+def _build_sparse_Z_block(
+    group_values: NDArray,
+    level_map: dict,
+    term_cols: list[NDArray[np.floating]],
+    n: int,
+    n_levels: int,
+    n_terms: int,
+) -> sparse.csc_matrix:
+    """Build sparse Z block using vectorized operations."""
+    n_random_cols = n_levels * n_terms
+
+    level_indices = np.full(n, -1, dtype=np.int64)
+    for i, gv in enumerate(group_values):
+        str_gv = str(gv) if not isinstance(gv, str) else gv
+        if str_gv in level_map:
+            level_indices[i] = level_map[str_gv]
+        elif gv in level_map:
+            level_indices[i] = level_map[gv]
+
+    valid_mask = level_indices >= 0
+
+    all_rows: list[NDArray[np.int64]] = []
+    all_cols: list[NDArray[np.int64]] = []
+    all_vals: list[NDArray[np.floating]] = []
+
+    for j, term_col in enumerate(term_cols):
+        nonzero_mask = (term_col != 0) & valid_mask
+        row_idx = np.where(nonzero_mask)[0]
+        if len(row_idx) > 0:
+            col_idx = level_indices[row_idx] * n_terms + j
+            all_rows.append(row_idx.astype(np.int64))
+            all_cols.append(col_idx.astype(np.int64))
+            all_vals.append(term_col[row_idx])
+
+    if all_rows:
+        row_indices = np.concatenate(all_rows)
+        col_indices = np.concatenate(all_cols)
+        values = np.concatenate(all_vals)
+    else:
+        row_indices = np.array([], dtype=np.int64)
+        col_indices = np.array([], dtype=np.int64)
+        values = np.array([], dtype=np.float64)
+
+    return sparse.csc_matrix(
+        (values, (row_indices, col_indices)),
+        shape=(n, n_random_cols),
+        dtype=np.float64,
+    )
 
 
 def build_random_matrix(
@@ -261,7 +311,7 @@ def _build_random_block(
     level_map = {lv: i for i, lv in enumerate(levels)}
     n_levels = len(levels)
 
-    group_values = get_column_numpy(data, grouping_factor)  # Keep original dtype for grouping
+    group_values = get_column_numpy(data, grouping_factor)
 
     term_cols: list[NDArray[np.floating]] = []
     term_names: list[str] = []
@@ -283,31 +333,8 @@ def _build_random_block(
             term_names.extend(nms)
 
     n_terms = len(term_cols)
-    n_random_cols = n_levels * n_terms
 
-    row_indices: list[int] = []
-    col_indices: list[int] = []
-    values: list[float] = []
-
-    for i in range(n):
-        group_val = group_values[i]
-        if group_val not in level_map:
-            continue
-        level_idx = level_map[group_val]
-
-        for j, term_col in enumerate(term_cols):
-            col_idx = level_idx * n_terms + j
-            val = term_col[i]
-            if val != 0:
-                row_indices.append(i)
-                col_indices.append(col_idx)
-                values.append(val)
-
-    Z_block = sparse.csc_matrix(
-        (values, (row_indices, col_indices)),
-        shape=(n, n_random_cols),
-        dtype=np.float64,
-    )
+    Z_block = _build_sparse_Z_block(group_values, level_map, term_cols, n, n_levels, n_terms)
 
     structure = RandomEffectStructure(
         grouping_factor=grouping_factor,
@@ -360,31 +387,8 @@ def _build_nested_random_block(
             term_names.extend(nms)
 
     n_terms = len(term_cols)
-    n_random_cols = n_levels * n_terms
 
-    row_indices: list[int] = []
-    col_indices: list[int] = []
-    values: list[float] = []
-
-    for i in range(n):
-        group_val = str(combined_group[i])
-        if group_val not in level_map:
-            continue
-        level_idx = level_map[group_val]
-
-        for j, term_col in enumerate(term_cols):
-            col_idx = level_idx * n_terms + j
-            val = term_col[i]
-            if val != 0:
-                row_indices.append(i)
-                col_indices.append(col_idx)
-                values.append(val)
-
-    Z_block = sparse.csc_matrix(
-        (values, (row_indices, col_indices)),
-        shape=(n, n_random_cols),
-        dtype=np.float64,
-    )
+    Z_block = _build_sparse_Z_block(combined_group, level_map, term_cols, n, n_levels, n_terms)
 
     structure = RandomEffectStructure(
         grouping_factor="/".join(grouping_factors),

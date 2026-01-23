@@ -62,7 +62,6 @@ class TestZTWZCache:
 
         theta = np.array([0.9])
 
-        # Compute deviance without caching (calling raw Rust function)
         z_csc = matrices.Z.tocsc()
         dev_uncached = profiled_deviance(
             theta,
@@ -80,7 +79,6 @@ class TestZTWZCache:
             True,
         )
 
-        # Compute deviance with caching
         cache = _RustMatrixCache.from_matrices(matrices)
         dev_cached = _profiled_deviance_rust_cached(theta, cache, REML=True)
 

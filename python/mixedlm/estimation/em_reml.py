@@ -42,6 +42,10 @@ def em_reml_simple(
     max_iter: int = 100,
     tol: float = 1e-4,
     verbose: int = 0,
+    variance_floor: float = 1e-8,
+    min_iter_converge: int = 5,
+    sigma2_u_init_scale: float = 0.5,
+    sigma2_u_init_min: float = 0.1,
 ) -> EMResult:
     """Fit linear mixed model using EM-REML algorithm.
 
@@ -60,9 +64,18 @@ def em_reml_simple(
     max_iter : int, default 100
         Maximum number of EM iterations.
     tol : float, default 1e-4
-        Convergence tolerance for log-likelihood change.
+        Convergence tolerance for relative log-likelihood change.
     verbose : int, default 0
         Verbosity level (0 = silent, 1 = show iterations).
+    variance_floor : float, default 1e-8
+        Minimum value for variance components to ensure numerical stability.
+    min_iter_converge : int, default 5
+        Minimum number of iterations before checking for convergence.
+    sigma2_u_init_scale : float, default 0.5
+        Scaling factor applied to residual variance for initial random effect
+        variance estimate.
+    sigma2_u_init_min : float, default 0.1
+        Minimum initial value for random effect variance.
 
     Returns
     -------
@@ -92,7 +105,6 @@ def em_reml_simple(
     >>> parsed = lFormula("Reaction ~ Days + (1 | Subject)", data)
     >>> result = em_reml_simple(parsed.matrices, max_iter=50, verbose=1)
     """
-    # Check if model structure is supported
     if len(matrices.random_structures) != 1:
         raise NotImplementedError(
             "EM-REML currently only supports models with a single random effect term. "
@@ -106,8 +118,7 @@ def em_reml_simple(
             "Use direct optimization via lmer() with optimizer='bobyqa' instead."
         )
 
-    # Extract data
-    y = matrices.y.copy()
+    y = matrices.y
     X = matrices.X
     Z = matrices.Z.toarray() if hasattr(matrices.Z, "toarray") else matrices.Z
     weights = matrices.weights
@@ -118,7 +129,6 @@ def em_reml_simple(
     p = X.shape[1]
     q = Z.shape[1]
 
-    # Initialize with OLS
     try:
         sqrt_w = np.sqrt(weights)
         Xw = X * sqrt_w[:, None]
@@ -130,32 +140,19 @@ def em_reml_simple(
         beta = np.zeros(p)
         sigma2_e = 1.0
 
-    sigma2_u = max(sigma2_e * 0.5, 0.1)  # Initialize random effect variance
+    sigma2_u = max(sigma2_e * sigma2_u_init_scale, sigma2_u_init_min)
     prev_loglik = -np.inf
     converged = False
 
     for iteration in range(max_iter):
-        # E-step: Compute E[u|y, theta] and Var(u|y, theta)
-        # Using Henderson's mixed model equations
-
-        # Build coefficient matrix for mixed model equations
-        # [X'WX      X'WZ  ] [beta]   [X'Wy]
-        # [Z'WX   Z'WZ+D^-1] [u   ] = [Z'Wy]
-        # where D = sigma2_u * I, W = diag(weights/sigma2_e)
-
         W = weights / sigma2_e
         XtWX = X.T @ (W[:, None] * X)
         XtWZ = X.T @ (W[:, None] * Z)
         ZtWZ = Z.T @ (W[:, None] * Z)
         D_inv = np.eye(q) / sigma2_u
 
-        # Right-hand side
         XtWy = X.T @ (W * y_adj)
         ZtWy = Z.T @ (W * y_adj)
-
-        # Solve mixed model equations
-        # [beta_hat]   [X'WX      X'WZ  ]^-1 [X'Wy]
-        # [u_hat   ] = [Z'WX   Z'WZ+D^-1]    [Z'Wy]
 
         LHS_top = np.hstack([XtWX, XtWZ])
         LHS_bot = np.hstack([XtWZ.T, ZtWZ + D_inv])
@@ -170,36 +167,26 @@ def em_reml_simple(
         beta_new = solution[:p]
         u_hat = solution[p:]
 
-        # Compute Var(u|y) from the inverse of the coefficient matrix
         try:
-            LHS_inv = linalg.inv(LHS)
-            Var_u = LHS_inv[p:, p:]  # Bottom-right block
+            XtWX_inv_XtWZ = linalg.solve(XtWX, XtWZ, assume_a="pos")
+            schur_complement = (ZtWZ + D_inv) - XtWZ.T @ XtWX_inv_XtWZ
+            Var_u = linalg.inv(schur_complement)
         except linalg.LinAlgError:
-            # Fallback: approximate variance
             Var_u = linalg.pinv(ZtWZ + D_inv)
 
-        # M-step: Update variance components
-
-        # Update sigma2_u: E[u'u|y] = u_hat'u_hat + tr(Var(u|y))
         E_utu = u_hat @ u_hat + np.trace(Var_u)
         sigma2_u_new = E_utu / q
 
-        # Update sigma2_e: E[(y-Xb-Zu)'W(y-Xb-Zu)|y]
         residuals = y_adj - X @ beta_new - Z @ u_hat
         wrss = np.sum(weights * residuals**2)
 
-        # Include uncertainty in random effects
-        # E[(Zu)'W(Zu)|y] = tr(Z'WZ * E[uu'|y]) = tr(Z'WZ * (uu' + Var_u))
         uncertainty_term = np.trace(ZtWZ @ Var_u)
 
         sigma2_e_new = (wrss + uncertainty_term) / n
 
-        # Ensure positive variances
-        sigma2_u_new = max(sigma2_u_new, 1e-8)
-        sigma2_e_new = max(sigma2_e_new, 1e-8)
+        sigma2_u_new = max(sigma2_u_new, variance_floor)
+        sigma2_e_new = max(sigma2_e_new, variance_floor)
 
-        # Compute REML log-likelihood for convergence checking
-        # This is approximate but sufficient for convergence monitoring
         loglik = -0.5 * (
             (n - p) * np.log(2 * np.pi * sigma2_e_new)
             + wrss / sigma2_e_new
@@ -207,15 +194,15 @@ def em_reml_simple(
             + np.linalg.slogdet(XtWX)[1]
         )
 
-        # Check for numerical issues
         if not np.isfinite(loglik):
             if verbose >= 1:
                 print(f"Warning: Non-finite log-likelihood at iteration {iteration + 1}")
             break
 
-        # Check convergence
         loglik_change = abs(loglik - prev_loglik)
-        rel_change = loglik_change / (abs(prev_loglik) + 1e-8) if prev_loglik != -np.inf else 1.0
+        rel_change = (
+            loglik_change / (abs(prev_loglik) + variance_floor) if prev_loglik != -np.inf else 1.0
+        )
 
         if verbose >= 1:
             print(
@@ -224,19 +211,17 @@ def em_reml_simple(
                 f"rel_change={rel_change:.6f}"
             )
 
-        if rel_change < tol and iteration >= 5:
+        if rel_change < tol and iteration >= min_iter_converge:
             converged = True
             if verbose >= 1:
                 print(f"Converged after {iteration + 1} iterations")
             break
 
-        # Update for next iteration
         beta = beta_new
         sigma2_e = sigma2_e_new
         sigma2_u = sigma2_u_new
         prev_loglik = loglik
 
-    # Convert to theta parameterization (relative scale)
     sigma = np.sqrt(sigma2_e)
     theta = np.array([np.sqrt(sigma2_u / sigma2_e)])
 
