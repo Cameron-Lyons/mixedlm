@@ -2555,7 +2555,8 @@ class TestPredict:
         assert np.isclose(pred[0], expected)
 
     def test_lmer_predict_random_slope(self):
-        result = lmer("Reaction ~ Days + (Days | Subject)", SLEEPSTUDY)
+        ctrl = LmerControl(optimizer="L-BFGS-B")
+        result = lmer("Reaction ~ Days + (Days | Subject)", SLEEPSTUDY, control=ctrl)
 
         subject = SLEEPSTUDY["Subject"].iloc[0]
         new_data = pd.DataFrame({"Reaction": [300.0], "Days": [5.0], "Subject": [subject]})
