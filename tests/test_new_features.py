@@ -79,7 +79,8 @@ class TestCovarianceStructures:
 
     def test_lmer_with_ar1_structure(self):
         formula = set_cov_type("Reaction ~ Days + (Days | Subject)", "ar1")
-        result = lmer(formula, SLEEPSTUDY)
+        ctrl = LmerControl(optimizer="L-BFGS-B")
+        result = lmer(formula, SLEEPSTUDY, control=ctrl)
 
         assert result.converged
         assert len(result.theta) == 2
