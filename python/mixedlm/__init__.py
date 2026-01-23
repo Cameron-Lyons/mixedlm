@@ -12,9 +12,19 @@ from mixedlm.datasets import (
     load_sleepstudy,
     load_verbagg,
 )
+from mixedlm.estimation.em_reml import EMResult, em_reml_simple
 from mixedlm.estimation.laplace import GQN, GQdk
 from mixedlm.estimation.optimizers import NelderMead, NelderMeadState, golden, nlminbwrap
 from mixedlm.estimation.reml import DevianceComponents
+
+try:
+    from mixedlm._rust import SparseCholeskyNumeric, SparseCholeskySymbolic
+
+    _HAS_RUST_SPARSE = True
+except ImportError:
+    SparseCholeskyNumeric = None
+    SparseCholeskySymbolic = None
+    _HAS_RUST_SPARSE = False
 from mixedlm.families.custom import CustomFamily, QuasiFamily, validate_family
 from mixedlm.formula.parser import (
     dropOffset,
@@ -264,4 +274,8 @@ __all__ = [
     "mkParsTemplate",
     "mkMinimalData",
     "mkNewReTrms",
+    "EMResult",
+    "em_reml_simple",
+    "SparseCholeskySymbolic",
+    "SparseCholeskyNumeric",
 ]

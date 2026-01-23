@@ -12,7 +12,7 @@ from mixedlm.estimation.optimizers import run_optimizer
 from mixedlm.matrices.design import ModelMatrices, RandomEffectStructure
 
 try:
-    from mixedlm._rust import profiled_deviance as _rust_profiled_deviance
+    import mixedlm._rust  # noqa: F401
 
     _HAS_RUST = True
 except ImportError:
@@ -356,6 +356,12 @@ def profiled_deviance_components(
     )
 
 
+if _HAS_RUST:
+    from mixedlm._rust import SparseCholeskySymbolic
+else:
+    SparseCholeskySymbolic = None
+
+
 @dataclass
 class _RustMatrixCache:
     """Cached data for Rust profiled_deviance calls."""
@@ -371,22 +377,35 @@ class _RustMatrixCache:
     n_levels: list[int]
     n_terms: list[int]
     correlated: list[bool]
+    ztwz: NDArray[np.floating] | None
+    symbolic_cache: SparseCholeskySymbolic | None = None
 
     @classmethod
     def from_matrices(cls, matrices: ModelMatrices) -> _RustMatrixCache:
+        from mixedlm._rust import compute_ztwz
+
         z_csc = matrices.Z.tocsc()
+        z_data = np.ascontiguousarray(z_csc.data)
+        z_indices = np.ascontiguousarray(z_csc.indices.astype(np.int64))
+        z_indptr = np.ascontiguousarray(z_csc.indptr.astype(np.int64))
+        z_shape = (z_csc.shape[0], z_csc.shape[1])
+        weights = np.ascontiguousarray(matrices.weights)
+
+        ztwz = compute_ztwz(z_data, z_indices, z_indptr, z_shape, weights)
+
         return cls(
             y=np.ascontiguousarray(matrices.y),
             X=np.ascontiguousarray(matrices.X),
-            z_data=np.ascontiguousarray(z_csc.data),
-            z_indices=np.ascontiguousarray(z_csc.indices.astype(np.int64)),
-            z_indptr=np.ascontiguousarray(z_csc.indptr.astype(np.int64)),
-            z_shape=(z_csc.shape[0], z_csc.shape[1]),
-            weights=np.ascontiguousarray(matrices.weights),
+            z_data=z_data,
+            z_indices=z_indices,
+            z_indptr=z_indptr,
+            z_shape=z_shape,
+            weights=weights,
             offset=np.ascontiguousarray(matrices.offset),
             n_levels=[s.n_levels for s in matrices.random_structures],
             n_terms=[s.n_terms for s in matrices.random_structures],
             correlated=[s.correlated for s in matrices.random_structures],
+            ztwz=ztwz,
         )
 
 
@@ -395,7 +414,9 @@ def _profiled_deviance_rust_cached(
     cache: _RustMatrixCache,
     REML: bool = True,
 ) -> float:
-    return _rust_profiled_deviance(
+    from mixedlm._rust import profiled_deviance_cached
+
+    return profiled_deviance_cached(
         theta,
         cache.y,
         cache.X,
@@ -409,6 +430,7 @@ def _profiled_deviance_rust_cached(
         cache.n_terms,
         cache.correlated,
         REML,
+        cache.ztwz,
     )
 
 
