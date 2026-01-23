@@ -26,6 +26,7 @@ dependencies = [
     "numpy>=1.21",
     "scipy>=1.8",
     "narwhals>=1.0",
+    "Py-BOBYQA>=1.4",
 ]
 
 [project.optional-dependencies]

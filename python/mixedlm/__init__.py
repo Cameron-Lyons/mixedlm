@@ -86,6 +86,7 @@ from mixedlm.models.modular import (
 )
 from mixedlm.models.nlmer import NlmerMod, NlmerResult, nlmer
 from mixedlm.power import PowerCurveResult, PowerResult, extend, powerCurve, powerSim
+from mixedlm.utils.allfit import AllFitResult, allFit
 from mixedlm.utils.lme4_compat import (
     ConvergenceInfo,
     DevComp,
@@ -129,6 +130,8 @@ __all__ = [
     "LmerMod",
     "lmerControl",
     "LmerControl",
+    "allFit",
+    "AllFitResult",
     "glmer",
     "glmer_nb",
     "GlmerMod",

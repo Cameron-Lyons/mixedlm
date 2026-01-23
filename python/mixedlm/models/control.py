@@ -13,14 +13,15 @@ class LmerControl:
 
     Parameters
     ----------
-    optimizer : str, default "L-BFGS-B"
+    optimizer : str, default "bobyqa"
         Optimization algorithm to use. Options:
-        - "L-BFGS-B": Limited-memory BFGS with bounds (default)
+        - "bobyqa": BOBYQA (Bound Optimization BY Quadratic Approximation) -
+          default, fastest and most reliable
+        - "L-BFGS-B": Limited-memory BFGS with bounds
         - "BFGS": BFGS without bounds
         - "Nelder-Mead": Simplex algorithm
         - "Powell": Powell's method
         - "trust-constr": Trust-region constrained
-        - "bobyqa": BOBYQA (Bound Optimization BY Quadratic Approximation)
     maxiter : int, default 1000
         Maximum number of iterations for the optimizer.
     ftol : float, default 1e-8
@@ -57,7 +58,7 @@ class LmerControl:
     >>> result = lmer("y ~ x + (x|group)", data, control=ctrl)
     """
 
-    optimizer: str = "L-BFGS-B"
+    optimizer: str = "bobyqa"
     maxiter: int = 1000
     ftol: float = 1e-8
     gtol: float = 1e-5
@@ -169,14 +170,15 @@ class GlmerControl:
 
     Parameters
     ----------
-    optimizer : str, default "L-BFGS-B"
+    optimizer : str, default "bobyqa"
         Optimization algorithm to use. Options:
-        - "L-BFGS-B": Limited-memory BFGS with bounds (default)
+        - "bobyqa": BOBYQA (Bound Optimization BY Quadratic Approximation) -
+          default, fastest and most reliable
+        - "L-BFGS-B": Limited-memory BFGS with bounds
         - "BFGS": BFGS without bounds
         - "Nelder-Mead": Simplex algorithm
         - "Powell": Powell's method
         - "trust-constr": Trust-region constrained
-        - "bobyqa": BOBYQA (Bound Optimization BY Quadratic Approximation)
     maxiter : int, default 1000
         Maximum number of iterations for the optimizer.
     ftol : float, default 1e-8
@@ -215,7 +217,7 @@ class GlmerControl:
     >>> result = glmer("y ~ x + (1|group)", data, family=Binomial(), control=ctrl)
     """
 
-    optimizer: str = "L-BFGS-B"
+    optimizer: str = "bobyqa"
     maxiter: int = 1000
     ftol: float = 1e-8
     gtol: float = 1e-5
@@ -323,7 +325,7 @@ class GlmerControl:
 
 
 def lmerControl(
-    optimizer: str = "L-BFGS-B",
+    optimizer: str = "bobyqa",
     maxiter: int = 1000,
     ftol: float = 1e-8,
     gtol: float = 1e-5,
@@ -378,7 +380,7 @@ def lmerControl(
 
 
 def glmerControl(
-    optimizer: str = "L-BFGS-B",
+    optimizer: str = "bobyqa",
     maxiter: int = 1000,
     ftol: float = 1e-8,
     gtol: float = 1e-5,
