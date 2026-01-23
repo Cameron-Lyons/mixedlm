@@ -257,6 +257,10 @@ class LmerResult(MerResultMixin):
     REML: bool
     converged: bool
     n_iter: int
+    gradient_norm: float | None = None
+    at_boundary: bool = False
+    message: str = ""
+    function_evals: int = 0
 
     def fixef(self) -> dict[str, float]:
         return dict(zip(self.matrices.fixed_names, self.beta, strict=False))
@@ -971,6 +975,7 @@ class LmerResult(MerResultMixin):
                 with np.errstate(divide="ignore", invalid="ignore"):
                     corr = cov / np.outer(stddevs, stddevs)
                     corr = np.where(np.isfinite(corr), corr, 0.0)
+                    np.fill_diagonal(corr, 1.0)
             else:
                 theta_block = self.theta[theta_idx : theta_idx + q]
                 theta_idx += q
@@ -2200,6 +2205,10 @@ class LmerResult(MerResultMixin):
             REML=False,
             converged=opt_result.converged,
             n_iter=opt_result.n_iter,
+            gradient_norm=opt_result.gradient_norm,
+            at_boundary=opt_result.at_boundary,
+            message=opt_result.message,
+            function_evals=opt_result.function_evals,
         )
 
     def refit(
@@ -2282,6 +2291,10 @@ class LmerResult(MerResultMixin):
             REML=self.REML,
             converged=opt_result.converged,
             n_iter=opt_result.n_iter,
+            gradient_norm=opt_result.gradient_norm,
+            at_boundary=opt_result.at_boundary,
+            message=opt_result.message,
+            function_evals=opt_result.function_evals,
         )
 
     def isREML(self) -> bool:
@@ -2500,6 +2513,10 @@ class LmerMod:
             REML=self.REML,
             converged=opt_result.converged,
             n_iter=opt_result.n_iter,
+            gradient_norm=opt_result.gradient_norm,
+            at_boundary=opt_result.at_boundary,
+            message=opt_result.message,
+            function_evals=opt_result.function_evals,
         )
 
         if ctrl.check_conv and not result.converged:

@@ -74,6 +74,8 @@ class OptimizeResult:
     success: bool
     nit: int
     message: str
+    jac: NDArray[np.floating] | None = None
+    nfev: int = 0
 
 
 def _convert_bounds_to_arrays(
@@ -227,6 +229,7 @@ def _optimize_scipy(
     bounds: list[tuple[float | None, float | None]],
     options: dict[str, Any],
     callback: Callable[[NDArray[np.floating]], None] | None = None,
+    jac: Callable[[NDArray[np.floating]], NDArray[np.floating]] | None = None,
 ) -> OptimizeResult:
     result = minimize(
         fun,
@@ -235,7 +238,11 @@ def _optimize_scipy(
         bounds=bounds,
         options=options,
         callback=callback,
+        jac=jac,
     )
+
+    jac_val = result.jac if hasattr(result, "jac") else None
+    nfev_val = result.nfev if hasattr(result, "nfev") else 0
 
     return OptimizeResult(
         x=result.x,
@@ -243,6 +250,8 @@ def _optimize_scipy(
         success=result.success,
         nit=result.nit,
         message=result.message if hasattr(result, "message") else "",
+        jac=jac_val,
+        nfev=nfev_val,
     )
 
 

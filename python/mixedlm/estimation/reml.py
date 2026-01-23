@@ -28,6 +28,10 @@ class OptimizationResult:
     deviance: float
     converged: bool
     n_iter: int
+    gradient_norm: float | None = None
+    at_boundary: bool = False
+    message: str = ""
+    function_evals: int = 0
 
 
 @dataclass
@@ -459,9 +463,28 @@ class LMMOptimizer:
 
     def get_start_theta(self) -> NDArray[np.floating]:
         theta_list: list[float] = []
+        try:
+            beta_ols, sigma_ols = self._fit_ols()
+            residuals = self._compute_ols_residuals(beta_ols)
+        except Exception:
+            beta_ols = None
+            sigma_ols = 1.0
+            residuals = None
+
         for struct in self.matrices.random_structures:
             q = struct.n_terms
             cov_type = getattr(struct, "cov_type", "us")
+
+            if residuals is not None and beta_ols is not None:
+                try:
+                    theta_struct = self._get_adaptive_start_for_structure(
+                        struct, residuals, sigma_ols
+                    )
+                    theta_list.extend(theta_struct)
+                    continue
+                except Exception:
+                    pass
+
             if cov_type == "cs" or cov_type == "ar1":
                 theta_list.append(1.0)
                 if q > 1:
@@ -473,6 +496,95 @@ class LMMOptimizer:
             else:
                 theta_list.extend([1.0] * q)
         return np.array(theta_list, dtype=np.float64)
+
+    def _fit_ols(self) -> tuple[NDArray[np.floating], float]:
+        """Fit OLS regression to get initial estimates."""
+        from scipy import linalg
+
+        y = self.matrices.y
+        X = self.matrices.X
+        w = self.matrices.weights
+        offset = self.matrices.offset
+
+        y_adj = y - offset
+        sqrt_w = np.sqrt(w)
+        Xw = X * sqrt_w[:, np.newaxis]
+        yw = y_adj * sqrt_w
+
+        XtX = Xw.T @ Xw
+        Xty = Xw.T @ yw
+
+        beta = linalg.solve(XtX, Xty, assume_a="pos")
+
+        fitted = X @ beta
+        residuals = y_adj - fitted
+        wrss = np.sum(w * residuals**2)
+        sigma = np.sqrt(wrss / (len(y) - len(beta)))
+
+        return beta, sigma
+
+    def _compute_ols_residuals(self, beta: NDArray[np.floating]) -> NDArray[np.floating]:
+        """Compute residuals from OLS fit."""
+        y = self.matrices.y
+        X = self.matrices.X
+        offset = self.matrices.offset
+
+        y_adj = y - offset
+        fitted = X @ beta
+        return y_adj - fitted
+
+    def _get_adaptive_start_for_structure(
+        self, struct, residuals: NDArray[np.floating], sigma_ols: float
+    ) -> list[float]:
+        """Get data-driven starting values for a random effect structure."""
+        q = struct.n_terms
+        cov_type = getattr(struct, "cov_type", "us")
+
+        if cov_type in ("cs", "ar1"):
+            sigma_start = max(0.5 * sigma_ols, 0.1)
+            rho_start = 0.3 if cov_type == "cs" else 0.5
+
+            if q > 1:
+                return [sigma_start, rho_start]
+            return [sigma_start]
+
+        if not struct.correlated:
+            sigma_start = max(0.5 * sigma_ols, 0.1)
+            return [sigma_start] * q
+
+        Z_block_start = 0
+        for s in self.matrices.random_structures:
+            if s is struct:
+                break
+            Z_block_start += s.n_levels * s.n_terms
+
+        Z_block_end = Z_block_start + struct.n_levels * struct.n_terms
+        Z_block = self.matrices.Z[:, Z_block_start:Z_block_end].toarray()
+
+        group_residuals = []
+        for level_idx in range(struct.n_levels):
+            level_cols = range(level_idx * q, (level_idx + 1) * q)
+            level_mask = np.asarray(Z_block[:, level_cols].sum(axis=1)).ravel() > 0
+            if np.any(level_mask):
+                level_resid_mean = residuals[level_mask].mean()
+                group_residuals.append(level_resid_mean)
+
+        if len(group_residuals) > 1:
+            group_var = max(np.var(group_residuals, ddof=1), 0.01)
+            relative_sd = np.sqrt(group_var) / max(sigma_ols, 0.1)
+            theta_diag = max(min(relative_sd, 3.0), 0.2)
+        else:
+            theta_diag = 0.5
+
+        theta_struct = []
+        for i in range(q):
+            for j in range(i + 1):
+                if i == j:
+                    theta_struct.append(theta_diag)
+                else:
+                    theta_struct.append(0.0)
+
+        return theta_struct
 
     def objective(self, theta: NDArray[np.floating]) -> float:
         if self.use_rust and self._rust_cache is not None:
@@ -487,6 +599,18 @@ class LMMOptimizer:
         if result is None:
             return np.zeros(self.matrices.n_fixed), 1.0, np.zeros(self.matrices.n_random)
         return result.beta, result.sigma, result.u
+
+    def _check_at_boundary(
+        self, theta: NDArray[np.floating], bounds: list[tuple[float | None, float | None]]
+    ) -> bool:
+        """Check if any parameters are at their bounds."""
+        tol = 1e-6
+        for theta_i, (lb, ub) in zip(theta, bounds, strict=True):
+            if lb is not None and abs(theta_i - lb) < tol:
+                return True
+            if ub is not None and abs(theta_i - ub) < tol:
+                return True
+        return False
 
     def optimize(
         self,
@@ -549,6 +673,12 @@ class LMMOptimizer:
         theta_opt = result.x
         core_result = _profiled_deviance_core(theta_opt, self.matrices, self.REML)
 
+        gradient_norm = None
+        if result.jac is not None:
+            gradient_norm = float(np.linalg.norm(result.jac))
+
+        at_boundary = self._check_at_boundary(theta_opt, bounds)
+
         if core_result is None:
             return OptimizationResult(
                 theta=theta_opt,
@@ -558,6 +688,10 @@ class LMMOptimizer:
                 deviance=result.fun,
                 converged=False,
                 n_iter=result.nit,
+                gradient_norm=gradient_norm,
+                at_boundary=at_boundary,
+                message=result.message,
+                function_evals=result.nfev,
             )
 
         return OptimizationResult(
@@ -568,4 +702,8 @@ class LMMOptimizer:
             deviance=result.fun,
             converged=result.success,
             n_iter=result.nit,
+            gradient_norm=gradient_norm,
+            at_boundary=at_boundary,
+            message=result.message,
+            function_evals=result.nfev,
         )

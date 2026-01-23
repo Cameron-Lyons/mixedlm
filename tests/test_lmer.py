@@ -4543,7 +4543,8 @@ class TestModularInterface:
 
         start = devfun.get_start()
         assert len(start) == 1
-        assert start[0] == 1.0
+        assert start[0] > 0.0
+        assert start[0] < 10.0
 
         dev = devfun(start)
         assert isinstance(dev, float)
