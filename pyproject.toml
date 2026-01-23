@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "mixedlm"
-version = "1.0.0"
+version = "1.1.0"
 description = "Mixed-effects models in Python with Rust backend"
 requires-python = ">=3.10"
 license = {text = "MIT"}
