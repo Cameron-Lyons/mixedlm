@@ -293,6 +293,10 @@ fn compute_ztwz_sparse(z: &CscMatrix<f64>, weights: &[f64], q: usize) -> Mat<f64
     ztwz
 }
 
+fn mat_from_flat_array(data: &[f64], q: usize) -> Mat<f64> {
+    Mat::from_fn(q, q, |i, j| data[i * q + j])
+}
+
 fn apply_lambda_block_transform(
     ztwz: &Mat<f64>,
     lambda_blocks: &[Mat<f64>],
@@ -464,6 +468,7 @@ pub fn profiled_deviance_impl(
     offset: ArrayView1<'_, f64>,
     structures: &[RandomEffectStructure],
     reml: bool,
+    ztwz_cache: Option<&[f64]>,
 ) -> PyResult<f64> {
     let n = y.len();
     let p = x_data.ncols();
@@ -524,7 +529,11 @@ pub fn profiled_deviance_impl(
     let z = csc_from_scipy(z_data, z_indices, z_indptr, z_shape)?;
     let lambda_blocks = build_lambda_blocks(theta, structures);
 
-    let ztwz = compute_ztwz_sparse(&z, &w, q);
+    let ztwz = if let Some(cached_data) = ztwz_cache {
+        mat_from_flat_array(cached_data, q)
+    } else {
+        compute_ztwz_sparse(&z, &w, q)
+    };
     let lambdat_ztwz_lambda = apply_lambda_block_transform(&ztwz, &lambda_blocks, structures);
 
     let mut v_factor = lambdat_ztwz_lambda;
@@ -616,6 +625,7 @@ pub fn profiled_deviance_with_gradient_impl(
     offset: ArrayView1<'_, f64>,
     structures: &[RandomEffectStructure],
     reml: bool,
+    ztwz_cache: Option<&[f64]>,
 ) -> PyResult<(f64, Vec<f64>)> {
     let n = y.len();
     let p = x_data.ncols();
@@ -678,7 +688,11 @@ pub fn profiled_deviance_with_gradient_impl(
     let lambda_blocks = build_lambda_blocks(theta, structures);
     let dlambda_blocks = build_lambda_derivative_blocks(structures);
 
-    let ztwz = compute_ztwz_sparse(&z, &w, q);
+    let ztwz = if let Some(cached_data) = ztwz_cache {
+        mat_from_flat_array(cached_data, q)
+    } else {
+        compute_ztwz_sparse(&z, &w, q)
+    };
     let lambdat_ztwz_lambda = apply_lambda_block_transform(&ztwz, &lambda_blocks, structures);
 
     let mut v_factor = lambdat_ztwz_lambda.clone();
@@ -880,6 +894,99 @@ pub fn profiled_deviance_with_gradient_impl(
 }
 
 #[pyfunction]
+pub fn compute_ztwz<'py>(
+    py: Python<'py>,
+    z_data: numpy::PyArrayLike1<'py, f64>,
+    z_indices: numpy::PyArrayLike1<'py, i64>,
+    z_indptr: numpy::PyArrayLike1<'py, i64>,
+    z_shape: (usize, usize),
+    weights: numpy::PyArrayLike1<'py, f64>,
+) -> PyResult<Py<PyArray1<f64>>> {
+    let z = csc_from_scipy(
+        z_data.as_slice()?,
+        z_indices.as_slice()?,
+        z_indptr.as_slice()?,
+        z_shape,
+    )?;
+    let w: Vec<f64> = weights.as_array().iter().copied().collect();
+    let q = z_shape.1;
+
+    let ztwz = compute_ztwz_sparse(&z, &w, q);
+
+    let mut flat_data = Vec::with_capacity(q * q);
+    for i in 0..q {
+        for j in 0..q {
+            flat_data.push(ztwz[(i, j)]);
+        }
+    }
+
+    Ok(PyArray1::from_vec(py, flat_data).into())
+}
+
+#[pyfunction]
+#[pyo3(signature = (
+    theta,
+    y,
+    x,
+    z_data,
+    z_indices,
+    z_indptr,
+    z_shape,
+    weights,
+    offset,
+    n_levels,
+    n_terms,
+    correlated,
+    reml = true,
+    ztwz_cache = None
+))]
+#[allow(clippy::too_many_arguments)]
+pub fn profiled_deviance_cached<'py>(
+    theta: numpy::PyArrayLike1<'py, f64>,
+    y: numpy::PyArrayLike1<'py, f64>,
+    x: numpy::PyArrayLike2<'py, f64>,
+    z_data: numpy::PyArrayLike1<'py, f64>,
+    z_indices: numpy::PyArrayLike1<'py, i64>,
+    z_indptr: numpy::PyArrayLike1<'py, i64>,
+    z_shape: (usize, usize),
+    weights: numpy::PyArrayLike1<'py, f64>,
+    offset: numpy::PyArrayLike1<'py, f64>,
+    n_levels: Vec<usize>,
+    n_terms: Vec<usize>,
+    correlated: Vec<bool>,
+    reml: bool,
+    ztwz_cache: Option<numpy::PyArrayLike1<'py, f64>>,
+) -> PyResult<f64> {
+    let structures: Vec<RandomEffectStructure> = n_levels
+        .into_iter()
+        .zip(n_terms)
+        .zip(correlated)
+        .map(|((nl, nt), c)| RandomEffectStructure {
+            n_levels: nl,
+            n_terms: nt,
+            correlated: c,
+        })
+        .collect();
+
+    let ztwz_data = ztwz_cache.as_ref().map(|arr| arr.as_slice()).transpose()?;
+
+    profiled_deviance_impl(
+        theta.as_slice()?,
+        y.as_array(),
+        x.as_array(),
+        z_data.as_slice()?,
+        z_indices.as_slice()?,
+        z_indptr.as_slice()?,
+        z_shape,
+        weights.as_array(),
+        offset.as_array(),
+        &structures,
+        reml,
+        ztwz_data,
+    )
+}
+
+#[pyfunction]
 #[pyo3(signature = (
     theta,
     y,
@@ -934,6 +1041,7 @@ pub fn profiled_deviance<'py>(
         offset.as_array(),
         &structures,
         reml,
+        None,
     )
 }
 
@@ -993,6 +1101,7 @@ pub fn profiled_deviance_with_gradient<'py>(
         offset.as_array(),
         &structures,
         reml,
+        None,
     )?;
 
     Ok((dev, PyArray1::from_vec(py, grad).into()))
