@@ -908,6 +908,7 @@ dependencies = [
     { name = "narwhals" },
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "numpy", version = "2.4.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "py-bobyqa" },
     { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "scipy", version = "1.17.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
 ]
@@ -959,6 +960,7 @@ requires-dist = [
     { name = "pandas", marker = "extra == 'pandas'", specifier = ">=1.4" },
     { name = "polars", marker = "extra == 'dev'", specifier = ">=0.20" },
     { name = "polars", marker = "extra == 'polars'", specifier = ">=0.20" },
+    { name = "py-bobyqa", specifier = ">=1.4" },
     { name = "py-bobyqa", marker = "extra == 'optimizers'", specifier = ">=1.4" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=4.0" },
