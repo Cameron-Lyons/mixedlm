@@ -118,96 +118,113 @@ def em_reml_simple(
     p = X.shape[1]
     q = Z.shape[1]
 
-    # Initialize parameters
-    sigma2_e = 1.0  # Residual variance
-    sigma2_u = 1.0  # Random effect variance
-    beta = np.zeros(p)
-    u = np.zeros(q)
+    # Initialize with OLS
+    try:
+        sqrt_w = np.sqrt(weights)
+        Xw = X * sqrt_w[:, None]
+        yw = y_adj * sqrt_w
+        beta = linalg.lstsq(Xw, yw)[0]
+        residuals = y_adj - X @ beta
+        sigma2_e = np.sum(weights * residuals**2) / n
+    except Exception:
+        beta = np.zeros(p)
+        sigma2_e = 1.0
 
+    sigma2_u = max(sigma2_e * 0.5, 0.1)  # Initialize random effect variance
     prev_loglik = -np.inf
+    converged = False
 
     for iteration in range(max_iter):
-        # E-step: Compute conditional expectations
-        # For simplified random intercept: V = sigma2_e * W^{-1} + sigma2_u * Z Z'
+        # E-step: Compute E[u|y, theta] and Var(u|y, theta)
+        # Using Henderson's mixed model equations
 
-        residuals = y_adj - X @ beta
+        # Build coefficient matrix for mixed model equations
+        # [X'WX      X'WZ  ] [beta]   [X'Wy]
+        # [Z'WX   Z'WZ+D^-1] [u   ] = [Z'Wy]
+        # where D = sigma2_u * I, W = diag(weights/sigma2_e)
 
-        # Compute V^{-1} * residuals using Woodbury identity
-        # V^{-1} = W / sigma2_e - W / sigma2_e * Z * (I / sigma2_u + Z' W Z / sigma2_e)^{-1} * Z' W / sigma2_e
+        W = weights / sigma2_e
+        XtWX = X.T @ (W[:, None] * X)
+        XtWZ = X.T @ (W[:, None] * Z)
+        ZtWZ = Z.T @ (W[:, None] * Z)
+        D_inv = np.eye(q) / sigma2_u
 
-        # Simpler approach for random intercepts: work with grouped structure
-        W_sqrt = np.sqrt(weights)
-        ZtWZ = Z.T @ (weights[:, None] * Z) / sigma2_e  # Shape: (q, q)
-        ZtWr = Z.T @ (weights * residuals) / sigma2_e  # Shape: (q,)
+        # Right-hand side
+        XtWy = X.T @ (W * y_adj)
+        ZtWy = Z.T @ (W * y_adj)
 
-        # (I / sigma2_u + Z' W Z / sigma2_e)
-        Gamma_inv = np.eye(q) / sigma2_u + ZtWZ
+        # Solve mixed model equations
+        # [beta_hat]   [X'WX      X'WZ  ]^-1 [X'Wy]
+        # [u_hat   ] = [Z'WX   Z'WZ+D^-1]    [Z'Wy]
 
-        try:
-            Gamma = linalg.inv(Gamma_inv)
-        except linalg.LinAlgError:
-            Gamma = linalg.pinv(Gamma_inv)
-
-        # Conditional mean: u_hat = Gamma * Z' W (y - X beta) / sigma2_e
-        u_new = Gamma @ ZtWr
-
-        # Conditional variance: Var(u|y) = Gamma
-        var_u = np.diag(Gamma)
-        var_u = np.maximum(var_u, 1e-10)  # Ensure positive
-
-        # M-step: Update parameters
-
-        # Update fixed effects
-        fitted_random = Z @ u_new
-        pseudo_y = y_adj - fitted_random
-        XtWX = X.T @ (weights[:, None] * X)
-        XtWy = X.T @ (weights * pseudo_y)
+        LHS_top = np.hstack([XtWX, XtWZ])
+        LHS_bot = np.hstack([XtWZ.T, ZtWZ + D_inv])
+        LHS = np.vstack([LHS_top, LHS_bot])
+        RHS = np.concatenate([XtWy, ZtWy])
 
         try:
-            beta_new = linalg.solve(XtWX, XtWy, assume_a="pos")
+            solution = linalg.solve(LHS, RHS, assume_a="pos")
         except linalg.LinAlgError:
-            beta_new = linalg.lstsq(XtWX, XtWy)[0]
+            solution = linalg.lstsq(LHS, RHS)[0]
 
-        # Update variance components
-        residuals_new = y_adj - X @ beta_new - fitted_random
-        sse = np.sum(weights * residuals_new**2)
+        beta_new = solution[:p]
+        u_hat = solution[p:]
 
-        # Update residual variance (including trace of conditional variance)
-        trace_term = np.sum(var_u)  # tr(Gamma)
-        sigma2_e_new = (sse + trace_term) / n
+        # Compute Var(u|y) from the inverse of the coefficient matrix
+        try:
+            LHS_inv = linalg.inv(LHS)
+            Var_u = LHS_inv[p:, p:]  # Bottom-right block
+        except linalg.LinAlgError:
+            # Fallback: approximate variance
+            Var_u = linalg.pinv(ZtWZ + D_inv)
 
-        # Update random effect variance
-        # E[u'u] = u_hat' u_hat + tr(Gamma)
-        u_sq_sum = np.sum(u_new**2) + trace_term
-        sigma2_u_new = u_sq_sum / q
+        # M-step: Update variance components
 
-        # Ensure positive variance estimates
-        sigma2_e_new = max(sigma2_e_new, 1e-10)
-        sigma2_u_new = max(sigma2_u_new, 1e-10)
+        # Update sigma2_u: E[u'u|y] = u_hat'u_hat + tr(Var(u|y))
+        E_utu = u_hat @ u_hat + np.trace(Var_u)
+        sigma2_u_new = E_utu / q
 
-        # Compute log-likelihood (approximate REML criterion)
-        residuals_new = y_adj - X @ beta_new - Z @ u_new
-        wrss = np.sum(weights * residuals_new**2)
-        logdet_Gamma_inv = np.linalg.slogdet(Gamma_inv)[1]
+        # Update sigma2_e: E[(y-Xb-Zu)'W(y-Xb-Zu)|y]
+        residuals = y_adj - X @ beta_new - Z @ u_hat
+        wrss = np.sum(weights * residuals**2)
 
+        # Include uncertainty in random effects
+        # E[(Zu)'W(Zu)|y] = tr(Z'WZ * E[uu'|y]) = tr(Z'WZ * (uu' + Var_u))
+        uncertainty_term = np.trace(ZtWZ @ Var_u)
+
+        sigma2_e_new = (wrss + uncertainty_term) / n
+
+        # Ensure positive variances
+        sigma2_u_new = max(sigma2_u_new, 1e-8)
+        sigma2_e_new = max(sigma2_e_new, 1e-8)
+
+        # Compute REML log-likelihood for convergence checking
+        # This is approximate but sufficient for convergence monitoring
         loglik = -0.5 * (
             (n - p) * np.log(2 * np.pi * sigma2_e_new)
             + wrss / sigma2_e_new
-            + logdet_Gamma_inv
-            + np.linalg.slogdet(XtWX)[1]  # REML adjustment
+            + np.linalg.slogdet(ZtWZ + D_inv)[1]
+            + np.linalg.slogdet(XtWX)[1]
         )
+
+        # Check for numerical issues
+        if not np.isfinite(loglik):
+            if verbose >= 1:
+                print(f"Warning: Non-finite log-likelihood at iteration {iteration + 1}")
+            break
 
         # Check convergence
         loglik_change = abs(loglik - prev_loglik)
-        rel_change = loglik_change / (abs(prev_loglik) + 1e-10)
+        rel_change = loglik_change / (abs(prev_loglik) + 1e-8) if prev_loglik != -np.inf else 1.0
 
         if verbose >= 1:
             print(
                 f"EM iter {iteration + 1}: loglik={loglik:.4f}, "
-                f"sigma2_e={sigma2_e_new:.4f}, sigma2_u={sigma2_u_new:.4f}"
+                f"sigma2_e={sigma2_e_new:.4f}, sigma2_u={sigma2_u_new:.4f}, "
+                f"rel_change={rel_change:.6f}"
             )
 
-        if rel_change < tol and iteration > 5:
+        if rel_change < tol and iteration >= 5:
             converged = True
             if verbose >= 1:
                 print(f"Converged after {iteration + 1} iterations")
@@ -215,18 +232,13 @@ def em_reml_simple(
 
         # Update for next iteration
         beta = beta_new
-        u = u_new
         sigma2_e = sigma2_e_new
         sigma2_u = sigma2_u_new
         prev_loglik = loglik
-    else:
-        converged = False
-        if verbose >= 1:
-            print(f"Did not converge after {max_iter} iterations")
 
-    # Convert to theta parameterization (theta = sigma_u / sigma_e)
+    # Convert to theta parameterization (relative scale)
     sigma = np.sqrt(sigma2_e)
-    theta = np.array([sigma2_u / sigma2_e])
+    theta = np.array([np.sqrt(sigma2_u / sigma2_e)])
 
     return EMResult(
         theta=theta,

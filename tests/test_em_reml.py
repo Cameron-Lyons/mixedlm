@@ -1,8 +1,6 @@
 """Tests for EM-REML algorithm."""
 
-import numpy as np
 import pytest
-
 from mixedlm import lFormula, load_sleepstudy
 from mixedlm.estimation.em_reml import em_reml_simple
 
@@ -41,7 +39,6 @@ class TestEMReml:
         with pytest.raises(NotImplementedError, match="random intercept models"):
             em_reml_simple(parsed.matrices, max_iter=10)
 
-    @pytest.mark.xfail(reason="EM-REML has numerical issues, needs further refinement")
     def test_em_reml_reasonable_estimates(self):
         """Test that EM-REML produces reasonable parameter estimates."""
         data = load_sleepstudy()
@@ -59,3 +56,24 @@ class TestEMReml:
         # Variance components should be positive and reasonable
         assert 0.1 < result.theta[0] < 10
         assert 10 < result.sigma < 50
+
+    def test_em_reml_avoids_singular_fits(self):
+        """Test that EM-REML is more robust and avoids singular fits.
+
+        This is one of the key advantages of EM-REML: it tends to avoid
+        boundary solutions (theta=0) that direct optimization can converge to.
+        """
+        data = load_sleepstudy()
+        parsed = lFormula("Reaction ~ Days + (1 | Subject)", data)
+
+        # Fit with EM-REML
+        em_result = em_reml_simple(parsed.matrices, max_iter=100, verbose=0)
+
+        # EM-REML should produce a non-singular fit
+        assert em_result.converged
+        assert em_result.theta[0] > 0.1  # Well away from boundary
+        assert em_result.sigma > 0
+
+        # Fixed effects should be reasonable
+        assert 200 < em_result.beta[0] < 300  # Intercept
+        assert 5 < em_result.beta[1] < 15  # Days effect
