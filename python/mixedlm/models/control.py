@@ -42,6 +42,12 @@ class LmerControl:
         Whether to calculate gradient/Hessian for variance-covariance.
     use_rust : bool, default True
         Whether to use Rust backend for optimization (if available).
+    em_init : bool, default False
+        Whether to use EM-REML algorithm for initialization before
+        switching to direct optimization. Can improve convergence for
+        difficult models, but only works with simple random intercept models.
+    em_maxiter : int, default 50
+        Maximum EM iterations if em_init=True.
     optCtrl : dict, optional
         Additional options passed directly to the optimizer.
         For BOBYQA, supports: rhobeg, rhoend, seek_global_minimum.
@@ -68,6 +74,8 @@ class LmerControl:
     check_singular: bool = True
     calc_derivs: bool = True
     use_rust: bool = True
+    em_init: bool = False
+    em_maxiter: int = 50
     check_nobs_vs_rankZ: str = "ignore"
     check_nobs_vs_nlev: str = "ignore"
     check_nlev_gtreq_5: str = "warning"
@@ -335,6 +343,8 @@ def lmerControl(
     check_singular: bool = True,
     calc_derivs: bool = True,
     use_rust: bool = True,
+    em_init: bool = False,
+    em_maxiter: int = 50,
     check_nobs_vs_rankZ: str = "ignore",
     check_nobs_vs_nlev: str = "ignore",
     check_nlev_gtreq_5: str = "warning",
@@ -369,6 +379,8 @@ def lmerControl(
         check_singular=check_singular,
         calc_derivs=calc_derivs,
         use_rust=use_rust,
+        em_init=em_init,
+        em_maxiter=em_maxiter,
         check_nobs_vs_rankZ=check_nobs_vs_rankZ,
         check_nobs_vs_nlev=check_nobs_vs_nlev,
         check_nlev_gtreq_5=check_nlev_gtreq_5,
