@@ -9,29 +9,82 @@ permissions:
 
 jobs:
   build-wheels:
-    name: Build wheels on ${{ matrix.os }}
+    name: Build wheels on ${{ matrix.os }} (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-14, windows-latest]
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            manylinux: "2_28"
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            manylinux: "2_28"
+          - os: macos-14
+            target: aarch64-apple-darwin
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
     steps:
       - uses: actions/checkout@v6.0.2
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: "3.12"
 
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
+          target: ${{ matrix.target }}
           args: --release --out dist
-          manylinux: auto
+          manylinux: ${{ matrix.manylinux || 'auto' }}
+          sccache: true
+        env:
+          RUSTFLAGS: "-C target-cpu=x86-64-v2"
 
       - name: Upload wheels
-        uses: actions/upload-artifact@v6.0.0
+        uses: actions/upload-artifact@v4
         with:
-          name: wheels-${{ matrix.os }}
+          name: wheels-${{ matrix.target }}
+          path: dist/*.whl
+
+  build-wheels-free-threaded:
+    name: Build free-threaded wheels on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            manylinux: "2_28"
+          - os: macos-14
+            target: aarch64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.13t
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13t"
+
+      - name: Build wheels (free-threaded)
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          args: --release --out dist -i python3.13t
+          manylinux: ${{ matrix.manylinux || 'auto' }}
+          sccache: true
+
+      - name: Upload wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-freethreaded-${{ matrix.target }}
           path: dist/*.whl
 
   build-sdist:
@@ -47,31 +100,27 @@ jobs:
           args: --out dist
 
       - name: Upload sdist
-        uses: actions/upload-artifact@v6.0.0
+        uses: actions/upload-artifact@v4
         with:
           name: sdist
           path: dist/*.tar.gz
 
   publish:
     name: Publish to PyPI
-    needs: [build-wheels, build-sdist]
+    needs: [build-wheels, build-wheels-free-threaded, build-sdist]
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
       id-token: write
     steps:
-      - name: Download wheels
-        uses: actions/download-artifact@v7.0.0
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
         with:
-          pattern: wheels-*
           path: dist
           merge-multiple: true
 
-      - name: Download sdist
-        uses: actions/download-artifact@v7.0.0
-        with:
-          name: sdist
-          path: dist
+      - name: List distributions
+        run: ls -la dist/
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1

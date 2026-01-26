@@ -1,11 +1,13 @@
 use numpy::{PyArray1, PyArray2, PyArrayLike1, PyArrayLike2};
 use pyo3::prelude::*;
 
+mod blocked_chol;
 mod glmm;
 mod linalg;
 mod lmm;
 mod nlmm;
 mod quadrature;
+mod reml_algorithms;
 mod simulation;
 mod sparse_chol;
 
@@ -160,5 +162,8 @@ fn _rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(nlmm::nlmm_deviance, m)?)?;
     m.add_function(wrap_pyfunction!(simulation::simulate_re_batch, m)?)?;
     m.add_function(wrap_pyfunction!(simulation::compute_zu, m)?)?;
+    m.add_function(wrap_pyfunction!(reml_algorithms::mm_reml, m)?)?;
+    m.add_function(wrap_pyfunction!(reml_algorithms::augmented_ai_reml, m)?)?;
+    m.add_function(wrap_pyfunction!(reml_algorithms::riemannian_reml, m)?)?;
     Ok(())
 }

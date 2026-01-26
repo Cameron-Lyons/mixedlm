@@ -7,6 +7,7 @@ use pyo3::PyResult;
 use pyo3::prelude::*;
 use rayon::prelude::*;
 
+use crate::blocked_chol::{BlockedCholesky, BlockedMatrix};
 use crate::linalg::LinalgError;
 
 #[derive(Debug, Clone, Copy)]
@@ -297,6 +298,7 @@ fn mat_from_flat_array(data: &[f64], q: usize) -> Mat<f64> {
     Mat::from_fn(q, q, |i, j| data[i * q + j])
 }
 
+#[allow(dead_code)]
 fn apply_lambda_block_transform(
     ztwz: &Mat<f64>,
     lambda_blocks: &[Mat<f64>],
@@ -534,20 +536,14 @@ pub fn profiled_deviance_impl(
     } else {
         compute_ztwz_sparse(&z, &w, q)
     };
-    let lambdat_ztwz_lambda = apply_lambda_block_transform(&ztwz, &lambda_blocks, structures);
 
-    let mut v_factor = lambdat_ztwz_lambda;
-    for i in 0..q {
-        v_factor[(i, i)] += 1.0;
-    }
-
-    let chol_v = match Llt::new(v_factor.as_ref(), Side::Lower) {
+    let blocked_v = BlockedMatrix::from_lambda_ztwz(&ztwz, &lambda_blocks, structures, true);
+    let chol_v = match BlockedCholesky::factor(&blocked_v) {
         Ok(c) => c,
         Err(_) => return Ok(1e10),
     };
 
-    let l_v = chol_v.L();
-    let logdet_v: f64 = 2.0 * (0..q).map(|i| l_v[(i, i)].ln()).sum::<f64>();
+    let logdet_v = chol_v.logdet();
 
     let ztwy = compute_ztwy_sparse(&z, &w, &y_adj, q);
     let cu = apply_lambda_transpose_vector(&ztwy, &lambda_blocks, structures);
@@ -693,20 +689,14 @@ pub fn profiled_deviance_with_gradient_impl(
     } else {
         compute_ztwz_sparse(&z, &w, q)
     };
-    let lambdat_ztwz_lambda = apply_lambda_block_transform(&ztwz, &lambda_blocks, structures);
 
-    let mut v_factor = lambdat_ztwz_lambda.clone();
-    for i in 0..q {
-        v_factor[(i, i)] += 1.0;
-    }
-
-    let chol_v = match Llt::new(v_factor.as_ref(), Side::Lower) {
+    let blocked_v = BlockedMatrix::from_lambda_ztwz(&ztwz, &lambda_blocks, structures, true);
+    let chol_v = match BlockedCholesky::factor(&blocked_v) {
         Ok(c) => c,
         Err(_) => return Ok((1e10, vec![0.0; n_theta])),
     };
 
-    let l_v = chol_v.L();
-    let logdet_v: f64 = 2.0 * (0..q).map(|i| l_v[(i, i)].ln()).sum::<f64>();
+    let logdet_v = chol_v.logdet();
 
     let ztwy = compute_ztwy_sparse(&z, &w, &y_adj, q);
     let cu = apply_lambda_transpose_vector(&ztwy, &lambda_blocks, structures);

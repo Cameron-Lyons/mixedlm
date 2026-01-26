@@ -1,0 +1,20 @@
+[package]
+name = "mixedlm-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+faer = "0.23"
+
+[[bin]]
+name = "fuzz_cholesky"
+path = "fuzz_targets/fuzz_cholesky.rs"
+test = false
+doc = false
+bench = false

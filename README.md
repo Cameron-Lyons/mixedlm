@@ -1,6 +1,16 @@
 # mixedlm
 
+[![CI](https://github.com/cameronlyons/mixedlm/actions/workflows/ci.yml/badge.svg)](https://github.com/cameronlyons/mixedlm/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/mixedlm.svg)](https://pypi.org/project/mixedlm/)
+[![Python](https://img.shields.io/pypi/pyversions/mixedlm.svg)](https://pypi.org/project/mixedlm/)
+[![codecov](https://codecov.io/gh/cameronlyons/mixedlm/branch/main/graph/badge.svg)](https://codecov.io/gh/cameronlyons/mixedlm)
+[![pre-commit.ci](https://results.pre-commit.ci/badge/github/cameronlyons/mixedlm/main.svg)](https://results.pre-commit.ci/latest/github/cameronlyons/mixedlm/main)
+[![Docs](https://readthedocs.org/projects/mixedlm/badge/?version=latest)](https://mixedlm.readthedocs.io/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 A Python implementation of mixed-effects models inspired by R's [lme4](https://github.com/lme4/lme4) package. Features a Rust backend for performance-critical operations and native support for both **pandas** and **polars** DataFrames.
+
+**[Documentation](https://mixedlm.readthedocs.io/)** | **[PyPI](https://pypi.org/project/mixedlm/)**
 
 ## Features
 
@@ -261,6 +271,71 @@ pip install mixedlm[plots]  # matplotlib
 # For additional optimizers
 pip install mixedlm[optimizers]  # Py-BOBYQA, nlopt
 ```
+
+## Development
+
+### Setup
+
+```bash
+git clone https://github.com/cameronlyons/mixedlm.git
+cd mixedlm
+uv venv && uv pip install -e ".[dev]"
+maturin develop --release
+```
+
+### Testing
+
+```bash
+# Run all tests
+pytest tests/
+
+# Run with coverage
+pytest tests/ --cov=mixedlm
+
+# Run benchmarks
+pytest tests/ --benchmark-only
+
+# Run property-based tests
+pytest tests/test_property.py
+```
+
+### Code Quality
+
+```bash
+# Linting and formatting (Python)
+ruff check python/ tests/
+ruff format python/ tests/
+
+# Type checking
+mypy python/
+
+# Rust
+cargo fmt
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test
+```
+
+### Pre-commit Hooks
+
+```bash
+pre-commit install
+pre-commit run --all-files
+```
+
+### CI Pipeline
+
+The project uses GitHub Actions for continuous integration:
+
+- **Linting**: ruff, clippy, rustfmt
+- **Type checking**: mypy
+- **Testing**: pytest across Python 3.10-3.13 (including free-threaded 3.13t)
+- **Coverage**: codecov for both Python and Rust
+- **Security**: cargo-audit, pip-audit
+- **Docs**: mkdocs build verification
+- **Benchmarks**: pytest-benchmark
+- **Property testing**: hypothesis
+- **Memory safety**: Miri
+- **Fuzz testing**: cargo-fuzz (weekly)
 
 ## License
 
