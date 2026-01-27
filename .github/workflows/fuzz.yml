@@ -12,7 +12,7 @@ jobs:
   fuzz:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Set up Rust nightly
         uses: dtolnay/rust-toolchain@nightly
@@ -30,7 +30,7 @@ jobs:
         continue-on-error: true
 
       - name: Upload crash artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         if: failure()
         with:
           name: fuzz-crashes
