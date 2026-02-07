@@ -5,7 +5,26 @@ All notable changes to mixedlm will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.2.0] - 2025-01-14
+## [1.1.0] - 2026-01-27
+
+### Added
+- Comprehensive CI pipeline with testing across Python 3.10-3.13 and free-threaded 3.13t
+- Symbolic factorization caching for sparse Cholesky operations
+- EM-REML initialization option for variance component estimation
+- Miri, property-based testing, and benchmark jobs in CI
+- Rust and Python code coverage reporting
+
+### Changed
+- Updated faer dependency from 0.23.2 to 0.24.0
+- Performance optimizations and code cleanup
+- BOBYQA is now the default optimizer
+- Enhanced convergence diagnostics and adaptive starting values
+
+### Fixed
+- pandas 2.x StringDtype compatibility issues
+- Polars compatibility fixes for dataset loaders
+
+## [1.0.0] - 2026-01-14
 
 ### Added
 - Comprehensive documentation site with MkDocs and Material theme
@@ -13,8 +32,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Background sections on estimation methods and degrees of freedom
 - Full API reference documentation
 - ReadTheDocs integration
+- Gradient support for linear mixed models
+- PyArrayLike support for flexible array input types
 
-## [0.1.1] - 2024-XX-XX
+### Changed
+- Marked as Production/Stable (v1 stability milestone)
+
+## [0.1.1] - 2026-01-13
 
 ### Added
 - Type III ANOVA via `anova_type3()`
@@ -41,7 +65,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fixed mypy error in profile cache
 - Numerical stability in boundary cases for GLMM
 
-## [0.1.0] - 2024-XX-XX
+## [0.1.0] - 2026-01-12
 
 ### Added
 - Initial release
