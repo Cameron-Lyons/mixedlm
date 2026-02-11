@@ -1982,6 +1982,10 @@ class GlmerResult(MerResultMixin):
             lines.append(f"convergence: yes ({self.n_iter} iterations)")
         else:
             lines.append(f"convergence: no ({self.n_iter} iterations)")
+            lines.append("  optimizer did not converge; try allFit() to compare optimizers")
+        if self.isSingular():
+            lines.append("  boundary (singular) fit: some random-effect variances are near zero")
+            lines.append("  consider simplifying the random-effects structure")
 
         return "\n".join(lines)
 
@@ -2047,6 +2051,19 @@ class GlmerMod:
         opt_maxiter = maxiter if maxiter is not None else ctrl.maxiter
 
         self.matrices, self._dropped_cols = run_model_checks(self.matrices, ctrl)
+
+        if ctrl.em_init and start is None:
+            from mixedlm.estimation.em_reml import em_reml_simple
+
+            try:
+                em_result = em_reml_simple(
+                    self.matrices,
+                    max_iter=ctrl.em_maxiter,
+                    verbose=max(self.verbose - 1, 0),
+                )
+                start = em_result.theta
+            except (NotImplementedError, Exception):
+                pass
 
         optimizer = GLMMOptimizer(
             self.matrices,

@@ -296,6 +296,12 @@ GLMMs are more prone to convergence issues than LMMs.
    model.allFit(data)
    ```
 5. **Scale predictors**: Center and scale continuous variables
+6. **EM-REML initialization**: Use EM-REML to find better starting values:
+   ```python
+   control = mlm.GlmerControl(em_init=True, em_maxiter=50)
+   model = mlm.glmer(..., control=control)
+   ```
+   This runs a linear EM-REML algorithm to estimate starting theta values before the GLMM optimizer takes over. It is silently skipped for unsupported covariance types.
 
 ### Singular Fits
 

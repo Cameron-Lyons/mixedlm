@@ -241,6 +241,15 @@ all_results = model.allFit(data)
 print(all_results.summary())
 ```
 
+### EM-REML Initialization
+
+For models that struggle to converge from default starting values, use EM-REML initialization to find better starting points:
+
+```python
+ctrl = mlm.LmerControl(em_init=True, em_maxiter=50)
+model = mlm.lmer("Reaction ~ Days + (Days | Subject)", data, control=ctrl)
+```
+
 ### Simplify Random Effects
 
 If the full model won't converge:
