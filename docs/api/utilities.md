@@ -158,6 +158,35 @@ cv = mlm.Vv_to_Cv(variance_vector)
 vv = mlm.Cv_to_Vv(cholesky_vector)
 ```
 
+## EM-REML Initialization
+
+### em_reml_simple
+
+Fit a linear mixed model using the EM-REML algorithm. Useful as a standalone estimator or as an initialization step before direct optimization.
+
+```python
+from mixedlm import lFormula
+from mixedlm.estimation.em_reml import em_reml_simple
+
+parsed = lFormula("Reaction ~ Days + (Days | Subject)", data)
+result = em_reml_simple(parsed.matrices, max_iter=100, tol=1e-5)
+```
+
+**Parameters:**
+
+- `matrices`: `ModelMatrices` — design matrices from `lFormula()`
+- `max_iter`: int — maximum EM iterations (default 100)
+- `tol`: float — convergence tolerance for relative log-likelihood change (default 1e-4)
+- `verbose`: int — verbosity level (default 0)
+- `variance_floor`: float — minimum variance to prevent numerical issues (default 1e-8)
+
+**Returns:** `EMResult` with fields `theta`, `beta`, `sigma`, `converged`, `n_iter`, `final_loglik`
+
+**Supported models:** Random intercepts, correlated and uncorrelated random slopes, multiple random effect terms (cov_type='us' only).
+
+!!! tip
+    For most users, `em_init=True` in `LmerControl` or `GlmerControl` is the easier way to use EM-REML. The standalone function is for advanced workflows.
+
 ## Formula Utilities
 
 ### parse_formula

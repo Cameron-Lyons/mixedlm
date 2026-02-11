@@ -349,6 +349,58 @@ class TestLmer:
         assert bic > 0
         assert bic > aic
 
+    def test_summary_convergence_recommendation(self) -> None:
+        ctrl = lmerControl(optimizer="Nelder-Mead", maxiter=2)
+        result = lmer("Reaction ~ Days + (Days | Subject)", SLEEPSTUDY, control=ctrl)
+        summary = result.summary()
+
+        assert "convergence: no" in summary
+        assert "allFit()" in summary
+
+    def test_summary_singular_fit_message(self) -> None:
+        np.random.seed(42)
+        n_per_group = 5
+        n_groups = 10
+        group = np.repeat(np.arange(n_groups), n_per_group)
+        x = np.random.randn(n_per_group * n_groups)
+        y = 1.0 + 2.0 * x + np.random.randn(n_per_group * n_groups) * 0.5
+        data = pd.DataFrame({"y": y, "x": x, "group": group})
+
+        result = lmer("y ~ x + (x | group)", data)
+        if result.isSingular():
+            summary = result.summary()
+            assert "singular" in summary
+            assert "simplifying" in summary
+
+    def test_em_init_control(self) -> None:
+        ctrl = lmerControl(em_init=True, em_maxiter=20)
+        result = lmer("Reaction ~ Days + (Days | Subject)", SLEEPSTUDY, control=ctrl)
+
+        assert result.converged
+        assert len(result.fixef()) == 2
+        assert 200 < result.beta[0] < 300
+        assert 5 < result.beta[1] < 15
+
+    def test_em_init_skipped_with_explicit_start(self) -> None:
+        start = np.array([1.0, 0.0, 1.0])
+        ctrl = lmerControl(em_init=True, em_maxiter=20)
+        result = lmer("Reaction ~ Days + (Days | Subject)", SLEEPSTUDY, start=start, control=ctrl)
+
+        assert len(result.fixef()) == 2
+
+    def test_em_init_silent_fallback_on_error(self) -> None:
+        from unittest.mock import patch
+
+        with patch(
+            "mixedlm.estimation.em_reml.em_reml_simple",
+            side_effect=NotImplementedError("unsupported"),
+        ):
+            ctrl = lmerControl(em_init=True)
+            result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY, control=ctrl)
+
+        assert result.converged
+        assert len(result.fixef()) == 2
+
 
 CBPP = pd.DataFrame(
     {
@@ -622,6 +674,20 @@ class TestGlmer:
 
         assert len(result.fixef()) == 2
         assert np.all(result.fitted(type="response") > 0)
+
+    def test_summary_convergence_recommendation(self) -> None:
+        ctrl = glmerControl(optimizer="Nelder-Mead", maxiter=2)
+        result = glmer("y ~ period + (1 | herd)", CBPP, family=families.Binomial(), control=ctrl)
+        summary = result.summary()
+
+        assert "convergence: no" in summary
+        assert "allFit()" in summary
+
+    def test_em_init_control(self) -> None:
+        ctrl = glmerControl(em_init=True, em_maxiter=20)
+        result = glmer("y ~ period + (1 | herd)", CBPP, family=families.Binomial(), control=ctrl)
+
+        assert len(result.fixef()) == 4
 
 
 def generate_nlme_data() -> pd.DataFrame:

@@ -45,7 +45,8 @@ class LmerControl:
     em_init : bool, default False
         Whether to use EM-REML algorithm for initialization before
         switching to direct optimization. Can improve convergence for
-        difficult models, but only works with simple random intercept models.
+        difficult models. Supports random intercepts, random slopes
+        (correlated and uncorrelated), and multiple random effect terms.
     em_maxiter : int, default 50
         Maximum EM iterations if em_init=True.
     optCtrl : dict, optional
@@ -209,6 +210,14 @@ class GlmerControl:
     nAGQ0initStep : bool, default True
         Whether to start with nAGQ=0 step before switching to
         the requested nAGQ value.
+    em_init : bool, default False
+        Whether to use EM-REML algorithm for initialization before
+        switching to direct optimization. Runs a linear mixed model
+        EM-REML to obtain starting theta values. Supports random intercepts,
+        random slopes (correlated and uncorrelated), and multiple random
+        effect terms.
+    em_maxiter : int, default 50
+        Maximum EM iterations if em_init=True.
     optCtrl : dict, optional
         Additional options passed directly to the optimizer.
         For BOBYQA, supports: rhobeg, rhoend, seek_global_minimum.
@@ -236,6 +245,8 @@ class GlmerControl:
     tolPwrss: float = 1e-7
     compDev: bool = True
     nAGQ0initStep: bool = True
+    em_init: bool = False
+    em_maxiter: int = 50
     check_nobs_vs_rankZ: str = "ignore"
     check_nobs_vs_nlev: str = "ignore"
     check_nlev_gtreq_5: str = "warning"
@@ -403,6 +414,8 @@ def glmerControl(
     tolPwrss: float = 1e-7,
     compDev: bool = True,
     nAGQ0initStep: bool = True,
+    em_init: bool = False,
+    em_maxiter: int = 50,
     check_nobs_vs_rankZ: str = "ignore",
     check_nobs_vs_nlev: str = "ignore",
     check_nlev_gtreq_5: str = "warning",
@@ -438,6 +451,8 @@ def glmerControl(
         tolPwrss=tolPwrss,
         compDev=compDev,
         nAGQ0initStep=nAGQ0initStep,
+        em_init=em_init,
+        em_maxiter=em_maxiter,
         check_nobs_vs_rankZ=check_nobs_vs_rankZ,
         check_nobs_vs_nlev=check_nobs_vs_nlev,
         check_nlev_gtreq_5=check_nlev_gtreq_5,

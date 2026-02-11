@@ -212,6 +212,59 @@ mixedlm uses a first-order linearization approach:
 
 This is similar to the Lindstrom-Bates algorithm.
 
+## EM-REML Initialization
+
+### The Algorithm
+
+The EM-REML (Expectation-Maximization Restricted Maximum Likelihood) algorithm provides a robust alternative for initializing variance components before switching to direct optimization. It alternates between:
+
+1. **E-step:** Compute conditional expectations of random effects given current variance parameters
+2. **M-step:** Update each random effect structure's covariance matrix and the residual variance
+
+The E-step solves a joint linear system for fixed effects \(\hat{\boldsymbol{\beta}}\) and BLUPs \(\hat{\mathbf{b}}\), and computes the posterior variance \(\text{Var}(\mathbf{b} | \mathbf{y})\) via the Schur complement. The M-step updates each structure's covariance:
+
+\[
+\hat{\boldsymbol{\Sigma}}_k = \frac{1}{n_k}\sum_{i=1}^{n_k}\left(\hat{\mathbf{b}}_{ki}\hat{\mathbf{b}}_{ki}^T + \text{Var}(\mathbf{b}_{ki} | \mathbf{y})\right)
+\]
+
+### When to Use EM-REML
+
+EM-REML is useful when direct optimization converges to boundary solutions (zero variance components) or fails to converge entirely. It tends to find interior solutions because it updates variances as averages of squared effects plus uncertainty, which naturally stay positive.
+
+Enable EM-REML initialization via the `em_init` control parameter:
+
+```python
+import mixedlm as mlm
+
+# Use EM-REML initialization for LMMs
+ctrl = mlm.LmerControl(em_init=True, em_maxiter=50)
+model = mlm.lmer("y ~ x + (x | group)", data, control=ctrl)
+
+# Also available for GLMMs (provides starting theta from a linear approximation)
+ctrl = mlm.GlmerControl(em_init=True)
+model = mlm.glmer("y ~ x + (1 | group)", data, family=mlm.families.Binomial(), control=ctrl)
+```
+
+### Supported Models
+
+EM-REML supports all random effect structures with unstructured covariance (`cov_type='us'`):
+
+- Random intercepts: `(1 | group)`
+- Correlated random slopes: `(x | group)`
+- Uncorrelated random slopes: `(x || group)`
+- Multiple random effects: `(1 | group1) + (1 | group2)`
+
+Compound symmetry and AR(1) covariance types are not supported; EM initialization is silently skipped for these models.
+
+### Trade-offs
+
+| Property | EM-REML | Direct Optimization |
+|----------|---------|---------------------|
+| Robustness to starting values | High | Moderate |
+| Convergence speed | Slow (linear) | Fast (superlinear) |
+| Boundary avoidance | Good | May converge to zero |
+| Best use | Initialization | Final estimation |
+
 ## Optimization
 
 ### Available Optimizers
