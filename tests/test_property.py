@@ -1,5 +1,8 @@
 import numpy as np
 import pandas as pd
+import pytest
+
+pytest.importorskip("hypothesis")
 from hypothesis import assume, given, settings
 from hypothesis import strategies as st
 from hypothesis.extra.numpy import arrays
