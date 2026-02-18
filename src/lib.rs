@@ -11,6 +11,20 @@ mod reml_algorithms;
 mod simulation;
 mod sparse_chol;
 
+fn checked_i64_vec_to_usize(values: &[i64], field_name: &str) -> PyResult<Vec<usize>> {
+    values
+        .iter()
+        .enumerate()
+        .map(|(idx, &value)| {
+            usize::try_from(value).map_err(|_| {
+                pyo3::exceptions::PyValueError::new_err(format!(
+                    "{field_name}[{idx}] must be non-negative, got {value}"
+                ))
+            })
+        })
+        .collect()
+}
+
 #[pyclass]
 pub struct SparseCholeskySymbolic {
     inner: sparse_chol::SymbolicCholeskyCache,
@@ -29,8 +43,8 @@ impl SparseCholeskySymbolic {
         let indices_slice = indices.as_slice()?;
         let indptr_slice = indptr.as_slice()?;
 
-        let indices_usize: Vec<usize> = indices_slice.iter().map(|&i| i as usize).collect();
-        let indptr_usize: Vec<usize> = indptr_slice.iter().map(|&i| i as usize).collect();
+        let indices_usize = checked_i64_vec_to_usize(indices_slice, "indices")?;
+        let indptr_usize = checked_i64_vec_to_usize(indptr_slice, "indptr")?;
 
         let cache = sparse_chol::SymbolicCholeskyCache::new(&indices_usize, &indptr_usize, n)?;
         Ok(Self {

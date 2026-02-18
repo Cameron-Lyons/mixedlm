@@ -25,6 +25,7 @@ from mixedlm.models.lmer import (
     PredictResult,
     RanefResult,
     VarCorrGroup,
+    _resolve_optional_vector,
 )
 from mixedlm.utils import _get_signif_code
 
@@ -2062,8 +2063,13 @@ class GlmerMod:
                     verbose=max(self.verbose - 1, 0),
                 )
                 start = em_result.theta
-            except (NotImplementedError, Exception):
-                pass
+            except (NotImplementedError, RuntimeError, ValueError, np.linalg.LinAlgError) as exc:
+                warnings.warn(
+                    f"EM initialization failed ({type(exc).__name__}: {exc}). "
+                    "Falling back to optimizer defaults.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
 
         optimizer = GLMMOptimizer(
             self.matrices,
@@ -2116,8 +2122,8 @@ def glmer_nb(
     data: pd.DataFrame,
     verbose: int = 0,
     nAGQ: int = 1,
-    weights: NDArray[np.floating] | None = None,
-    offset: NDArray[np.floating] | None = None,
+    weights: NDArray[np.floating] | str | None = None,
+    offset: NDArray[np.floating] | str | None = None,
     na_action: str | None = "omit",
     contrasts: dict[str, str | NDArray[np.floating]] | None = None,
     control: GlmerControl | None = None,
@@ -2203,8 +2209,8 @@ def glmer(
     family: Family | None = None,
     verbose: int = 0,
     nAGQ: int = 1,
-    weights: NDArray[np.floating] | None = None,
-    offset: NDArray[np.floating] | None = None,
+    weights: NDArray[np.floating] | str | None = None,
+    offset: NDArray[np.floating] | str | None = None,
     na_action: str | None = "omit",
     contrasts: dict[str, str | NDArray[np.floating]] | None = None,
     control: GlmerControl | None = None,
@@ -2260,13 +2266,16 @@ def glmer(
     >>> ctrl = glmerControl(optimizer="Nelder-Mead", maxiter=2000)
     >>> result = glmer("y ~ x + (1|group)", data, family=Binomial(), control=ctrl)
     """
+    weights_arr = _resolve_optional_vector(data, weights, "weights")
+    offset_arr = _resolve_optional_vector(data, offset, "offset")
+
     model = GlmerMod(
         formula,
         data,
         family=family,
         verbose=verbose,
-        weights=weights,
-        offset=offset,
+        weights=weights_arr,
+        offset=offset_arr,
         na_action=na_action,
         contrasts=contrasts,
         control=control,

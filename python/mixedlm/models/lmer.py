@@ -17,134 +17,16 @@ from mixedlm.estimation.reml import LMMOptimizer, _build_lambda, _count_theta
 from mixedlm.formula.parser import parse_formula
 from mixedlm.formula.terms import Formula
 from mixedlm.matrices.design import ModelMatrices, build_model_matrices
+from mixedlm.models.lmer_types import (
+    LogLik,
+    ModelTerms,
+    PredictResult,
+    RanefResult,
+    RePCAGroup,
+    VarCorrGroup,
+)
 from mixedlm.utils import _format_pvalue, _get_signif_code
-
-
-@dataclass
-class RanefResult:
-    values: dict[str, dict[str, NDArray[np.floating]]]
-    condVar: dict[str, dict[str, NDArray[np.floating]]] | None = None
-
-    def __getitem__(self, key: str) -> dict[str, NDArray[np.floating]]:
-        return self.values[key]
-
-    def __iter__(self):
-        return iter(self.values)
-
-    def keys(self):
-        return self.values.keys()
-
-    def items(self):
-        return self.values.items()
-
-
-@dataclass
-class PredictResult:
-    """Result of prediction with optional intervals.
-
-    Attributes
-    ----------
-    fit : NDArray
-        Predicted values.
-    se_fit : NDArray or None
-        Standard errors of predictions (if requested).
-    lower : NDArray or None
-        Lower bound of interval (if requested).
-    upper : NDArray or None
-        Upper bound of interval (if requested).
-    interval : str
-        Type of interval: "none", "confidence", or "prediction".
-    level : float
-        Confidence level used for intervals.
-    """
-
-    fit: NDArray[np.floating]
-    se_fit: NDArray[np.floating] | None = None
-    lower: NDArray[np.floating] | None = None
-    upper: NDArray[np.floating] | None = None
-    interval: str = "none"
-    level: float = 0.95
-
-    def __array__(self) -> NDArray[np.floating]:
-        return self.fit
-
-    def __len__(self) -> int:
-        return len(self.fit)
-
-    def __getitem__(self, idx: int) -> float:
-        return float(self.fit[idx])
-
-
-@dataclass
-class LogLik:
-    value: float
-    df: int
-    nobs: int
-    REML: bool = False
-
-    def __float__(self) -> float:
-        return float(self.value)
-
-    def __str__(self) -> str:
-        reml_str = " (REML)" if self.REML else ""
-        return f"'log Lik.' {self.value:.4f} (df={self.df}){reml_str}"
-
-    def __repr__(self) -> str:
-        return f"LogLik(value={self.value:.4f}, df={self.df}, nobs={self.nobs}, REML={self.REML})"
-
-
-@dataclass
-class VarCorrGroup:
-    name: str
-    term_names: list[str]
-    variance: dict[str, float]
-    stddev: dict[str, float]
-    cov: NDArray[np.floating]
-    corr: NDArray[np.floating] | None
-
-
-@dataclass
-class ModelTerms:
-    response: str
-    fixed_terms: list[str]
-    random_terms: dict[str, list[str]]
-    fixed_variables: set[str]
-    random_variables: set[str]
-    grouping_factors: set[str]
-    has_intercept: bool
-
-    def __str__(self) -> str:
-        lines = ["Model terms:"]
-        lines.append(f"  Response: {self.response}")
-        lines.append(f"  Fixed effects: {', '.join(self.fixed_terms)}")
-        for group, terms in self.random_terms.items():
-            lines.append(f"  Random effects ({group}): {', '.join(terms)}")
-        return "\n".join(lines)
-
-    def __repr__(self) -> str:
-        n_fixed = len(self.fixed_terms)
-        n_groups = len(self.random_terms)
-        return f"ModelTerms({n_fixed} fixed, {n_groups} random groups)"
-
-
-@dataclass
-class RePCAGroup:
-    name: str
-    n_terms: int
-    sdev: NDArray[np.floating]
-    proportion: NDArray[np.floating]
-    cumulative: NDArray[np.floating]
-
-    def __str__(self) -> str:
-        lines = [f"Random effect PCA: {self.name}"]
-        lines.append(f"{'Component':<12} {'Std.Dev':>10} {'Prop.Var':>10} {'Cumulative':>10}")
-        for i in range(self.n_terms):
-            pc_name = f"PC{i + 1}"
-            sdev = self.sdev[i]
-            prop = self.proportion[i]
-            cumul = self.cumulative[i]
-            lines.append(f"{pc_name:<12} {sdev:>10.4f} {prop:>10.4f} {cumul:>10.4f}")
-        return "\n".join(lines)
+from mixedlm.utils.dataframe import dataframe_length, get_column_numpy, get_columns
 
 
 @dataclass
@@ -261,6 +143,26 @@ class LmerResult(MerResultMixin):
     at_boundary: bool = False
     message: str = ""
     function_evals: int = 0
+
+    @property
+    def fe_params(self) -> NDArray[np.floating]:
+        """Compatibility alias for fixed-effect parameters."""
+        return self.beta
+
+    @property
+    def re_params(self) -> NDArray[np.floating]:
+        """Compatibility alias for random-effect covariance parameters."""
+        return self.theta
+
+    @property
+    def resid(self) -> NDArray[np.floating]:
+        """Compatibility alias for residuals."""
+        return self.residuals()
+
+    @property
+    def fittedvalues(self) -> NDArray[np.floating]:
+        """Compatibility alias for fitted values."""
+        return self.fitted()
 
     def fixef(self) -> dict[str, float]:
         return dict(zip(self.matrices.fixed_names, self.beta, strict=False))
@@ -1610,7 +1512,7 @@ class LmerResult(MerResultMixin):
                 "sigmaML": np.sqrt(dc.sigma2) if not self.REML else np.nan,
                 "sigmaREML": np.sqrt(dc.sigma2) if self.REML else np.nan,
             }
-        except Exception:
+        except (ImportError, RuntimeError, ValueError, np.linalg.LinAlgError):
             cmp = {
                 "ldL2": 0.0,
                 "ldRX2": 0.0,
@@ -2502,8 +2404,13 @@ class LmerMod:
                     verbose=max(self.verbose - 1, 0),
                 )
                 start = em_result.theta
-            except (NotImplementedError, Exception):
-                pass
+            except (NotImplementedError, RuntimeError, ValueError, np.linalg.LinAlgError) as exc:
+                warnings.warn(
+                    f"EM initialization failed ({type(exc).__name__}: {exc}). "
+                    "Falling back to optimizer defaults.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
 
         optimizer = LMMOptimizer(
             self.matrices,
@@ -2555,13 +2462,36 @@ class LmerMod:
         return result
 
 
+def _resolve_optional_vector(
+    data: Any,
+    value: NDArray[np.floating] | str | None,
+    name: str,
+) -> NDArray[np.floating] | None:
+    if value is None:
+        return None
+
+    if isinstance(value, str):
+        if value not in get_columns(data):
+            raise ValueError(f"{name} column '{value}' not found in data")
+        return get_column_numpy(data, value, dtype=np.float64)
+
+    arr = np.asarray(value, dtype=np.float64)
+    if arr.ndim != 1:
+        raise ValueError(f"{name} must be one-dimensional")
+    if arr.shape[0] != dataframe_length(data):
+        raise ValueError(
+            f"{name} length {arr.shape[0]} does not match data length {dataframe_length(data)}"
+        )
+    return arr
+
+
 def lmer(
     formula: str,
     data: pd.DataFrame,
     REML: bool = True,
     verbose: int = 0,
-    weights: NDArray[np.floating] | None = None,
-    offset: NDArray[np.floating] | None = None,
+    weights: NDArray[np.floating] | str | None = None,
+    offset: NDArray[np.floating] | str | None = None,
     na_action: str | None = "omit",
     contrasts: dict[str, str | NDArray[np.floating]] | None = None,
     control: LmerControl | None = None,
@@ -2615,13 +2545,16 @@ def lmer(
     >>> ctrl = lmerControl(optimizer="Nelder-Mead", maxiter=2000)
     >>> result = lmer("y ~ x + (1|group)", data, control=ctrl)
     """
+    weights_arr = _resolve_optional_vector(data, weights, "weights")
+    offset_arr = _resolve_optional_vector(data, offset, "offset")
+
     model = LmerMod(
         formula,
         data,
         REML=REML,
         verbose=verbose,
-        weights=weights,
-        offset=offset,
+        weights=weights_arr,
+        offset=offset_arr,
         na_action=na_action,
         contrasts=contrasts,
         control=control,
