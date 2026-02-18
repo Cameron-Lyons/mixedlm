@@ -436,6 +436,18 @@ fn chol_block(block: &BlockType) -> Result<BlockType, LinalgError> {
             Ok(BlockType::Diagonal(l?))
         }
         BlockType::BlockDiagonal { block_size, blocks } => {
+            // Avoid rayon/crossbeam interactions under Miri; run sequentially there.
+            #[cfg(miri)]
+            let results: Result<Vec<Mat<f64>>, LinalgError> = blocks
+                .iter()
+                .map(|b| {
+                    let chol = Llt::new(b.as_ref(), Side::Lower)
+                        .map_err(|_| LinalgError::NotPositiveDefinite)?;
+                    Ok(chol.L().to_owned())
+                })
+                .collect();
+
+            #[cfg(not(miri))]
             let results: Result<Vec<Mat<f64>>, LinalgError> = blocks
                 .par_iter()
                 .map(|b| {

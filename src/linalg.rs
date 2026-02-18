@@ -22,6 +22,14 @@ impl From<LinalgError> for pyo3::PyErr {
     }
 }
 
+fn checked_i64_to_usize(value: i64, field_name: &str, index: usize) -> Result<usize, LinalgError> {
+    usize::try_from(value).map_err(|_| {
+        LinalgError::InvalidSparseFormat(format!(
+            "{field_name}[{index}] must be non-negative, got {value}"
+        ))
+    })
+}
+
 fn csc_from_scipy(
     data: &[f64],
     indices: &[i64],
@@ -30,8 +38,16 @@ fn csc_from_scipy(
 ) -> Result<CscMatrix<f64>, LinalgError> {
     let (nrows, ncols) = shape;
 
-    let indices_usize: Vec<usize> = indices.iter().map(|&i| i as usize).collect();
-    let indptr_usize: Vec<usize> = indptr.iter().map(|&i| i as usize).collect();
+    let indices_usize: Vec<usize> = indices
+        .iter()
+        .enumerate()
+        .map(|(idx, &value)| checked_i64_to_usize(value, "indices", idx))
+        .collect::<Result<Vec<_>, _>>()?;
+    let indptr_usize: Vec<usize> = indptr
+        .iter()
+        .enumerate()
+        .map(|(idx, &value)| checked_i64_to_usize(value, "indptr", idx))
+        .collect::<Result<Vec<_>, _>>()?;
 
     CscMatrix::try_from_csc_data(nrows, ncols, indptr_usize, indices_usize, data.to_vec())
         .map_err(|e| LinalgError::InvalidSparseFormat(format!("{:?}", e)))
