@@ -38,6 +38,7 @@ from mixedlm.utils.lme4_compat import (
     ngrps,
     pvalues,
     ranef,
+    scale_vcov,
     sigma,
     vcconv,
 )
@@ -288,6 +289,30 @@ class TestDevcomp:
         assert "q" in dc.dims
         assert dc.dims["n"] == 180
         assert dc.dims["p"] == 2
+
+
+class TestScaleVcov:
+    def test_scale_only_predictor_length(self) -> None:
+        vcov = np.array([[1.0, 0.1], [0.1, 0.5]])
+        adjusted = scale_vcov(vcov, scale=np.array([2.0]))
+        expected = np.array([[1.0, 0.2], [0.2, 2.0]])
+        assert np.allclose(adjusted, expected)
+
+    def test_center_and_scale_adjust_intercept(self) -> None:
+        vcov = np.array([[1.0, 0.1], [0.1, 0.5]])
+        center = np.array([3.0])
+        scale = np.array([2.0])
+
+        adjusted = scale_vcov(vcov, center=center, scale=scale)
+        jacobian = np.array([[1.0, -6.0], [0.0, 2.0]])
+        expected = jacobian @ vcov @ jacobian.T
+
+        assert np.allclose(adjusted, expected)
+
+    def test_invalid_vector_length_raises(self) -> None:
+        vcov = np.eye(3)
+        with pytest.raises(ValueError, match="must be 2 or 3"):
+            scale_vcov(vcov, center=np.array([1.0]))
 
 
 class TestVcconv:

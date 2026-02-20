@@ -1374,11 +1374,12 @@ def scale_vcov(
     vcov : ndarray
         Variance-covariance matrix of coefficients (p x p).
     center : ndarray, optional
-        Centering values used for each predictor. If None, no centering
-        adjustment is made.
+        Centering values used for predictors. Assumes the first coefficient
+        is an intercept and applies centering adjustments to the intercept
+        covariance terms. Provide length ``p-1`` (predictors only) or ``p``.
     scale : ndarray, optional
-        Scaling values used for each predictor. If None, no scaling
-        adjustment is made.
+        Scaling values used for coefficients. Provide length ``p-1``
+        (predictors only, intercept unchanged) or ``p``.
 
     Returns
     -------
@@ -1394,17 +1395,39 @@ def scale_vcov(
     array([[1. , 0.2],
            [0.2, 2. ]])
     """
-    vcov = np.asarray(vcov).copy()
+    vcov = np.asarray(vcov, dtype=np.float64).copy()
     p = vcov.shape[0]
 
-    if scale is not None:
-        scale = np.asarray(scale)
-        if len(scale) != p:
-            raise ValueError(f"scale length {len(scale)} != vcov dimension {p}")
-        D = np.diag(scale)
-        vcov = D @ vcov @ D
+    if vcov.shape != (p, p):
+        raise ValueError("vcov must be a square matrix")
 
-    return vcov
+    def _expand(
+        value: NDArray[np.floating],
+        name: str,
+        intercept_default: float,
+    ) -> NDArray[np.floating]:
+        arr = np.asarray(value, dtype=np.float64)
+        if arr.ndim != 1:
+            raise ValueError(f"{name} must be a 1D array")
+        if len(arr) == p:
+            return arr
+        if len(arr) == p - 1:
+            return np.concatenate(([intercept_default], arr))
+        raise ValueError(f"{name} length {len(arr)} must be {p - 1} or {p}")
+
+    scale_full = np.ones(p, dtype=np.float64)
+    if scale is not None:
+        scale_full = _expand(scale, "scale", 1.0)
+
+    # Jacobian for mapping transformed coefficients to original scale.
+    transform = np.diag(scale_full)
+
+    if center is not None:
+        center_full = _expand(center, "center", 0.0)
+        for j in range(1, p):
+            transform[0, j] -= center_full[j] * scale_full[j]
+
+    return transform @ vcov @ transform.T
 
 
 def quickSimulate(

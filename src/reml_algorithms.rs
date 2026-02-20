@@ -3,34 +3,11 @@ use faer::{Mat, MatRef, Side};
 use numpy::PyArray1;
 use pyo3::prelude::*;
 
-#[allow(dead_code)]
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum RemlAlgorithm {
-    MinMax,
-    AugmentedAiReml,
-    Riemannian,
-}
-
-#[allow(dead_code)]
 pub struct RemlResult {
     pub variance_components: Vec<f64>,
     pub sigma2: f64,
-    pub loglik: f64,
     pub iterations: usize,
     pub converged: bool,
-}
-
-#[allow(dead_code)]
-fn compute_trace_product_owned(a: &Mat<f64>, b: &Mat<f64>) -> f64 {
-    let n = a.nrows();
-    let m = a.ncols();
-    let mut trace = 0.0;
-    for i in 0..n {
-        for j in 0..m {
-            trace += a[(i, j)] * b[(j, i)];
-        }
-    }
-    trace
 }
 
 fn compute_trace_product_ref(a: &Mat<f64>, b: MatRef<'_, f64>) -> f64 {
@@ -160,7 +137,6 @@ pub fn mm_reml_iterate(
             return Ok(RemlResult {
                 variance_components: variances,
                 sigma2,
-                loglik: 0.0,
                 iterations: iter + 1,
                 converged: true,
             });
@@ -170,7 +146,6 @@ pub fn mm_reml_iterate(
     Ok(RemlResult {
         variance_components: variances,
         sigma2,
-        loglik: 0.0,
         iterations: max_iter,
         converged: false,
     })
@@ -305,7 +280,6 @@ pub fn augmented_ai_reml_iterate(
             return Ok(RemlResult {
                 variance_components: variances,
                 sigma2,
-                loglik: 0.0,
                 iterations: iter + 1,
                 converged: true,
             });
@@ -315,7 +289,6 @@ pub fn augmented_ai_reml_iterate(
     Ok(RemlResult {
         variance_components: variances,
         sigma2,
-        loglik: 0.0,
         iterations: max_iter,
         converged: false,
     })
@@ -343,20 +316,6 @@ fn spd_exponential(x: &Mat<f64>) -> Mat<f64> {
     }
 
     result
-}
-
-#[allow(dead_code)]
-fn spd_logarithm(s: &Mat<f64>) -> Mat<f64> {
-    let n = s.nrows();
-    let chol = Llt::new(s.as_ref(), Side::Lower).expect("S should be positive definite");
-    let l = chol.L();
-
-    let mut log_l = Mat::zeros(n, n);
-    for i in 0..n {
-        log_l[(i, i)] = l[(i, i)].ln();
-    }
-
-    &log_l + log_l.transpose()
 }
 
 pub fn riemannian_gradient(
@@ -548,7 +507,6 @@ pub fn riemannian_reml_iterate(
             return Ok(RemlResult {
                 variance_components: variances,
                 sigma2,
-                loglik: 0.0,
                 iterations: iter + 1,
                 converged: true,
             });
@@ -563,7 +521,6 @@ pub fn riemannian_reml_iterate(
     Ok(RemlResult {
         variance_components: variances,
         sigma2,
-        loglik: 0.0,
         iterations: max_iter,
         converged: false,
     })
