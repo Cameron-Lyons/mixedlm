@@ -3,6 +3,106 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+_VALID_OPTIMIZERS = {
+    "L-BFGS-B",
+    "BFGS",
+    "Nelder-Mead",
+    "Powell",
+    "trust-constr",
+    "SLSQP",
+    "TNC",
+    "COBYLA",
+    "bobyqa",
+    "nloptwrap_BOBYQA",
+    "nloptwrap_NEWUOA",
+    "nloptwrap_PRAXIS",
+    "nloptwrap_SBPLX",
+    "nloptwrap_COBYLA",
+    "nloptwrap_NELDERMEAD",
+}
+
+_VALID_CHECK_ACTIONS = {"ignore", "warning", "message", "stop"}
+_VALID_RANKX_ACTIONS = {
+    "ignore",
+    "warning",
+    "message",
+    "stop",
+    "message+drop.cols",
+    "warning+drop.cols",
+    "stop+drop.cols",
+}
+
+
+def _validate_common_control(
+    *,
+    optimizer: str,
+    maxiter: int,
+    boundary_tol: float,
+    check_nobs_vs_rankZ: str,
+    check_nobs_vs_nlev: str,
+    check_nlev_gtreq_5: str,
+    check_nlev_gtr_1: str,
+    check_scaleX: str,
+    check_rankX: str,
+) -> None:
+    if optimizer not in _VALID_OPTIMIZERS:
+        raise ValueError(
+            f"Unknown optimizer '{optimizer}'. "
+            f"Valid options: {', '.join(sorted(_VALID_OPTIMIZERS))}"
+        )
+
+    if maxiter < 1:
+        raise ValueError("maxiter must be at least 1")
+
+    if boundary_tol < 0:
+        raise ValueError("boundary_tol must be non-negative")
+
+    for name, value in [
+        ("check_nobs_vs_rankZ", check_nobs_vs_rankZ),
+        ("check_nobs_vs_nlev", check_nobs_vs_nlev),
+        ("check_nlev_gtreq_5", check_nlev_gtreq_5),
+        ("check_nlev_gtr_1", check_nlev_gtr_1),
+        ("check_scaleX", check_scaleX),
+    ]:
+        if value not in _VALID_CHECK_ACTIONS:
+            raise ValueError(
+                f"{name} must be one of {_VALID_CHECK_ACTIONS}, got '{value}'"
+            )
+
+    if check_rankX not in _VALID_RANKX_ACTIONS:
+        raise ValueError(
+            f"check_rankX must be one of {_VALID_RANKX_ACTIONS}, got '{check_rankX}'"
+        )
+
+
+def _build_scipy_options(
+    *,
+    optimizer: str,
+    maxiter: int,
+    ftol: float,
+    gtol: float,
+    xtol: float,
+    opt_ctrl: dict[str, Any],
+) -> dict[str, Any]:
+    options: dict[str, Any] = {"maxiter": maxiter}
+
+    if optimizer in ("L-BFGS-B", "BFGS"):
+        options["gtol"] = gtol
+
+    if optimizer == "L-BFGS-B":
+        options["ftol"] = ftol
+
+    if optimizer in ("Nelder-Mead", "Powell"):
+        options["xatol"] = xtol
+        options["fatol"] = ftol
+
+    if optimizer == "trust-constr":
+        options["gtol"] = gtol
+        options["xtol"] = xtol
+
+    options.update(opt_ctrl)
+    return options
+
 
 @dataclass
 class LmerControl:
@@ -86,82 +186,28 @@ class LmerControl:
     optCtrl: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        valid_optimizers = {
-            "L-BFGS-B",
-            "BFGS",
-            "Nelder-Mead",
-            "Powell",
-            "trust-constr",
-            "SLSQP",
-            "TNC",
-            "COBYLA",
-            "bobyqa",
-            "nloptwrap_BOBYQA",
-            "nloptwrap_NEWUOA",
-            "nloptwrap_PRAXIS",
-            "nloptwrap_SBPLX",
-            "nloptwrap_COBYLA",
-            "nloptwrap_NELDERMEAD",
-        }
-        if self.optimizer not in valid_optimizers:
-            raise ValueError(
-                f"Unknown optimizer '{self.optimizer}'. "
-                f"Valid options: {', '.join(sorted(valid_optimizers))}"
-            )
-
-        if self.maxiter < 1:
-            raise ValueError("maxiter must be at least 1")
-
-        if self.boundary_tol < 0:
-            raise ValueError("boundary_tol must be non-negative")
-
-        valid_check_actions = {"ignore", "warning", "message", "stop"}
-        valid_rankX_actions = {
-            "ignore",
-            "warning",
-            "message",
-            "stop",
-            "message+drop.cols",
-            "warning+drop.cols",
-            "stop+drop.cols",
-        }
-
-        for param in [
-            "check_nobs_vs_rankZ",
-            "check_nobs_vs_nlev",
-            "check_nlev_gtreq_5",
-            "check_nlev_gtr_1",
-            "check_scaleX",
-        ]:
-            val = getattr(self, param)
-            if val not in valid_check_actions:
-                raise ValueError(f"{param} must be one of {valid_check_actions}, got '{val}'")
-
-        if self.check_rankX not in valid_rankX_actions:
-            raise ValueError(
-                f"check_rankX must be one of {valid_rankX_actions}, got '{self.check_rankX}'"
-            )
+        _validate_common_control(
+            optimizer=self.optimizer,
+            maxiter=self.maxiter,
+            boundary_tol=self.boundary_tol,
+            check_nobs_vs_rankZ=self.check_nobs_vs_rankZ,
+            check_nobs_vs_nlev=self.check_nobs_vs_nlev,
+            check_nlev_gtreq_5=self.check_nlev_gtreq_5,
+            check_nlev_gtr_1=self.check_nlev_gtr_1,
+            check_scaleX=self.check_scaleX,
+            check_rankX=self.check_rankX,
+        )
 
     def get_scipy_options(self) -> dict[str, Any]:
         """Get options dict for scipy.optimize.minimize."""
-        options: dict[str, Any] = {"maxiter": self.maxiter}
-
-        if self.optimizer in ("L-BFGS-B", "BFGS"):
-            options["gtol"] = self.gtol
-
-        if self.optimizer == "L-BFGS-B":
-            options["ftol"] = self.ftol
-
-        if self.optimizer in ("Nelder-Mead", "Powell"):
-            options["xatol"] = self.xtol
-            options["fatol"] = self.ftol
-
-        if self.optimizer == "trust-constr":
-            options["gtol"] = self.gtol
-            options["xtol"] = self.xtol
-
-        options.update(self.optCtrl)
-        return options
+        return _build_scipy_options(
+            optimizer=self.optimizer,
+            maxiter=self.maxiter,
+            ftol=self.ftol,
+            gtol=self.gtol,
+            xtol=self.xtol,
+            opt_ctrl=self.optCtrl,
+        )
 
     def __repr__(self) -> str:
         return (
@@ -256,85 +302,30 @@ class GlmerControl:
     optCtrl: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        valid_optimizers = {
-            "L-BFGS-B",
-            "BFGS",
-            "Nelder-Mead",
-            "Powell",
-            "trust-constr",
-            "SLSQP",
-            "TNC",
-            "COBYLA",
-            "bobyqa",
-            "nloptwrap_BOBYQA",
-            "nloptwrap_NEWUOA",
-            "nloptwrap_PRAXIS",
-            "nloptwrap_SBPLX",
-            "nloptwrap_COBYLA",
-            "nloptwrap_NELDERMEAD",
-        }
-        if self.optimizer not in valid_optimizers:
-            raise ValueError(
-                f"Unknown optimizer '{self.optimizer}'. "
-                f"Valid options: {', '.join(sorted(valid_optimizers))}"
-            )
-
-        if self.maxiter < 1:
-            raise ValueError("maxiter must be at least 1")
-
-        if self.boundary_tol < 0:
-            raise ValueError("boundary_tol must be non-negative")
-
         if self.tolPwrss <= 0:
             raise ValueError("tolPwrss must be positive")
-
-        valid_check_actions = {"ignore", "warning", "message", "stop"}
-        valid_rankX_actions = {
-            "ignore",
-            "warning",
-            "message",
-            "stop",
-            "message+drop.cols",
-            "warning+drop.cols",
-            "stop+drop.cols",
-        }
-
-        for param in [
-            "check_nobs_vs_rankZ",
-            "check_nobs_vs_nlev",
-            "check_nlev_gtreq_5",
-            "check_nlev_gtr_1",
-            "check_scaleX",
-        ]:
-            val = getattr(self, param)
-            if val not in valid_check_actions:
-                raise ValueError(f"{param} must be one of {valid_check_actions}, got '{val}'")
-
-        if self.check_rankX not in valid_rankX_actions:
-            raise ValueError(
-                f"check_rankX must be one of {valid_rankX_actions}, got '{self.check_rankX}'"
-            )
+        _validate_common_control(
+            optimizer=self.optimizer,
+            maxiter=self.maxiter,
+            boundary_tol=self.boundary_tol,
+            check_nobs_vs_rankZ=self.check_nobs_vs_rankZ,
+            check_nobs_vs_nlev=self.check_nobs_vs_nlev,
+            check_nlev_gtreq_5=self.check_nlev_gtreq_5,
+            check_nlev_gtr_1=self.check_nlev_gtr_1,
+            check_scaleX=self.check_scaleX,
+            check_rankX=self.check_rankX,
+        )
 
     def get_scipy_options(self) -> dict[str, Any]:
         """Get options dict for scipy.optimize.minimize."""
-        options: dict[str, Any] = {"maxiter": self.maxiter}
-
-        if self.optimizer in ("L-BFGS-B", "BFGS"):
-            options["gtol"] = self.gtol
-
-        if self.optimizer == "L-BFGS-B":
-            options["ftol"] = self.ftol
-
-        if self.optimizer in ("Nelder-Mead", "Powell"):
-            options["xatol"] = self.xtol
-            options["fatol"] = self.ftol
-
-        if self.optimizer == "trust-constr":
-            options["gtol"] = self.gtol
-            options["xtol"] = self.xtol
-
-        options.update(self.optCtrl)
-        return options
+        return _build_scipy_options(
+            optimizer=self.optimizer,
+            maxiter=self.maxiter,
+            ftol=self.ftol,
+            gtol=self.gtol,
+            xtol=self.xtol,
+            opt_ctrl=self.optCtrl,
+        )
 
     def __repr__(self) -> str:
         return (
