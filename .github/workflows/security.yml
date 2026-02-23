@@ -19,12 +19,12 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@v4.32.3
+        uses: github/codeql-action/init@v4.32.4
         with:
           languages: python
 
       - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@v4.32.3
+        uses: github/codeql-action/analyze@v4.32.4
         with:
           category: "/language:python"
 
@@ -76,7 +76,7 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Dependency Review
-        uses: actions/dependency-review-action@v4.8.2
+        uses: actions/dependency-review-action@v4.8.3
         with:
           fail-on-severity: high
           deny-licenses: GPL-3.0, AGPL-3.0
