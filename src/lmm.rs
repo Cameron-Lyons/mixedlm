@@ -682,7 +682,6 @@ pub fn profiled_deviance_with_gradient_impl(
     let v_inv = chol_v.solve(&Mat::<f64>::identity(q, q));
 
     let mut gradient = Vec::with_capacity(n_theta);
-    let mut theta_idx = 0;
 
     for (block_idx, (structure, block_derivs)) in
         structures.iter().zip(dlambda_blocks.iter()).enumerate()
@@ -795,11 +794,8 @@ pub fn profiled_deviance_with_gradient_impl(
             }
 
             gradient.push(grad_k);
-            theta_idx += 1;
         }
     }
-
-    let _ = theta_idx;
 
     Ok((dev, gradient))
 }

@@ -40,5 +40,7 @@ fuzz_target!(|input: MatrixInput| {
         }
     }
 
-    let _ = Llt::new(matrix.as_ref(), Side::Lower);
+    if Llt::new(matrix.as_ref(), Side::Lower).is_err() {
+        return;
+    }
 });

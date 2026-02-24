@@ -1,7 +1,7 @@
 use nalgebra::DMatrix;
 use nalgebra_sparse::csc::CscMatrix;
 use nalgebra_sparse::factorization::CscCholesky;
-use ndarray::ArrayView2;
+use ndarray::{ArrayView2, Axis};
 use pyo3::PyResult;
 use pyo3::exceptions::PyValueError;
 use thiserror::Error;
@@ -53,7 +53,6 @@ fn csc_from_scipy(
         .map_err(|e| LinalgError::InvalidSparseFormat(format!("{:?}", e)))
 }
 
-#[allow(clippy::needless_range_loop)]
 pub fn sparse_cholesky_solve(
     a_data: &[f64],
     a_indices: &[i64],
@@ -68,12 +67,11 @@ pub fn sparse_cholesky_solve(
     let (n, m) = (b.nrows(), b.ncols());
     let mut result = vec![vec![0.0; m]; n];
 
-    for j in 0..m {
-        let col: Vec<f64> = b.column(j).to_vec();
-        let b_matrix = DMatrix::from_vec(n, 1, col);
+    for (j, col) in b.axis_iter(Axis(1)).enumerate() {
+        let b_matrix = DMatrix::from_vec(n, 1, col.iter().copied().collect());
         let x = cholesky.solve(&b_matrix);
-        for (i, row) in result.iter_mut().enumerate() {
-            row[j] = x[(i, 0)];
+        for (row, x_i) in result.iter_mut().zip(x.column(0).iter()) {
+            row[j] = *x_i;
         }
     }
 
