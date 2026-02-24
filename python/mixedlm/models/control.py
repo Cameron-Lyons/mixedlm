@@ -65,14 +65,10 @@ def _validate_common_control(
         ("check_scaleX", check_scaleX),
     ]:
         if value not in _VALID_CHECK_ACTIONS:
-            raise ValueError(
-                f"{name} must be one of {_VALID_CHECK_ACTIONS}, got '{value}'"
-            )
+            raise ValueError(f"{name} must be one of {_VALID_CHECK_ACTIONS}, got '{value}'")
 
     if check_rankX not in _VALID_RANKX_ACTIONS:
-        raise ValueError(
-            f"check_rankX must be one of {_VALID_RANKX_ACTIONS}, got '{check_rankX}'"
-        )
+        raise ValueError(f"check_rankX must be one of {_VALID_RANKX_ACTIONS}, got '{check_rankX}'")
 
 
 def _build_scipy_options(

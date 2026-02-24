@@ -1405,7 +1405,7 @@ def scale_vcov(
         value: NDArray[np.floating],
         name: str,
         intercept_default: float,
-    ) -> NDArray[np.floating]:
+    ) -> NDArray[np.float64]:
         arr = np.asarray(value, dtype=np.float64)
         if arr.ndim != 1:
             raise ValueError(f"{name} must be a 1D array")
@@ -1415,7 +1415,7 @@ def scale_vcov(
             return np.concatenate(([intercept_default], arr))
         raise ValueError(f"{name} length {len(arr)} must be {p - 1} or {p}")
 
-    scale_full = np.ones(p, dtype=np.float64)
+    scale_full: NDArray[np.float64] = np.ones(p, dtype=np.float64)
     if scale is not None:
         scale_full = _expand(scale, "scale", 1.0)
 

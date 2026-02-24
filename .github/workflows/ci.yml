@@ -293,6 +293,8 @@ jobs:
 
       - name: Set up Rust (MSRV)
         uses: dtolnay/rust-toolchain@1.100.0
+        with:
+          toolchain: stable
 
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
