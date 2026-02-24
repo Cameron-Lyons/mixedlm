@@ -5,7 +5,6 @@ use rayon::prelude::*;
 use crate::linalg::LinalgError;
 use crate::lmm::RandomEffectStructure;
 
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub enum BlockType {
     Dense(Mat<f64>),
@@ -20,26 +19,7 @@ pub enum BlockType {
     },
 }
 
-#[allow(dead_code)]
 impl BlockType {
-    pub fn rows(&self) -> usize {
-        match self {
-            BlockType::Dense(m) => m.nrows(),
-            BlockType::Diagonal(d) => d.len(),
-            BlockType::BlockDiagonal { block_size, blocks } => block_size * blocks.len(),
-            BlockType::Zero { rows, .. } => *rows,
-        }
-    }
-
-    pub fn cols(&self) -> usize {
-        match self {
-            BlockType::Dense(m) => m.ncols(),
-            BlockType::Diagonal(d) => d.len(),
-            BlockType::BlockDiagonal { block_size, blocks } => block_size * blocks.len(),
-            BlockType::Zero { cols, .. } => *cols,
-        }
-    }
-
     pub fn to_dense(&self) -> Mat<f64> {
         match self {
             BlockType::Dense(m) => m.clone(),
@@ -61,31 +41,6 @@ impl BlockType {
                 result
             }
             BlockType::Zero { rows, cols } => Mat::zeros(*rows, *cols),
-        }
-    }
-
-    fn get(&self, i: usize, j: usize) -> f64 {
-        match self {
-            BlockType::Dense(m) => m[(i, j)],
-            BlockType::Diagonal(d) => {
-                if i == j {
-                    d[i]
-                } else {
-                    0.0
-                }
-            }
-            BlockType::BlockDiagonal { block_size, blocks } => {
-                let bi = i / block_size;
-                let bj = j / block_size;
-                if bi == bj {
-                    let li = i % block_size;
-                    let lj = j % block_size;
-                    blocks[bi][(li, lj)]
-                } else {
-                    0.0
-                }
-            }
-            BlockType::Zero { .. } => 0.0,
         }
     }
 }
@@ -128,40 +83,60 @@ impl BlockedMatrix {
                 let offset_j = block_offsets[j];
 
                 if i == j {
-                    let mut sub_blocks: Vec<Mat<f64>> = Vec::with_capacity(ni);
+                    if qi == 1 {
+                        let mut diagonal: Vec<f64> = Vec::with_capacity(ni);
 
-                    for level in 0..ni {
-                        let li = level * qi;
-                        let mut block = Mat::zeros(qi, qi);
+                        for level in 0..ni {
+                            let li = level * qi;
+                            let mut block = Mat::zeros(qi, qi);
+                            block[(0, 0)] = ztwz[(offset_i + li, offset_i + li)];
 
-                        for ii in 0..qi {
-                            for jj in 0..qi {
-                                block[(ii, jj)] = ztwz[(offset_i + li + ii, offset_i + li + jj)];
+                            let transformed = lambda_i_t.as_ref() * &block * lambda_i;
+                            let mut value = transformed[(0, 0)];
+                            if add_identity {
+                                value += 1.0;
                             }
+                            diagonal.push(value);
                         }
 
-                        let transformed = lambda_i_t.as_ref() * &block * lambda_i;
+                        row_blocks.push(BlockType::Diagonal(diagonal));
+                    } else {
+                        let mut sub_blocks: Vec<Mat<f64>> = Vec::with_capacity(ni);
 
-                        let mut result_block = Mat::zeros(qi, qi);
-                        for ii in 0..qi {
-                            for jj in 0..qi {
-                                result_block[(ii, jj)] = transformed[(ii, jj)];
-                            }
-                        }
+                        for level in 0..ni {
+                            let li = level * qi;
+                            let mut block = Mat::zeros(qi, qi);
 
-                        if add_identity {
                             for ii in 0..qi {
-                                result_block[(ii, ii)] += 1.0;
+                                for jj in 0..qi {
+                                    block[(ii, jj)] =
+                                        ztwz[(offset_i + li + ii, offset_i + li + jj)];
+                                }
                             }
+
+                            let transformed = lambda_i_t.as_ref() * &block * lambda_i;
+
+                            let mut result_block = Mat::zeros(qi, qi);
+                            for ii in 0..qi {
+                                for jj in 0..qi {
+                                    result_block[(ii, jj)] = transformed[(ii, jj)];
+                                }
+                            }
+
+                            if add_identity {
+                                for ii in 0..qi {
+                                    result_block[(ii, ii)] += 1.0;
+                                }
+                            }
+
+                            sub_blocks.push(result_block);
                         }
 
-                        sub_blocks.push(result_block);
+                        row_blocks.push(BlockType::BlockDiagonal {
+                            block_size: qi,
+                            blocks: sub_blocks,
+                        });
                     }
-
-                    row_blocks.push(BlockType::BlockDiagonal {
-                        block_size: qi,
-                        blocks: sub_blocks,
-                    });
                 } else {
                     let mut dense_block = Mat::zeros(block_dims[i], block_dims[j]);
 
@@ -209,7 +184,7 @@ impl BlockedMatrix {
         BlockedMatrix { block_dims, blocks }
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn to_dense(&self) -> Mat<f64> {
         let total_dim: usize = self.block_dims.iter().sum();
         let mut result = Mat::zeros(total_dim, total_dim);
@@ -247,32 +222,28 @@ pub struct BlockedCholesky {
 }
 
 impl BlockedCholesky {
-    #[allow(clippy::needless_range_loop)]
     pub fn factor(a: &BlockedMatrix) -> Result<Self, LinalgError> {
-        let n_blocks = a.block_dims.len();
+        let n_blocks = a.blocks.len();
         let block_dims = a.block_dims.clone();
         let mut l_blocks: Vec<Vec<BlockType>> = Vec::with_capacity(n_blocks);
 
-        for i in 0..n_blocks {
+        for (i, a_row) in a.blocks.iter().enumerate() {
             let mut row_blocks: Vec<BlockType> = Vec::with_capacity(i + 1);
 
-            for j in 0..=i {
+            for (j, a_block) in a_row.iter().enumerate() {
                 if i == j {
-                    let mut aii = a.blocks[i][i].clone();
+                    let mut aii = a_block.clone();
 
-                    for k in 0..i {
-                        let lik = &row_blocks[k];
+                    for lik in row_blocks.iter().take(i) {
                         rank_update_subtract(&mut aii, lik, lik)?;
                     }
 
                     let lii = chol_block(&aii)?;
                     row_blocks.push(lii);
                 } else {
-                    let mut aij = a.blocks[i][j].clone();
+                    let mut aij = a_block.clone();
 
-                    for k in 0..j {
-                        let lik = &row_blocks[k];
-                        let ljk = &l_blocks[j][k];
+                    for (lik, ljk) in row_blocks.iter().take(j).zip(l_blocks[j].iter().take(j)) {
                         rank_update_subtract(&mut aij, lik, ljk)?;
                     }
 
@@ -349,7 +320,6 @@ impl BlockedCholesky {
         y
     }
 
-    #[allow(clippy::needless_range_loop)]
     fn backward_solve(&self, y: &Mat<f64>) -> Mat<f64> {
         let total_dim: usize = self.block_dims.iter().sum();
         let ncols = y.ncols();
@@ -361,9 +331,14 @@ impl BlockedCholesky {
         }
 
         let n_blocks = self.l_blocks.len();
-        for i in (0..n_blocks).rev() {
-            let offset_i = block_offsets[i];
-            let dim_i = self.block_dims[i];
+        let block_layout: Vec<(usize, usize)> = block_offsets
+            .iter()
+            .take(n_blocks)
+            .copied()
+            .zip(self.block_dims.iter().copied())
+            .collect();
+        for (i, row_blocks_i) in self.l_blocks.iter().enumerate().rev() {
+            let (offset_i, dim_i) = block_layout[i];
 
             let mut rhs = Mat::zeros(dim_i, ncols);
             for ii in 0..dim_i {
@@ -372,10 +347,9 @@ impl BlockedCholesky {
                 }
             }
 
-            for j in (i + 1)..n_blocks {
-                let offset_j = block_offsets[j];
-                let dim_j = self.block_dims[j];
-                let lji = &self.l_blocks[j][i];
+            for (j, row_blocks_j) in self.l_blocks.iter().enumerate().skip(i + 1) {
+                let (offset_j, dim_j) = block_layout[j];
+                let lji = &row_blocks_j[i];
 
                 let mut xj = Mat::zeros(dim_j, ncols);
                 for jj in 0..dim_j {
@@ -392,7 +366,7 @@ impl BlockedCholesky {
                 }
             }
 
-            let lii = &self.l_blocks[i][i];
+            let lii = &row_blocks_i[i];
             let xi = solve_lower_transpose_block(lii, &rhs);
 
             for ii in 0..dim_i {
@@ -513,6 +487,13 @@ fn rank_update_subtract_inplace(target: &mut BlockType, l: &BlockType, r: &Block
                 }
             }
         }
+        (BlockType::Diagonal(_), BlockType::Diagonal(l_diag), BlockType::Diagonal(r_diag)) => {
+            if let BlockType::Diagonal(t_diag) = target {
+                for i in 0..t_diag.len() {
+                    t_diag[i] -= l_diag[i] * r_diag[i];
+                }
+            }
+        }
         _ => {
             let l_dense = l.to_dense();
             let r_dense = r.to_dense();
@@ -541,11 +522,15 @@ fn rank_update_subtract(
         return Ok(());
     }
 
-    let needs_conversion = matches!(
-        (&*target, l, r),
-        (BlockType::BlockDiagonal { .. }, BlockType::Dense(_), _)
-            | (BlockType::BlockDiagonal { .. }, _, BlockType::Dense(_))
-    );
+    let needs_conversion = match &*target {
+        BlockType::BlockDiagonal { .. } => {
+            matches!(l, BlockType::Dense(_)) || matches!(r, BlockType::Dense(_))
+        }
+        BlockType::Diagonal(_) => {
+            !matches!((l, r), (BlockType::Diagonal(_), BlockType::Diagonal(_)))
+        }
+        _ => false,
+    };
 
     if needs_conversion {
         let mut dense_target = target.to_dense();
@@ -576,23 +561,6 @@ fn solve_lower(l: &Mat<f64>, b: &Mat<f64>) -> Mat<f64> {
         for i in 0..n {
             for k in 0..i {
                 x[(i, c)] -= l[(i, k)] * x[(k, c)];
-            }
-            x[(i, c)] /= l[(i, i)];
-        }
-    }
-    x
-}
-
-#[allow(dead_code)]
-fn solve_lower_transpose(l: &Mat<f64>, b: &Mat<f64>) -> Mat<f64> {
-    let n = l.nrows();
-    let ncols = b.ncols();
-    let mut x = b.clone();
-
-    for c in 0..ncols {
-        for i in (0..n).rev() {
-            for k in (i + 1)..n {
-                x[(i, c)] -= l[(k, i)] * x[(k, c)];
             }
             x[(i, c)] /= l[(i, i)];
         }
