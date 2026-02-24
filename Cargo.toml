@@ -3,29 +3,29 @@ name = "mixedlm"
 version = "1.1.0"
 edition = "2024"
 license = "MIT"
-rust-version = "1.87"
+rust-version = "1.93"
 
 [lib]
 name = "_rust"
 crate-type = ["cdylib"]
 
 [dependencies]
-pyo3 = { version = "0.28.0", features = ["extension-module", "abi3-py310"] }
+pyo3 = { version = "0.28.2", features = ["extension-module", "abi3-py310"] }
 numpy = "0.28.0"
 ndarray = "0.17.2"
 sprs = "0.11.4"
-sprs-ldl = "0.10"
+sprs-ldl = "0.10.0"
 nalgebra = "0.34.1"
 nalgebra-sparse = "0.11.0"
 num-traits = "0.2.19"
-thiserror = "2.0.17"
+thiserror = "2.0.18"
 faer = "0.24.0"
 rand = "0.10.0"
 rand_distr = "0.6.0"
 rayon = "1.11.0"
 
 [dev-dependencies]
-proptest = "1.6"
+proptest = "1.10.0"
 
 [profile.release]
 lto = true
