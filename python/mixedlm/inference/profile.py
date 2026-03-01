@@ -16,6 +16,8 @@ if TYPE_CHECKING:
     from mixedlm.models.glmer import GlmerResult
     from mixedlm.models.lmer import LmerResult
 
+_SLICE2D_PARALLEL_MIN_TASKS = 400
+
 
 @dataclass
 class ProfileResult:
@@ -339,46 +341,30 @@ def _profile_param_worker(
     precomputed = _precompute_profile_matrices(
         theta, Zt_data, Zt_indices, Zt_indptr, Zt_shape, random_structures, q
     )
+    param_cache = _build_profile_param_direct_cache(
+        idx,
+        theta,
+        y,
+        X,
+        Zt_data,
+        Zt_indices,
+        Zt_indptr,
+        Zt_shape,
+        random_structures,
+        n,
+        p,
+        q,
+        REML,
+        precomputed=precomputed,
+    )
 
     for i, val in enumerate(param_values):
-        dev = _profile_deviance_at_beta_direct(
-            idx,
-            val,
-            theta,
-            y,
-            X,
-            Zt_data,
-            Zt_indices,
-            Zt_indptr,
-            Zt_shape,
-            random_structures,
-            n,
-            p,
-            q,
-            REML,
-            precomputed=precomputed,
-        )
+        dev = _profile_deviance_at_beta_direct_cached(val, param_cache)
         sign = 1 if val >= mle else -1
         zeta_values[i] = sign * np.sqrt(max(0, dev - dev_mle))
 
     def zeta_func(val: float) -> float:
-        dev = _profile_deviance_at_beta_direct(
-            idx,
-            val,
-            theta,
-            y,
-            X,
-            Zt_data,
-            Zt_indices,
-            Zt_indptr,
-            Zt_shape,
-            random_structures,
-            n,
-            p,
-            q,
-            REML,
-            precomputed=precomputed,
-        )
+        dev = _profile_deviance_at_beta_direct_cached(val, param_cache)
         sign = 1 if val >= mle else -1
         return sign * np.sqrt(max(0, dev - dev_mle))
 
@@ -446,10 +432,188 @@ def _precompute_profile_matrices(
 
     return {
         "Zt": Zt,
-        "Lambda": Lambda,
+        "Lambda_T": Lambda.T,
         "L_V": L_V,
         "logdet_V": logdet_V,
     }
+
+
+def _build_profile_param_direct_cache(
+    idx: int,
+    theta: NDArray,
+    y: NDArray,
+    X: NDArray,
+    Zt_data: NDArray,
+    Zt_indices: NDArray,
+    Zt_indptr: NDArray,
+    Zt_shape: tuple[int, int],
+    random_structures: list,
+    n: int,
+    p: int,
+    q: int,
+    REML: bool,
+    precomputed: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    from scipy import linalg, sparse
+
+    from mixedlm.estimation.reml import _build_lambda
+
+    X_reduced = np.delete(X, idx, axis=1)
+    X_col = X[:, idx]
+
+    cache: dict[str, Any] = {
+        "n": n,
+        "p": p,
+        "q": q,
+        "REML": REML,
+        "y": y,
+        "X_reduced": X_reduced,
+        "X_col": X_col,
+    }
+
+    if q == 0:
+        XtX = X_reduced.T @ X_reduced
+        if XtX.shape[0] == 0:
+            XtX_chol: NDArray[np.floating] | None = np.empty((0, 0), dtype=np.float64)
+        else:
+            try:
+                XtX_chol = linalg.cholesky(XtX, lower=True)
+            except linalg.LinAlgError:
+                XtX_chol = None
+        logdet_XtX = np.linalg.slogdet(XtX)[1] if REML and XtX.shape[0] > 0 else 0.0
+
+        cache.update(
+            {
+                "XtX_chol": XtX_chol,
+                "logdet_XtX": logdet_XtX,
+                "Zt": None,
+                "Lambda_T": None,
+                "L_V": None,
+                "logdet_V": 0.0,
+                "RZX": None,
+                "L_XtVinvX": None,
+                "logdet_XtVinvX": 0.0,
+            }
+        )
+        return cache
+
+    if precomputed is not None:
+        Zt = precomputed["Zt"]
+        Lambda_T = precomputed["Lambda_T"]
+        L_V = precomputed["L_V"]
+        logdet_V = precomputed["logdet_V"]
+    else:
+        Zt = sparse.csc_matrix((Zt_data, Zt_indices, Zt_indptr), shape=Zt_shape)
+        Lambda = _build_lambda(theta, random_structures)
+        ZtZ = Zt @ Zt.T
+        LambdatZtZLambda = Lambda.T @ ZtZ @ Lambda
+        I_q = sparse.eye(q, format="csc")
+        V_factor = LambdatZtZLambda + I_q
+        V_factor_dense = V_factor.toarray() if sparse.issparse(V_factor) else V_factor
+        L_V = linalg.cholesky(V_factor_dense, lower=True)
+        logdet_V = 2.0 * np.sum(np.log(np.diag(L_V)))
+        Lambda_T = Lambda.T
+
+    ZtX = Zt @ X_reduced
+    Lambdat_ZtX = Lambda_T @ ZtX
+    RZX = linalg.solve_triangular(L_V, Lambdat_ZtX, lower=True)
+
+    XtX = X_reduced.T @ X_reduced
+    XtVinvX = XtX - RZX.T @ RZX
+
+    if XtVinvX.shape[0] == 0:
+        L_XtVinvX: NDArray[np.floating] | None = np.empty((0, 0), dtype=np.float64)
+        logdet_XtVinvX = 0.0
+    else:
+        try:
+            L_XtVinvX = linalg.cholesky(XtVinvX, lower=True)
+            logdet_XtVinvX = 2.0 * np.sum(np.log(np.diag(L_XtVinvX)))
+        except linalg.LinAlgError:
+            L_XtVinvX = None
+            logdet_XtVinvX = 0.0
+
+    cache.update(
+        {
+            "XtX_chol": None,
+            "logdet_XtX": 0.0,
+            "Zt": Zt,
+            "Lambda_T": Lambda_T,
+            "L_V": L_V,
+            "logdet_V": logdet_V,
+            "RZX": RZX,
+            "L_XtVinvX": L_XtVinvX,
+            "logdet_XtVinvX": logdet_XtVinvX,
+        }
+    )
+    return cache
+
+
+def _profile_deviance_at_beta_direct_cached(
+    value: float,
+    cache: dict[str, Any],
+) -> float:
+    from scipy import linalg
+
+    y_adjusted = cache["y"] - value * cache["X_col"]
+
+    if cache["q"] == 0:
+        if cache["X_reduced"].shape[1] > 0:
+            Xty = cache["X_reduced"].T @ y_adjusted
+            if cache["XtX_chol"] is not None:
+                beta_reduced = linalg.cho_solve((cache["XtX_chol"], True), Xty)
+            else:
+                beta_reduced = linalg.lstsq(cache["X_reduced"], y_adjusted)[0]
+        else:
+            beta_reduced = np.array([], dtype=np.float64)
+
+        resid = y_adjusted - cache["X_reduced"] @ beta_reduced
+        rss = np.dot(resid, resid)
+
+        if cache["REML"]:
+            sigma2 = rss / (cache["n"] - cache["p"])
+            dev = (cache["n"] - cache["p"]) * (1.0 + np.log(2.0 * np.pi * sigma2)) + cache[
+                "logdet_XtX"
+            ]
+        else:
+            sigma2 = rss / cache["n"]
+            dev = cache["n"] * (1.0 + np.log(2.0 * np.pi * sigma2))
+
+        return float(dev)
+
+    if (
+        cache["L_XtVinvX"] is None
+        or cache["RZX"] is None
+        or cache["L_V"] is None
+        or cache["Zt"] is None
+        or cache["Lambda_T"] is None
+    ):
+        return 1e10
+
+    Zty = cache["Zt"] @ y_adjusted
+    cu = cache["Lambda_T"] @ Zty
+    cu_star = linalg.solve_triangular(cache["L_V"], cu, lower=True)
+
+    Xty = cache["X_reduced"].T @ y_adjusted
+    Xty_adj = Xty - cache["RZX"].T @ cu_star
+    if cache["X_reduced"].shape[1] > 0:
+        beta_reduced = linalg.cho_solve((cache["L_XtVinvX"], True), Xty_adj)
+    else:
+        beta_reduced = np.array([], dtype=np.float64)
+
+    resid = y_adjusted - cache["X_reduced"] @ beta_reduced
+    Zt_resid = cache["Zt"] @ resid
+    Lambda_t_Zt_resid = cache["Lambda_T"] @ Zt_resid
+    u_star = linalg.cho_solve((cache["L_V"], True), Lambda_t_Zt_resid)
+
+    pwrss = np.dot(resid, resid) + np.dot(u_star, u_star)
+    denom = cache["n"] - cache["p"] if cache["REML"] else cache["n"]
+    sigma2 = pwrss / denom
+
+    dev = denom * (1.0 + np.log(2.0 * np.pi * sigma2)) + cache["logdet_V"]
+    if cache["REML"]:
+        dev += cache["logdet_XtVinvX"]
+
+    return float(dev)
 
 
 def _profile_deviance_at_beta_direct(
@@ -469,95 +633,23 @@ def _profile_deviance_at_beta_direct(
     REML: bool,
     precomputed: dict[str, Any] | None = None,
 ) -> float:
-    from scipy import linalg, sparse
-
-    from mixedlm.estimation.reml import _build_lambda
-
-    X_reduced = np.delete(X, idx, axis=1)
-    y_adjusted = y - value * X[:, idx]
-
-    if q == 0:
-        XtX = X_reduced.T @ X_reduced
-        Xty = X_reduced.T @ y_adjusted
-        try:
-            beta_reduced = linalg.solve(XtX, Xty, assume_a="pos")
-        except linalg.LinAlgError:
-            beta_reduced = linalg.lstsq(X_reduced, y_adjusted)[0]
-
-        resid = y_adjusted - X_reduced @ beta_reduced
-        rss = np.dot(resid, resid)
-
-        if REML:
-            sigma2 = rss / (n - p)
-            logdet_XtX = np.linalg.slogdet(XtX)[1]
-            dev = (n - p) * (1.0 + np.log(2.0 * np.pi * sigma2)) + logdet_XtX
-        else:
-            sigma2 = rss / n
-            dev = n * (1.0 + np.log(2.0 * np.pi * sigma2))
-
-        return float(dev)
-
-    if precomputed is not None:
-        Zt = precomputed["Zt"]
-        Lambda = precomputed["Lambda"]
-        L_V = precomputed["L_V"]
-        logdet_V = precomputed["logdet_V"]
-    else:
-        Zt = sparse.csc_matrix((Zt_data, Zt_indices, Zt_indptr), shape=Zt_shape)
-        Lambda = _build_lambda(theta, random_structures)
-
-        ZtZ = Zt @ Zt.T
-        LambdatZtZLambda = Lambda.T @ ZtZ @ Lambda
-
-        I_q = sparse.eye(q, format="csc")
-        V_factor = LambdatZtZLambda + I_q
-
-        V_factor_dense = V_factor.toarray()
-        L_V = linalg.cholesky(V_factor_dense, lower=True)
-
-        logdet_V = 2.0 * np.sum(np.log(np.diag(L_V)))
-
-    Zty = Zt @ y_adjusted
-    cu = Lambda.T @ Zty
-    cu_star = linalg.solve_triangular(L_V, cu, lower=True)
-
-    ZtX = Zt @ X_reduced
-    Lambdat_ZtX = Lambda.T @ ZtX
-    RZX = linalg.solve_triangular(L_V, Lambdat_ZtX, lower=True)
-
-    XtX = X_reduced.T @ X_reduced
-    Xty = X_reduced.T @ y_adjusted
-
-    RZX_tRZX = RZX.T @ RZX
-    XtVinvX = XtX - RZX_tRZX
-
-    try:
-        L_XtVinvX = linalg.cholesky(XtVinvX, lower=True)
-    except linalg.LinAlgError:
-        return 1e10
-
-    logdet_XtVinvX = 2.0 * np.sum(np.log(np.diag(L_XtVinvX)))
-
-    cu_star_RZX_beta_term = RZX.T @ cu_star
-    Xty_adj = Xty - cu_star_RZX_beta_term
-    beta_reduced = linalg.cho_solve((L_XtVinvX, True), Xty_adj)
-
-    resid = y_adjusted - X_reduced @ beta_reduced
-    Zt_resid = Zt @ resid
-    Lambda_t_Zt_resid = Lambda.T @ Zt_resid
-    u_star = linalg.cho_solve((L_V, True), Lambda_t_Zt_resid)
-
-    pwrss = np.dot(resid, resid) + np.dot(u_star, u_star)
-
-    denom = n - p if REML else n
-
-    sigma2 = pwrss / denom
-
-    dev = denom * (1.0 + np.log(2.0 * np.pi * sigma2)) + logdet_V
-    if REML:
-        dev += logdet_XtVinvX
-
-    return float(dev)
+    cache = _build_profile_param_direct_cache(
+        idx,
+        theta,
+        y,
+        X,
+        Zt_data,
+        Zt_indices,
+        Zt_indptr,
+        Zt_shape,
+        random_structures,
+        n,
+        p,
+        q,
+        REML,
+        precomputed=precomputed,
+    )
+    return _profile_deviance_at_beta_direct_cached(value, cache)
 
 
 def profile_lmer(
@@ -1346,29 +1438,67 @@ def slice2D(
     dev_mle = result.deviance
 
     zeta = np.zeros((n_points, n_points))
+    if n_jobs == -1:
+        n_jobs_actual = os.cpu_count() or 1
+    elif n_jobs > 1:
+        n_jobs_actual = n_jobs
+    else:
+        n_jobs_actual = 1
 
-    if n_jobs == 1:
+    use_parallel = n_jobs_actual > 1 and (n_points * n_points) >= _SLICE2D_PARALLEL_MIN_TASKS
+
+    if not use_parallel:
+        cache = _Slice2DCache.build(result, idx1, idx2)
         for i, v1 in enumerate(values1):
             for j, v2 in enumerate(values2):
-                dev = _profile_deviance_2d(result, idx1, v1, idx2, v2)
+                dev = _profile_deviance_2d_cached(cache, v1, v2)
                 diff = dev - dev_mle
                 sign = 1 if diff >= 0 else -1
                 zeta[i, j] = sign * np.sqrt(abs(diff))
     else:
-        n_jobs_actual = os.cpu_count() or 1 if n_jobs == -1 else n_jobs
+        matrices = result.matrices
+        if matrices.n_random > 0:
+            Zt = matrices.Zt
+            Zt_data = np.array(Zt.data)
+            Zt_indices = np.array(Zt.indices)
+            Zt_indptr = np.array(Zt.indptr)
+            Zt_shape = Zt.shape
+        else:
+            Zt_data = np.array([])
+            Zt_indices = np.array([])
+            Zt_indptr = np.array([0])
+            Zt_shape = (0, matrices.n_obs)
 
         tasks = []
         for i, v1 in enumerate(values1):
-            for j, v2 in enumerate(values2):
-                tasks.append((i, j, v1, v2, idx1, idx2, result))
+            tasks.append(
+                (
+                    i,
+                    float(v1),
+                    values2,
+                    dev_mle,
+                    idx1,
+                    idx2,
+                    result.theta.copy(),
+                    matrices.y.copy(),
+                    matrices.X.copy(),
+                    Zt_data,
+                    Zt_indices,
+                    Zt_indptr,
+                    Zt_shape,
+                    matrices.random_structures,
+                    matrices.n_obs,
+                    matrices.n_fixed,
+                    matrices.n_random,
+                    result.REML,
+                )
+            )
 
         with ProcessPoolExecutor(max_workers=n_jobs_actual) as executor:
-            futures = {executor.submit(_slice2d_worker, task): task[:2] for task in tasks}
+            futures = {executor.submit(_slice2d_row_worker, task): task[0] for task in tasks}
             for future in as_completed(futures):
-                i, j, dev = future.result()
-                diff = dev - dev_mle
-                sign = 1 if diff >= 0 else -1
-                zeta[i, j] = sign * np.sqrt(abs(diff))
+                i, zeta_row = future.result()
+                zeta[i, :] = zeta_row
 
     return Profile2DResult(
         param1=param1,
@@ -1390,6 +1520,342 @@ def _slice2d_worker(
     return i, j, dev
 
 
+def _slice2d_row_worker(
+    args: tuple[Any, ...],
+) -> tuple[int, NDArray[np.floating]]:
+    (
+        i,
+        v1,
+        values2,
+        dev_mle,
+        idx1,
+        idx2,
+        theta,
+        y,
+        X,
+        Zt_data,
+        Zt_indices,
+        Zt_indptr,
+        Zt_shape,
+        random_structures,
+        n,
+        p,
+        q,
+        REML,
+    ) = args
+
+    precomputed = _precompute_profile_matrices(
+        theta, Zt_data, Zt_indices, Zt_indptr, Zt_shape, random_structures, q
+    )
+    cache = _Slice2DCache.from_components(
+        idx1,
+        idx2,
+        theta,
+        y,
+        X,
+        Zt_data,
+        Zt_indices,
+        Zt_indptr,
+        Zt_shape,
+        random_structures,
+        n,
+        p,
+        q,
+        REML,
+        precomputed=precomputed,
+    )
+
+    row = np.zeros(len(values2), dtype=np.float64)
+    for j, v2 in enumerate(values2):
+        dev = _profile_deviance_2d_cached(cache, float(v1), float(v2))
+        diff = dev - dev_mle
+        sign = 1 if diff >= 0 else -1
+        row[j] = sign * np.sqrt(abs(diff))
+
+    return i, row
+
+
+@dataclass
+class _Slice2DCache:
+    """Cache invariant terms for repeated 2D profile deviance evaluations."""
+
+    n: int
+    p: int
+    q: int
+    REML: bool
+    X_reduced: NDArray[np.floating]
+    X_col1: NDArray[np.floating]
+    X_col2: NDArray[np.floating]
+    y: NDArray[np.floating]
+    logdet_V: float
+    L_V: NDArray[np.floating] | None
+    Lambda_T: Any | None
+    Zt: Any | None
+    RZX: NDArray[np.floating] | None
+    L_XtVinvX: NDArray[np.floating] | None
+    logdet_XtVinvX: float
+    XtX_chol: NDArray[np.floating] | None
+    logdet_XtX: float
+
+    @classmethod
+    def build(cls, result: LmerResult, idx1: int, idx2: int) -> _Slice2DCache:
+        matrices = result.matrices
+        if matrices.n_random > 0:
+            Zt = matrices.Zt
+            Zt_data = np.array(Zt.data)
+            Zt_indices = np.array(Zt.indices)
+            Zt_indptr = np.array(Zt.indptr)
+            Zt_shape = Zt.shape
+        else:
+            Zt_data = np.array([])
+            Zt_indices = np.array([])
+            Zt_indptr = np.array([0])
+            Zt_shape = (0, matrices.n_obs)
+
+        return cls.from_components(
+            idx1,
+            idx2,
+            result.theta,
+            matrices.y,
+            matrices.X,
+            Zt_data,
+            Zt_indices,
+            Zt_indptr,
+            Zt_shape,
+            matrices.random_structures,
+            matrices.n_obs,
+            matrices.n_fixed,
+            matrices.n_random,
+            result.REML,
+        )
+
+    @classmethod
+    def from_components(
+        cls,
+        idx1: int,
+        idx2: int,
+        theta: NDArray[np.floating],
+        y: NDArray[np.floating],
+        X: NDArray[np.floating],
+        Zt_data: NDArray[np.floating],
+        Zt_indices: NDArray[np.int64],
+        Zt_indptr: NDArray[np.int64],
+        Zt_shape: tuple[int, int],
+        random_structures: list[Any],
+        n: int,
+        p: int,
+        q: int,
+        REML: bool,
+        precomputed: dict[str, Any] | None = None,
+    ) -> _Slice2DCache:
+        from scipy import linalg, sparse
+
+        from mixedlm.estimation.reml import _build_lambda
+
+        keep_idx = [i for i in range(p) if i not in (idx1, idx2)]
+        X_reduced = X[:, keep_idx]
+        X_col1 = X[:, idx1]
+        X_col2 = X[:, idx2]
+
+        if q == 0:
+            XtX = X_reduced.T @ X_reduced
+            if XtX.shape[0] == 0:
+                XtX_chol = np.empty((0, 0), dtype=np.float64)
+            else:
+                try:
+                    XtX_chol = linalg.cholesky(XtX, lower=True)
+                except linalg.LinAlgError:
+                    XtX_chol = None
+            logdet_XtX = np.linalg.slogdet(XtX)[1] if REML and XtX.shape[0] > 0 else 0.0
+
+            return cls(
+                n=n,
+                p=p,
+                q=q,
+                REML=REML,
+                X_reduced=X_reduced,
+                X_col1=X_col1,
+                X_col2=X_col2,
+                y=y,
+                logdet_V=0.0,
+                L_V=None,
+                Lambda_T=None,
+                Zt=None,
+                RZX=None,
+                L_XtVinvX=None,
+                logdet_XtVinvX=0.0,
+                XtX_chol=XtX_chol,
+                logdet_XtX=logdet_XtX,
+            )
+
+        if precomputed is not None:
+            Zt = precomputed["Zt"]
+            Lambda_T = precomputed["Lambda_T"]
+            L_V = precomputed["L_V"]
+            logdet_V = precomputed["logdet_V"]
+        else:
+            Zt = sparse.csc_matrix((Zt_data, Zt_indices, Zt_indptr), shape=Zt_shape)
+            Lambda = _build_lambda(theta, random_structures)
+            ZtZ = Zt @ Zt.T
+            LambdatZtZLambda = Lambda.T @ ZtZ @ Lambda
+            I_q = sparse.eye(q, format="csc")
+            V_factor = LambdatZtZLambda + I_q
+            V_factor_dense = V_factor.toarray() if sparse.issparse(V_factor) else V_factor
+
+            try:
+                L_V = linalg.cholesky(V_factor_dense, lower=True)
+            except linalg.LinAlgError:
+                return cls(
+                    n=n,
+                    p=p,
+                    q=q,
+                    REML=REML,
+                    X_reduced=X_reduced,
+                    X_col1=X_col1,
+                    X_col2=X_col2,
+                    y=y,
+                    logdet_V=0.0,
+                    L_V=None,
+                    Lambda_T=Lambda.T,
+                    Zt=Zt,
+                    RZX=None,
+                    L_XtVinvX=None,
+                    logdet_XtVinvX=0.0,
+                    XtX_chol=None,
+                    logdet_XtX=0.0,
+                )
+
+            logdet_V = 2.0 * np.sum(np.log(np.diag(L_V)))
+            Lambda_T = Lambda.T
+
+        if L_V is None:
+            return cls(
+                n=n,
+                p=p,
+                q=q,
+                REML=REML,
+                X_reduced=X_reduced,
+                X_col1=X_col1,
+                X_col2=X_col2,
+                y=y,
+                logdet_V=0.0,
+                L_V=None,
+                Lambda_T=Lambda_T if "Lambda_T" in locals() else None,
+                Zt=Zt,
+                RZX=None,
+                L_XtVinvX=None,
+                logdet_XtVinvX=0.0,
+                XtX_chol=None,
+                logdet_XtX=0.0,
+            )
+
+        ZtX = Zt @ X_reduced
+        Lambdat_ZtX = Lambda_T @ ZtX
+        RZX = linalg.solve_triangular(L_V, Lambdat_ZtX, lower=True)
+
+        XtX = X_reduced.T @ X_reduced
+        XtVinvX = XtX - RZX.T @ RZX
+
+        if XtVinvX.shape[0] == 0:
+            L_XtVinvX = np.empty((0, 0), dtype=np.float64)
+            logdet_XtVinvX = 0.0
+        else:
+            try:
+                L_XtVinvX = linalg.cholesky(XtVinvX, lower=True)
+                logdet_XtVinvX = 2.0 * np.sum(np.log(np.diag(L_XtVinvX)))
+            except linalg.LinAlgError:
+                L_XtVinvX = None
+                logdet_XtVinvX = 0.0
+
+        return cls(
+            n=n,
+            p=p,
+            q=q,
+            REML=REML,
+            X_reduced=X_reduced,
+            X_col1=X_col1,
+            X_col2=X_col2,
+            y=y,
+            logdet_V=logdet_V,
+            L_V=L_V,
+            Lambda_T=Lambda_T,
+            Zt=Zt,
+            RZX=RZX,
+            L_XtVinvX=L_XtVinvX,
+            logdet_XtVinvX=logdet_XtVinvX,
+            XtX_chol=None,
+            logdet_XtX=0.0,
+        )
+
+
+def _profile_deviance_2d_cached(
+    cache: _Slice2DCache,
+    value1: float,
+    value2: float,
+) -> float:
+    from scipy import linalg
+
+    y_adjusted = cache.y - value1 * cache.X_col1 - value2 * cache.X_col2
+
+    if cache.q == 0:
+        if cache.X_reduced.shape[1] > 0:
+            Xty = cache.X_reduced.T @ y_adjusted
+            if cache.XtX_chol is not None:
+                beta_reduced = linalg.cho_solve((cache.XtX_chol, True), Xty)
+            else:
+                beta_reduced = linalg.lstsq(cache.X_reduced, y_adjusted)[0]
+        else:
+            beta_reduced = np.array([], dtype=np.float64)
+
+        resid = y_adjusted - cache.X_reduced @ beta_reduced
+        rss = np.dot(resid, resid)
+
+        if cache.REML:
+            denom = cache.n - cache.p
+            sigma2 = rss / denom
+            dev = denom * (1.0 + np.log(2.0 * np.pi * sigma2)) + cache.logdet_XtX
+        else:
+            sigma2 = rss / cache.n
+            dev = cache.n * (1.0 + np.log(2.0 * np.pi * sigma2))
+
+        return float(dev)
+
+    if (
+        cache.L_XtVinvX is None
+        or cache.RZX is None
+        or cache.L_V is None
+        or cache.Zt is None
+        or cache.Lambda_T is None
+    ):
+        return 1e10
+
+    Zty = cache.Zt @ y_adjusted
+    cu = cache.Lambda_T @ Zty
+    cu_star = linalg.solve_triangular(cache.L_V, cu, lower=True)
+
+    Xty = cache.X_reduced.T @ y_adjusted
+    Xty_adj = Xty - cache.RZX.T @ cu_star
+    if cache.X_reduced.shape[1] > 0:
+        beta_reduced = linalg.cho_solve((cache.L_XtVinvX, True), Xty_adj)
+    else:
+        beta_reduced = np.array([], dtype=np.float64)
+
+    resid = y_adjusted - cache.X_reduced @ beta_reduced
+    Zt_resid = cache.Zt @ resid
+    Lambda_t_Zt_resid = cache.Lambda_T @ Zt_resid
+    u_star = linalg.cho_solve((cache.L_V, True), Lambda_t_Zt_resid)
+
+    pwrss = np.dot(resid, resid) + np.dot(u_star, u_star)
+    denom = cache.n - cache.p if cache.REML else cache.n
+    sigma2 = pwrss / denom
+
+    dev = denom * (1.0 + np.log(2.0 * np.pi * sigma2)) + cache.logdet_V
+    if cache.REML:
+        dev += cache.logdet_XtVinvX
+
+    return float(dev)
+
+
 def _profile_deviance_2d(
     result: LmerResult,
     idx1: int,
@@ -1398,99 +1864,5 @@ def _profile_deviance_2d(
     value2: float,
 ) -> float:
     """Compute deviance with two fixed effects parameters held constant."""
-    from scipy import linalg, sparse
-
-    from mixedlm.estimation.reml import _build_lambda
-
-    matrices = result.matrices
-    theta = result.theta
-    n = matrices.n_obs
-    p = matrices.n_fixed
-    q = matrices.n_random
-
-    keep_idx = [i for i in range(p) if i not in (idx1, idx2)]
-    X_reduced = matrices.X[:, keep_idx]
-    y_adjusted = matrices.y - value1 * matrices.X[:, idx1] - value2 * matrices.X[:, idx2]
-
-    p_reduced = len(keep_idx)
-
-    if q == 0:
-        XtX = X_reduced.T @ X_reduced
-        Xty = X_reduced.T @ y_adjusted
-        try:
-            beta_reduced = linalg.solve(XtX, Xty, assume_a="pos")
-        except linalg.LinAlgError:
-            beta_reduced = linalg.lstsq(X_reduced, y_adjusted)[0]
-
-        resid = y_adjusted - X_reduced @ beta_reduced
-        rss = np.dot(resid, resid)
-
-        if result.REML:
-            denom = n - p
-            sigma2 = rss / denom
-            logdet_XtX = np.linalg.slogdet(XtX)[1] if p_reduced > 0 else 0.0
-            dev = denom * (1.0 + np.log(2.0 * np.pi * sigma2)) + logdet_XtX
-        else:
-            sigma2 = rss / n
-            dev = n * (1.0 + np.log(2.0 * np.pi * sigma2))
-
-        return float(dev)
-
-    Lambda = _build_lambda(theta, matrices.random_structures)
-
-    Zt = matrices.Zt
-    ZtZ = Zt @ Zt.T
-    LambdatZtZLambda = Lambda.T @ ZtZ @ Lambda
-
-    I_q = sparse.eye(q, format="csc")
-    V_factor = LambdatZtZLambda + I_q
-
-    V_factor_dense = V_factor.toarray()
-    try:
-        L_V = linalg.cholesky(V_factor_dense, lower=True)
-    except linalg.LinAlgError:
-        return 1e10
-
-    logdet_V = 2.0 * np.sum(np.log(np.diag(L_V)))
-
-    Zty = Zt @ y_adjusted
-    cu = Lambda.T @ Zty
-    cu_star = linalg.solve_triangular(L_V, cu, lower=True)
-
-    ZtX = Zt @ X_reduced
-    Lambdat_ZtX = Lambda.T @ ZtX
-    RZX = linalg.solve_triangular(L_V, Lambdat_ZtX, lower=True)
-
-    XtX = X_reduced.T @ X_reduced
-    Xty = X_reduced.T @ y_adjusted
-
-    RZX_tRZX = RZX.T @ RZX
-    XtVinvX = XtX - RZX_tRZX
-
-    try:
-        L_XtVinvX = linalg.cholesky(XtVinvX, lower=True)
-    except linalg.LinAlgError:
-        return 1e10
-
-    logdet_XtVinvX = 2.0 * np.sum(np.log(np.diag(L_XtVinvX)))
-
-    cu_star_RZX_beta_term = RZX.T @ cu_star
-    Xty_adj = Xty - cu_star_RZX_beta_term
-    beta_reduced = linalg.cho_solve((L_XtVinvX, True), Xty_adj)
-
-    resid = y_adjusted - X_reduced @ beta_reduced
-    Zt_resid = Zt @ resid
-    Lambda_t_Zt_resid = Lambda.T @ Zt_resid
-    u_star = linalg.cho_solve((L_V, True), Lambda_t_Zt_resid)
-
-    pwrss = np.dot(resid, resid) + np.dot(u_star, u_star)
-
-    denom = n - p if result.REML else n
-
-    sigma2 = pwrss / denom
-
-    dev = denom * (1.0 + np.log(2.0 * np.pi * sigma2)) + logdet_V
-    if result.REML:
-        dev += logdet_XtVinvX
-
-    return float(dev)
+    cache = _Slice2DCache.build(result, idx1, idx2)
+    return _profile_deviance_2d_cached(cache, value1, value2)

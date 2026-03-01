@@ -23,6 +23,22 @@ def clear_vcov_grad_cache() -> None:
     _vcov_grad_cache.clear()
 
 
+def _solve_linear_system(A: NDArray[np.floating], B: NDArray[np.floating]) -> NDArray[np.floating]:
+    """Solve A X = B with SPD-fast path and robust fallbacks."""
+    try:
+        L = linalg.cholesky(A, lower=True)
+        return linalg.cho_solve((L, True), B)
+    except linalg.LinAlgError:
+        try:
+            return linalg.solve(A, B)
+        except linalg.LinAlgError:
+            return linalg.pinv(A) @ B
+
+
+def _matrix_inverse(A: NDArray[np.floating]) -> NDArray[np.floating]:
+    return _solve_linear_system(A, np.eye(A.shape[0], dtype=np.float64))
+
+
 @dataclass
 class DenomDFResult:
     df: NDArray[np.floating]
@@ -35,45 +51,6 @@ class DenomDFResult:
 
     def as_dict(self) -> dict[str, float]:
         return dict(zip(self.param_names, self.df, strict=False))
-
-
-def _build_lambda_from_theta(
-    theta: NDArray[np.floating],
-    random_structures: list,
-) -> NDArray[np.floating]:
-    total_q = sum(s.n_levels * s.n_terms for s in random_structures)
-    Lambda = np.zeros((total_q, total_q), dtype=np.float64)
-
-    theta_idx = 0
-    u_idx = 0
-
-    for struct in random_structures:
-        n_terms = struct.n_terms
-        n_levels = struct.n_levels
-
-        n_theta = n_terms * (n_terms + 1) // 2 if struct.correlated else n_terms
-
-        theta_block = theta[theta_idx : theta_idx + n_theta]
-
-        if struct.correlated:
-            L_block = np.zeros((n_terms, n_terms), dtype=np.float64)
-            idx = 0
-            for i in range(n_terms):
-                for j in range(i + 1):
-                    L_block[i, j] = theta_block[idx]
-                    idx += 1
-        else:
-            L_block = np.diag(theta_block)
-
-        for g in range(n_levels):
-            start = u_idx + g * n_terms
-            end = start + n_terms
-            Lambda[start:end, start:end] = L_block
-
-        theta_idx += n_theta
-        u_idx += n_levels * n_terms
-
-    return Lambda
 
 
 def satterthwaite_df(
@@ -114,10 +91,7 @@ def satterthwaite_df(
 
         if q == 0:
             XtX = result.matrices.X.T @ result.matrices.X
-            try:
-                return sigma**2 * linalg.inv(XtX)
-            except linalg.LinAlgError:
-                return sigma**2 * linalg.pinv(XtX)
+            return sigma**2 * _matrix_inverse(XtX)
 
         Lambda = _build_lambda(theta_vec, result.matrices.random_structures)
         Z = result.matrices.Z
@@ -151,17 +125,10 @@ def satterthwaite_df(
             ZLambda = Z @ Lambda_dense
             V = np.eye(n) * sigma**2 + ZLambda @ ZLambda.T * sigma**2
 
-            try:
-                V_inv = linalg.inv(V)
-            except linalg.LinAlgError:
-                V_inv = linalg.pinv(V)
+            V_inv_X = _solve_linear_system(V, X)
+            XtVinvX = X.T @ V_inv_X
 
-            XtVinvX = X.T @ V_inv @ X
-
-        try:
-            return linalg.inv(XtVinvX)
-        except linalg.LinAlgError:
-            return linalg.pinv(XtVinvX)
+        return _matrix_inverse(XtVinvX)
 
     cache_key = theta.tobytes() + np.array([sigma]).tobytes()
     if cache_key in _vcov_grad_cache:
@@ -261,14 +228,8 @@ def kenward_roger_df(
         ZLambda = Z_dense @ Lambda_dense
         V = np.eye(n) * sigma**2 + ZLambda @ ZLambda.T * sigma**2
 
-        try:
-            V_inv = linalg.inv(V)
-        except linalg.LinAlgError:
-            V_inv = linalg.pinv(V)
-
-        P = V_inv - V_inv @ X @ vcov @ X.T @ V_inv
-
-        return X.T @ P @ X
+        XtVinvX = X.T @ _solve_linear_system(V, X)
+        return XtVinvX - XtVinvX @ vcov @ XtVinvX
 
     base_hess = compute_hessian_contribution(theta)
 

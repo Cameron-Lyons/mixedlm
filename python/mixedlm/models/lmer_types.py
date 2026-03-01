@@ -131,3 +131,24 @@ class RePCAGroup:
             cumul = self.cumulative[i]
             lines.append(f"{pc_name:<12} {sdev:>10.4f} {prop:>10.4f} {cumul:>10.4f}")
         return "\n".join(lines)
+
+
+@dataclass
+class RePCA:
+    groups: dict[str, RePCAGroup]
+
+    def __str__(self) -> str:
+        lines = []
+        for group in self.groups.values():
+            lines.append(str(group))
+            lines.append("")
+        return "\n".join(lines).rstrip()
+
+    def __repr__(self) -> str:
+        return f"RePCA({len(self.groups)} groups)"
+
+    def __getitem__(self, key: str) -> RePCAGroup:
+        return self.groups[key]
+
+    def is_singular(self, tol: float = 1e-4) -> dict[str, bool]:
+        return {name: bool(np.any(group.sdev < tol)) for name, group in self.groups.items()}

@@ -252,4 +252,11 @@ class TestProfileIntegration:
 
     def test_parallel_profiling(self, lmer_result):
         profiles_serial = profile_lmer(lmer_result, which=["Days"], n_points=10, n_jobs=1)
+        profiles_parallel = profile_lmer(lmer_result, which=["Days"], n_points=10, n_jobs=2)
+
         assert "Days" in profiles_serial
+        assert "Days" in profiles_parallel
+        assert_allclose(profiles_serial["Days"].values, profiles_parallel["Days"].values)
+        assert_allclose(profiles_serial["Days"].zeta, profiles_parallel["Days"].zeta, atol=1e-8)
+        assert profiles_serial["Days"].ci_lower == pytest.approx(profiles_parallel["Days"].ci_lower)
+        assert profiles_serial["Days"].ci_upper == pytest.approx(profiles_parallel["Days"].ci_upper)

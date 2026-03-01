@@ -554,9 +554,13 @@ class NlmerResult:
                 hessian[j, i] = d2f
 
         try:
-            vcov = linalg.inv(hessian)
+            L = linalg.cholesky(hessian, lower=True)
+            vcov = linalg.cho_solve((L, True), np.eye(n_params))
         except linalg.LinAlgError:
-            vcov = linalg.pinv(hessian)
+            try:
+                vcov = linalg.solve(hessian, np.eye(n_params))
+            except linalg.LinAlgError:
+                vcov = linalg.pinv(hessian)
 
         return vcov
 
@@ -682,9 +686,14 @@ class NlmerResult:
 
         try:
             JtJ = J.T @ J
-            JtJ_inv = linalg.inv(JtJ)
-            H = J @ JtJ_inv @ J.T
-            h = np.diag(H)
+            try:
+                L = linalg.cholesky(JtJ, lower=True)
+                JtJ_inv = linalg.cho_solve((L, True), np.eye(n_params))
+            except linalg.LinAlgError:
+                JtJ_inv = linalg.solve(JtJ, np.eye(n_params))
+
+            J_JtJ_inv = J @ JtJ_inv
+            h = np.sum(J_JtJ_inv * J, axis=1)
         except linalg.LinAlgError:
             h = np.sum(J**2, axis=1) / (np.sum(J**2) + _HAT_FALLBACK_EPS)
 

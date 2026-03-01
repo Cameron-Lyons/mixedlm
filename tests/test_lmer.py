@@ -2308,6 +2308,26 @@ class TestPredict:
 
         assert pred[0] != pred_fixed[0]
 
+    def test_lmer_predict_new_levels_se_fit_random_slope(self):
+        ctrl = LmerControl(optimizer="L-BFGS-B")
+        result = lmer("Reaction ~ Days + (Days | Subject)", SLEEPSTUDY, control=ctrl)
+
+        new_data = pd.DataFrame(
+            {
+                "Reaction": [300.0, 320.0],
+                "Days": [2.0, 7.0],
+                "Subject": ["new_subject_a", "new_subject_b"],
+            }
+        )
+
+        pred = result.predict(newdata=new_data, allow_new_levels=True, se_fit=True)
+        pred_fixed = result.predict(newdata=new_data, re_form="NA")
+
+        assert pred.se_fit is not None
+        assert np.all(np.isfinite(pred.se_fit))
+        assert np.all(pred.se_fit > 0)
+        assert np.allclose(pred.fit, pred_fixed)
+
     def test_glmer_predict_no_newdata(self):
         result = glmer("y ~ period + (1 | herd)", CBPP, family=families.Binomial())
         pred = result.predict()

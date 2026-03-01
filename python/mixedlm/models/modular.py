@@ -19,6 +19,7 @@ if TYPE_CHECKING:
 
 from mixedlm.estimation.reml import (
     LMMOptimizer,
+    _build_theta_bounds,
     _count_theta,
 )
 from mixedlm.formula.parser import parse_formula
@@ -26,7 +27,50 @@ from mixedlm.matrices.design import ModelMatrices, build_model_matrices
 
 
 @dataclass
-class LmerParsedFormula:
+class _ParsedFormulaBase:
+    """Shared parsed-formula container for mixed model modular APIs."""
+
+    formula: Formula
+    matrices: ModelMatrices
+
+    @property
+    def X(self) -> NDArray[np.floating]:
+        """Fixed effects design matrix."""
+        return self.matrices.X
+
+    @property
+    def Z(self):
+        """Random effects design matrix (sparse)."""
+        return self.matrices.Z
+
+    @property
+    def y(self) -> NDArray[np.floating]:
+        """Response vector."""
+        return self.matrices.y
+
+    @property
+    def n_obs(self) -> int:
+        """Number of observations."""
+        return self.matrices.n_obs
+
+    @property
+    def n_fixed(self) -> int:
+        """Number of fixed effects."""
+        return self.matrices.n_fixed
+
+    @property
+    def n_random(self) -> int:
+        """Number of random effects."""
+        return self.matrices.n_random
+
+    @property
+    def n_theta(self) -> int:
+        """Number of variance component parameters."""
+        return _count_theta(self.matrices.random_structures)
+
+
+@dataclass
+class LmerParsedFormula(_ParsedFormulaBase):
     """Result of lFormula - parsed formula and model matrices for LMM.
 
     This class contains all the information needed to construct the
@@ -43,48 +87,11 @@ class LmerParsedFormula:
         Whether to use REML estimation.
     """
 
-    formula: Formula
-    matrices: ModelMatrices
     REML: bool
-
-    @property
-    def X(self) -> NDArray[np.floating]:
-        """Fixed effects design matrix."""
-        return self.matrices.X
-
-    @property
-    def Z(self):
-        """Random effects design matrix (sparse)."""
-        return self.matrices.Z
-
-    @property
-    def y(self) -> NDArray[np.floating]:
-        """Response vector."""
-        return self.matrices.y
-
-    @property
-    def n_obs(self) -> int:
-        """Number of observations."""
-        return self.matrices.n_obs
-
-    @property
-    def n_fixed(self) -> int:
-        """Number of fixed effects."""
-        return self.matrices.n_fixed
-
-    @property
-    def n_random(self) -> int:
-        """Number of random effects."""
-        return self.matrices.n_random
-
-    @property
-    def n_theta(self) -> int:
-        """Number of variance component parameters."""
-        return _count_theta(self.matrices.random_structures)
 
 
 @dataclass
-class GlmerParsedFormula:
+class GlmerParsedFormula(_ParsedFormulaBase):
     """Result of glFormula - parsed formula and model matrices for GLMM.
 
     This class contains all the information needed to construct the
@@ -101,44 +108,7 @@ class GlmerParsedFormula:
         The GLM family (e.g., Binomial, Poisson).
     """
 
-    formula: Formula
-    matrices: ModelMatrices
     family: Family
-
-    @property
-    def X(self) -> NDArray[np.floating]:
-        """Fixed effects design matrix."""
-        return self.matrices.X
-
-    @property
-    def Z(self):
-        """Random effects design matrix (sparse)."""
-        return self.matrices.Z
-
-    @property
-    def y(self) -> NDArray[np.floating]:
-        """Response vector."""
-        return self.matrices.y
-
-    @property
-    def n_obs(self) -> int:
-        """Number of observations."""
-        return self.matrices.n_obs
-
-    @property
-    def n_fixed(self) -> int:
-        """Number of fixed effects."""
-        return self.matrices.n_fixed
-
-    @property
-    def n_random(self) -> int:
-        """Number of random effects."""
-        return self.matrices.n_random
-
-    @property
-    def n_theta(self) -> int:
-        """Number of variance component parameters."""
-        return _count_theta(self.matrices.random_structures)
 
 
 @dataclass
@@ -194,20 +164,7 @@ class LmerDevfun:
         list of tuple
             Bounds for each theta parameter.
         """
-        bounds: list[tuple[float | None, float | None]] = []
-        for struct in self.parsed.matrices.random_structures:
-            q = struct.n_terms
-            if struct.correlated:
-                for i in range(q):
-                    for j in range(i + 1):
-                        if i == j:
-                            bounds.append((0.0, None))
-                        else:
-                            bounds.append((None, None))
-            else:
-                for _ in range(q):
-                    bounds.append((0.0, None))
-        return bounds
+        return _build_theta_bounds(self.parsed.matrices.random_structures, self.parsed.n_theta)
 
 
 @dataclass
@@ -261,20 +218,7 @@ class GlmerDevfun:
         list of tuple
             Bounds for each theta parameter.
         """
-        bounds: list[tuple[float | None, float | None]] = []
-        for struct in self.parsed.matrices.random_structures:
-            q = struct.n_terms
-            if struct.correlated:
-                for i in range(q):
-                    for j in range(i + 1):
-                        if i == j:
-                            bounds.append((0.0, None))
-                        else:
-                            bounds.append((None, None))
-            else:
-                for _ in range(q):
-                    bounds.append((0.0, None))
-        return bounds
+        return _build_theta_bounds(self.parsed.matrices.random_structures, self.parsed.n_theta)
 
 
 @dataclass

@@ -170,6 +170,36 @@ class TestAdaptiveGH:
         assert len(beta) == matrices.n_fixed
         assert len(u) == matrices.n_random
 
+    def test_agh_parallel_matches_serial(self):
+        from mixedlm.estimation.laplace import adaptive_gh_deviance
+        from mixedlm.families import Binomial
+        from mixedlm.formula.parser import parse_formula
+        from mixedlm.matrices.design import build_model_matrices
+
+        np.random.seed(42)
+        n = 100
+        group = np.repeat(np.arange(10), 10)
+        x = np.random.randn(n)
+        prob = 1 / (1 + np.exp(-(x + 0.5)))
+        y = np.random.binomial(1, prob)
+        data = pd.DataFrame({"y": y, "x": x, "group": [f"g{g}" for g in group]})
+
+        formula = parse_formula("y ~ x + (1 | group)")
+        matrices = build_model_matrices(formula, data)
+        family = Binomial()
+        theta = np.array([1.0])
+
+        dev_serial, beta_serial, u_serial = adaptive_gh_deviance(
+            theta, matrices, family, nAGQ=5, n_jobs=1
+        )
+        dev_parallel, beta_parallel, u_parallel = adaptive_gh_deviance(
+            theta, matrices, family, nAGQ=5, n_jobs=2
+        )
+
+        assert np.isclose(dev_serial, dev_parallel, rtol=1e-8, atol=1e-8)
+        assert np.allclose(beta_serial, beta_parallel, rtol=1e-10, atol=1e-10)
+        assert np.allclose(u_serial, u_parallel, rtol=1e-10, atol=1e-10)
+
 
 class TestDevianceComponents:
     """Tests for deviance components."""
@@ -277,6 +307,30 @@ class TestProfile2D:
         result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
         with pytest.raises(ValueError, match="not found"):
             slice2D(result, "invalid_param", "Days")
+
+    def test_slice2d_parallel_matches_serial(self):
+        from mixedlm.inference.profile import slice2D
+
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+
+        profile_serial = slice2D(result, "(Intercept)", "Days", n_points=5, n_jobs=1)
+        profile_parallel = slice2D(result, "(Intercept)", "Days", n_points=5, n_jobs=2)
+
+        assert np.allclose(profile_serial.zeta, profile_parallel.zeta, rtol=1e-8, atol=1e-8)
+
+    def test_slice2d_small_grid_skips_parallel_pool(self, monkeypatch):
+        import mixedlm.inference.profile as profile_mod
+        from mixedlm.inference.profile import slice2D
+
+        class _FailExecutor:
+            def __init__(self, *args, **kwargs):
+                raise AssertionError("Process pool should not be created for small grids")
+
+        monkeypatch.setattr(profile_mod, "ProcessPoolExecutor", _FailExecutor)
+
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+        profile2d = slice2D(result, "(Intercept)", "Days", n_points=5, n_jobs=2)
+        assert profile2d.zeta.shape == (5, 5)
 
 
 class TestExportsAndImports:
