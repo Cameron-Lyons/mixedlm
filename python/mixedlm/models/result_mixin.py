@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 import numpy as np
 from numpy.typing import NDArray
@@ -19,9 +19,9 @@ class MerResultMixin:
     matrices: ModelMatrices
     beta: NDArray[np.floating]
     theta: NDArray[np.floating]
-    _IS_GLMM: bool = False
-    _IS_LMM: bool = False
-    _IS_NLMM: bool = False
+    _IS_GLMM: ClassVar[bool] = False
+    _IS_LMM: ClassVar[bool] = False
+    _IS_NLMM: ClassVar[bool] = False
 
     def ranef(
         self, condVar: bool = False
@@ -69,11 +69,7 @@ class MerResultMixin:
 
     def _model_matrix(
         self, type: str = "fixed"
-    ) -> (
-        NDArray[np.floating]
-        | sparse.csc_matrix
-        | tuple[NDArray[np.floating], sparse.csc_matrix]
-    ):
+    ) -> NDArray[np.floating] | sparse.csc_matrix | tuple[NDArray[np.floating], sparse.csc_matrix]:
         if type in ("fixed", "X"):
             return self.matrices.X
         if type in ("random", "Z"):
@@ -245,9 +241,7 @@ class MerResultMixin:
 
         return contrib
 
-    def _coerce_new_response(
-        self, newresp: NDArray[np.floating] | None
-    ) -> NDArray[np.floating]:
+    def _coerce_new_response(self, newresp: NDArray[np.floating] | None) -> NDArray[np.floating]:
         if newresp is None:
             return self.matrices.y
 
