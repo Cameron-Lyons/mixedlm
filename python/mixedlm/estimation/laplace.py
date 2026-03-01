@@ -39,6 +39,14 @@ _lambda_cache: dict[
 _LAMBDA_CACHE_MAX_SIZE = 8
 
 
+def _scale_sparse_rows(
+    Z: sparse.csc_matrix,
+    row_scale: NDArray[np.floating],
+) -> sparse.csc_matrix:
+    """Scale sparse rows without explicitly constructing a diagonal matrix."""
+    return Z.multiply(row_scale[:, None]).tocsc()
+
+
 def _get_lambda_cached(
     theta: NDArray[np.floating], random_structures: list[RandomEffectStructure]
 ) -> tuple[sparse.csc_matrix, NDArray[np.floating]]:
@@ -163,7 +171,7 @@ def pirls(
         W_sqrt = np.sqrt(W)
         np.clip(W_sqrt, 0, _SQRT_WEIGHT_CLIP_MAX, out=W_sqrt)
         WX = W_sqrt[:, None] * matrices.X
-        WZ = sparse.diags(W_sqrt, format="csc") @ matrices.Z
+        WZ = _scale_sparse_rows(matrices.Z, W_sqrt)
 
         XtWX = WX.T @ WX
         ZtWZ = WZ.T @ WZ
@@ -248,7 +256,14 @@ def pirls(
     dev_resids = family.deviance_resids(matrices.y, mu, prior_weights)
     deviance = np.sum(dev_resids)
 
-    deviance += np.dot(u, linalg.solve(LambdatLambda_dense + _EIGENVALUE_FLOOR * np.eye(q), u))
+    if q > 0:
+        penalty_matrix = LambdatLambda_dense + _EIGENVALUE_FLOOR * np.eye(q)
+        try:
+            L_penalty = linalg.cholesky(penalty_matrix, lower=True)
+            u_penalty = np.dot(u, linalg.cho_solve((L_penalty, True), u))
+        except linalg.LinAlgError:
+            u_penalty = np.dot(u, linalg.solve(penalty_matrix, u))
+        deviance += u_penalty
 
     return beta, u, deviance, converged
 
@@ -273,14 +288,20 @@ def laplace_deviance(
 
     _, LambdatLambda_dense = _get_lambda_cached(theta, matrices.random_structures)
 
-    eta = matrices.X @ beta + matrices.Z @ u + offset
+    eta_fixed = matrices.X @ beta + offset
+    eta = eta_fixed + matrices.Z @ u
     mu = family.link.inverse(eta)
     mu = np.clip(mu, _MU_CLIP_MIN_STRICT, _MU_CLIP_MAX_STRICT)
 
     dev_resids = family.deviance_resids(matrices.y, mu, prior_weights)
     deviance = np.sum(dev_resids)
 
-    u_penalty = np.dot(u, linalg.solve(LambdatLambda_dense + _EIGENVALUE_FLOOR * np.eye(q), u))
+    penalty_matrix = LambdatLambda_dense + _EIGENVALUE_FLOOR * np.eye(q)
+    try:
+        L_penalty = linalg.cholesky(penalty_matrix, lower=True)
+        u_penalty = np.dot(u, linalg.cho_solve((L_penalty, True), u))
+    except linalg.LinAlgError:
+        u_penalty = np.dot(u, linalg.solve(penalty_matrix, u))
     deviance += u_penalty
 
     W = family.weights(mu) * prior_weights
@@ -288,7 +309,7 @@ def laplace_deviance(
 
     W_sqrt = np.sqrt(W)
     np.clip(W_sqrt, 0, _SQRT_WEIGHT_CLIP_MAX, out=W_sqrt)
-    WZ = sparse.diags(W_sqrt, format="csc") @ matrices.Z
+    WZ = _scale_sparse_rows(matrices.Z, W_sqrt)
     ZtWZ = WZ.T @ WZ
     ZtWZ_dense = ZtWZ.toarray() if sparse.issparse(ZtWZ) else ZtWZ
     if not np.all(np.isfinite(ZtWZ_dense)):
@@ -335,9 +356,8 @@ def _compute_group_quadrature(
     weights: NDArray[np.floating],
     matrices: ModelMatrices,
     family: Family,
-    beta: NDArray[np.floating],
+    eta_fixed: NDArray[np.floating],
     prior_weights: NDArray[np.floating],
-    offset: NDArray[np.floating],
 ) -> float:
     """Compute quadrature contribution for a single group."""
     sqrt2 = np.sqrt(2.0)
@@ -358,18 +378,25 @@ def _compute_group_quadrature(
     u_block_orig = u_mode.copy()
     Lambda_block = LambdatLambda[idx_start:idx_end, idx_start:idx_end]
     Lambda_block_reg = Lambda_block + _EIGENVALUE_FLOOR * np.eye(n_terms_first)
+    try:
+        L_lambda = linalg.cholesky(Lambda_block_reg, lower=True)
+    except linalg.LinAlgError:
+        L_lambda = None
 
     for node, weight in zip(nodes, weights, strict=False):
         u_block = u_mode + sqrt2 * scale * node
         u[idx_start:idx_end] = u_block
 
-        eta_quad = matrices.X @ beta + matrices.Z @ u + offset
+        eta_quad = eta_fixed + matrices.Z @ u
         mu_quad = family.link.inverse(eta_quad)
         mu_quad = np.clip(mu_quad, _MU_CLIP_MIN_STRICT, _MU_CLIP_MAX_STRICT)
 
         log_lik_y = -0.5 * np.sum(family.deviance_resids(matrices.y, mu_quad, prior_weights))
 
-        log_prior = -0.5 * np.dot(u_block, linalg.solve(Lambda_block_reg, u_block))
+        if L_lambda is not None:
+            log_prior = -0.5 * np.dot(u_block, linalg.cho_solve((L_lambda, True), u_block))
+        else:
+            log_prior = -0.5 * np.dot(u_block, linalg.solve(Lambda_block_reg, u_block))
 
         integrand = np.exp(log_lik_y + log_prior)
         group_contrib += weight * integrand
@@ -432,9 +459,10 @@ def adaptive_gh_deviance(
 
     beta, u, _, _ = pirls(matrices, family, theta, beta_start, u_start)
 
-    Lambda, LambdatLambda_dense = _get_lambda_cached(theta, matrices.random_structures)
+    _, LambdatLambda_dense = _get_lambda_cached(theta, matrices.random_structures)
 
-    eta = matrices.X @ beta + matrices.Z @ u + offset
+    eta_fixed = matrices.X @ beta + offset
+    eta = eta_fixed + matrices.Z @ u
     mu = family.link.inverse(eta)
     mu = np.clip(mu, _MU_CLIP_MIN_STRICT, _MU_CLIP_MAX_STRICT)
 
@@ -442,7 +470,7 @@ def adaptive_gh_deviance(
     W = np.maximum(W, _WEIGHT_CLIP_MIN)
 
     W_sqrt = np.sqrt(W)
-    WZ = sparse.diags(W_sqrt, format="csc") @ matrices.Z
+    WZ = _scale_sparse_rows(matrices.Z, W_sqrt)
     ZtWZ = WZ.T @ WZ
     ZtWZ_dense = ZtWZ.toarray() if sparse.issparse(ZtWZ) else ZtWZ
 
@@ -474,16 +502,15 @@ def adaptive_gh_deviance(
                     _compute_group_quadrature,
                     g,
                     n_terms_first,
-                    u,
+                    u.copy(),
                     H,
                     LambdatLambda_dense,
                     nodes,
                     weights,
                     matrices,
                     family,
-                    beta,
+                    eta_fixed,
                     prior_weights,
-                    offset,
                 )
                 for g in range(n_levels_first)
             ]
@@ -501,9 +528,8 @@ def adaptive_gh_deviance(
                 weights,
                 matrices,
                 family,
-                beta,
+                eta_fixed,
                 prior_weights,
-                offset,
             )
 
     other_u_start = first_struct.n_levels * first_struct.n_terms

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import cached_property
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import numpy as np
 from numpy.typing import NDArray
@@ -22,32 +22,13 @@ from mixedlm.models.lmer_types import (
     ModelTerms,
     PredictResult,
     RanefResult,
+    RePCA,
     RePCAGroup,
     VarCorrGroup,
 )
+from mixedlm.models.result_mixin import MerResultMixin
+from mixedlm.models.shared_utils import resolve_optional_vector
 from mixedlm.utils import _format_pvalue, _get_signif_code
-from mixedlm.utils.dataframe import dataframe_length, get_column_numpy, get_columns
-
-
-@dataclass
-class RePCA:
-    groups: dict[str, RePCAGroup]
-
-    def __str__(self) -> str:
-        lines = []
-        for group in self.groups.values():
-            lines.append(str(group))
-            lines.append("")
-        return "\n".join(lines).rstrip()
-
-    def __repr__(self) -> str:
-        return f"RePCA({len(self.groups)} groups)"
-
-    def __getitem__(self, key: str) -> RePCAGroup:
-        return self.groups[key]
-
-    def is_singular(self, tol: float = 1e-4) -> dict[str, bool]:
-        return {name: bool(np.any(group.sdev < tol)) for name, group in self.groups.items()}
 
 
 @dataclass
@@ -85,50 +66,9 @@ class VarCorr:
     def get_corr(self, group: str) -> NDArray[np.floating] | None:
         return self.groups[group].corr
 
-
-class MerResultMixin:
-    matrices: ModelMatrices
-
-    def ranef(
-        self, condVar: bool = False
-    ) -> dict[str, dict[str, NDArray[np.floating]]] | RanefResult:
-        raise NotImplementedError
-
-    def fixef(self) -> dict[str, float]:
-        raise NotImplementedError
-
-    def coef(self) -> dict[str, dict[str, NDArray[np.floating]]]:
-        ranefs = self.ranef()
-        fixefs = self.fixef()
-        result: dict[str, dict[str, NDArray[np.floating]]] = {}
-
-        for group, terms in ranefs.items():
-            group_coef: dict[str, NDArray[np.floating]] = {}
-            for term_name, ranef_vals in terms.items():
-                if term_name in fixefs:
-                    group_coef[term_name] = ranef_vals + fixefs[term_name]
-                else:
-                    group_coef[term_name] = ranef_vals
-            result[group] = group_coef
-
-        return result
-
-    def nobs(self) -> int:
-        return self.matrices.n_obs
-
-    def ngrps(self) -> dict[str, int]:
-        return {
-            struct.grouping_factor: struct.n_levels for struct in self.matrices.random_structures
-        }
-
-    def df_residual(self) -> int:
-        n = self.matrices.n_obs
-        p = self.matrices.n_fixed
-        return n - p
-
-
 @dataclass
 class LmerResult(MerResultMixin):
+    _IS_LMM: ClassVar[bool] = True
     formula: Formula
     matrices: ModelMatrices
     theta: NDArray[np.floating]
@@ -165,33 +105,12 @@ class LmerResult(MerResultMixin):
         return self.fitted()
 
     def fixef(self) -> dict[str, float]:
-        return dict(zip(self.matrices.fixed_names, self.beta, strict=False))
+        return self._fixef_dict(self.beta)
 
     def ranef(
         self, condVar: bool = False
     ) -> dict[str, dict[str, NDArray[np.floating]]] | RanefResult:
-        result: dict[str, dict[str, NDArray[np.floating]]] = {}
-        u_idx = 0
-
-        for struct in self.matrices.random_structures:
-            n_levels = struct.n_levels
-            n_terms = struct.n_terms
-            n_u = n_levels * n_terms
-
-            u_block = self.u[u_idx : u_idx + n_u].reshape(n_levels, n_terms)
-            u_idx += n_u
-
-            term_ranefs: dict[str, NDArray[np.floating]] = {}
-            for j, term_name in enumerate(struct.term_names):
-                term_ranefs[term_name] = u_block[:, j]
-
-            result[struct.grouping_factor] = term_ranefs
-
-        if not condVar:
-            return result
-
-        cond_var = self._compute_condVar()
-        return RanefResult(values=result, condVar=cond_var)
+        return self._ranef_with_optional_condvar(self.u, condVar)
 
     def _compute_condVar(self) -> dict[str, dict[str, NDArray[np.floating]]]:
         q = self.matrices.n_random
@@ -212,27 +131,7 @@ class LmerResult(MerResultMixin):
         Lambda_dense = Lambda.toarray() if sparse.issparse(Lambda) else Lambda
         V_inv_Lambda_t = linalg.solve(V_dense, Lambda_dense.T, assume_a="pos")
         cond_cov = self.sigma**2 * Lambda_dense @ V_inv_Lambda_t
-
-        cond_var_result: dict[str, dict[str, NDArray[np.floating]]] = {}
-        u_idx = 0
-
-        for struct in self.matrices.random_structures:
-            n_levels = struct.n_levels
-            n_terms = struct.n_terms
-            n_u = n_levels * n_terms
-
-            block_diag = np.diag(cond_cov[u_idx : u_idx + n_u, u_idx : u_idx + n_u])
-            var_block = block_diag.reshape(n_levels, n_terms)
-
-            u_idx += n_u
-
-            term_vars: dict[str, NDArray[np.floating]] = {}
-            for j, term_name in enumerate(struct.term_names):
-                term_vars[term_name] = var_block[:, j]
-
-            cond_var_result[struct.grouping_factor] = term_vars
-
-        return cond_var_result
+        return self._condvar_from_cov(cond_cov)
 
     def get_sigma(self) -> float:
         return self.sigma
@@ -254,7 +153,7 @@ class LmerResult(MerResultMixin):
         NDArray
             Array of weights with length equal to number of observations.
         """
-        return self.matrices.weights.copy() if copy else self.matrices.weights
+        return self._weights_array(copy=copy)
 
     def offset(self, copy: bool = True) -> NDArray[np.floating]:
         """Get the model offset.
@@ -273,9 +172,15 @@ class LmerResult(MerResultMixin):
         NDArray
             Array of offsets with length equal to number of observations.
         """
-        return self.matrices.offset.copy() if copy else self.matrices.offset
+        return self._offset_array(copy=copy)
 
-    def model_matrix(self, type: str = "fixed") -> NDArray[np.floating] | sparse.csc_matrix:
+    def model_matrix(
+        self, type: str = "fixed"
+    ) -> (
+        NDArray[np.floating]
+        | sparse.csc_matrix
+        | tuple[NDArray[np.floating], sparse.csc_matrix]
+    ):
         """Get the model design matrix.
 
         Parameters
@@ -298,14 +203,7 @@ class LmerResult(MerResultMixin):
         >>> Z = result.model_matrix("random")
         >>> X, Z = result.model_matrix("both")
         """
-        if type in ("fixed", "X"):
-            return self.matrices.X
-        elif type in ("random", "Z"):
-            return self.matrices.Z
-        elif type == "both":
-            return (self.matrices.X, self.matrices.Z)
-        else:
-            raise ValueError(f"Unknown type '{type}'. Use 'fixed', 'random', 'X', 'Z', or 'both'.")
+        return self._model_matrix(type)
 
     def terms(self) -> ModelTerms:
         """Get information about the model terms.
@@ -334,40 +232,7 @@ class LmerResult(MerResultMixin):
         >>> print(t.fixed_terms)  # ['(Intercept)', 'x']
         >>> print(t.random_terms)  # {'group': ['(Intercept)', 'x']}
         """
-        from mixedlm.formula.terms import InteractionTerm, VariableTerm
-
-        fixed_terms = list(self.matrices.fixed_names)
-
-        random_terms: dict[str, list[str]] = {}
-        for struct in self.matrices.random_structures:
-            random_terms[struct.grouping_factor] = list(struct.term_names)
-
-        fixed_variables: set[str] = set()
-        for term in self.formula.fixed.terms:
-            if isinstance(term, VariableTerm):
-                fixed_variables.add(term.name)
-            elif isinstance(term, InteractionTerm):
-                fixed_variables.update(term.variables)
-
-        random_variables: set[str] = set()
-        for rterm in self.formula.random:
-            for term in rterm.expr:
-                if isinstance(term, VariableTerm):
-                    random_variables.add(term.name)
-                elif isinstance(term, InteractionTerm):
-                    random_variables.update(term.variables)
-
-        grouping_factors = {struct.grouping_factor for struct in self.matrices.random_structures}
-
-        return ModelTerms(
-            response=self.formula.response,
-            fixed_terms=fixed_terms,
-            random_terms=random_terms,
-            fixed_variables=fixed_variables,
-            random_variables=random_variables,
-            grouping_factors=grouping_factors,
-            has_intercept=self.formula.fixed.has_intercept,
-        )
+        return self._build_model_terms(self.formula)
 
     def model_frame(self) -> pd.DataFrame:
         """Get the model frame.
@@ -387,12 +252,7 @@ class LmerResult(MerResultMixin):
         >>> mf = result.model_frame()
         >>> print(mf.columns.tolist())  # ['y', 'x', 'group']
         """
-        import pandas as pd
-
-        if self.matrices.frame is not None:
-            return self.matrices.frame.copy()
-
-        return pd.DataFrame({"y": self.matrices.y})
+        return self._model_frame()
 
     @cached_property
     def _fitted_values(self) -> NDArray[np.floating]:
@@ -418,15 +278,6 @@ class LmerResult(MerResultMixin):
             assert self.matrices.na_info is not None
             return self.matrices.na_info.expand_to_original(values)
         return values
-
-    def _should_expand_na(self) -> bool:
-        from mixedlm.utils.na_action import NAAction
-
-        return (
-            self.matrices.na_info is not None
-            and self.matrices.na_info.action == NAAction.EXCLUDE
-            and self.matrices.na_info.n_omitted > 0
-        )
 
     def residuals(self, type: str = "response", na_expand: bool = True) -> NDArray[np.floating]:
         """Get residuals.
@@ -494,19 +345,16 @@ class LmerResult(MerResultMixin):
             if not se_fit and interval == "none":
                 return pred
             X = self.matrices.X
-            new_matrices = self.matrices
         else:
-            new_matrices = build_model_matrices(self.formula, newdata)
-            X = new_matrices.X
+            pred_matrices = build_model_matrices(self.formula, newdata)
+            X = pred_matrices.X
             pred = X @ self.beta
 
-            if new_matrices.offset is not None:
-                pred = pred + new_matrices.offset
+            if pred_matrices.offset is not None:
+                pred = pred + pred_matrices.offset
 
             if include_re:
-                pred = self._add_random_effects_to_pred(
-                    pred, newdata, new_matrices, allow_new_levels
-                )
+                pred = self._add_random_effects_to_pred(pred, newdata, allow_new_levels)
 
         if not se_fit and interval == "none":
             return pred
@@ -515,7 +363,7 @@ class LmerResult(MerResultMixin):
         var_fixed = np.sum((X @ vcov_beta) * X, axis=1)
 
         if include_re and newdata is not None:
-            var_re = self._compute_re_prediction_variance(newdata, new_matrices, allow_new_levels)
+            var_re = self._compute_re_prediction_variance(newdata, allow_new_levels)
             var_fit = var_fixed + var_re
         else:
             var_fit = var_fixed
@@ -555,51 +403,15 @@ class LmerResult(MerResultMixin):
         self,
         pred: NDArray[np.floating],
         newdata: pd.DataFrame,
-        new_matrices: ModelMatrices,
         allow_new_levels: bool,
     ) -> NDArray[np.floating]:
         """Add random effects contribution to predictions."""
-        u_idx = 0
-
-        for struct in self.matrices.random_structures:
-            group_col = struct.grouping_factor
-            n_terms = struct.n_terms
-            n_levels_orig = struct.n_levels
-
-            if group_col not in newdata.columns:
-                u_idx += n_levels_orig * n_terms
-                continue
-
-            new_groups = newdata[group_col].astype(str).values
-            u_block = self.u[u_idx : u_idx + n_levels_orig * n_terms].reshape(
-                n_levels_orig, n_terms
-            )
-            u_idx += n_levels_orig * n_terms
-
-            for i, term_name in enumerate(struct.term_names):
-                if term_name == "(Intercept)":
-                    term_values = np.ones(len(newdata))
-                elif term_name in newdata.columns:
-                    term_values = newdata[term_name].values.astype(np.float64)
-                else:
-                    continue
-
-                for j, group_level in enumerate(new_groups):
-                    if group_level in struct.level_map:
-                        level_idx = struct.level_map[group_level]
-                        pred[j] += u_block[level_idx, i] * term_values[j]
-                    elif not allow_new_levels:
-                        raise ValueError(
-                            f"New level '{group_level}' in grouping factor '{group_col}'. "
-                            "Set allow_new_levels=True to predict with random effects = 0."
-                        )
-
+        pred += self._random_effect_prediction_contrib(newdata, allow_new_levels, self.u)
         return pred
 
     def _compute_re_prediction_variance(
         self,
         newdata: pd.DataFrame,
-        new_matrices: ModelMatrices,
         allow_new_levels: bool,
     ) -> NDArray[np.floating]:
         """Compute variance contribution from random effects for predictions."""
@@ -607,53 +419,47 @@ class LmerResult(MerResultMixin):
         var_re = np.zeros(n, dtype=np.float64)
 
         cond_var = self._compute_condVar()
-        u_idx = 0
-
-        theta_idx_map: dict[str, int] = {}
-        theta_idx = 0
-        for s in self.matrices.random_structures:
-            theta_idx_map[s.grouping_factor] = theta_idx
-            theta_idx += s.n_terms * (s.n_terms + 1) // 2 if s.correlated else s.n_terms
+        prior_var = {
+            struct.grouping_factor: np.diag(cov)
+            for struct, cov in self._iter_random_cov_blocks(scale=self.sigma**2)
+        }
 
         for struct in self.matrices.random_structures:
             group_col = struct.grouping_factor
-            n_terms = struct.n_terms
-            n_levels_orig = struct.n_levels
 
             if group_col not in newdata.columns:
-                u_idx += n_levels_orig * n_terms
                 continue
 
             if group_col not in cond_var:
-                u_idx += n_levels_orig * n_terms
                 continue
 
-            new_groups = newdata[group_col].astype(str).values
+            group_values = newdata[group_col].astype(str)
+            mapped_levels = group_values.map(struct.level_map)
+            known_mask = mapped_levels.notna().to_numpy()
+            unknown_mask = ~known_mask
+            if np.any(known_mask):
+                level_idx = mapped_levels[known_mask].astype(int).to_numpy()
+            else:
+                level_idx = np.array([], dtype=np.int64)
+
             group_cond_var = cond_var[group_col]
-            struct_theta_idx = theta_idx_map[group_col]
+            group_prior_var = prior_var[group_col]
 
             for i, term_name in enumerate(struct.term_names):
                 if term_name == "(Intercept)":
-                    term_values = np.ones(n)
+                    term_values = np.ones(n, dtype=np.float64)
                 elif term_name in newdata.columns:
-                    term_values = newdata[term_name].values.astype(np.float64)
+                    term_values = np.asarray(newdata[term_name], dtype=np.float64)
                 else:
                     continue
 
-                if term_name not in group_cond_var:
-                    continue
+                term_sq = term_values**2
+                if term_name in group_cond_var and level_idx.size:
+                    term_var = group_cond_var[term_name]
+                    var_re[known_mask] += term_var[level_idx] * term_sq[known_mask]
 
-                term_var = group_cond_var[term_name]
-                re_var_new = self.theta[struct_theta_idx + i] ** 2 * self.sigma**2
-
-                for j, group_level in enumerate(new_groups):
-                    if group_level in struct.level_map:
-                        level_idx = struct.level_map[group_level]
-                        var_re[j] += term_var[level_idx] * term_values[j] ** 2
-                    elif allow_new_levels:
-                        var_re[j] += re_var_new * term_values[j] ** 2
-
-            u_idx += n_levels_orig * n_terms
+                if allow_new_levels and np.any(unknown_mask):
+                    var_re[unknown_mask] += group_prior_var[i] * term_sq[unknown_mask]
 
         return var_re
 
@@ -759,13 +565,12 @@ class LmerResult(MerResultMixin):
 
         h_fixed = np.sum((X @ XtVinvX_inv) * X, axis=1)
 
-        Lambda_dense = Lambda.toarray() if sparse.issparse(Lambda) else Lambda
-        Z_dense = Z.toarray() if sparse.issparse(Z) else Z
-        ZLambda = Z_dense @ Lambda_dense
+        ZLambda = Z @ Lambda
+        ZLambda_dense = ZLambda.toarray() if sparse.issparse(ZLambda) else ZLambda
 
-        V_inv = linalg.solve(V_factor_dense, np.eye(q), assume_a="pos")
-        ZLambda_Vinv_LambdatZt = ZLambda @ V_inv @ ZLambda.T
-        h_random = np.diag(ZLambda_Vinv_LambdatZt)
+        V_inv = linalg.cho_solve((L_V, True), np.eye(q))
+        ZLambda_Vinv = ZLambda_dense @ V_inv
+        h_random = np.sum(ZLambda_Vinv * ZLambda_dense, axis=1)
 
         h = h_fixed + h_random
 
@@ -853,35 +658,15 @@ class LmerResult(MerResultMixin):
 
     def VarCorr(self) -> VarCorr:
         groups: dict[str, VarCorrGroup] = {}
-        theta_idx = 0
 
-        for struct in self.matrices.random_structures:
-            q = struct.n_terms
-
+        for struct, cov in self._iter_random_cov_blocks(scale=self.sigma**2):
             if struct.correlated:
-                n_theta = q * (q + 1) // 2
-                theta_block = self.theta[theta_idx : theta_idx + n_theta]
-                theta_idx += n_theta
-
-                L_block = np.zeros((q, q), dtype=np.float64)
-                idx = 0
-                for i in range(q):
-                    for j in range(i + 1):
-                        L_block[i, j] = theta_block[idx]
-                        idx += 1
-
-                cov_scaled = L_block @ L_block.T
-                cov = cov_scaled * self.sigma**2
-
                 stddevs = np.sqrt(np.diag(cov))
                 with np.errstate(divide="ignore", invalid="ignore"):
                     corr = cov / np.outer(stddevs, stddevs)
                     corr = np.where(np.isfinite(corr), corr, 0.0)
                     np.fill_diagonal(corr, 1.0)
             else:
-                theta_block = self.theta[theta_idx : theta_idx + q]
-                theta_idx += q
-                cov = np.diag(theta_block**2) * self.sigma**2
                 corr = None
 
             diag_cov = np.diag(cov)
@@ -928,29 +713,9 @@ class LmerResult(MerResultMixin):
         >>> pca.is_singular()  # Check if any components are near-zero
         """
         groups: dict[str, RePCAGroup] = {}
-        theta_idx = 0
 
-        for struct in self.matrices.random_structures:
+        for struct, cov in self._iter_random_cov_blocks(scale=self.sigma**2):
             q = struct.n_terms
-
-            if struct.correlated:
-                n_theta = q * (q + 1) // 2
-                theta_block = self.theta[theta_idx : theta_idx + n_theta]
-                theta_idx += n_theta
-
-                L_block = np.zeros((q, q), dtype=np.float64)
-                idx = 0
-                for i in range(q):
-                    for j in range(i + 1):
-                        L_block[i, j] = theta_block[idx]
-                        idx += 1
-
-                cov_scaled = L_block @ L_block.T
-                cov = cov_scaled * self.sigma**2
-            else:
-                theta_block = self.theta[theta_idx : theta_idx + q]
-                theta_idx += q
-                cov = np.diag(theta_block**2) * self.sigma**2
 
             eigenvalues = linalg.eigvalsh(cov)
             eigenvalues = np.sort(eigenvalues)[::-1]
@@ -2023,6 +1788,38 @@ class LmerResult(MerResultMixin):
 
         return fixed_part + random_part + noise
 
+    def _refit_from_matrices(
+        self,
+        matrices: ModelMatrices,
+        reml: bool,
+        **kwargs,
+    ) -> LmerResult:
+        optimizer = LMMOptimizer(
+            matrices,
+            REML=reml,
+            verbose=0,
+        )
+
+        start = kwargs.pop("start", self.theta)
+        opt_result = optimizer.optimize(start=start, **kwargs)
+
+        return LmerResult(
+            formula=self.formula,
+            matrices=matrices,
+            theta=opt_result.theta,
+            beta=opt_result.beta,
+            sigma=opt_result.sigma,
+            u=opt_result.u,
+            deviance=opt_result.deviance,
+            REML=reml,
+            converged=opt_result.converged,
+            n_iter=opt_result.n_iter,
+            gradient_norm=opt_result.gradient_norm,
+            at_boundary=opt_result.at_boundary,
+            message=opt_result.message,
+            function_evals=opt_result.function_evals,
+        )
+
     def refitML(self, **kwargs) -> LmerResult:
         """Refit the model using ML instead of REML.
 
@@ -2071,47 +1868,8 @@ class LmerResult(MerResultMixin):
         if not self.REML:
             return self
 
-        new_matrices = ModelMatrices(
-            y=self.matrices.y,
-            X=self.matrices.X,
-            Z=self.matrices.Z,
-            fixed_names=self.matrices.fixed_names,
-            random_structures=self.matrices.random_structures,
-            n_obs=self.matrices.n_obs,
-            n_fixed=self.matrices.n_fixed,
-            n_random=self.matrices.n_random,
-            weights=self.matrices.weights,
-            offset=self.matrices.offset,
-            frame=self.matrices.frame,
-            na_info=self.matrices.na_info,
-        )
-
-        optimizer = LMMOptimizer(
-            new_matrices,
-            REML=False,
-            verbose=0,
-        )
-
-        start = kwargs.pop("start", self.theta)
-
-        opt_result = optimizer.optimize(start=start, **kwargs)
-
-        return LmerResult(
-            formula=self.formula,
-            matrices=new_matrices,
-            theta=opt_result.theta,
-            beta=opt_result.beta,
-            sigma=opt_result.sigma,
-            u=opt_result.u,
-            deviance=opt_result.deviance,
-            REML=False,
-            converged=opt_result.converged,
-            n_iter=opt_result.n_iter,
-            gradient_norm=opt_result.gradient_norm,
-            at_boundary=opt_result.at_boundary,
-            message=opt_result.message,
-            function_evals=opt_result.function_evals,
-        )
+        matrices = self._clone_matrices_with_response_base(self.matrices.y)
+        return self._refit_from_matrices(matrices, reml=False, **kwargs)
 
     def refit(
         self,
@@ -2149,80 +1907,9 @@ class LmerResult(MerResultMixin):
         simulate : Simulate response from the fitted model.
         refitML : Refit using ML instead of REML.
         """
-        if newresp is None:
-            newresp = self.matrices.y
-        else:
-            newresp = np.asarray(newresp, dtype=np.float64)
-            if len(newresp) != self.matrices.n_obs:
-                raise ValueError(
-                    f"newresp has length {len(newresp)}, expected {self.matrices.n_obs}"
-                )
-
-        new_matrices = ModelMatrices(
-            y=newresp,
-            X=self.matrices.X,
-            Z=self.matrices.Z,
-            fixed_names=self.matrices.fixed_names,
-            random_structures=self.matrices.random_structures,
-            n_obs=self.matrices.n_obs,
-            n_fixed=self.matrices.n_fixed,
-            n_random=self.matrices.n_random,
-            weights=self.matrices.weights,
-            offset=self.matrices.offset,
-            frame=self.matrices.frame,
-            na_info=self.matrices.na_info,
-        )
-
-        optimizer = LMMOptimizer(
-            new_matrices,
-            REML=self.REML,
-            verbose=0,
-        )
-
-        start = kwargs.pop("start", self.theta)
-        opt_result = optimizer.optimize(start=start, **kwargs)
-
-        return LmerResult(
-            formula=self.formula,
-            matrices=new_matrices,
-            theta=opt_result.theta,
-            beta=opt_result.beta,
-            sigma=opt_result.sigma,
-            u=opt_result.u,
-            deviance=opt_result.deviance,
-            REML=self.REML,
-            converged=opt_result.converged,
-            n_iter=opt_result.n_iter,
-            gradient_norm=opt_result.gradient_norm,
-            at_boundary=opt_result.at_boundary,
-            message=opt_result.message,
-            function_evals=opt_result.function_evals,
-        )
-
-    def isREML(self) -> bool:
-        """Check if the model was fit using REML."""
-        return self.REML
-
-    def isGLMM(self) -> bool:
-        """Check if this is a generalized linear mixed model.
-
-        Always returns False for LmerResult.
-        """
-        return False
-
-    def isLMM(self) -> bool:
-        """Check if this is a linear mixed model.
-
-        Always returns True for LmerResult.
-        """
-        return True
-
-    def isNLMM(self) -> bool:
-        """Check if this is a nonlinear mixed model.
-
-        Always returns False for LmerResult.
-        """
-        return False
+        y_new = self._coerce_new_response(newresp)
+        matrices = self._clone_matrices_with_response_base(y_new)
+        return self._refit_from_matrices(matrices, reml=self.REML, **kwargs)
 
     def npar(self) -> int:
         """Get the number of parameters in the model.
@@ -2237,10 +1924,7 @@ class LmerResult(MerResultMixin):
         int
             Total number of parameters.
         """
-        n_fixed = len(self.beta)
-        n_theta = len(self.theta)
-        n_sigma = 1
-        return n_fixed + n_theta + n_sigma
+        return self._npar_count(include_sigma=True)
 
     def drop1(self, data: pd.DataFrame, test: str = "Chisq"):
         from mixedlm.inference.drop1 import drop1_lmer
@@ -2467,22 +2151,7 @@ def _resolve_optional_vector(
     value: NDArray[np.floating] | str | None,
     name: str,
 ) -> NDArray[np.floating] | None:
-    if value is None:
-        return None
-
-    if isinstance(value, str):
-        if value not in get_columns(data):
-            raise ValueError(f"{name} column '{value}' not found in data")
-        return get_column_numpy(data, value, dtype=np.float64)
-
-    arr = np.asarray(value, dtype=np.float64)
-    if arr.ndim != 1:
-        raise ValueError(f"{name} must be one-dimensional")
-    if arr.shape[0] != dataframe_length(data):
-        raise ValueError(
-            f"{name} length {arr.shape[0]} does not match data length {dataframe_length(data)}"
-        )
-    return arr
+    return resolve_optional_vector(data, value, name)
 
 
 def lmer(

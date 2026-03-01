@@ -233,6 +233,14 @@ def _build_theta_bounds(
     return bounds
 
 
+def _scale_sparse_rows(
+    Z: sparse.csc_matrix,
+    row_scale: NDArray[np.floating],
+) -> sparse.csc_matrix:
+    """Scale sparse rows without explicitly constructing a diagonal matrix."""
+    return Z.multiply(row_scale[:, None]).tocsc()
+
+
 def _profiled_deviance_core(
     theta: NDArray[np.floating],
     matrices: ModelMatrices,
@@ -290,7 +298,7 @@ def _profiled_deviance_core(
     WZ = (
         sqrt_w[:, None] * matrices.Z
         if not sparse.issparse(matrices.Z)
-        else sparse.diags(sqrt_w, format="csc") @ matrices.Z
+        else _scale_sparse_rows(matrices.Z, sqrt_w)
     )
     ZtWZ = WZ.T @ WZ
     LambdatZtWZLambda = Lambda.T @ ZtWZ @ Lambda
@@ -311,8 +319,7 @@ def _profiled_deviance_core(
     cu_star = linalg.solve_triangular(L_V, cu, lower=True)
 
     WX = sqrt_w[:, None] * matrices.X
-    sqrtW_sparse = sparse.diags(sqrt_w, format="csc")
-    ZtWX = Zt @ (sqrtW_sparse.T @ WX)
+    ZtWX = Zt @ (w[:, None] * matrices.X)
     Lambdat_ZtWX = Lambda.T @ ZtWX
     RZX = linalg.solve_triangular(L_V, Lambdat_ZtWX, lower=True)
 

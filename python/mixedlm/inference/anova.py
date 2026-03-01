@@ -293,11 +293,15 @@ def anova_type3(
         vcov_term = vcov[np.ix_(indices_arr, indices_arr)]
 
         try:
-            vcov_term_inv = linalg.inv(vcov_term)
+            L = linalg.cholesky(vcov_term, lower=True)
+            beta_proj = linalg.cho_solve((L, True), beta_term)
         except linalg.LinAlgError:
-            vcov_term_inv = linalg.pinv(vcov_term)
+            try:
+                beta_proj = linalg.solve(vcov_term, beta_term)
+            except linalg.LinAlgError:
+                beta_proj = linalg.pinv(vcov_term) @ beta_term
 
-        f_stat = float(beta_term @ vcov_term_inv @ beta_term) / num_df
+        f_stat = float(beta_term @ beta_proj) / num_df
 
         avg_den_df = float(np.mean(ddf_result.df[indices_arr]))
 

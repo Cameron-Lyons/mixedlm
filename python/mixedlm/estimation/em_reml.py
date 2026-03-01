@@ -37,6 +37,20 @@ class EMResult:
     final_loglik: float
 
 
+def _safe_inverse(A: NDArray[np.floating]) -> NDArray[np.floating]:
+    """Compute a numerically stable matrix inverse with fallbacks."""
+    n = A.shape[0]
+    ident = np.eye(n, dtype=np.float64)
+    try:
+        L = linalg.cholesky(A, lower=True)
+        return linalg.cho_solve((L, True), ident)
+    except linalg.LinAlgError:
+        try:
+            return linalg.solve(A, ident)
+        except linalg.LinAlgError:
+            return linalg.pinv(A)
+
+
 def _init_sigma_k(
     struct: RandomEffectStructure,
     sigma2_e: float,
@@ -58,7 +72,7 @@ def _build_block_diag_D_inv(
     for struct, sigma_k in zip(structures, sigma_list, strict=True):
         q = struct.n_terms
         n_levels = struct.n_levels
-        sigma_k_inv = linalg.inv(sigma_k) if q > 1 else np.array([[1.0 / sigma_k[0, 0]]])
+        sigma_k_inv = _safe_inverse(sigma_k) if q > 1 else np.array([[1.0 / sigma_k[0, 0]]])
         block = np.kron(np.eye(n_levels), sigma_k_inv)
         blocks.append(block)
     return linalg.block_diag(*blocks)
@@ -285,9 +299,9 @@ def em_reml_simple(
         try:
             XtWX_inv_XtWZ = linalg.solve(XtWX, XtWZ, assume_a="pos")
             schur_complement = (ZtWZ + D_inv) - XtWZ.T @ XtWX_inv_XtWZ
-            Var_u = linalg.inv(schur_complement)
+            Var_u = _safe_inverse(schur_complement)
         except linalg.LinAlgError:
-            Var_u = linalg.pinv(ZtWZ + D_inv)
+            Var_u = _safe_inverse(ZtWZ + D_inv)
 
         sigma_list_new: list[NDArray[np.floating]] = []
         for k, struct in enumerate(structures):

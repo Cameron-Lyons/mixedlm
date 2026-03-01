@@ -88,9 +88,13 @@ def _influence_lmer(model: LmerResult) -> InfluenceResult:
 
     XtX = X.T @ X
     try:
-        XtX_inv = linalg.inv(XtX)
+        L = linalg.cholesky(XtX, lower=True)
+        XtX_inv = linalg.cho_solve((L, True), np.eye(XtX.shape[0]))
     except linalg.LinAlgError:
-        XtX_inv = linalg.pinv(XtX)
+        try:
+            XtX_inv = linalg.solve(XtX, np.eye(XtX.shape[0]))
+        except linalg.LinAlgError:
+            XtX_inv = linalg.pinv(XtX)
 
     X_XtXinv = X @ XtX_inv
     hat_values = np.einsum("ij,ij->i", X_XtXinv, X)
@@ -124,9 +128,13 @@ def _influence_glmer(model: GlmerResult) -> InfluenceResult:
     WX = sqrt_w[:, None] * X
     XtWX = WX.T @ WX
     try:
-        XtWX_inv = linalg.inv(XtWX)
+        L = linalg.cholesky(XtWX, lower=True)
+        XtWX_inv = linalg.cho_solve((L, True), np.eye(XtWX.shape[0]))
     except linalg.LinAlgError:
-        XtWX_inv = linalg.pinv(XtWX)
+        try:
+            XtWX_inv = linalg.solve(XtWX, np.eye(XtWX.shape[0]))
+        except linalg.LinAlgError:
+            XtWX_inv = linalg.pinv(XtWX)
 
     WX_XtWXinv = WX @ XtWX_inv
     hat_values = np.einsum("ij,ij->i", WX_XtWXinv, WX)
