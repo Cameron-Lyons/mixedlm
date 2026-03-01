@@ -176,11 +176,7 @@ class GlmerResult(MerResultMixin):
 
     def model_matrix(
         self, type: str = "fixed"
-    ) -> (
-        NDArray[np.floating]
-        | sparse.csc_matrix
-        | tuple[NDArray[np.floating], sparse.csc_matrix]
-    ):
+    ) -> NDArray[np.floating] | sparse.csc_matrix | tuple[NDArray[np.floating], sparse.csc_matrix]:
         """Get the model design matrix.
 
         Parameters

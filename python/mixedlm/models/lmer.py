@@ -66,6 +66,7 @@ class VarCorr:
     def get_corr(self, group: str) -> NDArray[np.floating] | None:
         return self.groups[group].corr
 
+
 @dataclass
 class LmerResult(MerResultMixin):
     _IS_LMM: ClassVar[bool] = True
@@ -176,11 +177,7 @@ class LmerResult(MerResultMixin):
 
     def model_matrix(
         self, type: str = "fixed"
-    ) -> (
-        NDArray[np.floating]
-        | sparse.csc_matrix
-        | tuple[NDArray[np.floating], sparse.csc_matrix]
-    ):
+    ) -> NDArray[np.floating] | sparse.csc_matrix | tuple[NDArray[np.floating], sparse.csc_matrix]:
         """Get the model design matrix.
 
         Parameters
