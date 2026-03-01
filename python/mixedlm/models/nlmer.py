@@ -498,6 +498,34 @@ class NlmerResult:
             **kwargs,
         )
 
+    def _invert_with_fallback(self, matrix: NDArray[np.floating]) -> NDArray[np.floating]:
+        """Invert a potentially ill-conditioned matrix with finite-value guards."""
+        n = matrix.shape[0]
+        eye = np.eye(n, dtype=np.float64)
+        sym_matrix = 0.5 * (matrix + matrix.T)
+
+        candidates = (sym_matrix, sym_matrix + _COV_REGULARIZATION * eye)
+        for candidate in candidates:
+            try:
+                L = linalg.cholesky(candidate, lower=True)
+                inv = linalg.cho_solve((L, True), eye)
+                if np.all(np.isfinite(inv)):
+                    return 0.5 * (inv + inv.T)
+            except linalg.LinAlgError:
+                pass
+
+            try:
+                inv = linalg.solve(candidate, eye, assume_a="sym")
+                if np.all(np.isfinite(inv)):
+                    return 0.5 * (inv + inv.T)
+            except (linalg.LinAlgError, ValueError):
+                pass
+
+        inv = linalg.pinv(sym_matrix + _COV_REGULARIZATION * eye)
+        if not np.all(np.isfinite(inv)):
+            inv = np.nan_to_num(inv, nan=0.0, posinf=0.0, neginf=0.0)
+        return 0.5 * (inv + inv.T)
+
     def vcov(self) -> NDArray[np.floating]:
         """Compute the variance-covariance matrix of fixed effects.
 
@@ -553,15 +581,9 @@ class NlmerResult:
                 hessian[i, j] = d2f
                 hessian[j, i] = d2f
 
-        try:
-            L = linalg.cholesky(hessian, lower=True)
-            vcov = linalg.cho_solve((L, True), np.eye(n_params))
-        except linalg.LinAlgError:
-            try:
-                vcov = linalg.solve(hessian, np.eye(n_params))
-            except linalg.LinAlgError:
-                vcov = linalg.pinv(hessian)
-
+        vcov = self._invert_with_fallback(hessian)
+        vcov = np.nan_to_num(vcov, nan=0.0, posinf=0.0, neginf=0.0)
+        np.fill_diagonal(vcov, np.maximum(np.diag(vcov), 0.0))
         return vcov
 
     def confint(
@@ -684,19 +706,15 @@ class NlmerResult:
 
             J[:, j] = (pred_plus - fitted_base) / eps
 
-        try:
-            JtJ = J.T @ J
-            try:
-                L = linalg.cholesky(JtJ, lower=True)
-                JtJ_inv = linalg.cho_solve((L, True), np.eye(n_params))
-            except linalg.LinAlgError:
-                JtJ_inv = linalg.solve(JtJ, np.eye(n_params))
+        JtJ = J.T @ J
+        JtJ_inv = self._invert_with_fallback(JtJ)
+        J_JtJ_inv = J @ JtJ_inv
+        h = np.sum(J_JtJ_inv * J, axis=1)
 
-            J_JtJ_inv = J @ JtJ_inv
-            h = np.sum(J_JtJ_inv * J, axis=1)
-        except linalg.LinAlgError:
+        if not np.all(np.isfinite(h)):
             h = np.sum(J**2, axis=1) / (np.sum(J**2) + _HAT_FALLBACK_EPS)
 
+        h = np.nan_to_num(h, nan=0.0, posinf=_HAT_CLIP_MAX, neginf=0.0)
         return np.clip(h, 0, _HAT_CLIP_MAX)
 
     def cooks_distance(self) -> NDArray[np.floating]:
@@ -709,12 +727,14 @@ class NlmerResult:
         """
         h = self.hatvalues()
         resid = self.residuals(type="response")
-        p = len(self.phi)
+        p = max(len(self.phi), 1)
 
         h = np.clip(h, 0, _HAT_CLIP_MAX)
-        cooks_d = (resid**2 / (p * self.sigma**2)) * (h / (1 - h) ** 2)
+        sigma2 = max(self.sigma**2, _HAT_FALLBACK_EPS)
+        denom = np.maximum((1 - h) ** 2, _HAT_FALLBACK_EPS)
+        cooks_d = (resid**2 / (p * sigma2)) * (h / denom)
 
-        return cooks_d
+        return np.nan_to_num(cooks_d, nan=0.0, posinf=np.finfo(np.float64).max, neginf=0.0)
 
     def influence(self) -> dict[str, NDArray[np.floating]]:
         """Compute influence diagnostics for the model.
