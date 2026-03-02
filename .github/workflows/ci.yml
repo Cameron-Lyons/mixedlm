@@ -280,7 +280,7 @@ jobs:
         run: uv run pytest tests/ -v --benchmark-only --benchmark-json=benchmark.json
 
       - name: Upload benchmark results
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: benchmark-results
           path: benchmark.json
@@ -397,7 +397,7 @@ jobs:
           RUSTFLAGS: ${{ matrix.rustflags }}
 
       - name: Upload wheels
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: wheels-${{ matrix.target }}
           path: dist/*.whl
@@ -432,7 +432,7 @@ jobs:
           sccache: true
 
       - name: Upload wheels
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: wheels-freethreaded-${{ matrix.target }}
           path: dist/*.whl
@@ -449,7 +449,7 @@ jobs:
           args: --out dist
 
       - name: Upload sdist
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: sdist
           path: dist/*.tar.gz
