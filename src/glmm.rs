@@ -813,8 +813,11 @@ pub fn adaptive_gh_deviance_impl(
 
     let (nodes, gh_weights) = gauss_hermite_nodes_weights(n_agq);
 
-    let log_integral: f64 = (0..n_levels_first)
-        .into_par_iter()
+    #[cfg(miri)]
+    let iter = (0..n_levels_first).into_iter();
+    #[cfg(not(miri))]
+    let iter = (0..n_levels_first).into_par_iter();
+    let log_integral: f64 = iter
         .map(|g| {
             compute_group_log_integral(
                 g,
