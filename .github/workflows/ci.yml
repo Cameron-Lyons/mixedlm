@@ -135,7 +135,7 @@ jobs:
         run: uv run pytest tests/ -v --cov=mixedlm --cov-report=xml --ignore=tests/test_property.py --ignore=tests/test_benchmark.py
 
       - name: Upload coverage
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@v6
         if: matrix.python-version == '3.12'
         with:
           files: coverage.xml
@@ -194,7 +194,7 @@ jobs:
         run: cargo llvm-cov --all-features --lcov --output-path lcov.info
 
       - name: Upload Rust coverage
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@v6
         with:
           files: lcov.info
           fail_ci_if_error: false
