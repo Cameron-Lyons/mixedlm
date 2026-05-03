@@ -140,5 +140,3 @@ class TestModelMatrices:
 
         assert matrices.fixed_names == ["(Intercept)", "x1", "x2", "x1:x2"]
         assert np.allclose(matrices.X[:, 3], data["x1"].to_numpy() * data["x2"].to_numpy())
-
-

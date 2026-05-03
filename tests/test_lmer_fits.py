@@ -511,5 +511,3 @@ class TestNlmer:
 
         assert np.isfinite(aic)
         assert np.isfinite(bic)
-
-

@@ -812,5 +812,3 @@ class TestContrasts:
 
         assert result.converged
         assert "(Intercept)" in result.matrices.fixed_names
-
-

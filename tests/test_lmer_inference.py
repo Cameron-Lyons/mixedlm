@@ -495,5 +495,3 @@ class TestRefit:
 
         result2 = result.refitML()
         assert result2 is result
-
-

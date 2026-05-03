@@ -2019,5 +2019,4 @@ class LmerResult(MerResultMixin):
         return f"LmerResult(formula={self.formula}, deviance={self.deviance:.4f})"
 
 
-
 from mixedlm.models.lmer_fit import LmerMod, lmer  # noqa: E402,F401

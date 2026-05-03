@@ -127,7 +127,6 @@ class ProfileResult:
         return ax
 
 
-
 @dataclass
 class Profile2DResult:
     """Result of 2D profile likelihood slice.
@@ -268,5 +267,3 @@ class Profile2DResult:
         ax.set_title(f"2D Profile Likelihood: {self.param1} vs {self.param2}")
 
         return ax
-
-

@@ -1780,5 +1780,4 @@ class GlmerResult(MerResultMixin):
         )
 
 
-
 from mixedlm.models.glmer_fit import GlmerMod, glmer, glmer_nb  # noqa: E402,F401

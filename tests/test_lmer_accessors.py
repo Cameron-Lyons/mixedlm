@@ -1231,5 +1231,3 @@ class TestCoef:
         for i in range(len(ranef["herd"]["(Intercept)"])):
             expected = fixef["(Intercept)"] + ranef["herd"]["(Intercept)"][i]
             assert np.isclose(coef["herd"]["(Intercept)"][i], expected)
-
-

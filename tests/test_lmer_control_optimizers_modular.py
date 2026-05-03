@@ -1474,5 +1474,3 @@ class TestModularInterface:
 
         assert parsed.n_theta == 3
         assert parsed.Z.shape[1] == 36
-
-
