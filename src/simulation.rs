@@ -85,13 +85,15 @@ pub fn simulate_re_batch_impl(
 
     let base_seed = seed.unwrap_or_else(|| rand::rng().random());
 
-    (0..n_sim)
-        .into_par_iter()
-        .map(|i| {
-            let mut rng = rand::rngs::StdRng::seed_from_u64(base_seed.wrapping_add(i as u64));
-            simulate_re_single(theta, sigma, structures, &mut rng)
-        })
-        .collect()
+    #[cfg(miri)]
+    let iter = (0..n_sim).into_iter();
+    #[cfg(not(miri))]
+    let iter = (0..n_sim).into_par_iter();
+    iter.map(|i| {
+        let mut rng = rand::rngs::StdRng::seed_from_u64(base_seed.wrapping_add(i as u64));
+        simulate_re_single(theta, sigma, structures, &mut rng)
+    })
+    .collect()
 }
 
 #[pyfunction]

@@ -274,8 +274,11 @@ fn compute_ztwz_sparse(z: &CscMatrix<f64>, weights: &[f64], q: usize) -> Mat<f64
             }
         }
     } else {
-        let entries: Vec<(usize, usize, f64)> = (0..q)
-            .into_par_iter()
+        #[cfg(miri)]
+        let iter = (0..q).into_iter();
+        #[cfg(not(miri))]
+        let iter = (0..q).into_par_iter();
+        let entries: Vec<(usize, usize, f64)> = iter
             .flat_map(|j| {
                 (j..q)
                     .map(|k| (j, k, compute_ztwz_entry(z, weights, j, k)))

@@ -734,7 +734,7 @@ class NlmerResult:
         denom = np.maximum((1 - h) ** 2, _HAT_FALLBACK_EPS)
         cooks_d = (resid**2 / (p * sigma2)) * (h / denom)
 
-        return np.nan_to_num(cooks_d, nan=0.0, posinf=float(np.finfo(np.float64).max), neginf=0.0)
+        return np.nan_to_num(cooks_d, nan=0.0, posinf=np.finfo(np.float64).max, neginf=0.0)
 
     def influence(self) -> dict[str, NDArray[np.floating]]:
         """Compute influence diagnostics for the model.

@@ -228,11 +228,10 @@ class MerResultMixin:
 
             block_contrib = np.zeros(level_idx.shape[0], dtype=np.float64)
             for i, term_name in enumerate(struct.term_names):
-                term_values: NDArray[np.floating]
                 if term_name == "(Intercept)":
                     term_values = np.ones(n, dtype=np.float64)
                 elif term_name in newdata.columns:
-                    term_values = np.asarray(newdata[term_name], dtype=np.float64).reshape(-1)
+                    term_values = np.asarray(newdata[term_name], dtype=np.float64)
                 else:
                     continue
 
