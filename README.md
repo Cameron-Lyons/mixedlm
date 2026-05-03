@@ -252,14 +252,15 @@ Built-in datasets from lme4:
 - Python >= 3.10
 - NumPy >= 1.21
 - SciPy >= 1.8
-- One of: **pandas** >= 1.4 or **polars** >= 0.20
+- **pandas** >= 1.4
+- **Py-BOBYQA** >= 1.4
 
-The package works with either pandas or polars DataFrames. Install whichever you prefer:
+The core package uses pandas for built-in datasets and some result tables. Polars support is
+available as an optional extra for model input data:
 
 ```bash
-pip install mixedlm pandas   # For pandas support
-pip install mixedlm polars   # For polars support
-pip install mixedlm pandas polars  # For both
+pip install mixedlm          # Core package with pandas support
+pip install mixedlm[polars]  # Also accept polars DataFrames
 ```
 
 ### Optional Dependencies
@@ -269,7 +270,7 @@ pip install mixedlm pandas polars  # For both
 pip install mixedlm[plots]  # matplotlib
 
 # For additional optimizers
-pip install mixedlm[optimizers]  # Py-BOBYQA, nlopt
+pip install mixedlm[optimizers]  # nlopt
 ```
 
 ## Development
@@ -311,8 +312,8 @@ mypy python/
 
 # Rust
 cargo fmt
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test
+cargo clippy --locked --all-targets --all-features -- -D warnings
+cargo test --locked
 ```
 
 ### Pre-commit Hooks

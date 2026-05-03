@@ -1292,6 +1292,7 @@ def dummy(
     levels = np.unique(x)
     n = len(x)
     k = len(levels)
+    result: NDArray[np.floating]
 
     if base is None:
         base_idx = 0

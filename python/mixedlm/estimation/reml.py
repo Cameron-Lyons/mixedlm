@@ -639,12 +639,16 @@ class LMMOptimizer:
             Z_block_start += s.n_levels * s.n_terms
 
         Z_block_end = Z_block_start + struct.n_levels * struct.n_terms
-        Z_block = self.matrices.Z[:, Z_block_start:Z_block_end].toarray()
+        Z_block = self.matrices.Z[:, Z_block_start:Z_block_end]
 
         group_residuals = []
         for level_idx in range(struct.n_levels):
             level_cols = range(level_idx * q, (level_idx + 1) * q)
-            level_mask = np.asarray(Z_block[:, level_cols].sum(axis=1)).ravel() > 0
+            level_block = Z_block[:, level_cols]
+            if sparse.issparse(level_block):
+                level_mask = level_block.getnnz(axis=1) > 0
+            else:
+                level_mask = np.asarray(level_block != 0).any(axis=1)
             if np.any(level_mask):
                 level_resid_mean = residuals[level_mask].mean()
                 group_residuals.append(level_resid_mean)

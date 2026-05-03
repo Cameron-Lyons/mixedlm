@@ -5,7 +5,8 @@
 - Python 3.10 or later
 - NumPy >= 1.21
 - SciPy >= 1.8
-- One of: pandas >= 1.4 or polars >= 0.20
+- pandas >= 1.4
+- Py-BOBYQA >= 1.4
 
 ## Basic Installation
 
@@ -15,24 +16,18 @@ Install mixedlm from PyPI:
 pip install mixedlm
 ```
 
-This installs the core package. You'll also need either pandas or polars for DataFrame support:
+This installs the core package with pandas support. Polars support is optional:
 
-=== "pandas"
+=== "Core"
 
     ```bash
-    pip install mixedlm pandas
+    pip install mixedlm
     ```
 
-=== "polars"
+=== "Polars"
 
     ```bash
-    pip install mixedlm polars
-    ```
-
-=== "Both"
-
-    ```bash
-    pip install mixedlm pandas polars
+    pip install mixedlm[polars]
     ```
 
 ## Optional Dependencies
@@ -49,13 +44,14 @@ This installs matplotlib >= 3.5.
 
 ### Additional Optimizers
 
-For access to BOBYQA, NEWUOA, and other optimization algorithms:
+The default BOBYQA optimizer is included in the core package. Install the optimizer extra for
+nlopt-backed optimizers such as NEWUOA and SBPLX:
 
 ```bash
 pip install mixedlm[optimizers]
 ```
 
-This installs Py-BOBYQA and nlopt.
+This installs nlopt.
 
 ### All Optional Dependencies
 
@@ -106,12 +102,13 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
 Then reinstall mixedlm.
 
-### No DataFrame backend available
+### Polars support not available
 
-You need either pandas or polars installed:
+Pandas is installed with the core package. Install the polars extra if you want to pass polars
+DataFrames directly:
 
 ```bash
-pip install pandas  # or polars
+pip install mixedlm[polars]
 ```
 
 ### Optimizer not available

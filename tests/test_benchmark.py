@@ -2,6 +2,9 @@ import numpy as np
 import pandas as pd
 import pytest
 from mixedlm import lmer
+from mixedlm.estimation.reml import LMMOptimizer
+from mixedlm.formula.parser import parse_formula
+from mixedlm.matrices.design import build_model_matrices
 
 
 @pytest.fixture
@@ -48,6 +51,31 @@ def large_data():
     return pd.DataFrame({"y": y, "x": x, "group": [f"g{i}" for i in group_ids]})
 
 
+@pytest.fixture
+def large_crossed_sparse_data():
+    rng = np.random.default_rng(123)
+    n_obs = 5_000
+    n_group1 = 500
+    n_group2 = 400
+
+    group1_ids = np.arange(n_obs) % n_group1
+    group2_ids = (np.arange(n_obs) * 11) % n_group2
+    x = rng.normal(size=n_obs)
+    group1_effects = rng.normal(scale=1.0, size=n_group1)
+    group2_effects = rng.normal(scale=0.6, size=n_group2)
+    y = 2.0 + 0.5 * x + group1_effects[group1_ids] + group2_effects[group2_ids]
+    y += rng.normal(scale=0.25, size=n_obs)
+
+    return pd.DataFrame(
+        {
+            "y": y,
+            "x": x,
+            "group1": [f"g1_{i}" for i in group1_ids],
+            "group2": [f"g2_{i}" for i in group2_ids],
+        }
+    )
+
+
 @pytest.mark.benchmark(group="lmer")
 def test_benchmark_lmer_simple(benchmark, sleepstudy_data):
     def fit_model():
@@ -70,3 +98,24 @@ def test_benchmark_lmer_large_data(benchmark, large_data):
         return lmer("y ~ x + (1 | group)", data=large_data)
 
     benchmark(fit_model)
+
+
+@pytest.mark.benchmark(group="sparse-design")
+def test_benchmark_large_crossed_sparse_design_build(benchmark, large_crossed_sparse_data):
+    formula = parse_formula("y ~ x + (1 | group1) + (1 | group2)")
+
+    def build_design():
+        return build_model_matrices(formula, large_crossed_sparse_data)
+
+    matrices = benchmark(build_design)
+    assert matrices.Z.nnz == 2 * len(large_crossed_sparse_data)
+
+
+@pytest.mark.benchmark(group="sparse-design")
+def test_benchmark_large_crossed_sparse_adaptive_start(benchmark, large_crossed_sparse_data):
+    formula = parse_formula("y ~ x + (1 | group1) + (1 | group2)")
+    matrices = build_model_matrices(formula, large_crossed_sparse_data)
+    optimizer = LMMOptimizer(matrices, use_rust=False)
+
+    theta = benchmark(optimizer.get_start_theta)
+    assert theta.shape == (2,)

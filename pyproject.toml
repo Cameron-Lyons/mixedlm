@@ -25,6 +25,7 @@ dependencies = [
     "numpy>=1.21",
     "scipy>=1.8",
     "narwhals>=1.0",
+    "pandas>=1.4",
     "Py-BOBYQA>=1.4",
 ]
 
@@ -43,15 +44,13 @@ plots = [
     "matplotlib>=3.5",
 ]
 optimizers = [
-    "Py-BOBYQA>=1.4",
     "nlopt>=2.7",
 ]
 polars = [
     "polars>=0.20",
 ]
-pandas = [
-    "pandas>=1.4",
-]
+# Kept as a no-op compatibility extra because pandas is a core dependency.
+pandas = []
 docs = [
     "mkdocs>=1.5",
     "mkdocs-material>=9.5",
