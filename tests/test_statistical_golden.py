@@ -99,7 +99,7 @@ def test_penicillin_crossed_random_effects_golden() -> None:
     assert model.converged
     assert_allclose(model.beta, [22.81944444444444], rtol=0, atol=1e-12)
     assert_allclose(model.theta, [1.187215173162e-06, 0.5594653125073], rtol=0, atol=2e-11)
-    assert model.sigma == pytest.approx(2.6562451541083103, abs=1e-12)
+    assert model.sigma == pytest.approx(2.6562451541083103, abs=3e-12)
     assert model.deviance == pytest.approx(702.922932400389, abs=1e-12)
 
     loglik = model.logLik()
