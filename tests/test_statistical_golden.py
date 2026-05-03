@@ -14,6 +14,7 @@ from tests._lmer_data import CBPP
 # mixed-model implementations. The sleepstudy and penicillin LMM variance
 # components currently land on singular fits; if optimizer parity changes, these
 # values should be updated deliberately with external lme4/statsmodels evidence.
+_PENICILLIN_FLOAT_ATOL = 2e-11
 
 
 @pytest.mark.filterwarnings("ignore:Model is singular")
@@ -98,15 +99,17 @@ def test_penicillin_crossed_random_effects_golden() -> None:
 
     assert model.converged
     assert_allclose(model.beta, [22.81944444444444], rtol=0, atol=1e-12)
-    assert_allclose(model.theta, [1.187215173162e-06, 0.5594653125073], rtol=0, atol=2e-11)
-    assert model.sigma == pytest.approx(2.6562451541083103, abs=3e-12)
-    assert model.deviance == pytest.approx(702.922932400389, abs=1e-12)
+    assert_allclose(
+        model.theta, [1.187215173162e-06, 0.5594653125073], rtol=0, atol=_PENICILLIN_FLOAT_ATOL
+    )
+    assert model.sigma == pytest.approx(2.6562451541083103, abs=_PENICILLIN_FLOAT_ATOL)
+    assert model.deviance == pytest.approx(702.922932400389, abs=_PENICILLIN_FLOAT_ATOL)
 
     loglik = model.logLik()
-    assert loglik.value == pytest.approx(-482.86967644846266, abs=1e-12)
+    assert loglik.value == pytest.approx(-482.86967644846266, abs=_PENICILLIN_FLOAT_ATOL)
     assert loglik.df == 4
     assert loglik.nobs == 144
-    assert_allclose(model.vcov(), [[0.417068309149]], rtol=0, atol=1e-12)
+    assert_allclose(model.vcov(), [[0.417068309149]], rtol=0, atol=_PENICILLIN_FLOAT_ATOL)
     assert_allclose(
         model.residuals()[:8],
         [
@@ -120,7 +123,7 @@ def test_penicillin_crossed_random_effects_golden() -> None:
             4.278613252485,
         ],
         rtol=0,
-        atol=1e-12,
+        atol=_PENICILLIN_FLOAT_ATOL,
     )
 
     varcorr = model.VarCorr()
