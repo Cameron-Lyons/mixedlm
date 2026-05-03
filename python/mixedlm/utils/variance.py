@@ -173,7 +173,9 @@ def Cv_to_Vv(
     cov = np.zeros((q, q), dtype=np.float64)
     row_indices, col_indices = np.tril_indices(q)
     cov[row_indices, col_indices] = cv
-    cov = cov + cov.T - np.diag(np.diag(cov))
+    diag = np.diag(cov).copy()
+    cov += cov.T
+    cov[np.diag_indices(q)] = diag
 
     cov_scaled = cov / sigma**2
 
@@ -272,7 +274,9 @@ def Cv_to_Sv(
     cov = np.zeros((q, q), dtype=np.float64)
     row_indices, col_indices = np.tril_indices(q)
     cov[row_indices, col_indices] = cv
-    cov = cov + cov.T - np.diag(np.diag(cov))
+    diag = np.diag(cov).copy()
+    cov += cov.T
+    cov[np.diag_indices(q)] = diag
 
     sd, corr = cov2sdcor(cov)
 
@@ -339,7 +343,7 @@ def vec2mlist(
            [3, 4]]), array([[5]])]
     """
     vec = np.asarray(vec)
-    matrices = []
+    matrices: list[NDArray[np.floating]] = []
     idx = 0
     for nrow, ncol in dims:
         size = nrow * ncol

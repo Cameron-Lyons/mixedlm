@@ -13,6 +13,9 @@ from mixedlm.formula.terms import (
     VariableTerm,
 )
 
+ParsedTerm = InterceptTerm | VariableTerm | InteractionTerm
+NoInterceptMarker = tuple[str]
+
 
 class TokenType(Enum):
     TILDE = auto()
@@ -146,11 +149,13 @@ class Parser:
         fixed_terms, random_terms = self._parse_rhs()
 
         has_intercept = True
-        filtered_terms: list[InterceptTerm | VariableTerm | InteractionTerm] = []
+        filtered_terms: list[ParsedTerm] = []
         for term in fixed_terms:
             if isinstance(term, tuple) and term[0] == "no_intercept":
                 has_intercept = False
             elif isinstance(term, InterceptTerm | VariableTerm | InteractionTerm):
+                if term in filtered_terms:
+                    continue
                 filtered_terms.append(term)
 
         fixed = FixedTerm(terms=tuple(filtered_terms), has_intercept=has_intercept)
@@ -163,23 +168,25 @@ class Parser:
     def _parse_rhs(
         self,
     ) -> tuple[
-        list[InterceptTerm | VariableTerm | InteractionTerm | tuple[str, ...]],
+        list[ParsedTerm | NoInterceptMarker],
         list[RandomTerm],
     ]:
-        fixed_terms: list[InterceptTerm | VariableTerm | InteractionTerm | tuple[str, ...]] = []
+        fixed_terms: list[ParsedTerm | NoInterceptMarker] = []
         random_terms: list[RandomTerm] = []
 
         while self.peek().type != TokenType.EOF:
             if self.peek().type == TokenType.LPAREN:
                 random_terms.append(self._parse_random_term())
             elif self.peek().type in (TokenType.IDENTIFIER, TokenType.NUMBER):
-                term = self._parse_term()
-                if term is not None:
-                    fixed_terms.append(term)
+                terms = self._parse_term()
+                if isinstance(terms, tuple):
+                    fixed_terms.append(terms)
+                elif terms is not None:
+                    fixed_terms.extend(terms)
             elif self.peek().type == TokenType.MINUS:
                 self.advance()
                 next_term = self._parse_term()
-                if isinstance(next_term, InterceptTerm):
+                if next_term == [InterceptTerm()]:
                     fixed_terms.append(("no_intercept",))
             elif self.peek().type == TokenType.PLUS:
                 self.advance()
@@ -190,64 +197,80 @@ class Parser:
 
     def _parse_term(
         self,
-    ) -> InterceptTerm | VariableTerm | InteractionTerm | tuple[str, ...] | None:
+    ) -> list[ParsedTerm] | NoInterceptMarker | None:
         if self.peek().type == TokenType.NUMBER:
             tok = self.advance()
             if tok.value == "1":
-                return InterceptTerm()
+                return [InterceptTerm()]
             elif tok.value == "0":
                 return ("no_intercept",)
             else:
                 raise ValueError(f"Unexpected number {tok.value} in formula")
 
-        base = self._parse_base_term()
-        if base is None:
+        terms = self._parse_base_terms()
+        if terms is None:
             return None
 
         while self.peek().type in (TokenType.COLON, TokenType.STAR):
             op = self.advance()
-            next_base = self._parse_base_term()
-            if next_base is None:
+            next_terms = self._parse_base_terms()
+            if next_terms is None:
                 continue
 
             if op.type == TokenType.COLON:
-                base = self._combine_interaction(base, next_base)
+                terms = self._combine_colon(terms, next_terms)
             else:
-                base = self._combine_star(base, next_base)
+                terms = self._combine_star(terms, next_terms)
 
-        return base
+        return terms
 
-    def _parse_base_term(self) -> VariableTerm | InteractionTerm | None:
+    def _parse_base_terms(self) -> list[ParsedTerm] | None:
         if self.peek().type != TokenType.IDENTIFIER:
             return None
         tok = self.advance()
-        return VariableTerm(tok.value)
+        return [VariableTerm(tok.value)]
+
+    def _append_unique(self, terms: list[ParsedTerm], term: ParsedTerm) -> None:
+        if term not in terms:
+            terms.append(term)
+
+    def _term_variables(self, term: ParsedTerm) -> tuple[str, ...]:
+        if isinstance(term, InterceptTerm):
+            return ()
+        if isinstance(term, VariableTerm):
+            return (term.name,)
+        return term.variables
 
     def _combine_interaction(
         self,
-        left: InterceptTerm | VariableTerm | InteractionTerm,
-        right: VariableTerm | InteractionTerm,
+        left: ParsedTerm,
+        right: ParsedTerm,
     ) -> InteractionTerm:
-        left_vars: tuple[str, ...]
-        right_vars: tuple[str, ...]
+        return InteractionTerm(self._term_variables(left) + self._term_variables(right))
 
-        if isinstance(left, InterceptTerm):
-            left_vars = ()
-        elif isinstance(left, VariableTerm):
-            left_vars = (left.name,)
-        else:
-            left_vars = left.variables
-
-        right_vars = (right.name,) if isinstance(right, VariableTerm) else right.variables
-
-        return InteractionTerm(left_vars + right_vars)
+    def _combine_colon(
+        self,
+        left_terms: list[ParsedTerm],
+        right_terms: list[ParsedTerm],
+    ) -> list[ParsedTerm]:
+        result: list[ParsedTerm] = []
+        for left in left_terms:
+            for right in right_terms:
+                self._append_unique(result, self._combine_interaction(left, right))
+        return result
 
     def _combine_star(
         self,
-        left: InterceptTerm | VariableTerm | InteractionTerm,
-        right: VariableTerm | InteractionTerm,
-    ) -> InteractionTerm:
-        return self._combine_interaction(left, right)
+        left_terms: list[ParsedTerm],
+        right_terms: list[ParsedTerm],
+    ) -> list[ParsedTerm]:
+        result: list[ParsedTerm] = []
+        for term in left_terms + right_terms:
+            self._append_unique(result, term)
+        for left in left_terms:
+            for right in right_terms:
+                self._append_unique(result, self._combine_interaction(left, right))
+        return result
 
     def _parse_random_term(self) -> RandomTerm:
         self.expect(TokenType.LPAREN)
@@ -259,17 +282,18 @@ class Parser:
             if self.peek().type == TokenType.NUMBER:
                 tok = self.advance()
                 if tok.value == "1":
-                    expr_terms.append(InterceptTerm())
+                    self._append_unique(expr_terms, InterceptTerm())
                 elif tok.value == "0":
                     has_intercept = False
             elif self.peek().type == TokenType.IDENTIFIER:
-                term = self._parse_term()
-                if term is not None:
-                    if isinstance(term, tuple):
-                        if term == ("no_intercept",):
+                terms = self._parse_term()
+                if terms is not None:
+                    if isinstance(terms, tuple):
+                        if terms == ("no_intercept",):
                             has_intercept = False
                     else:
-                        expr_terms.append(term)
+                        for term in terms:
+                            self._append_unique(expr_terms, term)
             elif self.peek().type == TokenType.PLUS:
                 self.advance()
             elif self.peek().type == TokenType.MINUS:
@@ -834,7 +858,7 @@ def getFixedFormulaStr(formula: Formula | str) -> str:
     'y ~ x + z'
 
     >>> getFixedFormulaStr("y ~ x * z + (x | group)")
-    'y ~ x * z'
+    'y ~ x + z + x:z'
     """
     if isinstance(formula, str):
         formula = parse_formula(formula)

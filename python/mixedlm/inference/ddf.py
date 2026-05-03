@@ -39,6 +39,34 @@ def _matrix_inverse(A: NDArray[np.floating]) -> NDArray[np.floating]:
     return _solve_linear_system(A, np.eye(A.shape[0], dtype=np.float64))
 
 
+def _xt_vinv_x_from_theta(result: LmerResult, theta: NDArray[np.floating]) -> NDArray[np.floating]:
+    """Compute X'V^-1X without materializing the n x n marginal covariance."""
+    from mixedlm.estimation.reml import _build_lambda
+
+    q = result.matrices.n_random
+    if q == 0:
+        return result.matrices.X.T @ result.matrices.X / result.sigma**2
+
+    Lambda = _build_lambda(theta, result.matrices.random_structures)
+    X = result.matrices.X
+    Zt = result.matrices.Zt
+
+    ZtZ = Zt @ Zt.T
+    lambdat_ztz_lambda = Lambda.T @ ZtZ @ Lambda
+    v_factor = lambdat_ztz_lambda + sparse.eye(q, format="csc")
+    v_factor_dense = v_factor.toarray() if sparse.issparse(v_factor) else v_factor
+
+    try:
+        chol = linalg.cholesky(v_factor_dense, lower=True)
+    except linalg.LinAlgError:
+        v_factor_dense += _CHOLESKY_REGULARIZATION * np.eye(q, dtype=np.float64)
+        chol = linalg.cholesky(v_factor_dense, lower=True)
+
+    lambdat_ztx = Lambda.T @ (Zt @ X)
+    rzx = linalg.solve_triangular(chol, lambdat_ztx, lower=True)
+    return (X.T @ X - rzx.T @ rzx) / result.sigma**2
+
+
 @dataclass
 class DenomDFResult:
     df: NDArray[np.floating]
@@ -202,7 +230,6 @@ def kenward_roger_df(
 
     eps = _NUMERICAL_EPS
     theta = result.theta.copy()
-    sigma = result.sigma
 
     satt_result = satterthwaite_df(result)
     df_satt = satt_result.df
@@ -210,25 +237,10 @@ def kenward_roger_df(
     W = np.zeros((p, p), dtype=np.float64)
 
     def compute_hessian_contribution(theta_vec: NDArray) -> NDArray:
-        from mixedlm.estimation.reml import _build_lambda
-
-        q = result.matrices.n_random
-
-        if q == 0:
+        if result.matrices.n_random == 0:
             return np.zeros((p, p))
 
-        Lambda = _build_lambda(theta_vec, result.matrices.random_structures)
-        Z = result.matrices.Z
-        X = result.matrices.X
-
-        Z_dense = Z.toarray() if sparse.issparse(Z) else Z
-
-        Lambda_dense = Lambda.toarray() if sparse.issparse(Lambda) else Lambda
-
-        ZLambda = Z_dense @ Lambda_dense
-        V = np.eye(n) * sigma**2 + ZLambda @ ZLambda.T * sigma**2
-
-        XtVinvX = X.T @ _solve_linear_system(V, X)
+        XtVinvX = _xt_vinv_x_from_theta(result, theta_vec)
         return XtVinvX - XtVinvX @ vcov @ XtVinvX
 
     base_hess = compute_hessian_contribution(theta)
@@ -245,7 +257,8 @@ def kenward_roger_df(
         d2_hess = (hess_plus - 2 * base_hess + hess_minus) / (eps**2)
         W += d2_hess
 
-    W = W / (2 * n_theta) if n_theta > 0 else W
+    if n_theta > 0:
+        W /= 2 * n_theta
 
     scale_factor = 1.0 + np.trace(W @ vcov) / p if p > 0 else 1.0
     scale_factor = max(_MIN_DF, scale_factor)

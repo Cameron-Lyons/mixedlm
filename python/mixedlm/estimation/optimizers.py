@@ -376,7 +376,7 @@ class NelderMead:
 
         for iteration in range(self.maxiter):
             order = np.argsort(f_vals)
-            simplex = simplex[order]
+            simplex[:] = simplex[order]
             f_vals = f_vals[order]
 
             if self.track_history:
@@ -435,7 +435,7 @@ class NelderMead:
                         f_vals[i] = self.fun(simplex[i])
 
         order = np.argsort(f_vals)
-        simplex = simplex[order]
+        simplex[:] = simplex[order]
         f_vals = f_vals[order]
 
         self.state = NelderMeadState(

@@ -981,23 +981,23 @@ def simulate_formula(
     q = matrices.n_random
 
     if beta is None:
-        beta_vec = np.zeros(p)
+        beta_vec: NDArray[np.floating] = np.zeros(p)
     elif isinstance(beta, dict):
         beta_vec = np.zeros(p)
         for i, name in enumerate(matrices.fixed_names):
             if name in beta:
                 beta_vec[i] = beta[name]
     else:
-        beta_vec = np.asarray(beta)
+        beta_vec = np.asarray(beta, dtype=np.float64).reshape(-1)
 
     if theta is None:
         n_theta = sum(
             s.n_terms * (s.n_terms + 1) // 2 if s.correlated else s.n_terms
             for s in matrices.random_structures
         )
-        theta_vec = np.ones(n_theta)
+        theta_vec: NDArray[np.floating] = np.ones(n_theta)
     else:
-        theta_vec = np.asarray(theta)
+        theta_vec = np.asarray(theta, dtype=np.float64).reshape(-1)
 
     results = []
 
