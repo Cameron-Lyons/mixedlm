@@ -10,8 +10,8 @@ name = "_rust"
 crate-type = ["cdylib"]
 
 [dependencies]
-pyo3 = { version = "0.28.2", features = ["extension-module", "abi3-py310"] }
-numpy = "0.28.0"
+pyo3 = { version = "0.29.0", features = ["extension-module", "abi3-py310"] }
+numpy = "0.29.0"
 ndarray = "0.17.2"
 sprs = "0.11.4"
 sprs-ldl = "0.10.0"
