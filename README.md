@@ -329,7 +329,7 @@ The project uses GitHub Actions for continuous integration:
 
 - **Linting**: ruff, clippy, rustfmt
 - **Type checking**: mypy
-- **Testing**: pytest across Python 3.10-3.13 (including free-threaded 3.13t)
+- **Testing**: pytest across Python 3.10-3.13 (including free-threaded 3.14t)
 - **Coverage**: codecov for both Python and Rust
 - **Security**: cargo-audit, pip-audit
 - **Docs**: mkdocs build verification
