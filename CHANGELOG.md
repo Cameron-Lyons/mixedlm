@@ -21,7 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [1.1.0] - 2026-01-27
 
 ### Added
-- Comprehensive CI pipeline with testing across Python 3.10-3.13 and free-threaded 3.13t
+- Comprehensive CI pipeline with testing across Python 3.10-3.13 and free-threaded 3.14t
 - Symbolic factorization caching for sparse Cholesky operations
 - EM-REML initialization option for variance component estimation
 - Miri, property-based testing, and benchmark jobs in CI
