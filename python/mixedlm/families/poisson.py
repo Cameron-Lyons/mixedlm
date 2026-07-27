@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 from numpy.typing import NDArray
+from scipy.special import xlogy
 
 from mixedlm.families.base import Family, LogLink
 
@@ -19,5 +20,5 @@ class Poisson(Family):
         eps = 1e-10
         mu = np.maximum(mu, eps)
 
-        term = np.where(y > 0, y * np.log(y / mu), 0)
+        term = xlogy(y, y / mu)
         return 2 * wt * (term - (y - mu))
