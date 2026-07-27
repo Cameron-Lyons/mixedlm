@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -10,6 +12,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib import MatplotlibDeprecationWarning
 from mixedlm.diagnostics.plots import (
     _check_matplotlib,
     plot_diagnostics,
@@ -119,8 +122,19 @@ class TestPlotScaleLocation:
 
 class TestPlotResidGroup:
     def test_basic_plot(self, lmer_result):
-        ax = plot_resid_group(lmer_result)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", MatplotlibDeprecationWarning)
+            ax = plot_resid_group(lmer_result)
+
         assert ax is not None
+        assert [tick.get_text() for tick in ax.get_xticklabels()] == [
+            "G0",
+            "G1",
+            "G2",
+            "G3",
+            "G4",
+            "G5",
+        ]
         plt.close("all")
 
     def test_with_specified_group(self, lmer_result):
