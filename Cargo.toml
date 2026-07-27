@@ -31,7 +31,9 @@ proptest = "1.10.0"
 lto = true
 codegen-units = 1
 opt-level = 3
-strip = true
+# Cargo's post-link stripping can produce malformed Mach-O extension modules.
+# Wheel compression keeps the size impact small, and CI verifies macOS imports.
+strip = false
 
 [profile.release.build-override]
 opt-level = 3
