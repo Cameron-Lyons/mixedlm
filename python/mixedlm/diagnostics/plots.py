@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -293,7 +294,11 @@ def plot_resid_group(
     if point_kws:
         box_defaults.update(point_kws)
 
-    bp = ax.boxplot(group_resids, labels=group_labels, **box_defaults)
+    label_parameter = (
+        "tick_labels" if "tick_labels" in inspect.signature(ax.boxplot).parameters else "labels"
+    )
+    box_defaults[label_parameter] = group_labels
+    bp = ax.boxplot(group_resids, **box_defaults)
 
     for patch in bp["boxes"]:
         patch.set_facecolor("lightblue")
