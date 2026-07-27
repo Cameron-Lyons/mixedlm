@@ -4,6 +4,7 @@ from abc import ABC, abstractmethod
 
 import numpy as np
 from numpy.typing import NDArray
+from scipy.special import expit
 
 
 class Link(ABC):
@@ -47,7 +48,7 @@ class LogitLink(Link):
         return np.log(mu / (1 - mu))
 
     def inverse(self, eta: NDArray[np.floating]) -> NDArray[np.floating]:
-        return 1.0 / (1.0 + np.exp(-eta))
+        return expit(eta)
 
     def deriv(self, mu: NDArray[np.floating]) -> NDArray[np.floating]:
         return 1.0 / (mu * (1 - mu))
