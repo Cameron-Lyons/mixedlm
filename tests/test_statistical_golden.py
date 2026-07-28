@@ -17,13 +17,14 @@ from tests._lmer_data import CBPP
 _PENICILLIN_FLOAT_ATOL = 2e-11
 
 
+@pytest.fixture(scope="class")
+def model() -> mlm.LmerResult:
+    data = mlm.load_sleepstudy()
+    return mlm.lmer("Reaction ~ Days + (Days | Subject)", data, REML=True)
+
+
 @pytest.mark.filterwarnings("ignore:Model is singular")
 class TestSleepstudyGolden:
-    @pytest.fixture(scope="class")
-    def model(self) -> mlm.LmerResult:
-        data = mlm.load_sleepstudy()
-        return mlm.lmer("Reaction ~ Days + (Days | Subject)", data, REML=True)
-
     def test_likelihood_and_variance_components(self, model: mlm.LmerResult) -> None:
         assert model.converged
         assert_allclose(model.beta, [251.19101636363638, 10.529083771043759], rtol=0, atol=1e-10)
