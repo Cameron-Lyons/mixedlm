@@ -260,3 +260,23 @@ class TestProfileIntegration:
         assert_allclose(profiles_serial["Days"].zeta, profiles_parallel["Days"].zeta, atol=1e-8)
         assert profiles_serial["Days"].ci_lower == pytest.approx(profiles_parallel["Days"].ci_lower)
         assert profiles_serial["Days"].ci_upper == pytest.approx(profiles_parallel["Days"].ci_upper)
+
+    def test_parallel_profiling_falls_back_when_process_pool_is_unavailable(
+        self, lmer_result, monkeypatch
+    ):
+        import mixedlm.inference.profile as profile_module
+
+        class UnavailableExecutor:
+            def __init__(self, *args, **kwargs):
+                raise PermissionError("process semaphores are unavailable")
+
+        monkeypatch.setattr(profile_module, "ProcessPoolExecutor", UnavailableExecutor)
+
+        expected = profile_lmer(lmer_result, which=["Days"], n_points=10, n_jobs=1)
+        with pytest.warns(RuntimeWarning, match="falling back to serial execution"):
+            actual = profile_lmer(lmer_result, which=["Days"], n_points=10, n_jobs=2)
+
+        assert_allclose(actual["Days"].values, expected["Days"].values)
+        assert_allclose(actual["Days"].zeta, expected["Days"].zeta, atol=1e-8)
+        assert actual["Days"].ci_lower == pytest.approx(expected["Days"].ci_lower)
+        assert actual["Days"].ci_upper == pytest.approx(expected["Days"].ci_upper)
