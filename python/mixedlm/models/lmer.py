@@ -340,7 +340,7 @@ class LmerResult(MerResultMixin):
             X = self.matrices.X
         else:
             pred_matrices = build_model_matrices(self.formula, newdata)
-            X = pred_matrices.X
+            X = self._align_fixed_matrix(pred_matrices)
             pred = X @ self.beta
 
             if pred_matrices.offset is not None:

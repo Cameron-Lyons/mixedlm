@@ -78,6 +78,17 @@ class MerResultMixin:
             return (self.matrices.X, self.matrices.Z)
         raise ValueError(f"Unknown type '{type}'. Use 'fixed', 'random', 'X', 'Z', or 'both'.")
 
+    def _align_fixed_matrix(self, matrices: ModelMatrices) -> NDArray[np.floating]:
+        """Align a newly built fixed-effects matrix to the fitted columns."""
+        column_indices = {name: index for index, name in enumerate(matrices.fixed_names)}
+        try:
+            fitted_indices = [column_indices[name] for name in self.matrices.fixed_names]
+        except KeyError as exc:
+            raise ValueError(
+                f"New data is missing fitted fixed-effect column '{exc.args[0]}'."
+            ) from None
+        return matrices.X[:, fitted_indices]
+
     def _model_frame(self) -> pd.DataFrame:
         import pandas as pd
 

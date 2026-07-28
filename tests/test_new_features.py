@@ -35,6 +35,7 @@ from mixedlm.inference.profile import (
     sdProf,
     varianceProf,
 )
+from mixedlm.models.checks import check_rankX
 from mixedlm.models.control import GlmerControl, LmerControl
 
 SLEEPSTUDY = load_sleepstudy()
@@ -133,6 +134,55 @@ class TestControlParameters:
 
 
 class TestModelChecks:
+    def test_rank_deficient_fixed_effects_keep_model_metadata_consistent(self):
+        x = np.linspace(-1.0, 1.0, 30)
+        data = pd.DataFrame(
+            {
+                "y": 1.5 + 0.75 * x,
+                "x1": x,
+                "x2": 2.0 * x,
+                "group": np.repeat(np.arange(10), 3),
+            }
+        )
+        control = LmerControl(
+            check_rankX="warning+drop.cols",
+            check_nlev_gtreq_5="ignore",
+            check_conv=False,
+            check_singular=False,
+        )
+
+        with pytest.warns(UserWarning, match="Dropping columns"):
+            result = lmer("y ~ x1 + x2 + (1 | group)", data, control=control)
+
+        assert result.matrices.X.shape[1] == 2
+        assert result.matrices.n_fixed == 2
+        assert len(result.matrices.fixed_names) == 2
+        assert len(result.beta) == 2
+        assert list(result.fixef()) == result.matrices.fixed_names
+
+        predictions = result.predict(data, re_form="NA")
+        assert np.allclose(predictions, result.matrices.X @ result.beta)
+
+    def test_rank_deficiency_drop_supports_more_columns_than_rows(self):
+        from types import SimpleNamespace
+
+        matrices = SimpleNamespace(
+            X=np.array(
+                [
+                    [1.0, 0.0, 1.0],
+                    [0.0, 1.0, 1.0],
+                ]
+            )
+        )
+
+        with pytest.warns(UserWarning, match="Dropping columns"):
+            reduced, dropped = check_rankX(matrices, "warning+drop.cols")
+
+        assert reduced.shape == (2, 2)
+        assert np.linalg.matrix_rank(reduced) == 2
+        assert dropped is not None
+        assert len(dropped) == 1
+
     def test_check_nlev_gtr_1_stop(self):
         data = pd.DataFrame(
             {
