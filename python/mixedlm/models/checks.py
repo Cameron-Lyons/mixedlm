@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 from numpy.typing import NDArray
+from scipy import linalg
 
 if TYPE_CHECKING:
     from mixedlm.matrices.design import ModelMatrices
@@ -115,7 +116,7 @@ def check_rankX(
     action: str,
 ) -> tuple[NDArray[np.floating], list[int] | None]:
     X = matrices.X
-    n, p = X.shape
+    p = X.shape[1]
 
     rank = np.linalg.matrix_rank(X)
 
@@ -131,17 +132,15 @@ def check_rankX(
     message = f"Fixed-effects design matrix is rank deficient (rank {rank} < {p} columns)."
 
     if drop_cols:
-        _, R = np.linalg.qr(X)
-        diag_R = np.abs(np.diag(R))
-        tol = max(n, p) * np.finfo(X.dtype).eps * np.max(diag_R)
-        keep_cols = diag_R > tol
-        dropped = [i for i, keep in enumerate(keep_cols) if not keep]
+        _, _, pivots = linalg.qr(X, mode="economic", pivoting=True)
+        kept = sorted(int(i) for i in pivots[:rank])
+        dropped = sorted(set(range(p)) - set(kept))
 
         if dropped:
             message += f" Dropping columns: {dropped}"
             if base_action != "ignore":
                 _handle_check(base_action, message)
-            X_new = X[:, keep_cols]
+            X_new = X[:, kept]
             return X_new, dropped
     else:
         _handle_check(base_action, message)
@@ -198,6 +197,15 @@ def run_model_checks(
     if dropped_cols is not None:
         from dataclasses import replace
 
-        matrices = replace(matrices, X=X_new)
+        dropped = set(dropped_cols)
+        fixed_names = [
+            name for index, name in enumerate(matrices.fixed_names) if index not in dropped
+        ]
+        matrices = replace(
+            matrices,
+            X=X_new,
+            fixed_names=fixed_names,
+            n_fixed=X_new.shape[1],
+        )
 
     return matrices, dropped_cols
