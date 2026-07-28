@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import warnings
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -627,13 +628,27 @@ def profile_lmer(
                 )
             )
 
-        with ProcessPoolExecutor(max_workers=n_jobs) as executor:
-            futures = {executor.submit(_profile_param_worker, task): task[0] for task in tasks}
-
-            for future in as_completed(futures):
-                param, profile_result = future.result()
+        try:
+            executor = ProcessPoolExecutor(max_workers=n_jobs)
+        except (NotImplementedError, OSError) as exc:
+            warnings.warn(
+                "Process-based parallel profiling is unavailable; falling back to serial "
+                f"execution ({exc}).",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            for task in tasks:
+                param, profile_result = _profile_param_worker(task)
                 if profile_result is not None:
                     profiles[param] = profile_result
+        else:
+            with executor:
+                futures = {executor.submit(_profile_param_worker, task): task[0] for task in tasks}
+
+                for future in as_completed(futures):
+                    param, profile_result = future.result()
+                    if profile_result is not None:
+                        profiles[param] = profile_result
 
     return profiles
 
