@@ -27,7 +27,7 @@ from tests._lmer_data import CBPP, SLEEPSTUDY
 class TestControl:
     def test_lmer_control_default(self) -> None:
         ctrl = LmerControl()
-        assert ctrl.optimizer == "bobyqa"
+        assert ctrl.optimizer == "COBYQA"
         assert ctrl.maxiter == 1000
         assert ctrl.ftol == 1e-8
         assert ctrl.gtol == 1e-5
@@ -88,7 +88,7 @@ class TestControl:
 
     def test_glmer_control_default(self) -> None:
         ctrl = GlmerControl()
-        assert ctrl.optimizer == "bobyqa"
+        assert ctrl.optimizer == "COBYQA"
         assert ctrl.maxiter == 1000
         assert ctrl.tolPwrss == 1e-7
         assert ctrl.compDev is True
@@ -157,50 +157,35 @@ class TestControl:
         assert ctrl.optimizer == "bobyqa"
 
 
-class TestBobyqaOptimizer:
-    @pytest.fixture
-    def has_bobyqa(self) -> bool:
-        from mixedlm.estimation.optimizers import has_bobyqa
-
-        return has_bobyqa()
-
-    def test_lmer_bobyqa(self, has_bobyqa: bool) -> None:
-        if not has_bobyqa:
-            pytest.skip("pybobyqa not installed")
-
-        ctrl = lmerControl(optimizer="bobyqa")
+class TestCobyqaOptimizer:
+    def test_lmer_cobyqa(self) -> None:
+        ctrl = lmerControl(optimizer="COBYQA")
         result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY, control=ctrl)
         assert result.converged
         assert result.fixef() is not None
         assert result.sigma > 0
 
-    def test_lmer_bobyqa_random_slope(self, has_bobyqa: bool) -> None:
-        if not has_bobyqa:
-            pytest.skip("pybobyqa not installed")
-
-        ctrl = lmerControl(optimizer="bobyqa")
+    def test_lmer_cobyqa_random_slope(self) -> None:
+        ctrl = lmerControl(optimizer="COBYQA")
         result = lmer("Reaction ~ Days + (Days | Subject)", SLEEPSTUDY, control=ctrl)
         assert result.converged
         fe = result.fixef()
         assert "(Intercept)" in fe
         assert "Days" in fe
 
-    def test_lmer_bobyqa_optctrl(self, has_bobyqa: bool) -> None:
-        if not has_bobyqa:
-            pytest.skip("pybobyqa not installed")
-
-        ctrl = lmerControl(optimizer="bobyqa", optCtrl={"rhobeg": 0.5, "rhoend": 1e-4})
+    def test_lmer_cobyqa_optctrl(self) -> None:
+        ctrl = lmerControl(
+            optimizer="COBYQA",
+            optCtrl={"initial_tr_radius": 0.5, "final_tr_radius": 1e-4},
+        )
         result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY, control=ctrl)
         assert result.converged
 
-    def test_glmer_bobyqa(self, has_bobyqa: bool) -> None:
-        if not has_bobyqa:
-            pytest.skip("pybobyqa not installed")
-
+    def test_glmer_cobyqa(self) -> None:
         data = CBPP.copy()
         data["y"] = data["incidence"] / data["size"]
 
-        ctrl = glmerControl(optimizer="bobyqa")
+        ctrl = glmerControl(optimizer="COBYQA")
         result = glmer(
             "y ~ period + (1 | herd)",
             data,
@@ -211,36 +196,29 @@ class TestBobyqaOptimizer:
         assert result.converged
         assert result.fixef() is not None
 
-    def test_bobyqa_vs_lbfgsb_consistency(self, has_bobyqa: bool) -> None:
-        if not has_bobyqa:
-            pytest.skip("pybobyqa not installed")
-
-        ctrl_bobyqa = lmerControl(optimizer="bobyqa")
+    def test_cobyqa_vs_lbfgsb_consistency(self) -> None:
+        ctrl_cobyqa = lmerControl(optimizer="COBYQA")
         ctrl_lbfgsb = lmerControl(optimizer="L-BFGS-B")
 
-        result_bobyqa = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY, control=ctrl_bobyqa)
+        result_cobyqa = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY, control=ctrl_cobyqa)
         result_lbfgsb = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY, control=ctrl_lbfgsb)
 
-        assert abs(result_bobyqa.deviance - result_lbfgsb.deviance) < 0.1
-        fe_bobyqa = result_bobyqa.fixef()
+        assert abs(result_cobyqa.deviance - result_lbfgsb.deviance) < 0.1
+        fe_cobyqa = result_cobyqa.fixef()
         fe_lbfgsb = result_lbfgsb.fixef()
-        assert abs(fe_bobyqa["(Intercept)"] - fe_lbfgsb["(Intercept)"]) < 1.0
-        assert abs(fe_bobyqa["Days"] - fe_lbfgsb["Days"]) < 0.5
+        assert abs(fe_cobyqa["(Intercept)"] - fe_lbfgsb["(Intercept)"]) < 1.0
+        assert abs(fe_cobyqa["Days"] - fe_lbfgsb["Days"]) < 0.5
 
-    def test_has_bobyqa_function(self) -> None:
-        from mixedlm.estimation.optimizers import has_bobyqa
+    def test_has_cobyqa_function(self) -> None:
+        from mixedlm.estimation.optimizers import has_cobyqa
 
-        result = has_bobyqa()
-        assert isinstance(result, bool)
+        assert has_cobyqa() is True
 
-    def test_allfit_includes_bobyqa(self, has_bobyqa: bool) -> None:
-        if not has_bobyqa:
-            pytest.skip("pybobyqa not installed")
-
+    def test_allfit_includes_cobyqa(self) -> None:
         from mixedlm.inference.allfit import _get_available_optimizers
 
         optimizers = _get_available_optimizers()
-        assert "bobyqa" in optimizers
+        assert "COBYQA" in optimizers
 
 
 class TestNloptOptimizer:

@@ -66,7 +66,7 @@ def allFit(
         Data containing the variables in the formula.
     optimizers : list[str], optional
         List of optimizer names to try. If None, uses a default set of
-        robust optimizers: ["bobyqa", "Nelder-Mead", "L-BFGS-B"].
+        robust optimizers: ["COBYQA", "Nelder-Mead", "L-BFGS-B"].
     REML : bool, default True
         Use REML estimation.
     verbose : int, default 0
@@ -91,7 +91,7 @@ def allFit(
     >>> result = mlm.allFit(
     ...     "Reaction ~ Days + (1|Subject)",
     ...     data,
-    ...     optimizers=["bobyqa", "L-BFGS-B", "Nelder-Mead", "Powell"]
+    ...     optimizers=["COBYQA", "L-BFGS-B", "Nelder-Mead", "Powell"]
     ... )
 
     Notes
@@ -111,7 +111,7 @@ def allFit(
     from mixedlm.models.lmer import lmer
 
     if optimizers is None:
-        optimizers = ["bobyqa", "Nelder-Mead", "L-BFGS-B"]
+        optimizers = ["COBYQA", "Nelder-Mead", "L-BFGS-B"]
 
     results: dict[str, LmerResult | Exception] = {}
 

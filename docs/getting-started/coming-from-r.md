@@ -231,7 +231,7 @@ Control arguments are similar:
 === "Python"
 
     ```python
-    mlm.LmerControl(optimizer="bobyqa", maxfun=10000)
+    mlm.LmerControl(optimizer="COBYQA", maxiter=10000)
     ```
 
 ## Functions Not Yet Available

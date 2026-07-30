@@ -12,6 +12,7 @@ _VALID_OPTIMIZERS = {
     "SLSQP",
     "TNC",
     "COBYLA",
+    "COBYQA",
     "bobyqa",
     "nloptwrap_BOBYQA",
     "nloptwrap_NEWUOA",
@@ -109,10 +110,11 @@ class LmerControl:
 
     Parameters
     ----------
-    optimizer : str, default "bobyqa"
+    optimizer : str, default "COBYQA"
         Optimization algorithm to use. Options:
-        - "bobyqa": BOBYQA (Bound Optimization BY Quadratic Approximation) -
+        - "COBYQA": Constrained Optimization BY Quadratic Approximations -
           default, fastest and most reliable
+        - "bobyqa": Deprecated compatibility alias for "COBYQA"
         - "L-BFGS-B": Limited-memory BFGS with bounds
         - "BFGS": BFGS without bounds
         - "Nelder-Mead": Simplex algorithm
@@ -147,21 +149,23 @@ class LmerControl:
         Maximum EM iterations if em_init=True.
     optCtrl : dict, optional
         Additional options passed directly to the optimizer.
-        For BOBYQA, supports: rhobeg, rhoend, seek_global_minimum.
+        For COBYQA, supports SciPy's ``initial_tr_radius``, ``final_tr_radius``,
+        ``maxfev``, and ``scale`` options. Legacy ``rhobeg``, ``rhoend``,
+        ``maxfun``, and ``scaling_within_bounds`` names are also accepted.
 
     Examples
     --------
     >>> ctrl = LmerControl(optimizer="Nelder-Mead", maxiter=2000)
     >>> result = lmer("y ~ x + (1|group)", data, control=ctrl)
 
-    >>> ctrl = LmerControl(optimizer="bobyqa")
+    >>> ctrl = LmerControl(optimizer="COBYQA")
     >>> result = lmer("y ~ x + (1|group)", data, control=ctrl)
 
     >>> ctrl = LmerControl(boundary_tol=1e-5, check_singular=False)
     >>> result = lmer("y ~ x + (x|group)", data, control=ctrl)
     """
 
-    optimizer: str = "bobyqa"
+    optimizer: str = "COBYQA"
     maxiter: int = 1000
     ftol: float = 1e-8
     gtol: float = 1e-5
@@ -221,10 +225,11 @@ class GlmerControl:
 
     Parameters
     ----------
-    optimizer : str, default "bobyqa"
+    optimizer : str, default "COBYQA"
         Optimization algorithm to use. Options:
-        - "bobyqa": BOBYQA (Bound Optimization BY Quadratic Approximation) -
+        - "COBYQA": Constrained Optimization BY Quadratic Approximations -
           default, fastest and most reliable
+        - "bobyqa": Deprecated compatibility alias for "COBYQA"
         - "L-BFGS-B": Limited-memory BFGS with bounds
         - "BFGS": BFGS without bounds
         - "Nelder-Mead": Simplex algorithm
@@ -262,21 +267,23 @@ class GlmerControl:
         Maximum EM iterations if em_init=True.
     optCtrl : dict, optional
         Additional options passed directly to the optimizer.
-        For BOBYQA, supports: rhobeg, rhoend, seek_global_minimum.
+        For COBYQA, supports SciPy's ``initial_tr_radius``, ``final_tr_radius``,
+        ``maxfev``, and ``scale`` options. Legacy ``rhobeg``, ``rhoend``,
+        ``maxfun``, and ``scaling_within_bounds`` names are also accepted.
 
     Examples
     --------
     >>> ctrl = GlmerControl(optimizer="Nelder-Mead", maxiter=2000)
     >>> result = glmer("y ~ x + (1|group)", data, family=Binomial(), control=ctrl)
 
-    >>> ctrl = GlmerControl(optimizer="bobyqa")
+    >>> ctrl = GlmerControl(optimizer="COBYQA")
     >>> result = glmer("y ~ x + (1|group)", data, family=Binomial(), control=ctrl)
 
     >>> ctrl = GlmerControl(tolPwrss=1e-8, nAGQ0initStep=False)
     >>> result = glmer("y ~ x + (1|group)", data, family=Binomial(), control=ctrl)
     """
 
-    optimizer: str = "bobyqa"
+    optimizer: str = "COBYQA"
     maxiter: int = 1000
     ftol: float = 1e-8
     gtol: float = 1e-5
@@ -331,7 +338,7 @@ class GlmerControl:
 
 
 def lmerControl(
-    optimizer: str = "bobyqa",
+    optimizer: str = "COBYQA",
     maxiter: int = 1000,
     ftol: float = 1e-8,
     gtol: float = 1e-5,
@@ -390,7 +397,7 @@ def lmerControl(
 
 
 def glmerControl(
-    optimizer: str = "bobyqa",
+    optimizer: str = "COBYQA",
     maxiter: int = 1000,
     ftol: float = 1e-8,
     gtol: float = 1e-5,

@@ -1,20 +1,32 @@
 use nalgebra::DMatrix;
 use nalgebra_sparse::csc::CscMatrix;
 use nalgebra_sparse::factorization::CscCholesky;
-use ndarray::{ArrayView2, Axis};
+use numpy::ndarray::{ArrayView2, Axis};
 use pyo3::PyResult;
 use pyo3::exceptions::PyValueError;
-use thiserror::Error;
 
-#[derive(Error, Debug, Clone)]
+#[derive(Debug, Clone)]
 pub enum LinalgError {
-    #[error("Matrix is not positive definite")]
     NotPositiveDefinite,
-    #[error("Invalid sparse matrix format: {0}")]
     InvalidSparseFormat(String),
-    #[error("Dimension mismatch: {0}")]
     DimensionMismatch(String),
 }
+
+impl std::fmt::Display for LinalgError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotPositiveDefinite => formatter.write_str("Matrix is not positive definite"),
+            Self::InvalidSparseFormat(message) => {
+                write!(formatter, "Invalid sparse matrix format: {message}")
+            }
+            Self::DimensionMismatch(message) => {
+                write!(formatter, "Dimension mismatch: {message}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for LinalgError {}
 
 impl From<LinalgError> for pyo3::PyErr {
     fn from(err: LinalgError) -> pyo3::PyErr {

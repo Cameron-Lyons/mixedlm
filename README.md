@@ -251,9 +251,8 @@ Built-in datasets from lme4:
 
 - Python >= 3.10
 - NumPy >= 1.21
-- SciPy >= 1.8
+- SciPy >= 1.14
 - **pandas** >= 1.4
-- **Py-BOBYQA** >= 1.4
 
 The core package uses pandas for built-in datasets and some result tables. Polars support is
 available as an optional extra for model input data:

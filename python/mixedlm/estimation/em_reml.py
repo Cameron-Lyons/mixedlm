@@ -140,7 +140,7 @@ def _sigma_to_theta(
         if cov_type not in ("us",):
             raise NotImplementedError(
                 f"EM-REML does not support cov_type='{cov_type}'. "
-                "Use direct optimization via lmer() with optimizer='bobyqa' instead."
+                "Use direct optimization via lmer() with optimizer='COBYQA' instead."
             )
 
         relative_cov = sigma_k / sigma2_e
@@ -235,7 +235,7 @@ def em_reml_simple(
         if cov_type not in ("us",):
             raise NotImplementedError(
                 f"EM-REML does not support cov_type='{cov_type}'. "
-                "Use direct optimization via lmer() with optimizer='bobyqa' instead."
+                "Use direct optimization via lmer() with optimizer='COBYQA' instead."
             )
 
     y = matrices.y

@@ -1,8 +1,8 @@
 use faer::linalg::solvers::{Llt, Solve};
 use faer::{Mat, Side};
 use nalgebra_sparse::csc::CscMatrix;
-use ndarray::{ArrayView1, ArrayView2};
 use numpy::PyArray1;
+use numpy::ndarray::{ArrayView1, ArrayView2};
 use pyo3::PyResult;
 use pyo3::prelude::*;
 use rayon::prelude::*;

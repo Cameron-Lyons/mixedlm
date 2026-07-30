@@ -273,7 +273,8 @@ mixedlm supports multiple optimization algorithms:
 
 **Always available (SciPy):**
 
-- `L-BFGS-B` - Quasi-Newton with bounds (default)
+- `COBYQA` - Derivative-free constrained optimization (default)
+- `L-BFGS-B` - Quasi-Newton with bounds
 - `BFGS` - Quasi-Newton
 - `Nelder-Mead` - Simplex method
 - `Powell` - Direction set method
@@ -284,7 +285,6 @@ mixedlm supports multiple optimization algorithms:
 
 **Optional (requires additional packages):**
 
-- `bobyqa` - Derivative-free bounded optimization (Py-BOBYQA)
 - `newuoa` - Derivative-free unconstrained (nlopt)
 - `praxis` - Principal axis (nlopt)
 - `sbplx` - Subplex algorithm (nlopt)
@@ -296,7 +296,7 @@ mixedlm supports multiple optimization algorithms:
 model = mlm.lmer(
     "y ~ x + (1 | g)",
     data,
-    control=mlm.LmerControl(optimizer="bobyqa")
+    control=mlm.LmerControl(optimizer="COBYQA")
 )
 
 # Try all available optimizers
