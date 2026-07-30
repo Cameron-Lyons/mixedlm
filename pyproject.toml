@@ -23,10 +23,8 @@ classifiers = [
 ]
 dependencies = [
     "numpy>=1.21",
-    "scipy>=1.8",
-    "narwhals>=1.0",
+    "scipy>=1.14",
     "pandas>=1.4",
-    "Py-BOBYQA>=1.4",
 ]
 
 [project.optional-dependencies]
@@ -38,7 +36,6 @@ dev = [
     "ruff>=0.1",
     "mypy>=1.0",
     "polars>=0.20",
-    "pandas>=1.4",
 ]
 plots = [
     "matplotlib>=3.5",
@@ -54,7 +51,6 @@ pandas = []
 docs = [
     "mkdocs>=1.5",
     "mkdocs-material>=9.5",
-    "mkdocstrings[python]>=0.24",
 ]
 
 [tool.maturin]

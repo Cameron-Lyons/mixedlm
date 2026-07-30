@@ -8,6 +8,7 @@ from mixedlm.estimation.optimizers import (
     available_optimizers,
     golden,
     has_bobyqa,
+    has_cobyqa,
     has_nlopt,
     nlminbwrap,
     run_optimizer,
@@ -37,12 +38,17 @@ class TestAvailableOptimizers:
         opts = available_optimizers()
         assert "L-BFGS-B" in opts
         assert "Nelder-Mead" in opts
+        assert "COBYQA" in opts
+        assert "bobyqa" in opts
 
 
 class TestHasOptionalDeps:
     def test_has_bobyqa_returns_bool(self):
         result = has_bobyqa()
         assert isinstance(result, bool)
+
+    def test_has_cobyqa_returns_true(self):
+        assert has_cobyqa() is True
 
     def test_has_nlopt_returns_bool(self):
         result = has_nlopt()
@@ -209,13 +215,37 @@ class TestRunOptimizer:
         assert result.x[1] <= 2.5 + 1e-6
 
 
-@pytest.mark.skipif(not has_bobyqa(), reason="pybobyqa not installed")
-class TestBobyqa:
+class TestCobyqa:
     def test_simple_optimization(self):
         bounds = [(-5, 5), (-5, 5)]
-        result = run_optimizer(quadratic, np.array([0.0, 0.0]), "bobyqa", bounds)
+        result = run_optimizer(quadratic, np.array([0.0, 0.0]), "COBYQA", bounds)
         assert result.success
         assert_allclose(result.x, [2.0, 3.0], atol=1e-2)
+
+    def test_legacy_name_and_options(self):
+        bounds = [(-5, 5), (-5, 5)]
+        options = {"rhobeg": 0.25, "rhoend": 1e-6, "maxfun": 1000}
+        with pytest.deprecated_call(match="use 'COBYQA'"):
+            result = run_optimizer(
+                quadratic,
+                np.array([0.0, 0.0]),
+                "bobyqa",
+                bounds,
+                options=options,
+            )
+        assert result.success
+        assert_allclose(result.x, [2.0, 3.0], atol=1e-2)
+
+    def test_rejects_unsupported_global_search(self):
+        bounds = [(-5, 5), (-5, 5)]
+        with pytest.raises(ValueError, match="does not support 'seek_global_minimum'"):
+            run_optimizer(
+                quadratic,
+                np.array([0.0, 0.0]),
+                "COBYQA",
+                bounds,
+                options={"seek_global_minimum": True},
+            )
 
 
 @pytest.mark.skipif(not has_nlopt(), reason="nlopt not installed")

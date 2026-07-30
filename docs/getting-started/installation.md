@@ -4,9 +4,8 @@
 
 - Python 3.10 or later
 - NumPy >= 1.21
-- SciPy >= 1.8
+- SciPy >= 1.14
 - pandas >= 1.4
-- Py-BOBYQA >= 1.4
 
 ## Basic Installation
 

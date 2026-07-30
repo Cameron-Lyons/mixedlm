@@ -121,26 +121,25 @@ Control objects configure optimization and convergence settings.
 
 ```python
 control = mlm.LmerControl(
-    optimizer="L-BFGS-B",
-    maxfun=10000,
-    tol=1e-6
+    optimizer="COBYQA",
+    maxiter=10000,
+    optCtrl={"final_tr_radius": 1e-6},
 )
 ```
 
 **Parameters:**
 
-- `optimizer`: Optimization algorithm. Options: `"L-BFGS-B"` (default), `"BFGS"`, `"Nelder-Mead"`, `"Powell"`, `"bobyqa"`, `"newuoa"`
-- `maxfun`: Maximum number of function evaluations
-- `tol`: Convergence tolerance
+- `optimizer`: Optimization algorithm. Options include `"COBYQA"` (default), `"L-BFGS-B"`, `"BFGS"`, `"Nelder-Mead"`, and `"Powell"`
+- `maxiter`: Maximum number of iterations
+- `optCtrl`: Optimizer-specific options, such as COBYQA's `final_tr_radius`
 
 ### GlmerControl
 
 ```python
 control = mlm.GlmerControl(
-    optimizer="L-BFGS-B",
-    maxfun=10000,
-    tol=1e-6,
-    nAGQ=1
+    optimizer="COBYQA",
+    maxiter=10000,
+    optCtrl={"final_tr_radius": 1e-6},
 )
 ```
 
@@ -213,9 +212,9 @@ print(model.summary())
 
 ```python
 control = mlm.GlmerControl(
-    optimizer="bobyqa",
-    maxfun=50000,
-    tol=1e-8
+    optimizer="COBYQA",
+    maxiter=50000,
+    optCtrl={"final_tr_radius": 1e-8},
 )
 
 model = mlm.glmer(

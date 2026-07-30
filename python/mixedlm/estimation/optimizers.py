@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import warnings
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -7,13 +8,6 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 from scipy.optimize import minimize
-
-try:
-    import pybobyqa
-
-    _HAS_BOBYQA = True
-except ImportError:
-    _HAS_BOBYQA = False
 
 try:
     import nlopt
@@ -32,6 +26,7 @@ SCIPY_OPTIMIZERS = {
     "SLSQP",
     "TNC",
     "COBYLA",
+    "COBYQA",
 }
 
 NLOPT_OPTIMIZERS = {
@@ -45,13 +40,20 @@ NLOPT_OPTIMIZERS = {
 
 NLOPT_OPTIMIZER_NAMES = set(NLOPT_OPTIMIZERS.keys())
 
-EXTERNAL_OPTIMIZERS = {"bobyqa"} | NLOPT_OPTIMIZER_NAMES
+COMPATIBILITY_OPTIMIZERS = {"bobyqa"}
+EXTERNAL_OPTIMIZERS = NLOPT_OPTIMIZER_NAMES
 
-ALL_OPTIMIZERS = SCIPY_OPTIMIZERS | EXTERNAL_OPTIMIZERS
+ALL_OPTIMIZERS = SCIPY_OPTIMIZERS | COMPATIBILITY_OPTIMIZERS | EXTERNAL_OPTIMIZERS
 
 
 def has_bobyqa() -> bool:
-    return _HAS_BOBYQA
+    """Return whether the legacy ``bobyqa`` compatibility alias is available."""
+    return True
+
+
+def has_cobyqa() -> bool:
+    """Return whether SciPy COBYQA is available."""
+    return True
 
 
 def has_nlopt() -> bool:
@@ -59,9 +61,7 @@ def has_nlopt() -> bool:
 
 
 def available_optimizers() -> list[str]:
-    opts = list(SCIPY_OPTIMIZERS)
-    if _HAS_BOBYQA:
-        opts.append("bobyqa")
+    opts = list(SCIPY_OPTIMIZERS | COMPATIBILITY_OPTIMIZERS)
     if _HAS_NLOPT:
         opts.extend(NLOPT_OPTIMIZER_NAMES)
     return sorted(opts)
@@ -94,48 +94,59 @@ def _convert_bounds_to_arrays(
     return lower, upper
 
 
-def _optimize_bobyqa(
+def _move_legacy_cobyqa_option(options: dict[str, Any], legacy_name: str, scipy_name: str) -> None:
+    if legacy_name not in options:
+        return
+    if scipy_name in options:
+        raise ValueError(f"Specify only one of '{legacy_name}' and '{scipy_name}'")
+    options[scipy_name] = options.pop(legacy_name)
+
+
+def _optimize_cobyqa(
     fun: Callable[[NDArray[np.floating]], float],
     x0: NDArray[np.floating],
     bounds: list[tuple[float | None, float | None]],
     options: dict[str, Any],
+    callback: Callable[[NDArray[np.floating]], None] | None = None,
 ) -> OptimizeResult:
-    if not _HAS_BOBYQA:
-        raise ImportError(
-            "pybobyqa is required for the 'bobyqa' optimizer. "
-            "Install it with: pip install Py-BOBYQA"
-        )
-
+    scipy_options = dict(options)
     lower, upper = _convert_bounds_to_arrays(bounds, len(x0))
 
-    maxfun = options.get("maxiter", 1000) * (len(x0) + 1)
-    rhobeg = options.get("rhobeg", 0.5)
-    rhoend = options.get("rhoend", 1e-4)
+    _move_legacy_cobyqa_option(scipy_options, "maxfun", "maxfev")
+    _move_legacy_cobyqa_option(scipy_options, "rhobeg", "initial_tr_radius")
+    _move_legacy_cobyqa_option(scipy_options, "rhoend", "final_tr_radius")
+    _move_legacy_cobyqa_option(scipy_options, "scaling_within_bounds", "scale")
 
-    seek_global_minimum = options.get("seek_global_minimum", False)
+    seek_global_minimum = scipy_options.pop("seek_global_minimum", False)
+    if seek_global_minimum:
+        raise ValueError(
+            "SciPy COBYQA does not support 'seek_global_minimum'; "
+            "use a global optimizer explicitly instead"
+        )
 
+    maxiter = int(scipy_options.setdefault("maxiter", 1000))
+    scipy_options.setdefault("maxfev", maxiter * (len(x0) + 1))
+    scipy_options.setdefault("initial_tr_radius", 0.5)
+    scipy_options.setdefault("final_tr_radius", 1e-6)
     has_finite_bounds = np.all(np.isfinite(lower)) and np.all(np.isfinite(upper))
-    scaling_within_bounds = options.get("scaling_within_bounds", has_finite_bounds)
+    scipy_options.setdefault("scale", bool(has_finite_bounds))
 
-    result = pybobyqa.solve(
+    result = minimize(
         fun,
         x0,
-        bounds=(lower, upper),
-        maxfun=maxfun,
-        rhobeg=rhobeg,
-        rhoend=rhoend,
-        seek_global_minimum=seek_global_minimum,
-        scaling_within_bounds=scaling_within_bounds,
+        method="COBYQA",
+        bounds=bounds,
+        options=scipy_options,
+        callback=callback,
     )
-
-    success = result.flag in (result.EXIT_SUCCESS, result.EXIT_SLOW_WARNING)
 
     return OptimizeResult(
         x=result.x,
-        fun=result.f,
-        success=success,
-        nit=result.nf,
-        message=result.msg,
+        fun=float(result.fun),
+        success=bool(result.success or np.isneginf(result.fun)),
+        nit=int(result.nit),
+        message=str(result.message),
+        nfev=int(result.nfev),
     )
 
 
@@ -603,7 +614,14 @@ def run_optimizer(
     method_lower = method.lower()
 
     if method_lower == "bobyqa":
-        return _optimize_bobyqa(fun, x0, bounds, options)
+        warnings.warn(
+            "The 'bobyqa' optimizer name is deprecated; use 'COBYQA'.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return _optimize_cobyqa(fun, x0, bounds, options, callback)
+    elif method_lower == "cobyqa":
+        return _optimize_cobyqa(fun, x0, bounds, options, callback)
     elif method_lower == "nlminb":
         return nlminbwrap(
             fun,

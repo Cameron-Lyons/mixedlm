@@ -15,6 +15,7 @@ from mixedlm.estimation.optimizers import (
     SCIPY_OPTIMIZERS,
     available_optimizers,
     has_bobyqa,
+    has_cobyqa,
     has_nlopt,
     run_optimizer,
 )
@@ -36,6 +37,7 @@ __all__ = [
     "pnls_step",
     "run_optimizer",
     "has_bobyqa",
+    "has_cobyqa",
     "has_nlopt",
     "available_optimizers",
     "SCIPY_OPTIMIZERS",

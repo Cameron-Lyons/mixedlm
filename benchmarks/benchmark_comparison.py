@@ -70,7 +70,7 @@ def generate_lmm_data(
     }
 
 
-def benchmark_mixedlm(data: dict, algorithm: str = "bobyqa") -> BenchmarkResult:
+def benchmark_mixedlm(data: dict, algorithm: str = "COBYQA") -> BenchmarkResult:
     """Benchmark mixedlm fitting."""
     from mixedlm import lFormula
 
@@ -265,10 +265,10 @@ def run_scaling_benchmark(
         data = generate_lmm_data(n_obs, n_groups)
 
         for _ in range(n_repeats):
-            result = benchmark_mixedlm(data, "bobyqa")
+            result = benchmark_mixedlm(data, "COBYQA")
             results.append(result)
             if not np.isnan(result.fit_time_ms):
-                print(f"  mixedlm (bobyqa): {result.fit_time_ms:.2f}ms")
+                print(f"  mixedlm (COBYQA): {result.fit_time_ms:.2f}ms")
 
         result = benchmark_lme4(data)
         results.append(result)
@@ -292,7 +292,7 @@ def run_algorithm_comparison(n_obs: int = 1000, n_groups: int = 50) -> list[Benc
     data = generate_lmm_data(n_obs, n_groups)
     results = []
 
-    algorithms = ["bobyqa", "L-BFGS-B", "Nelder-Mead"]
+    algorithms = ["COBYQA", "L-BFGS-B", "Nelder-Mead"]
 
     for algo in algorithms:
         result = benchmark_mixedlm(data, algo)

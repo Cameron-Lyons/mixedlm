@@ -21,15 +21,14 @@ SCIPY_OPTIMIZERS = [
     "BFGS",
     "TNC",
     "SLSQP",
+    "COBYQA",
 ]
 
 
 def _get_available_optimizers() -> list[str]:
-    from mixedlm.estimation.optimizers import has_bobyqa, has_nlopt
+    from mixedlm.estimation.optimizers import has_nlopt
 
     optimizers = list(SCIPY_OPTIMIZERS)
-    if has_bobyqa():
-        optimizers.append("bobyqa")
     if has_nlopt():
         optimizers.extend(
             [
