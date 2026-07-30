@@ -1,24 +1,17 @@
-# ruff: noqa: F401
+from importlib.util import find_spec
+
 import numpy as np
 import pandas as pd
 import pytest
 from mixedlm import (
-    anova,
     families,
-    findbars,
     glmer,
     glmerControl,
-    is_mixed_formula,
     lmer,
     lmerControl,
     nlme,
     nlmer,
-    nobars,
-    parse_formula,
-    subbars,
 )
-from mixedlm.formula.terms import InteractionTerm, VariableTerm
-from mixedlm.matrices import build_model_matrices
 from mixedlm.models.control import GlmerControl, LmerControl
 
 from tests._lmer_data import CBPP, SLEEPSTUDY
@@ -837,12 +830,7 @@ class TestDfResidual:
         assert result.df_residual() == n - p
 
 
-try:
-    import matplotlib  # noqa: F401
-
-    HAS_MATPLOTLIB = True
-except ImportError:
-    HAS_MATPLOTLIB = False
+HAS_MATPLOTLIB = find_spec("matplotlib") is not None
 
 
 @pytest.mark.skipif(not HAS_MATPLOTLIB, reason="matplotlib not installed")

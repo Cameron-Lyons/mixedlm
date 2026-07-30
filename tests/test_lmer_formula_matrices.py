@@ -1,27 +1,12 @@
-# ruff: noqa: F401
 import numpy as np
 import pandas as pd
-import pytest
 from mixedlm import (
-    anova,
-    families,
-    findbars,
-    glmer,
-    glmerControl,
-    is_mixed_formula,
-    lmer,
-    lmerControl,
-    nlme,
-    nlmer,
-    nobars,
     parse_formula,
-    subbars,
 )
 from mixedlm.formula.terms import InteractionTerm, VariableTerm
 from mixedlm.matrices import build_model_matrices
-from mixedlm.models.control import GlmerControl, LmerControl
 
-from tests._lmer_data import CBPP, SLEEPSTUDY
+from tests._lmer_data import SLEEPSTUDY
 
 
 class TestFormulaParser:

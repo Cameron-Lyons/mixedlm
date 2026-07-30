@@ -13,6 +13,7 @@ if TYPE_CHECKING:
 
 from mixedlm.estimation.laplace import GLMMOptimizer, _build_lambda, _count_theta
 from mixedlm.families.base import Family
+from mixedlm.families.negative_binomial import NegativeBinomial
 from mixedlm.formula.terms import Formula
 from mixedlm.matrices.design import ModelMatrices, build_model_matrices
 from mixedlm.models.lmer_types import (
@@ -1597,9 +1598,9 @@ class GlmerResult(MerResultMixin):
         elif family_name == "Poisson":
             mu = np.clip(mu, 1e-6, 1e15)
             y_sim = np.random.poisson(mu).astype(np.float64)
-        elif family_name == "NegativeBinomial":
+        elif isinstance(self.family, NegativeBinomial):
             mu = np.clip(mu, 1e-6, 1e10)
-            theta = self.family.theta  # type: ignore[attr-defined]
+            theta = self.family.theta
             y_sim = np.random.negative_binomial(theta, theta / (mu + theta)).astype(np.float64)
         elif family_name == "Gamma":
             mu = np.clip(mu, 1e-6, 1e10)
@@ -1780,4 +1781,6 @@ class GlmerResult(MerResultMixin):
         )
 
 
-from mixedlm.models.glmer_fit import GlmerMod, glmer, glmer_nb  # noqa: E402,F401
+from mixedlm.models.glmer_fit import GlmerMod as GlmerMod
+from mixedlm.models.glmer_fit import glmer as glmer
+from mixedlm.models.glmer_fit import glmer_nb as glmer_nb

@@ -300,7 +300,7 @@ def emmeans(
     specs: str | list[str],
     _by: str | list[str] | None = None,
     at: dict[str, Any] | None = None,
-    cov_reduce: Callable[[pd.Series], float] = np.mean,  # type: ignore[type-arg]
+    cov_reduce: Callable[[pd.Series], float] = np.mean,
     type: str = "response",
     level: float = 0.95,
 ) -> Emmeans:
@@ -393,12 +393,12 @@ def emmeans(
     var_em = np.diag(L @ vcov @ L.T)
     se_em = np.sqrt(np.maximum(var_em, 0))
 
-    is_glmm = hasattr(model, "family") and model.family is not None
+    family = getattr(model, "family", None)
 
-    if is_glmm and type == "response":
+    if family is not None and type == "response":
         eta = em_values
-        mu = model.family.link.inverse(eta)  # type: ignore[union-attr]
-        deriv = model.family.link.deriv(mu)  # type: ignore[union-attr]
+        mu = family.link.inverse(eta)
+        deriv = family.link.deriv(mu)
         se_response = se_em * np.abs(deriv)
         em_values = mu
         se_em = se_response

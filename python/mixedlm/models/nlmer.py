@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import numpy as np
 from numpy.typing import NDArray
@@ -931,9 +931,10 @@ class NlmerMod:
         if random_params is None:
             self.random_params = list(range(model.n_params))
         elif isinstance(random_params[0], str):
-            self.random_params = [model.param_names.index(p) for p in random_params]  # type: ignore
+            names = cast(list[str], random_params)
+            self.random_params = [model.param_names.index(p) for p in names]
         else:
-            self.random_params = list(random_params)  # type: ignore
+            self.random_params = list(cast(list[int], random_params))
 
         self.start_phi: NDArray[np.floating]
         if start is not None:

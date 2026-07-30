@@ -170,7 +170,7 @@ def benchmark_riemannian_reml(data: dict, max_iter: int = 100) -> dict:
 
 def run_benchmark(n_obs: int = 500, n_groups1: int = 20, n_groups2: int = 30, n_repeats: int = 5):
     """Run benchmarks for all REML algorithms."""
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print("REML Algorithm Benchmark")
     print(f"Problem size: n={n_obs}, groups1={n_groups1}, groups2={n_groups2}")
     print("=" * 70)

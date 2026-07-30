@@ -1,11 +1,10 @@
 """Tests for polars DataFrame support."""
 
+import mixedlm as mlm
 import numpy as np
 import pytest
 
 pl = pytest.importorskip("polars")
-
-import mixedlm as mlm  # noqa: E402
 
 
 @pytest.fixture
@@ -116,7 +115,7 @@ class TestPolarsDataTypes:
         data = pl.DataFrame(
             {
                 "y": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
-                "x": [1, 2, 3, 4, 5, 6],  # int
+                "x": [1, 2, 3, 4, 5, 6],
                 "group": ["A", "A", "B", "B", "C", "C"],
             }
         )

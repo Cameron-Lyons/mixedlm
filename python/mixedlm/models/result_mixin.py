@@ -31,6 +31,9 @@ class MerResultMixin:
     def fixef(self) -> dict[str, float]:
         raise NotImplementedError
 
+    def _compute_condVar(self) -> dict[str, dict[str, NDArray[np.floating]]]:
+        raise NotImplementedError
+
     def _fixef_dict(self, beta: NDArray[np.floating]) -> dict[str, float]:
         return dict(zip(self.matrices.fixed_names, beta, strict=False))
 
@@ -64,7 +67,7 @@ class MerResultMixin:
         values = self._ranef_values_from_u(u)
         if not condVar:
             return values
-        cond_var = self._compute_condVar()  # type: ignore[attr-defined]
+        cond_var = self._compute_condVar()
         return RanefResult(values=values, condVar=cond_var)
 
     def _model_matrix(
