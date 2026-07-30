@@ -9,12 +9,6 @@ from numpy.testing import assert_allclose
 
 from tests._lmer_data import CBPP
 
-# These fixtures use canonical lme4 benchmark datasets and lock the current
-# numerical contract across outputs that users commonly compare between
-# mixed-model implementations. The sleepstudy and penicillin LMM variance
-# components currently land on singular fits. Boundary parameters are compared
-# with tolerances that allow equivalent trust-region solutions at effectively
-# zero variance while still detecting statistically meaningful drift.
 _BOUNDARY_FLOAT_ATOL = 1e-8
 _PENICILLIN_FLOAT_ATOL = 2e-5
 _CBPP_FLOAT_ATOL = 1e-6

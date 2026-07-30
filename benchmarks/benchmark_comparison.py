@@ -13,12 +13,8 @@ Requirements:
 """
 
 import json
-import subprocess
-import sys
 import time
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Any
 
 import numpy as np
 
@@ -77,11 +73,13 @@ def benchmark_mixedlm(data: dict, algorithm: str = "COBYQA") -> BenchmarkResult:
     try:
         import pandas as pd
 
-        df = pd.DataFrame({
-            "y": data["y"],
-            "x1": data["x"][:, 1] if data["n_fixed"] > 1 else np.zeros(data["n_obs"]),
-            "group": data["group"].astype(str),
-        })
+        df = pd.DataFrame(
+            {
+                "y": data["y"],
+                "x1": data["x"][:, 1] if data["n_fixed"] > 1 else np.zeros(data["n_obs"]),
+                "group": data["group"].astype(str),
+            }
+        )
 
         formula = "y ~ x1 + (1 | group)" if data["n_fixed"] > 1 else "y ~ 1 + (1 | group)"
 
@@ -127,7 +125,7 @@ def benchmark_lme4(data: dict) -> BenchmarkResult:
 
         numpy2ri.activate()
 
-        lme4 = importr("lme4")
+        importr("lme4")
 
         ro.r.assign("y", data["y"])
         ro.r.assign("x1", data["x"][:, 1] if data["n_fixed"] > 1 else np.zeros(data["n_obs"]))
@@ -258,7 +256,7 @@ def run_scaling_benchmark(
     results = []
 
     for n_obs, n_groups in sizes:
-        print(f"\n{'='*60}")
+        print(f"\n{'=' * 60}")
         print(f"Benchmarking: n_obs={n_obs}, n_groups={n_groups}")
         print("=" * 60)
 
@@ -285,7 +283,7 @@ def run_scaling_benchmark(
 
 def run_algorithm_comparison(n_obs: int = 1000, n_groups: int = 50) -> list[BenchmarkResult]:
     """Compare different REML algorithms available in mixedlm."""
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"Algorithm Comparison: n_obs={n_obs}, n_groups={n_groups}")
     print("=" * 60)
 
@@ -317,7 +315,10 @@ def print_summary(results: list[BenchmarkResult]):
     for r in results:
         time_str = f"{r.fit_time_ms:.2f}" if not np.isnan(r.fit_time_ms) else "N/A"
         status = "✓" if r.converged else "✗"
-        print(f"{r.package:<20} {r.algorithm:<15} {r.n_obs:>8} {r.n_groups:>8} {time_str:>12} {status}")
+        print(
+            f"{r.package:<20} {r.algorithm:<15} {r.n_obs:>8} "
+            f"{r.n_groups:>8} {time_str:>12} {status}"
+        )
 
 
 def save_results(results: list[BenchmarkResult], path: str = "benchmark_results.json"):

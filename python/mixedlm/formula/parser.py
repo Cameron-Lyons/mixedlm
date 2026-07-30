@@ -106,14 +106,20 @@ class Lexer:
                 num = ""
                 next_ch = self.peek()
                 while next_ch is not None and next_ch.isdigit():
-                    num += self.advance()  # type: ignore[operator]
+                    advanced = self.advance()
+                    if advanced is None:
+                        break
+                    num += advanced
                     next_ch = self.peek()
                 yield Token(TokenType.NUMBER, num, start_pos)
             elif ch.isalpha() or ch == "_" or ch == ".":
                 ident = ""
                 next_ch = self.peek()
                 while next_ch is not None and (next_ch.isalnum() or next_ch in "_."):
-                    ident += self.advance()  # type: ignore[operator]
+                    advanced = self.advance()
+                    if advanced is None:
+                        break
+                    ident += advanced
                     next_ch = self.peek()
                 yield Token(TokenType.IDENTIFIER, ident, start_pos)
             else:

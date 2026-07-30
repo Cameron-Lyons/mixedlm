@@ -1,9 +1,3 @@
-# Julia benchmark script for MixedModels.jl comparison
-# Run with: julia benchmark_julia.jl
-#
-# Requires MixedModels.jl:
-#   using Pkg; Pkg.add(["MixedModels", "DataFrames", "Random", "BenchmarkTools"])
-
 using MixedModels
 using DataFrames
 using Random
@@ -31,14 +25,12 @@ end
 function benchmark_fit(df::DataFrame; n_evals::Int=10)
     formula = @formula(y ~ 1 + x1 + (1 | group))
 
-    # Warmup
     fit(MixedModel, formula, df; REML=true)
 
-    # Benchmark
     times = Float64[]
     for _ in 1:n_evals
         t = @elapsed fit(MixedModel, formula, df; REML=true)
-        push!(times, t * 1000)  # Convert to ms
+        push!(times, t * 1000)
     end
 
     return times
@@ -88,7 +80,6 @@ function run_benchmarks()
         end
     end
 
-    # Summary table
     println("\n" * "=" ^ 70)
     println("SUMMARY")
     println("=" ^ 70)
@@ -108,10 +99,8 @@ function run_benchmarks()
     return results
 end
 
-# Export to JSON for comparison with Python benchmarks
 function save_results(results, filename="julia_benchmark_results.json")
     open(filename, "w") do f
-        # Simple JSON-like output (Julia's JSON.jl would be better)
         println(f, "{")
         entries = collect(results)
         for (i, (key, data)) in enumerate(entries)

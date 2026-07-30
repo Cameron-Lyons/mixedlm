@@ -671,7 +671,7 @@ def _simulate_glmer(result: GlmerResult) -> NDArray[np.floating]:
 
 
 def bootMer(
-    model: LmerResult | GlmerResult,
+    model: LmerResult | GlmerResult | NlmerResult,
     nsim: int = 1000,
     seed: int | None = None,
     n_jobs: int = 1,
@@ -753,34 +753,37 @@ def bootMer(
             f"Bootstrap type '{bootstrap_type}' not supported. Only 'parametric' is available."
         )
 
-    if hasattr(model, "isLMM") and model.isLMM():
+    from mixedlm.models.glmer import GlmerResult
+    from mixedlm.models.lmer import LmerResult
+    from mixedlm.models.nlmer import NlmerResult
+
+    if isinstance(model, LmerResult):
         return bootstrap_lmer(
-            model,  # type: ignore[arg-type]
+            model,
             n_boot=nsim,
             seed=seed,
             n_jobs=n_jobs,
             verbose=verbose,
         )
-    elif hasattr(model, "isGLMM") and model.isGLMM():
+    if isinstance(model, GlmerResult):
         return bootstrap_glmer(
-            model,  # type: ignore[arg-type]
+            model,
             n_boot=nsim,
             seed=seed,
             n_jobs=n_jobs,
             verbose=verbose,
         )
-    elif hasattr(model, "isNLMM") and model.isNLMM():
+    if isinstance(model, NlmerResult):
         return bootstrap_nlmer(
-            model,  # type: ignore[arg-type]
+            model,
             n_boot=nsim,
             seed=seed,
             verbose=verbose,
         )
-    else:
-        raise TypeError(
-            f"Model type {type(model).__name__} not supported. "
-            "Use LmerResult, GlmerResult, or NlmerResult."
-        )
+    raise TypeError(
+        f"Model type {type(model).__name__} not supported. "
+        "Use LmerResult, GlmerResult, or NlmerResult."
+    )
 
 
 @dataclass

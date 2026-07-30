@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Union
+from typing import TYPE_CHECKING, Union, cast
 
 import numpy as np
 import pandas as pd
@@ -138,7 +138,7 @@ def ranef(model: MerMod, condVar: bool = False) -> dict[str, dict[str, NDArray[n
     {'group': {'(Intercept)': array([...])}}
     """
     if hasattr(model, "isNLMM") and model.isNLMM():
-        return model.ranef()  # type: ignore[return-value]
+        return cast(dict[str, dict[str, NDArray[np.floating]]], model.ranef())
     from mixedlm.models.glmer import GlmerResult
     from mixedlm.models.lmer import LmerResult, RanefResult
 
@@ -146,8 +146,8 @@ def ranef(model: MerMod, condVar: bool = False) -> dict[str, dict[str, NDArray[n
         result = model.ranef(condVar=condVar)
         if isinstance(result, RanefResult):
             return result.values
-        return result  # type: ignore[return-value]
-    return model.ranef()  # type: ignore[return-value]
+        return result
+    return model.ranef()
 
 
 def VarCorr(model: MerMod):
@@ -778,8 +778,10 @@ def fortify(
         if len(fixed_contrib) == len(result):
             result[".fixed"] = fixed_contrib
 
-    if hasattr(model, "isGLMM") and model.isGLMM() and hasattr(model, "fitted"):
-        result[".mu"] = model.fitted(type="response")  # type: ignore[call-arg]
+    from mixedlm.models.glmer import GlmerResult
+
+    if isinstance(model, GlmerResult):
+        result[".mu"] = model.fitted(type="response")
 
     return result
 
@@ -963,13 +965,13 @@ def vcconv(
             cov = L @ L.T * sigma**2
 
             if to == "varcov":
-                var = np.diag(cov)
+                diag_var = np.diag(cov)
                 cov_offdiag = []
                 for i in range(n_terms):
                     for j in range(i + 1, n_terms):
                         cov_offdiag.append(cov[i, j])
                 result[group] = {
-                    "var": var.tolist(),
+                    "var": diag_var.tolist(),
                     "cov": cov_offdiag,
                     "terms": struct.term_names,
                 }
@@ -997,9 +999,9 @@ def vcconv(
             theta_idx += n_terms
 
             if to == "varcov":
-                var = (theta_block * sigma) ** 2  # type: ignore[assignment]
+                independent_var = (theta_block * sigma) ** 2
                 result[group] = {
-                    "var": var.tolist(),
+                    "var": independent_var.tolist(),
                     "cov": [],
                     "terms": struct.term_names,
                 }
@@ -1420,7 +1422,6 @@ def scale_vcov(
     if scale is not None:
         scale_full = _expand(scale, "scale", 1.0)
 
-    # Jacobian for mapping transformed coefficients to original scale.
     transform = np.diag(scale_full)
 
     if center is not None:

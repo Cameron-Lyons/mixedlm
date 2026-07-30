@@ -217,7 +217,7 @@ def get_contrast_matrix(
 
 
 def apply_contrasts(
-    col: pd.Series,  # type: ignore[type-arg]
+    col: pd.Series,
     name: str,
     contrast_matrix: NDArray[np.floating],
     categories: list,

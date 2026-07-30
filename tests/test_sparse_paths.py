@@ -44,7 +44,7 @@ def test_adaptive_start_uses_sparse_random_design_without_densifying(
     beta, sigma = optimizer._fit_ols()
     residuals = optimizer._compute_ols_residuals(beta)
 
-    def fail_toarray(self):  # noqa: ANN001
+    def fail_toarray(self):
         raise AssertionError("adaptive start should not densify sparse random-design blocks")
 
     monkeypatch.setattr(sparse.csc_matrix, "toarray", fail_toarray)
@@ -61,7 +61,7 @@ def test_kenward_roger_keeps_large_observation_covariance_sparse(
     model = lmer("y ~ x + (1 | group1) + (1 | group2)", data, REML=True)
     original_toarray = sparse.csc_matrix.toarray
 
-    def reject_large_observation_covariance(self, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003
+    def reject_large_observation_covariance(self, *args, **kwargs):
         if self.shape[0] == model.matrices.n_obs and self.shape[1] == model.matrices.n_obs:
             raise AssertionError(
                 "Kenward-Roger should not densify the n x n observation covariance"

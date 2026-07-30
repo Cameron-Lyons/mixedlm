@@ -180,14 +180,14 @@ def pnls_step(
 
         if use_parallel:
             with ThreadPoolExecutor(max_workers=n_jobs) as executor:
-                futures = [
+                residual_futures = [
                     executor.submit(
                         _compute_group_resid_grad, g, groups, x, y, phi, b, random_params, model
                     )
                     for g in range(n_groups)
                 ]
-                for future in futures:
-                    g, mask, resid_g, grad_g = future.result()
+                for residual_future in residual_futures:
+                    g, mask, resid_g, grad_g = residual_future.result()
                     resid_total[mask] = resid_g
                     grad_total[mask, :] = grad_g
         else:
@@ -217,9 +217,9 @@ def pnls_step(
 
         if use_parallel and Psi_chol is not None:
             with ThreadPoolExecutor(max_workers=n_jobs) as executor:
-                futures = [
+                update_futures = [
                     executor.submit(
-                        _update_group_random_effects,  # type: ignore[arg-type]
+                        _update_group_random_effects,
                         g,
                         groups,
                         x,
@@ -233,8 +233,8 @@ def pnls_step(
                     )
                     for g in range(n_groups)
                 ]
-                for future in futures:
-                    result = future.result()
+                for update_future in update_futures:
+                    result = update_future.result()
                     b_new[result[0], :] = result[1]
         else:
             sigma2 = sigma**2
@@ -270,9 +270,9 @@ def pnls_step(
     rss: float
     if use_parallel:
         with ThreadPoolExecutor(max_workers=n_jobs) as executor:
-            futures = [
+            rss_futures = [
                 executor.submit(
-                    _compute_group_rss,  # type: ignore[arg-type]
+                    _compute_group_rss,
                     g,
                     groups,
                     x,
@@ -284,7 +284,7 @@ def pnls_step(
                 )
                 for g in range(n_groups)
             ]
-            rss = float(sum(future.result() for future in futures))  # type: ignore[misc]
+            rss = float(sum(future.result() for future in rss_futures))
     else:
         rss = sum(
             _compute_group_rss(g, groups, x, y, phi_new, b_new, random_params, model)
@@ -326,9 +326,9 @@ def nlmm_deviance(
     rss: float
     if use_parallel:
         with ThreadPoolExecutor(max_workers=n_jobs) as executor:
-            futures = [
+            rss_futures = [
                 executor.submit(
-                    _compute_group_rss,  # type: ignore[arg-type]
+                    _compute_group_rss,
                     g,
                     groups,
                     x,
@@ -340,7 +340,7 @@ def nlmm_deviance(
                 )
                 for g in range(n_groups)
             ]
-            rss = float(sum(future.result() for future in futures))  # type: ignore[misc]
+            rss = float(sum(future.result() for future in rss_futures))
     else:
         rss = sum(
             _compute_group_rss(g, groups, x, y, phi_new, b_new, random_params, model)

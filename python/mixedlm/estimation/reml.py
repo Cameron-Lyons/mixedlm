@@ -12,7 +12,7 @@ from mixedlm.estimation.optimizers import run_optimizer
 from mixedlm.matrices.design import ModelMatrices, RandomEffectStructure
 
 try:
-    import mixedlm._rust  # noqa: F401
+    from mixedlm import _rust as _rust
 
     _HAS_RUST = True
 except ImportError:

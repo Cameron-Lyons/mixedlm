@@ -124,12 +124,12 @@ def allFit(
 
         try:
             ctrl = lmerControl(optimizer=opt_name)
-            result = lmer(formula, data, REML=REML, control=ctrl, verbose=0, **kwargs)
-            results[opt_name] = result
+            fit_result = lmer(formula, data, REML=REML, control=ctrl, verbose=0, **kwargs)
+            results[opt_name] = fit_result
 
             if verbose >= 1:
-                status = "OK" if result.converged else "FAILED"
-                print(f"{status} (deviance={result.deviance:.4f}, iter={result.n_iter})")
+                status = "OK" if fit_result.converged else "FAILED"
+                print(f"{status} (deviance={fit_result.deviance:.4f}, iter={fit_result.n_iter})")
 
         except Exception as e:
             results[opt_name] = e
@@ -138,8 +138,8 @@ def allFit(
 
     summary_data = []
     for opt_name in results:
-        result = results[opt_name]  # type: ignore[assignment]
-        if isinstance(result, Exception):
+        result_or_error = results[opt_name]
+        if isinstance(result_or_error, Exception):
             summary_data.append(
                 {
                     "optimizer": opt_name,
@@ -148,18 +148,18 @@ def allFit(
                     "iterations": np.nan,
                     "gradient_norm": np.nan,
                     "at_boundary": np.nan,
-                    "error": str(result),
+                    "error": str(result_or_error),
                 }
             )
         else:
             summary_data.append(
                 {
                     "optimizer": opt_name,
-                    "converged": result.converged,
-                    "deviance": result.deviance,
-                    "iterations": result.n_iter,
-                    "gradient_norm": result.gradient_norm or np.nan,
-                    "at_boundary": result.at_boundary,
+                    "converged": result_or_error.converged,
+                    "deviance": result_or_error.deviance,
+                    "iterations": result_or_error.n_iter,
+                    "gradient_norm": result_or_error.gradient_norm or np.nan,
+                    "at_boundary": result_or_error.at_boundary,
                     "error": None,
                 }
             )
