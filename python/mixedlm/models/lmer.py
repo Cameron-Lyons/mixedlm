@@ -334,7 +334,10 @@ class LmerResult(MerResultMixin):
         include_re = re_form != "NA" and re_form != "~0"
 
         if newdata is None:
-            pred = self._fitted_values.copy()
+            if include_re:
+                pred = self._fitted_values.copy()
+            else:
+                pred = self.matrices.X @ self.beta + self.matrices.offset
             if not se_fit and interval == "none":
                 return pred
             X = self.matrices.X
