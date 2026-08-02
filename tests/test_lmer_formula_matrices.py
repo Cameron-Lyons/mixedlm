@@ -5,6 +5,7 @@ from mixedlm import (
 )
 from mixedlm.formula.terms import InteractionTerm, VariableTerm
 from mixedlm.matrices import build_model_matrices
+from mixedlm.utils.dataframe import concat_columns_as_string
 
 from tests._lmer_data import SLEEPSTUDY
 
@@ -110,6 +111,18 @@ class TestModelMatrices:
         assert matrices.n_random == 36
         assert len(matrices.random_structures) == 1
         assert matrices.random_structures[0].n_terms == 2
+
+    def test_nested_group_labels_preserve_mixed_values(self) -> None:
+        data = pd.DataFrame(
+            {
+                "school": [1, 1, 2, 2],
+                "classroom": pd.Categorical(["A", "B", "A", "B"]),
+            }
+        )
+
+        labels = concat_columns_as_string(data, ["school", "classroom"])
+
+        np.testing.assert_array_equal(labels, ["1/A", "1/B", "2/A", "2/B"])
 
     def test_star_fixed_matrix_includes_main_effect_columns(self) -> None:
         data = pd.DataFrame(
