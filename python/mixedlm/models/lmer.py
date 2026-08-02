@@ -1672,6 +1672,9 @@ class LmerResult(MerResultMixin):
         use_re: bool = True,
         re_form: str | None = None,
     ) -> NDArray[np.floating]:
+        if nsim < 1:
+            raise ValueError("nsim must be at least 1")
+
         if seed is not None:
             np.random.seed(seed)
 
@@ -1683,11 +1686,17 @@ class LmerResult(MerResultMixin):
 
         include_re = use_re and q > 0 and re_form not in ("~0", "NA")
 
-        try:
-            from mixedlm._rust import compute_zu, simulate_re_batch
+        if not include_re:
+            fixed_part = self.matrices.X @ self.beta
+            result = np.random.randn(nsim, n).T
+            result *= self.sigma
+            result += fixed_part[:, None]
+            return result
 
-            if include_re and nsim > 1:
-                return self._simulate_batch_rust(nsim, seed, simulate_re_batch, compute_zu)
+        try:
+            from mixedlm._rust import simulate_re_batch
+
+            return self._simulate_batch_rust(nsim, seed, simulate_re_batch)
         except ImportError:
             pass
 
@@ -1702,7 +1711,6 @@ class LmerResult(MerResultMixin):
         nsim: int,
         seed: int | None,
         simulate_re_batch: Any,
-        compute_zu: Any,
     ) -> NDArray[np.floating]:
         n = self.matrices.n_obs
 
@@ -1724,12 +1732,11 @@ class LmerResult(MerResultMixin):
 
         Z = self.matrices.Z
 
-        result = np.zeros((n, nsim), dtype=np.float64)
-        for i in range(nsim):
-            random_part = Z @ u_batch[i]
-            noise = np.random.randn(n) * self.sigma
-            result[:, i] = fixed_part + random_part + noise
-
+        result = np.asarray(Z @ u_batch.T, dtype=np.float64)
+        result += fixed_part[:, None]
+        noise = np.random.randn(nsim, n).T
+        noise *= self.sigma
+        result += noise
         return result
 
     def _simulate_once(
