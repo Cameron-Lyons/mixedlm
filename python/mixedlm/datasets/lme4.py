@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+from functools import lru_cache, wraps
+
 import pandas as pd
 
 
@@ -15,6 +18,23 @@ def _ensure_object_strings(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _copy_cached_dataset(
+    loader: Callable[[], pd.DataFrame],
+) -> Callable[[], pd.DataFrame]:
+    """Cache a private dataset prototype and return an independent copy."""
+
+    @lru_cache(maxsize=1)
+    def prototype() -> pd.DataFrame:
+        return loader()
+
+    @wraps(loader)
+    def load_copy() -> pd.DataFrame:
+        return prototype().copy(deep=True)
+
+    return load_copy
+
+
+@_copy_cached_dataset
 def load_sleepstudy() -> pd.DataFrame:
     """Load the sleepstudy dataset from lme4.
 
@@ -255,6 +275,7 @@ def load_sleepstudy() -> pd.DataFrame:
     return _ensure_object_strings(pd.DataFrame(data))
 
 
+@_copy_cached_dataset
 def load_cbpp() -> pd.DataFrame:
     """Load the cbpp dataset from lme4.
 
@@ -472,6 +493,7 @@ def load_cbpp() -> pd.DataFrame:
     return _ensure_object_strings(pd.DataFrame(data))
 
 
+@_copy_cached_dataset
 def load_dyestuff() -> pd.DataFrame:
     """Load the Dyestuff dataset from lme4.
 
@@ -548,6 +570,7 @@ def load_dyestuff() -> pd.DataFrame:
     return _ensure_object_strings(pd.DataFrame(data))
 
 
+@_copy_cached_dataset
 def load_dyestuff2() -> pd.DataFrame:
     """Load the Dyestuff2 dataset from lme4.
 
@@ -608,6 +631,7 @@ def load_dyestuff2() -> pd.DataFrame:
     return _ensure_object_strings(pd.DataFrame(data))
 
 
+@_copy_cached_dataset
 def load_penicillin() -> pd.DataFrame:
     """Load the Penicillin dataset from lme4.
 
@@ -812,6 +836,7 @@ def load_penicillin() -> pd.DataFrame:
     return _ensure_object_strings(pd.DataFrame(data))
 
 
+@_copy_cached_dataset
 def load_cake() -> pd.DataFrame:
     """Load the cake dataset from lme4.
 
@@ -1145,6 +1170,7 @@ def load_cake() -> pd.DataFrame:
     return _ensure_object_strings(pd.DataFrame(data))
 
 
+@_copy_cached_dataset
 def load_pastes() -> pd.DataFrame:
     """Load the Pastes dataset from lme4.
 
@@ -1264,6 +1290,7 @@ def load_pastes() -> pd.DataFrame:
     return _ensure_object_strings(pd.DataFrame(data))
 
 
+@_copy_cached_dataset
 def load_insteval() -> pd.DataFrame:
     """Load a subset of the InstEval dataset from lme4.
 
@@ -1631,6 +1658,7 @@ def load_insteval() -> pd.DataFrame:
     )
 
 
+@_copy_cached_dataset
 def load_arabidopsis() -> pd.DataFrame:
     """Load the Arabidopsis dataset from lme4.
 
@@ -1712,6 +1740,7 @@ def load_arabidopsis() -> pd.DataFrame:
     return _ensure_object_strings(pd.DataFrame(data))
 
 
+@_copy_cached_dataset
 def load_grouseticks() -> pd.DataFrame:
     """Load the grouseticks dataset from lme4.
 
@@ -1803,6 +1832,7 @@ def load_grouseticks() -> pd.DataFrame:
     return _ensure_object_strings(pd.DataFrame(data))
 
 
+@_copy_cached_dataset
 def load_verbagg() -> pd.DataFrame:
     """Load the VerbAgg dataset from lme4.
 
