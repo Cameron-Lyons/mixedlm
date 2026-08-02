@@ -136,6 +136,103 @@ class TestPredict:
         assert len(pred) == 1
         assert 0 <= pred[0] <= 1
 
+    def test_lmer_predict_newdata_does_not_require_response(self):
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+        new_data = SLEEPSTUDY.drop(columns="Reaction")
+
+        predicted = result.predict(newdata=new_data)
+
+        assert np.allclose(predicted, result.fitted())
+
+    def test_glmer_predict_newdata_does_not_require_response(self):
+        result = glmer("y ~ period + (1 | herd)", CBPP, family=families.Binomial())
+        new_data = CBPP.drop(columns="y")
+
+        predicted = result.predict(newdata=new_data)
+
+        assert np.allclose(predicted, result.fitted())
+
+    def test_predict_categorical_subset_uses_fitted_levels(self):
+        data = pd.DataFrame(
+            {
+                "y": [1.0, 3.0, 2.0, 4.0, 3.0, 5.0, 4.0, 6.0, 5.0, 7.0, 6.0, 8.0],
+                "treatment": ["A", "B"] * 6,
+                "subject": np.repeat([f"s{i}" for i in range(6)], 2),
+            }
+        )
+        result = lmer(
+            "y ~ treatment + (1 | subject)",
+            data,
+            contrasts={"treatment": "sum"},
+        )
+        expected = result.predict(data, re_form="NA")[data["treatment"] == "B"]
+        new_data = data.loc[data["treatment"] == "B", ["treatment", "subject"]]
+
+        predicted = result.predict(new_data, re_form="NA")
+
+        assert np.allclose(predicted, expected)
+
+    def test_predict_custom_contrast_schema_is_immutable(self):
+        data = pd.DataFrame(
+            {
+                "y": np.arange(18.0),
+                "treatment": ["A", "B", "C"] * 6,
+                "subject": np.repeat([f"s{i}" for i in range(6)], 3),
+            }
+        )
+        custom = np.array([[-1.0, -1.0], [1.0, 0.0], [0.0, 1.0]])
+        result = lmer(
+            "y ~ treatment + (1 | subject)",
+            data,
+            contrasts={"treatment": custom},
+        )
+        expected = result.predict(data, re_form="NA")[data["treatment"] == "C"]
+        custom[:] = 0.0
+        new_data = data.loc[data["treatment"] == "C", ["treatment"]]
+
+        predicted = result.predict(new_data, re_form="NA")
+
+        assert np.allclose(predicted, expected)
+
+    def test_predict_interaction_subset_uses_fitted_levels(self):
+        data = pd.DataFrame(
+            {
+                "y": np.arange(1.0, 17.0),
+                "a": ["A", "A", "B", "B"] * 4,
+                "b": ["X", "Y", "X", "Y"] * 4,
+                "subject": np.repeat([f"s{i}" for i in range(8)], 2),
+            }
+        )
+        result = lmer("y ~ a * b + (1 | subject)", data)
+        mask = (data["a"] == "B") & (data["b"] == "Y")
+        expected = result.predict(data, re_form="NA")[mask]
+        new_data = data.loc[mask, ["a", "b", "subject"]]
+
+        predicted = result.predict(new_data, re_form="NA")
+
+        assert np.allclose(predicted, expected)
+
+    def test_predict_rejects_unseen_fixed_effect_level(self):
+        data = pd.DataFrame(
+            {
+                "y": np.arange(12.0),
+                "treatment": ["A", "B"] * 6,
+                "subject": np.repeat([f"s{i}" for i in range(6)], 2),
+            }
+        )
+        result = lmer("y ~ treatment + (1 | subject)", data)
+        new_data = pd.DataFrame({"treatment": ["C"], "subject": ["s0"]})
+
+        with pytest.raises(ValueError, match="New level.*'C'.*treatment"):
+            result.predict(new_data)
+
+    def test_predict_reports_missing_fixed_effect_variables(self):
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+        new_data = pd.DataFrame({"Subject": ["308"]})
+
+        with pytest.raises(ValueError, match="missing fixed-effect variable.*'Days'"):
+            result.predict(new_data)
+
 
 class TestNAAction:
     def test_lmer_na_omit(self) -> None:

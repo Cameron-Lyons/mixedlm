@@ -212,3 +212,24 @@ class TestEmmeansEdgeCases:
         result = lmer("y ~ treatment * factor2 + (1|group)", simple_data)
         em = emmeans(result, "treatment", at={"factor2": "X"})
         assert len(em.result.emmean) == 2
+
+    def test_uses_fitted_contrasts(self):
+        data = pd.DataFrame(
+            {
+                "y": np.arange(18.0),
+                "treatment": ["A", "B", "C"] * 6,
+                "group": np.repeat([f"G{i}" for i in range(6)], 3),
+            }
+        )
+        custom = np.array([[-1.0, -1.0], [1.0, 0.0], [0.0, 1.0]])
+        result = lmer(
+            "y ~ treatment + (1 | group)",
+            data,
+            contrasts={"treatment": custom},
+        )
+        grid = pd.DataFrame({"treatment": ["A", "B", "C"]})
+
+        em = emmeans(result, "treatment")
+        expected = result.predict(grid, re_form="NA")
+
+        assert_allclose(em.result.emmean, expected)
