@@ -51,6 +51,28 @@ def _safe_inverse(A: NDArray[np.floating]) -> NDArray[np.floating]:
             return linalg.pinv(A)
 
 
+def _logdet_spd(A: NDArray[np.floating]) -> float:
+    """Compute a stable log determinant for a positive-definite matrix."""
+    try:
+        chol = linalg.cholesky(A, lower=True, check_finite=False)
+        return float(2.0 * np.sum(np.log(np.diag(chol))))
+    except linalg.LinAlgError:
+        with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+            sign, logdet = np.linalg.slogdet(A)
+        return float(logdet) if sign > 0 else -np.inf
+
+
+def _compound_symmetry_moments(cov: NDArray[np.floating]) -> tuple[float, float]:
+    """Return the common variance and off-diagonal covariance."""
+    q = cov.shape[0]
+    trace = float(np.trace(cov))
+    variance = trace / q
+    if q == 1:
+        return variance, 0.0
+    covariance = float((np.sum(cov) - trace) / (q * (q - 1)))
+    return variance, covariance
+
+
 def _init_sigma_k(
     struct: RandomEffectStructure,
     sigma2_e: float,
@@ -111,6 +133,21 @@ def _m_step_update_sigma(
 
     Sigma_new = (S + var_sum) / n_levels
 
+    cov_type = getattr(struct, "cov_type", "us")
+    if cov_type == "cs" and q > 1:
+        variance, covariance = _compound_symmetry_moments(Sigma_new)
+        variance = max(variance, variance_floor)
+        covariance = float(
+            np.clip(
+                covariance,
+                (variance_floor - variance) / (q - 1),
+                variance - variance_floor,
+            )
+        )
+        Sigma_new = np.full((q, q), covariance, dtype=np.float64)
+        np.fill_diagonal(Sigma_new, variance)
+        return Sigma_new
+
     if not struct.correlated and q > 1:
         Sigma_new = np.diag(np.diag(Sigma_new))
 
@@ -137,13 +174,24 @@ def _sigma_to_theta(
         q = struct.n_terms
         cov_type = getattr(struct, "cov_type", "us")
 
-        if cov_type not in ("us",):
+        relative_cov = sigma_k / sigma2_e
+
+        if cov_type == "cs":
+            variance, covariance = _compound_symmetry_moments(relative_cov)
+            variance = max(variance, 1e-10)
+            theta_k = [np.sqrt(variance)]
+            if q > 1:
+                rho = covariance / variance
+                rho = float(np.clip(rho, -1.0 / (q - 1) + 1e-10, 1.0 - 1e-10))
+                theta_k.append(rho)
+            theta_parts.append(np.asarray(theta_k, dtype=np.float64))
+            continue
+
+        if cov_type != "us":
             raise NotImplementedError(
                 f"EM-REML does not support cov_type='{cov_type}'. "
                 "Use direct optimization via lmer() with optimizer='COBYQA' instead."
             )
-
-        relative_cov = sigma_k / sigma2_e
 
         eigvals, eigvecs = linalg.eigh(relative_cov)
         eigvals = np.maximum(eigvals, 1e-10)
@@ -209,7 +257,7 @@ def em_reml_simple(
     -----
     This implementation supports random intercepts, random slopes (correlated
     and uncorrelated), and multiple random effect structures with unstructured
-    covariance (cov_type='us').
+    covariance (cov_type='us') and compound symmetry (cov_type='cs').
 
     The EM algorithm tends to be more robust to poor starting values but
     converges more slowly than direct optimization methods.
@@ -232,7 +280,7 @@ def em_reml_simple(
 
     for struct in structures:
         cov_type = getattr(struct, "cov_type", "us")
-        if cov_type not in ("us",):
+        if cov_type not in ("us", "cs"):
             raise NotImplementedError(
                 f"EM-REML does not support cov_type='{cov_type}'. "
                 "Use direct optimization via lmer() with optimizer='COBYQA' instead."
@@ -321,8 +369,8 @@ def em_reml_simple(
         loglik = -0.5 * (
             (n - p) * np.log(2 * np.pi * sigma2_e_new)
             + wrss / sigma2_e_new
-            + np.linalg.slogdet(ZtWZ + D_inv)[1]
-            + np.linalg.slogdet(XtWX)[1]
+            + _logdet_spd(ZtWZ + D_inv)
+            + _logdet_spd(XtWX)
         )
 
         if not np.isfinite(loglik):
