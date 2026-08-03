@@ -16,6 +16,10 @@ model = mlm.glmer(
 )
 ```
 
+Family constructors accept either a documented link name or a custom `Link`
+instance. Invalid names and family/link combinations raise `ValueError` when
+the family is created.
+
 ## Available Families
 
 ### Gaussian
@@ -72,9 +76,9 @@ For positive continuous data with constant coefficient of variation.
 mlm.families.Gamma(link="inverse")
 ```
 
-**Default link:** inverse
+**Default link:** log
 
-**Other links:** identity, log
+**Other links:** inverse, identity
 
 ### InverseGaussian
 
@@ -84,9 +88,9 @@ For positive continuous data.
 mlm.families.InverseGaussian(link="1/mu^2")
 ```
 
-**Default link:** 1/mu^2
+**Default link:** log
 
-**Other links:** inverse, identity, log
+**Other links:** 1/mu^2, inverse, identity
 
 ### NegativeBinomial
 
@@ -135,7 +139,7 @@ class MyFamily(CustomFamily):
     def variance(self, mu):
         return mu ** 1.5  # Custom variance function
 
-    def deviance_residuals(self, y, mu, wt=1):
+    def deviance_resids(self, y, mu, wt):
         # Custom deviance residuals
         return 2 * wt * (y * np.log(y / mu) - (y - mu))
 ```
@@ -145,19 +149,19 @@ class MyFamily(CustomFamily):
 For quasi-likelihood models with custom variance functions.
 
 ```python
-from mixedlm.families import QuasiFamily
+from mixedlm.families import Binomial, Poisson, QuasiFamily
 
 # Quasi-Poisson for overdispersed counts
-quasi_pois = QuasiFamily(variance_func="mu", link="log")
+quasi_pois = QuasiFamily(Poisson(), phi=2.0)
 
 # Quasi-binomial for overdispersed proportions
-quasi_binom = QuasiFamily(variance_func="mu*(1-mu)", link="logit")
+quasi_binom = QuasiFamily(Binomial(), phi=2.0)
 ```
 
 **Parameters:**
 
-- `variance_func`: String expression for variance as function of mu
-- `link`: Link function name
+- `base_family`: Family whose link, variance, and deviance are wrapped
+- `phi`: Positive dispersion multiplier
 
 ## Family Components
 
@@ -259,20 +263,17 @@ nb_model = mlm.glmer_nb("count ~ x + (1 | g)", data)
 print(f"Estimated theta: {nb_model.family.theta}")
 ```
 
-### Custom Variance Function
+### Quasi-Likelihood Dispersion
 
 ```python
 from mixedlm.families import QuasiFamily
 
-# Power variance: Var(Y) = phi * mu^p
-power_var = QuasiFamily(
-    variance_func="mu**1.5",
-    link="log"
-)
+# Double the variance of a Poisson model without changing its log link
+overdispersed = QuasiFamily(mlm.families.Poisson(), phi=2.0)
 
 model = mlm.glmer(
     "y ~ x + (1 | g)",
     data,
-    family=power_var
+    family=overdispersed
 )
 ```
