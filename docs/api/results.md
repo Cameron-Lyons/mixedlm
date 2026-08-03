@@ -91,7 +91,7 @@ Extract residuals.
 #### predict
 
 ```python
-result.predict(newdata=None, re_form=None, type="response")
+result.predict(newdata=None, re_form=None, type="response", offset=None)
 ```
 
 Generate predictions.
@@ -101,6 +101,8 @@ Generate predictions.
 - `newdata`: New data for prediction. If None, uses original data.
 - `re_form`: Formula for random effects. Use `"~0"` to exclude random effects.
 - `type`: Type of prediction. Options: `"response"`, `"link"`.
+- `offset`: Numeric offset for new rows, a scalar, or the name of an offset
+  column in `newdata`. GLMM offsets are applied on the link scale.
 
 **Returns:** Array of predictions.
 
