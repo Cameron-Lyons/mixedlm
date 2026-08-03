@@ -40,6 +40,35 @@ class NLMMOptimizationResult:
     n_iter: int
 
 
+def _as_prior_weights(
+    weights: NDArray[np.floating] | None,
+    n: int,
+) -> NDArray[np.float64]:
+    if weights is None:
+        return np.ones(n, dtype=np.float64)
+
+    weights_array = np.asarray(weights, dtype=np.float64)
+    if weights_array.ndim != 1:
+        raise ValueError("weights must be one-dimensional")
+    if len(weights_array) != n:
+        raise ValueError(f"weights has length {len(weights_array)}, expected {n}")
+    if not np.all(np.isfinite(weights_array)):
+        raise ValueError("weights must contain only finite values")
+    if np.any(weights_array <= 0.0):
+        raise ValueError("weights must be strictly positive")
+    return np.ascontiguousarray(weights_array)
+
+
+def _weighted_standard_deviation(
+    values: NDArray[np.floating],
+    weights: NDArray[np.floating],
+) -> float:
+    weight_sum = float(np.sum(weights))
+    mean = float(np.dot(weights, values) / weight_sum)
+    variance = float(np.dot(weights, (values - mean) ** 2) / weight_sum)
+    return np.sqrt(max(variance, _MIN_VARIANCE))
+
+
 def _build_psi_factor(
     theta: NDArray[np.floating],
     n_random: int,
@@ -102,10 +131,12 @@ def _update_group_random_effects(
     random_params: list[int],
     model: NonlinearModel,
     Psi_chol: NDArray,
+    weights: NDArray[np.floating],
 ) -> tuple[int, NDArray]:
     mask = groups == g
     x_g = x[mask]
     y_g = y[mask]
+    weights_g = weights[mask]
 
     params_g = phi.copy()
     np.add.at(params_g, random_params, b[g, :])
@@ -116,8 +147,8 @@ def _update_group_random_effects(
     Z_g = grad_g[:, random_params]
     resid_g = y_g - pred_g + Z_g @ b[g, :]
 
-    ZtZ = Z_g.T @ Z_g
-    Ztr = Z_g.T @ resid_g
+    ZtZ = Z_g.T @ (weights_g[:, None] * Z_g)
+    Ztr = Z_g.T @ (weights_g * resid_g)
 
     n_random = len(random_params)
     Psi_inv = linalg.cho_solve((Psi_chol, True), np.eye(n_random))
@@ -139,16 +170,19 @@ def _compute_group_rss(
     b: NDArray,
     random_params: list[int],
     model: NonlinearModel,
+    weights: NDArray[np.floating],
 ) -> float:
     mask = groups == g
     x_g = x[mask]
     y_g = y[mask]
+    weights_g = weights[mask]
 
     params_g = phi.copy()
     np.add.at(params_g, random_params, b[g, :])
 
     pred_g = model.predict(params_g, x_g)
-    return float(np.sum((y_g - pred_g) ** 2))
+    residuals_g = y_g - pred_g
+    return float(np.dot(weights_g, residuals_g**2))
 
 
 def pnls_step(
@@ -162,9 +196,12 @@ def pnls_step(
     sigma: float,
     random_params: list[int],
     n_jobs: int = 1,
+    weights: NDArray[np.floating] | None = None,
 ) -> tuple[NDArray[np.floating], NDArray[np.floating], float]:
     _ = sigma
     n = len(y)
+    prior_weights = _as_prior_weights(weights, n)
+    sqrt_weights = np.sqrt(prior_weights)
     n_groups = len(np.unique(groups))
     n_phi = len(phi)
     n_random = len(random_params)
@@ -218,6 +255,8 @@ def pnls_step(
                 resid_total[mask] = y_g - pred_g
                 grad_total[mask, :] = grad_g
 
+        resid_total *= sqrt_weights
+        grad_total *= sqrt_weights[:, None]
         GtG = grad_total.T @ grad_total
         Gtr = grad_total.T @ resid_total
 
@@ -242,6 +281,7 @@ def pnls_step(
                         random_params,
                         model,
                         Psi_chol,
+                        prior_weights,
                     )
                     for g in range(n_groups)
                 ]
@@ -253,6 +293,7 @@ def pnls_step(
                 mask = groups == g
                 x_g = x[mask]
                 y_g = y[mask]
+                weights_g = prior_weights[mask]
 
                 params_g = phi_new.copy()
                 np.add.at(params_g, random_params, b[g, :])
@@ -263,8 +304,8 @@ def pnls_step(
                 Z_g = grad_g[:, random_params]
                 resid_g = y_g - pred_g + Z_g @ b[g, :]
 
-                ZtZ = Z_g.T @ Z_g
-                Ztr = Z_g.T @ resid_g
+                ZtZ = Z_g.T @ (weights_g[:, None] * Z_g)
+                Ztr = Z_g.T @ (weights_g * resid_g)
 
                 C = ZtZ + Psi_inv
                 try:
@@ -296,13 +337,14 @@ def pnls_step(
                     b_new,
                     random_params,
                     model,
+                    prior_weights,
                 )
                 for g in range(n_groups)
             ]
             rss = float(sum(future.result() for future in rss_futures))
     else:
         rss = sum(
-            _compute_group_rss(g, groups, x, y, phi_new, b_new, random_params, model)
+            _compute_group_rss(g, groups, x, y, phi_new, b_new, random_params, model, prior_weights)
             for g in range(n_groups)
         )
 
@@ -323,8 +365,10 @@ def nlmm_deviance(
     random_params: list[int],
     sigma: float,
     n_jobs: int = 1,
+    weights: NDArray[np.floating] | None = None,
 ) -> tuple[float, NDArray[np.floating], NDArray[np.floating], float]:
     n = len(y)
+    prior_weights = _as_prior_weights(weights, n)
     n_groups = len(np.unique(groups))
     n_random = len(random_params)
 
@@ -332,7 +376,17 @@ def nlmm_deviance(
     Psi = Psi_factor @ Psi_factor.T
 
     phi_new, b_new, _sigma_new = pnls_step(
-        y, x, groups, model, phi, b, Psi, sigma, random_params, n_jobs=n_jobs
+        y,
+        x,
+        groups,
+        model,
+        phi,
+        b,
+        Psi,
+        sigma,
+        random_params,
+        n_jobs=n_jobs,
+        weights=prior_weights,
     )
 
     if n_jobs == -1:
@@ -354,13 +408,14 @@ def nlmm_deviance(
                     b_new,
                     random_params,
                     model,
+                    prior_weights,
                 )
                 for g in range(n_groups)
             ]
             rss = float(sum(future.result() for future in rss_futures))
     else:
         rss = sum(
-            _compute_group_rss(g, groups, x, y, phi_new, b_new, random_params, model)
+            _compute_group_rss(g, groups, x, y, phi_new, b_new, random_params, model, prior_weights)
             for g in range(n_groups)
         )
 
@@ -383,8 +438,10 @@ def nlmm_deviance(
         np.add.at(params_g, random_params, b_new[g, :])
         grad_g = model.gradient(params_g, x[mask])
         Z_g = grad_g[:, random_params]
-        # Stable form of log|Psi| + log|Z'Z + Psi^-1| for Psi = L L'.
-        system = identity + Psi_factor.T @ (Z_g.T @ Z_g) @ Psi_factor
+        weights_g = prior_weights[mask]
+        # Stable form of log|Psi| + log|Z'WZ + Psi^-1| for Psi = L L'.
+        ZtWZ = Z_g.T @ (weights_g[:, None] * Z_g)
+        system = identity + Psi_factor.T @ ZtWZ @ Psi_factor
         sign, logdet = np.linalg.slogdet(system)
         if sign <= 0 or not np.isfinite(logdet):
             return _INVALID_OBJECTIVE, phi_new, b_new, np.sqrt(sigma_sq)
@@ -405,17 +462,19 @@ def _nlmm_deviance_rust(
     b: NDArray[np.floating],
     random_params: list[int],
     sigma: float,
+    weights: NDArray[np.floating],
 ) -> tuple[float, NDArray[np.floating], NDArray[np.floating], float]:
     dev, phi_out, b_out, sigma_out = _rust_nlmm_deviance(
-        theta.astype(np.float64),
-        y.astype(np.float64),
-        x.astype(np.float64),
-        groups.astype(np.int64),
+        np.ascontiguousarray(theta, dtype=np.float64),
+        np.ascontiguousarray(y, dtype=np.float64),
+        np.ascontiguousarray(x, dtype=np.float64),
+        np.ascontiguousarray(groups, dtype=np.int64),
         model.name.lower(),
-        phi.astype(np.float64),
-        b.astype(np.float64),
+        np.ascontiguousarray(phi, dtype=np.float64),
+        np.ascontiguousarray(b, dtype=np.float64),
         list(random_params),
         float(sigma),
+        np.ascontiguousarray(weights, dtype=np.float64),
     )
     return dev, np.array(phi_out), np.array(b_out), sigma_out
 
@@ -441,14 +500,14 @@ class NLMMOptimizer:
         self.verbose = verbose
         self.use_rust = use_rust and _HAS_RUST and model.name.lower() in _SUPPORTED_RUST_MODELS
         self.n_jobs = n_jobs
-        self.weights = weights if weights is not None else np.ones(len(y), dtype=np.float64)
+        self.weights = _as_prior_weights(weights, len(y)).copy()
 
         self.n_groups = len(np.unique(groups))
         self.n_random = len(random_params)
         self.n_theta = self.n_random * (self.n_random + 1) // 2
 
         self._start_phi: NDArray[np.floating] | None = None
-        self._start_sigma = max(float(np.std(self.y)), np.sqrt(_MIN_VARIANCE))
+        self._start_sigma = _weighted_standard_deviation(self.y, self.weights)
         self._last_theta: NDArray[np.floating] | None = None
         self._last_evaluation: (
             tuple[
@@ -516,6 +575,7 @@ class NLMMOptimizer:
                             start_b,
                             self.random_params,
                             self._start_sigma,
+                            self.weights,
                         )
                     else:
                         evaluation = nlmm_deviance(
@@ -529,6 +589,7 @@ class NLMMOptimizer:
                             self.random_params,
                             self._start_sigma,
                             n_jobs=self.n_jobs,
+                            weights=self.weights,
                         )
             except (FloatingPointError, OverflowError, ValueError, linalg.LinAlgError):
                 evaluation = invalid_evaluation
@@ -555,7 +616,7 @@ class NLMMOptimizer:
             start_theta = self.get_start_theta()
 
         self._start_phi = start_phi.copy() if start_phi is not None else self.get_start_phi()
-        self._start_sigma = max(float(np.std(self.y)), np.sqrt(_MIN_VARIANCE))
+        self._start_sigma = _weighted_standard_deviation(self.y, self.weights)
         self._last_theta = None
         self._last_evaluation = None
 
