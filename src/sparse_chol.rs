@@ -27,7 +27,7 @@ impl SymbolicCholeskyCache {
             .clone()
             .factor(mat.view())
             .map_err(|_| LinalgError::NotPositiveDefinite)?;
-        Ok(NumericFactorization { numeric })
+        Ok(NumericFactorization { numeric, n: self.n })
     }
 
     pub fn n(&self) -> usize {
@@ -37,11 +37,23 @@ impl SymbolicCholeskyCache {
 
 pub struct NumericFactorization {
     numeric: LdlNumeric<f64, usize>,
+    n: usize,
 }
 
 impl NumericFactorization {
-    pub fn solve(&self, b: &[f64]) -> Vec<f64> {
-        self.numeric.solve(b).to_vec()
+    pub fn n(&self) -> usize {
+        self.n
+    }
+
+    pub fn solve(&self, b: &[f64]) -> Result<Vec<f64>, LinalgError> {
+        if b.len() != self.n {
+            return Err(LinalgError::DimensionMismatch(format!(
+                "right-hand side has {} rows, expected {}",
+                b.len(),
+                self.n
+            )));
+        }
+        Ok(self.numeric.solve(b).to_vec())
     }
 
     pub fn logdet(&self) -> f64 {
@@ -91,7 +103,7 @@ mod tests {
         let numeric = cache.factor(&data, &indices, &indptr).unwrap();
 
         let b = vec![1.0, 2.0, 3.0];
-        let x = numeric.solve(&b);
+        let x = numeric.solve(&b).unwrap();
 
         assert!(x.len() == 3);
     }
