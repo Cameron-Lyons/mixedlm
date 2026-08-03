@@ -26,6 +26,11 @@ from mixedlm.formula.parser import parse_formula
 from mixedlm.matrices.design import ModelMatrices, build_model_matrices
 
 
+def _coerce_formula(formula: Formula | str) -> Formula:
+    """Return an existing Formula or parse its string representation."""
+    return parse_formula(formula) if isinstance(formula, str) else formula
+
+
 @dataclass
 class _ParsedFormulaBase:
     """Shared parsed-formula container for mixed model modular APIs."""
@@ -247,7 +252,7 @@ class OptimizeResult:
 
 
 def lFormula(
-    formula: str,
+    formula: Formula | str,
     data: pd.DataFrame,
     REML: bool = True,
     weights: NDArray[np.floating] | None = None,
@@ -263,8 +268,8 @@ def lFormula(
 
     Parameters
     ----------
-    formula : str
-        Model formula in lme4 syntax (e.g., "y ~ x + (1|group)").
+    formula : Formula or str
+        Parsed formula or model formula in lme4 syntax (e.g., "y ~ x + (1|group)").
     data : DataFrame
         Data containing the variables in the formula.
     REML : bool, default True
@@ -295,7 +300,7 @@ def lFormula(
     optimizeLmer : Optimize the deviance function.
     mkLmerMod : Create final model from optimization results.
     """
-    parsed_formula = parse_formula(formula)
+    parsed_formula = _coerce_formula(formula)
     matrices = build_model_matrices(
         parsed_formula,
         data,
@@ -313,7 +318,7 @@ def lFormula(
 
 
 def glFormula(
-    formula: str,
+    formula: Formula | str,
     data: pd.DataFrame,
     family: Family | None = None,
     weights: NDArray[np.floating] | None = None,
@@ -329,8 +334,8 @@ def glFormula(
 
     Parameters
     ----------
-    formula : str
-        Model formula in lme4 syntax (e.g., "y ~ x + (1|group)").
+    formula : Formula or str
+        Parsed formula or model formula in lme4 syntax (e.g., "y ~ x + (1|group)").
     data : DataFrame
         Data containing the variables in the formula.
     family : Family, optional
@@ -363,7 +368,7 @@ def glFormula(
     """
     from mixedlm.families import Binomial
 
-    parsed_formula = parse_formula(formula)
+    parsed_formula = _coerce_formula(formula)
     matrices = build_model_matrices(
         parsed_formula,
         data,
