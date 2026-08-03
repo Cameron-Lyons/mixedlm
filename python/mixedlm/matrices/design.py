@@ -27,6 +27,7 @@ from mixedlm.formula.terms import (
     Formula,
     InteractionTerm,
     InterceptTerm,
+    PowerTerm,
     RandomTerm,
     VariableTerm,
 )
@@ -141,6 +142,10 @@ def build_fixed_matrix(
             col, col_names = _encode_variable(term.name, data, contrasts)
             columns.extend(col)
             names.extend(col_names)
+        elif isinstance(term, PowerTerm):
+            col, col_names = _encode_power(term, data)
+            columns.extend(col)
+            names.extend(col_names)
         elif isinstance(term, InteractionTerm):
             col, col_names = _encode_interaction(term.variables, data, contrasts)
             columns.extend(col)
@@ -164,6 +169,14 @@ def _encode_variable(
     else:
         arr = get_column_numpy(data, name, dtype=np.float64)
         return [arr], [name]
+
+
+def _encode_power(
+    term: PowerTerm,
+    data: Any,
+) -> tuple[list[NDArray[np.floating]], list[str]]:
+    arr = get_column_numpy(data, term.name, dtype=np.float64)
+    return [np.power(arr, term.exponent)], [f"I({term.name}**{term.exponent})"]
 
 
 def _encode_categorical(
@@ -191,13 +204,16 @@ def _encode_categorical(
 
 
 def _encode_interaction(
-    variables: tuple[str, ...],
+    variables: tuple[str | PowerTerm, ...],
     data: Any,
     contrasts: dict[str, str | NDArray[np.floating]] | None = None,
 ) -> tuple[list[NDArray[np.floating]], list[str]]:
     encoded_vars: list[tuple[list[NDArray[np.floating]], list[str]]] = []
     for var in variables:
-        cols, nms = _encode_variable(var, data, contrasts)
+        if isinstance(var, PowerTerm):
+            cols, nms = _encode_power(var, data)
+        else:
+            cols, nms = _encode_variable(var, data, contrasts)
         encoded_vars.append((cols, nms))
 
     result_cols: list[NDArray[np.floating]] = []
@@ -327,6 +343,10 @@ def _build_random_block(
             cols, nms = _encode_variable(term.name, data, contrasts)
             term_cols.extend(cols)
             term_names.extend(nms)
+        elif isinstance(term, PowerTerm):
+            cols, nms = _encode_power(term, data)
+            term_cols.extend(cols)
+            term_names.extend(nms)
         elif isinstance(term, InteractionTerm):
             cols, nms = _encode_interaction(term.variables, data, contrasts)
             term_cols.extend(cols)
@@ -379,6 +399,10 @@ def _build_nested_random_block(
             continue
         elif isinstance(term, VariableTerm):
             cols, nms = _encode_variable(term.name, data, contrasts)
+            term_cols.extend(cols)
+            term_names.extend(nms)
+        elif isinstance(term, PowerTerm):
+            cols, nms = _encode_power(term, data)
             term_cols.extend(cols)
             term_names.extend(nms)
         elif isinstance(term, InteractionTerm):

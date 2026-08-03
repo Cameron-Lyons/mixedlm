@@ -45,12 +45,20 @@ The formula has two parts:
 
 ### Polynomial Terms
 
+Use `I()` with a non-negative integer exponent to include raw polynomial columns:
+
 ```python
 # Quadratic
 "y ~ x + I(x**2)"
 
-# Using poly() equivalent
+# Quadratic and cubic
 "y ~ x + I(x**2) + I(x**3)"
+
+# Raw polynomial interaction
+"y ~ I(x**2) * z"
+
+# Polynomial random slope
+"y ~ x + (I(x**2) | group)"
 ```
 
 ### Removing the Intercept

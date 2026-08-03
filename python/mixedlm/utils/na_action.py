@@ -65,15 +65,15 @@ class NAInfo:
 
 
 def get_model_variables(formula: Formula) -> list[str]:
-    from mixedlm.formula.terms import InteractionTerm, VariableTerm
+    from mixedlm.formula.terms import InteractionTerm, PowerTerm, VariableTerm
 
     variables = [formula.response]
 
     for term in formula.fixed.terms:
-        if isinstance(term, VariableTerm):
+        if isinstance(term, VariableTerm | PowerTerm):
             variables.append(term.name)
         elif isinstance(term, InteractionTerm):
-            variables.extend(term.variables)
+            variables.extend(term.source_variables)
 
     for rterm in formula.random:
         if isinstance(rterm.grouping, str):
@@ -82,10 +82,10 @@ def get_model_variables(formula: Formula) -> list[str]:
             variables.extend(rterm.grouping_factors)
 
         for term in rterm.expr:
-            if isinstance(term, VariableTerm):
+            if isinstance(term, VariableTerm | PowerTerm):
                 variables.append(term.name)
             elif isinstance(term, InteractionTerm):
-                variables.extend(term.variables)
+                variables.extend(term.source_variables)
 
     return list(dict.fromkeys(variables))
 
