@@ -112,6 +112,17 @@ def test_benchmark_large_crossed_sparse_design_build(benchmark, large_crossed_sp
 
 
 @pytest.mark.benchmark(group="sparse-design")
+def test_benchmark_large_nested_sparse_design_build(benchmark, large_crossed_sparse_data):
+    formula = parse_formula("y ~ x + (1 | group1/group2)")
+
+    def build_design():
+        return build_model_matrices(formula, large_crossed_sparse_data)
+
+    matrices = benchmark(build_design)
+    assert matrices.Z.nnz == len(large_crossed_sparse_data)
+
+
+@pytest.mark.benchmark(group="sparse-design")
 def test_benchmark_large_crossed_sparse_adaptive_start(benchmark, large_crossed_sparse_data):
     formula = parse_formula("y ~ x + (1 | group1) + (1 | group2)")
     matrices = build_model_matrices(formula, large_crossed_sparse_data)

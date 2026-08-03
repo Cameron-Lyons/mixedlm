@@ -128,6 +128,11 @@ def select_columns(data: Any, columns: list[str]) -> Any:
 
 def concat_columns_as_string(data: Any, columns: list[str], separator: str = "/") -> NDArray:
     """Concatenate multiple columns into a single string column."""
+    if not columns:
+        import numpy as np
+
+        return np.full(dataframe_length(data), "", dtype=object)
+
     if _is_polars(data):
         import polars as pl
 
@@ -135,10 +140,21 @@ def concat_columns_as_string(data: Any, columns: list[str], separator: str = "/"
         result = data.select(expr.alias("_combined")).get_column("_combined")
         return result.to_numpy()
 
-    combined = data[list(columns)].apply(lambda row: separator.join(str(x) for x in row), axis=1)
-    if hasattr(combined.dtype, "storage"):
-        combined = combined.astype(object)
-    return combined.values
+    combined = data[columns[0]].astype(str)
+    for name in columns[1:]:
+        combined = combined.str.cat(data[name].astype(str), sep=separator)
+    return combined.to_numpy()
+
+
+def factorize_levels(values: NDArray) -> tuple[NDArray, dict[Any, int]]:
+    """Factor grouping values into sorted integer levels in one pass."""
+    import numpy as np
+    import pandas as pd
+
+    codes, levels = pd.factorize(values, sort=True)
+    indices = np.asarray(codes, dtype=np.int64)
+    level_values = levels.tolist()
+    return indices, {level: index for index, level in enumerate(level_values)}
 
 
 def _is_polars(data: Any) -> bool:
