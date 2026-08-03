@@ -212,8 +212,12 @@ model.VarCorr()
 # Fitted values
 model.fitted()
 
-# Predictions for new data
+# Population-level predictions for new data. The predictor column used during
+# fitting is remembered automatically.
 model.predict(newdata=new_data)
+
+# Add fitted random effects for known groups; unseen groups use population values.
+model.predict(newdata=new_data, group_var="subject")
 ```
 
 ## Bootstrap Inference
