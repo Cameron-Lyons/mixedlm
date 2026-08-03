@@ -4,6 +4,30 @@ This page documents functions for statistical inference, hypothesis testing, and
 
 ## Model Comparison
 
+### model_selection
+
+Rank candidate mixed models with AIC, small-sample corrected AIC, or BIC:
+
+```python
+ranking = mlm.model_selection(
+    model1,
+    model2,
+    model3,
+    names=["baseline", "linear", "interaction"],
+    criterion="AICc",
+)
+
+print(ranking.to_dataframe())
+best = ranking.best_model
+supported = ranking.evidence_set(threshold=0.95)
+```
+
+Models are returned from strongest to weakest support. The result includes log-likelihood,
+parameter count, AIC, AICc, BIC, criterion deltas, relative likelihoods, normalized weights,
+and cumulative weights. Candidate models must use the same observations, response, likelihood
+class, and generalized family. Linear models should be fit with `REML=False`; set
+`allow_reml=True` only when every candidate has the same fixed-effects specification.
+
 ### anova
 
 Likelihood ratio tests between nested models.
