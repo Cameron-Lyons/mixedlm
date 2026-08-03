@@ -2,6 +2,60 @@
 
 This page documents functions for statistical inference, hypothesis testing, and confidence intervals.
 
+## Linear Hypotheses
+
+### linear_hypothesis
+
+Test arbitrary linear restrictions on fixed-effect coefficients. The null
+hypothesis is expressed as $C\beta = r$, where $C$ contains one or more
+constraint rows and $r$ is supplied with `rhs`.
+
+```python
+from mixedlm.inference import linear_hypothesis
+
+# H0: the x and z slopes are equal
+test = linear_hypothesis(model, {"x": 1, "z": -1})
+print(test)
+```
+
+Named rows test several restrictions jointly while retaining readable labels:
+
+```python
+test = linear_hypothesis(
+    model,
+    {
+        "equal slopes": {"x": 1, "z": -1},
+        "target sum": {"x": 1, "z": 1},
+    },
+    rhs=[0, 2],
+)
+
+test.statistic    # Joint Wald statistic
+test.p_value      # Joint p-value
+test.table        # Row-level estimates, SEs, intervals, and p-values
+```
+
+Numeric arrays are interpreted in `model.matrices.fixed_names` order. A pandas
+DataFrame can instead use coefficient names as columns and row labels as its
+index. Constraint rows must be finite, nonzero, linearly independent, and
+estimable from the fitted covariance matrix.
+
+The default joint test is an F test for linear mixed models and a chi-square
+test for generalized linear mixed models. An F test uses residual denominator
+degrees of freedom unless `denominator_df` is provided explicitly.
+
+**Parameters:**
+
+- `model`: Fitted linear or generalized linear mixed model
+- `hypothesis`: Constraint matrix, named weights, named rows, or DataFrame
+- `rhs`: Scalar null value or one value per row; defaults to zero
+- `labels`: Optional replacement row labels
+- `test`: `"auto"`, `"F"`, or `"Chisq"`
+- `denominator_df`: Optional positive denominator DF for an F test
+- `level`: Confidence level for row-level intervals
+
+**Returns:** `LinearHypothesisResult`
+
 ## Model Comparison
 
 ### anova

@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Arbitrary linear fixed-effect hypothesis tests with named or matrix constraints
 - EM-REML now supports multiple random effects and random slopes (correlated and uncorrelated)
 - Automatic convergence recommendations in `summary()` output for non-converged and singular fits
 - `em_init` control parameter is now wired up in `lmer()` and `glmer()` model fitting
