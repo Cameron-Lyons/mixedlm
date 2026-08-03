@@ -4,15 +4,19 @@ import numpy as np
 from numpy.typing import NDArray
 from scipy.special import xlogy
 
-from mixedlm.families.base import Family, LogitLink
+from mixedlm.families.base import Family, Link
 
 
 class Binomial(Family):
     mu_lower_bound = 0.0
     mu_upper_bound = 1.0
 
-    def __init__(self) -> None:
-        self.link = LogitLink()
+    def __init__(self, link: str | Link | None = None) -> None:
+        super().__init__(
+            link,
+            default_link="logit",
+            allowed_links=("logit", "probit", "cloglog", "cauchit", "log"),
+        )
 
     def variance(self, mu: NDArray[np.floating]) -> NDArray[np.floating]:
         return mu * (1 - mu)

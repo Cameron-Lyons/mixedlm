@@ -3,26 +3,21 @@ from __future__ import annotations
 import numpy as np
 from numpy.typing import NDArray
 
-from mixedlm.families.base import Family, Link, LogLink
+from mixedlm.families.base import Family, Link
+from mixedlm.families.base import InverseSquaredLink as _InverseSquaredLink
 
-
-class InverseSquaredLink(Link):
-    def link(self, mu: NDArray[np.floating]) -> NDArray[np.floating]:
-        return 1.0 / (mu**2)
-
-    def inverse(self, eta: NDArray[np.floating]) -> NDArray[np.floating]:
-        eta = np.maximum(eta, 1e-10)
-        return 1.0 / np.sqrt(eta)
-
-    def deriv(self, mu: NDArray[np.floating]) -> NDArray[np.floating]:
-        return -2.0 / (mu**3)
+InverseSquaredLink = _InverseSquaredLink
 
 
 class InverseGaussian(Family):
     mu_lower_bound = 0.0
 
-    def __init__(self, link: Link | None = None) -> None:
-        self.link = link if link is not None else LogLink()
+    def __init__(self, link: str | Link | None = None) -> None:
+        super().__init__(
+            link,
+            default_link="log",
+            allowed_links=("log", "inverse", "identity", "1/mu^2"),
+        )
 
     def variance(self, mu: NDArray[np.floating]) -> NDArray[np.floating]:
         eps = 1e-10
@@ -41,4 +36,4 @@ class InverseGaussian(Family):
 
 class InverseGaussianCanonical(InverseGaussian):
     def __init__(self) -> None:
-        super().__init__(link=InverseSquaredLink())
+        super().__init__(link="1/mu^2")

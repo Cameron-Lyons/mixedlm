@@ -197,6 +197,8 @@ class QuasiFamily(CustomFamily):
     """
 
     def __init__(self, base_family: Family, phi: float = 1.0):
+        if not np.isfinite(phi) or phi <= 0:
+            raise ValueError("phi must be finite and greater than zero")
         self.base_family = base_family
         self.phi = phi
         self.link = base_family.link

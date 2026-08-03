@@ -3,14 +3,18 @@ from __future__ import annotations
 import numpy as np
 from numpy.typing import NDArray
 
-from mixedlm.families.base import Family, InverseLink, Link, LogLink
+from mixedlm.families.base import Family, Link
 
 
 class Gamma(Family):
     mu_lower_bound = 0.0
 
-    def __init__(self, link: Link | None = None) -> None:
-        self.link = link if link is not None else LogLink()
+    def __init__(self, link: str | Link | None = None) -> None:
+        super().__init__(
+            link,
+            default_link="log",
+            allowed_links=("log", "inverse", "identity"),
+        )
 
     def variance(self, mu: NDArray[np.floating]) -> NDArray[np.floating]:
         eps = 1e-10
@@ -29,4 +33,4 @@ class Gamma(Family):
 
 class GammaInverse(Gamma):
     def __init__(self) -> None:
-        super().__init__(link=InverseLink())
+        super().__init__(link="inverse")
