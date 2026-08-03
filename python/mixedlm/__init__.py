@@ -48,6 +48,7 @@ from mixedlm.inference.ddf import (
     pvalues_with_ddf,
     satterthwaite_df,
 )
+from mixedlm.inference.effects import allEffects, ggpredict
 from mixedlm.inference.emmeans import Emmeans, emmeans
 from mixedlm.inference.profile import (
     Profile2DResult,
@@ -156,6 +157,8 @@ __all__ = [
     "AnovaType3Result",
     "emmeans",
     "Emmeans",
+    "ggpredict",
+    "allEffects",
     "bootMer",
     "bootstrap_nlmer",
     "satterthwaite_df",
