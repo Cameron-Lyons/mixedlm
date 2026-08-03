@@ -20,6 +20,7 @@ A Python implementation of mixed-effects models inspired by R's [lme4](https://g
 - **Formula interface** - lme4-style formulas with random effects syntax
 - **Inference tools** - Profile likelihood, parametric bootstrap, confidence intervals, Satterthwaite/Kenward-Roger degrees of freedom
 - **Model comparison** - ANOVA (including Type III), drop1, allFit
+- **Model validation** - Case-level and whole-group cross-validation with weighted scoring
 - **Power analysis** - powerSim, powerCurve for sample size planning
 - **Diagnostics** - Influence measures, Cook's distance, leverage
 

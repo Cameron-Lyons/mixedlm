@@ -8,6 +8,16 @@ from mixedlm.inference.bootstrap import (
     bootstrap_lmer,
     bootstrap_nlmer,
 )
+from mixedlm.inference.cross_validation import (
+    CrossValidationFold,
+    CrossValidationResult,
+    cross_validate,
+    make_folds,
+    weighted_mae,
+    weighted_mse,
+    weighted_r2,
+    weighted_rmse,
+)
 from mixedlm.inference.ddf import (
     DenomDFResult,
     kenward_roger_df,
@@ -63,6 +73,14 @@ __all__ = [
     "bootstrap_glmer",
     "bootstrap_nlmer",
     "bootMer",
+    "CrossValidationFold",
+    "CrossValidationResult",
+    "cross_validate",
+    "make_folds",
+    "weighted_mae",
+    "weighted_mse",
+    "weighted_r2",
+    "weighted_rmse",
     "DenomDFResult",
     "satterthwaite_df",
     "kenward_roger_df",
