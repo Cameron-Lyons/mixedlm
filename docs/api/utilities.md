@@ -197,6 +197,22 @@ Parse a model formula.
 parsed = mlm.parse_formula("y ~ x + (x | g)")
 ```
 
+### simulate_formula
+
+Simulate responses before fitting, using the same variance-parameter ordering
+and covariance structures as the model optimizers.
+
+```python
+formula = mlm.set_cov_type("y ~ x + (x | g)", "cs")
+simulated = mlm.simulate_formula(
+    formula,
+    data,
+    beta={"(Intercept)": 1.0, "x": 0.5},
+    theta=[0.8, 0.25],
+    seed=42,
+)
+```
+
 ### findbars
 
 Find random effects terms in a formula.
