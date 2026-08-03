@@ -57,6 +57,7 @@ from mixedlm.inference.profile import (
     splom_profiles,
     varianceProf,
 )
+from mixedlm.inference.reporting import glance, tidy
 from mixedlm.models.control import GlmerControl, LmerControl, glmerControl, lmerControl
 from mixedlm.models.glmer import GlmerMod, GlmerVarCorr, glmer, glmer_nb
 from mixedlm.models.lmer import (
@@ -161,6 +162,8 @@ __all__ = [
     "satterthwaite_df",
     "kenward_roger_df",
     "pvalues_with_ddf",
+    "tidy",
+    "glance",
     "DenomDFResult",
     "powerSim",
     "powerCurve",

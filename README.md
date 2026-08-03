@@ -19,6 +19,7 @@ A Python implementation of mixed-effects models inspired by R's [lme4](https://g
 - **Nonlinear Mixed Models (NLMM)** via `nlmer()` - Self-starting models (SSasymp, SSlogis, SSmicmen)
 - **Formula interface** - lme4-style formulas with random effects syntax
 - **Inference tools** - Profile likelihood, parametric bootstrap, confidence intervals, Satterthwaite/Kenward-Roger degrees of freedom
+- **Tidy reporting** - Analysis-ready coefficient, random-effect, and model-fit tables
 - **Model comparison** - ANOVA (including Type III), drop1, allFit
 - **Power analysis** - powerSim, powerCurve for sample size planning
 - **Diagnostics** - Influence measures, Cook's distance, leverage
@@ -60,6 +61,11 @@ result.coef()       # Combined coefficients
 # Inference
 result.confint(method="profile")  # Profile confidence intervals
 result.confint(method="boot")     # Bootstrap confidence intervals
+
+# Analysis-ready pandas tables
+result.tidy(conf_int=True)          # Fixed effects, uncertainty, tests
+result.tidy(effects="all")         # Fixed, random parameters, random values
+result.glance()                     # One-row model fit summary
 ```
 
 ### Using Polars
@@ -201,6 +207,8 @@ mixedlm supports lme4-style formula syntax for specifying random effects:
 | `logLik()` | Log-likelihood with df |
 | `AIC()` / `BIC()` | Information criteria |
 | `summary(ddf_method)` | Model summary with optional p-values |
+| `tidy(effects, conf_int)` | Analysis-ready parameter table |
+| `glance()` | One-row model fit summary |
 | `getME(name)` | Extract model components (X, Z, theta, Lambda, etc.) |
 | `get_deviance_components()` | Breakdown of deviance into components |
 
