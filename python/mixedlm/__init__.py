@@ -41,6 +41,7 @@ from mixedlm.formula.parser import (
     subbars,
 )
 from mixedlm.inference.anova import AnovaResult, AnovaType3Result, anova, anova_type3
+from mixedlm.inference.boot_ci import bootCI
 from mixedlm.inference.bootstrap import bootMer, bootstrap_nlmer
 from mixedlm.inference.ddf import (
     DenomDFResult,
@@ -157,6 +158,7 @@ __all__ = [
     "emmeans",
     "Emmeans",
     "bootMer",
+    "bootCI",
     "bootstrap_nlmer",
     "satterthwaite_df",
     "kenward_roger_df",
