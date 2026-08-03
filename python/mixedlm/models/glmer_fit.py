@@ -98,11 +98,12 @@ class GlmerMod:
             nAGQ=nAGQ,
         )
 
+        opt_options = ctrl.get_scipy_options(optimizer=opt_method, maxiter=opt_maxiter)
         opt_result = optimizer.optimize(
             start=start,
             method=opt_method,
             maxiter=opt_maxiter,
-            options=ctrl.optCtrl,
+            options=opt_options,
         )
 
         result = GlmerResult(
