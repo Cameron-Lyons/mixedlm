@@ -22,6 +22,7 @@ A Python implementation of mixed-effects models inspired by R's [lme4](https://g
 - **Model comparison** - ANOVA (including Type III), drop1, allFit
 - **Power analysis** - powerSim, powerCurve for sample size planning
 - **Diagnostics** - Influence measures, Cook's distance, leverage
+- **Fast startup** - Public objects are loaded on demand, so lightweight imports avoid the modeling stack
 
 ## Installation
 
