@@ -68,7 +68,7 @@ result.confint(method="boot")     # Bootstrap confidence intervals
 import polars as pl
 import mixedlm as mlm
 
-# Works directly with polars DataFrames
+# Works directly with eager or lazy polars frames
 data = pl.DataFrame({
     "y": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
     "x": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
@@ -77,6 +77,9 @@ data = pl.DataFrame({
 
 result = mlm.lmer("y ~ x + (1 | group)", data)
 print(result.summary())
+
+# LazyFrame plans are projected to model columns before one-time collection
+lazy_result = mlm.lmer("y ~ x + (1 | group)", data.lazy())
 ```
 
 ### Generalized Linear Mixed Model

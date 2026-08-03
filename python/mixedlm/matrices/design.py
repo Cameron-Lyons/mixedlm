@@ -77,7 +77,7 @@ def build_model_matrices(
 ) -> ModelMatrices:
     from mixedlm.utils.na_action import handle_na
 
-    data = ensure_dataframe(data)
+    data = ensure_dataframe(data, columns=sorted(_get_formula_variables(formula)))
 
     if na_action is not None:
         clean_data, na_info, weights, offset = handle_na(data, formula, na_action, weights, offset)
