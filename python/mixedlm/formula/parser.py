@@ -150,7 +150,7 @@ class Parser:
         return self.advance()
 
     def parse(self) -> Formula:
-        response = self._parse_response()
+        response, response_denominator = self._parse_response()
         self.expect(TokenType.TILDE)
         fixed_terms, random_terms = self._parse_rhs()
 
@@ -165,11 +165,21 @@ class Parser:
                 filtered_terms.append(term)
 
         fixed = FixedTerm(terms=tuple(filtered_terms), has_intercept=has_intercept)
-        return Formula(response=response, fixed=fixed, random=tuple(random_terms))
+        return Formula(
+            response=response,
+            fixed=fixed,
+            random=tuple(random_terms),
+            response_denominator=response_denominator,
+        )
 
-    def _parse_response(self) -> str:
+    def _parse_response(self) -> tuple[str, str | None]:
         tok = self.expect(TokenType.IDENTIFIER)
-        return tok.value
+        if self.peek().type != TokenType.SLASH:
+            return tok.value, None
+
+        self.advance()
+        denominator = self.expect(TokenType.IDENTIFIER)
+        return tok.value, denominator.value
 
     def _parse_rhs(
         self,
@@ -357,13 +367,22 @@ def update_formula(old_formula: Formula, new_formula_str: str) -> Formula:
     lhs = lhs.strip()
     rhs = rhs.strip()
 
-    response = old_formula.response if lhs == "." else lhs
+    if lhs == ".":
+        response = old_formula.response
+        response_denominator = old_formula.response_denominator
+        response_expression = old_formula.response_expression
+    else:
+        parsed_response = parse_formula(f"{lhs} ~ 1")
+        response = parsed_response.response
+        response_denominator = parsed_response.response_denominator
+        response_expression = parsed_response.response_expression
 
     if rhs == ".":
         return Formula(
             response=response,
             fixed=old_formula.fixed,
             random=old_formula.random,
+            response_denominator=response_denominator,
         )
 
     additions: list[str] = []
@@ -439,7 +458,7 @@ def update_formula(old_formula: Formula, new_formula_str: str) -> Formula:
                 additions.append(term)
 
     if not keep_old_rhs and not additions and not random_additions:
-        return parse_formula(new_formula_str.replace(".", response))
+        return parse_formula(new_formula_str.replace(".", response_expression, 1))
 
     if keep_old_rhs:
         new_fixed_terms = list(old_formula.fixed.terms)
@@ -488,7 +507,12 @@ def update_formula(old_formula: Formula, new_formula_str: str) -> Formula:
             new_random = [r for r in new_random if r != rt]
 
     new_fixed = FixedTerm(terms=tuple(new_fixed_terms), has_intercept=has_intercept)
-    return Formula(response=response, fixed=new_fixed, random=tuple(new_random))
+    return Formula(
+        response=response,
+        fixed=new_fixed,
+        random=tuple(new_random),
+        response_denominator=response_denominator,
+    )
 
 
 def nobars(formula: Formula | str) -> Formula:
@@ -523,6 +547,7 @@ def nobars(formula: Formula | str) -> Formula:
         response=formula.response,
         fixed=formula.fixed,
         random=(),
+        response_denominator=formula.response_denominator,
     )
 
 
@@ -616,7 +641,7 @@ def subbars(formula: Formula | str) -> str:
                 fixed_parts.append(f"{grouping}:{interaction}")
 
     rhs = " + ".join(fixed_parts) if fixed_parts else "1"
-    return f"{formula.response} ~ {rhs}"
+    return f"{formula.response_expression} ~ {rhs}"
 
 
 def is_mixed_formula(formula: Formula | str) -> bool:
@@ -710,6 +735,7 @@ def set_cov_type(
         response=formula.response,
         fixed=formula.fixed,
         random=tuple(new_random),
+        response_denominator=formula.response_denominator,
     )
 
 
@@ -883,7 +909,7 @@ def getFixedFormulaStr(formula: Formula | str) -> str:
             fixed_parts.append(":".join(term.variables))
 
     rhs = " + ".join(fixed_parts) if fixed_parts else "1"
-    return f"{formula.response} ~ {rhs}"
+    return f"{formula.response_expression} ~ {rhs}"
 
 
 def getRandomFormulaStr(formula: Formula | str) -> str:

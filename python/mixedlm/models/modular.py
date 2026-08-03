@@ -364,6 +364,9 @@ def glFormula(
     from mixedlm.families import Binomial
 
     parsed_formula = parse_formula(formula)
+    if family is None:
+        family = Binomial()
+
     matrices = build_model_matrices(
         parsed_formula,
         data,
@@ -371,10 +374,8 @@ def glFormula(
         offset=offset,
         na_action=na_action,
         contrasts=contrasts,
+        grouped_binomial=isinstance(family, Binomial),
     )
-
-    if family is None:
-        family = Binomial()
 
     return GlmerParsedFormula(
         formula=parsed_formula,

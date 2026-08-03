@@ -337,7 +337,11 @@ class GlmerResult(MerResultMixin):
             eta = self._linear_predictor.copy()
             X = self.matrices.X
         else:
-            pred_matrices = build_model_matrices(self.formula, newdata)
+            pred_matrices = build_model_matrices(
+                self.formula,
+                newdata,
+                grouped_binomial=self.matrices.trials is not None,
+            )
             X = self._align_fixed_matrix(pred_matrices)
             eta = X @ self.beta
 
@@ -1594,7 +1598,8 @@ class GlmerResult(MerResultMixin):
 
         if family_name == "Binomial":
             mu = np.clip(mu, 1e-6, 1 - 1e-6)
-            y_sim = np.random.binomial(1, mu).astype(np.float64)
+            trials = 1 if self.matrices.trials is None else self.matrices.trials.astype(np.int64)
+            y_sim = np.random.binomial(trials, mu).astype(np.float64)
         elif family_name == "Poisson":
             mu = np.clip(mu, 1e-6, 1e15)
             y_sim = np.random.poisson(mu).astype(np.float64)
@@ -1669,7 +1674,9 @@ class GlmerResult(MerResultMixin):
         ----------
         newresp : array-like, optional
             New response values. Must have the same length as the original
-            response. If None, refits with the original response.
+            response. For grouped binomial models, provide success counts;
+            the original trial counts are reused. If None, refits with the
+            original response.
         **kwargs
             Additional arguments passed to the optimizer (start, method, maxiter).
 
