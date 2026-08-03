@@ -23,6 +23,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - LMM profiling now applies fitted random effects before computing the penalized residual sum of squares, preventing variance estimates from being biased toward zero
 - LMM likelihood reporting and fixed-effect profiles now use the corrected profiled criterion consistently
+- Exported influence diagnostics now use the fitted mixed-model projection, prior weights, random effects, and offsets
+- GLMM covariance, leverage, conditional variance, Pearson residuals, and influence diagnostics now honor prior weights
 
 ## [1.1.0] - 2026-01-27
 

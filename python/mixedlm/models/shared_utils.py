@@ -4,8 +4,18 @@ from typing import Any
 
 import numpy as np
 from numpy.typing import NDArray
+from scipy import linalg
 
 from mixedlm.utils.dataframe import dataframe_length, get_column_numpy, get_columns
+
+
+def symmetric_inverse(matrix: NDArray[np.floating]) -> NDArray[np.float64]:
+    """Invert a symmetric matrix with a positive-definite fast path."""
+    try:
+        factor = linalg.cholesky(matrix, lower=True)
+        return linalg.cho_solve((factor, True), np.eye(matrix.shape[0]))
+    except linalg.LinAlgError:
+        return linalg.pinvh(matrix)
 
 
 def is_singular_theta(theta: NDArray[np.floating], structures: list[Any], tol: float) -> bool:
