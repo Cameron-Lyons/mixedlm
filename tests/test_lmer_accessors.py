@@ -936,10 +936,7 @@ class TestDeviance:
         ll = result.logLik()
 
         assert result.get_deviance() == result.REMLcrit()
-        expected = result.deviance + (result.matrices.n_obs - result.matrices.n_fixed) * np.log(
-            2 * np.pi
-        )
-        assert np.isclose(-2 * ll.value, expected, rtol=1e-6)
+        assert np.isclose(-2 * ll.value, result.deviance, rtol=1e-6)
 
     def test_glmer_get_deviance(self):
         result = glmer("y ~ period + (1 | herd)", CBPP, family=families.Binomial())
