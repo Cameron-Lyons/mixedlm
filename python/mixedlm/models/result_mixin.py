@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, ClassVar, cast
 
 import numpy as np
 from numpy.typing import NDArray
@@ -176,30 +176,38 @@ class MerResultMixin:
     def _iter_random_cov_blocks(
         self, scale: float = 1.0
     ) -> Iterator[tuple[RandomEffectStructure, NDArray[np.floating]]]:
-        theta_idx = 0
+        from mixedlm.utils.variance import getL
 
-        for struct in self.matrices.random_structures:
-            q = struct.n_terms
+        level_factors = cast(
+            list[NDArray[np.floating]],
+            getL(self.theta, self.matrices.random_structures, as_blocks=True),
+        )
 
-            if struct.correlated:
-                n_theta = q * (q + 1) // 2
-                theta_block = self.theta[theta_idx : theta_idx + n_theta]
-                theta_idx += n_theta
-
-                L_block = np.zeros((q, q), dtype=np.float64)
-                idx = 0
-                for i in range(q):
-                    row_size = i + 1
-                    L_block[i, :row_size] = theta_block[idx : idx + row_size]
-                    idx += row_size
-
-                cov = L_block @ L_block.T
-            else:
-                theta_block = self.theta[theta_idx : theta_idx + q]
-                theta_idx += q
-                cov = np.diag(theta_block**2)
+        for struct, level_factor in zip(
+            self.matrices.random_structures, level_factors, strict=True
+        ):
+            cov = level_factor @ level_factor.T
 
             yield struct, cov * scale
+
+    def _is_singular_covariance(self, tol: float = 1e-4) -> bool:
+        if not np.isfinite(tol) or tol < 0:
+            raise ValueError("tol must be a finite, non-negative number")
+
+        threshold = tol**2
+        for _struct, cov in self._iter_random_cov_blocks():
+            if float(np.min(np.linalg.eigvalsh(cov), initial=np.inf)) < threshold:
+                return True
+        return False
+
+    def _theta_lower_bounds(self) -> NDArray[np.floating]:
+        from mixedlm.estimation.reml import _build_theta_bounds
+
+        bounds = _build_theta_bounds(self.matrices.random_structures, len(self.theta))
+        return np.asarray(
+            [lower if lower is not None else -np.inf for lower, _upper in bounds],
+            dtype=np.float64,
+        )
 
     def _random_effect_prediction_contrib(
         self,
