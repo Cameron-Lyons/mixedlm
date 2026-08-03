@@ -217,13 +217,14 @@ def coef(model: MerMod) -> dict:
     Returns
     -------
     dict
-        Dictionary mapping group levels to their coefficient dictionaries.
+        Nested dictionary mapping grouping factors to coefficient names and
+        their per-level arrays.
 
     Examples
     --------
     >>> result = lmer("y ~ x + (x|group)", data)
     >>> coef(result)
-    {'A': {'(Intercept)': 5.1, 'x': 2.3}, 'B': {...}}
+    {'group': {'(Intercept)': array([5.1, 4.9]), 'x': array([2.3, 2.1])}}
     """
     return model.coef()
 
