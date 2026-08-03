@@ -49,6 +49,7 @@ from mixedlm.inference.ddf import (
     satterthwaite_df,
 )
 from mixedlm.inference.emmeans import Emmeans, emmeans
+from mixedlm.inference.model_selection import ModelSelectionResult, model_selection
 from mixedlm.inference.profile import (
     Profile2DResult,
     logProf,
@@ -156,6 +157,8 @@ __all__ = [
     "AnovaType3Result",
     "emmeans",
     "Emmeans",
+    "model_selection",
+    "ModelSelectionResult",
     "bootMer",
     "bootstrap_nlmer",
     "satterthwaite_df",

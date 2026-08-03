@@ -20,6 +20,7 @@ A Python implementation of mixed-effects models inspired by R's [lme4](https://g
 - **Formula interface** - lme4-style formulas with random effects syntax
 - **Inference tools** - Profile likelihood, parametric bootstrap, confidence intervals, Satterthwaite/Kenward-Roger degrees of freedom
 - **Model comparison** - ANOVA (including Type III), drop1, allFit
+- **Model selection** - AIC/AICc/BIC rankings, normalized weights, and evidence sets
 - **Power analysis** - powerSim, powerCurve for sample size planning
 - **Diagnostics** - Influence measures, Cook's distance, leverage
 
@@ -119,12 +120,17 @@ pvals = pvalues_with_ddf(result)
 ### Model Comparison
 
 ```python
-# Fit nested models
-model1 = mlm.lmer("y ~ x + (1 | group)", data)
-model2 = mlm.lmer("y ~ x + z + (1 | group)", data)
+# Fit nested models with maximum likelihood for valid comparison
+model1 = mlm.lmer("y ~ x + (1 | group)", data, REML=False)
+model2 = mlm.lmer("y ~ x + z + (1 | group)", data, REML=False)
 
 # Likelihood ratio test
 mlm.anova(model1, model2)
+
+# Rank candidate models with small-sample correction and normalized weights
+ranking = mlm.model_selection(model1, model2, criterion="AICc")
+print(ranking.to_dataframe())
+best_model = ranking.best_model
 
 # Type III ANOVA for a single model
 mlm.anova_type3(model1)
