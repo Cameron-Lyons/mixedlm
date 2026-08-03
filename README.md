@@ -177,6 +177,14 @@ mixedlm supports lme4-style formula syntax for specifying random effects:
 | `(1 \| group1/group2)` | Nested random effects |
 | `(1 \| group1) + (1 \| group2)` | Crossed random effects |
 
+Structured covariance models can use compound symmetry or AR(1) correlation:
+
+```python
+formula = mlm.set_cov_type("y ~ time + (time | subject)", "ar1")
+model = mlm.lmer(formula, data)
+print(model.VarCorr())
+```
+
 ## API Reference
 
 ### Model Fitting
