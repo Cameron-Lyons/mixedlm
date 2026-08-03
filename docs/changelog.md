@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Formula-driven simulation now supports every built-in response family
 - EM-REML now supports multiple random effects and random slopes (correlated and uncorrelated)
 - Automatic convergence recommendations in `summary()` output for non-converged and singular fits
 - `em_init` control parameter is now wired up in `lmer()` and `glmer()` model fitting
@@ -19,6 +20,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - EM-REML algorithm generalized from single random intercept to arbitrary unstructured covariance models
 - Replaced the Py-BOBYQA dependency and default optimizer with SciPy COBYQA
 - Reduced unused and redundant Python and Rust dependencies
+
+### Fixed
+- Formula simulation now preserves global random state and random-effect coefficient ordering
 
 ## [1.1.0] - 2026-01-27
 
