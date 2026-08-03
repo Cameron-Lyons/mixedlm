@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import numpy as np
 from numpy.typing import NDArray
@@ -10,6 +10,7 @@ from scipy import sparse
 from mixedlm.formula.terms import Formula
 from mixedlm.matrices.design import ModelMatrices, RandomEffectStructure
 from mixedlm.models.lmer_types import ModelTerms, RanefResult
+from mixedlm.utils.dataframe import copy_dataframe
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -92,11 +93,11 @@ class MerResultMixin:
             ) from None
         return matrices.X[:, fitted_indices]
 
-    def _model_frame(self) -> pd.DataFrame:
+    def _model_frame(self) -> Any:
         import pandas as pd
 
         if self.matrices.frame is not None:
-            return self.matrices.frame.copy()
+            return copy_dataframe(self.matrices.frame)
         return pd.DataFrame({"y": self.matrices.y})
 
     def _weights_array(self, copy: bool = True) -> NDArray[np.floating]:
