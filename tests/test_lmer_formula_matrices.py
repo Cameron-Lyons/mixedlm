@@ -64,6 +64,17 @@ class TestFormulaParser:
         labels = self._fixed_term_labels("y ~ x1 * x2 * x3 + (1 | g)")
         assert labels == ["x1", "x2", "x1:x2", "x3", "x1:x3", "x2:x3", "x1:x2:x3"]
 
+    def test_fixed_term_subtraction_is_sequential(self) -> None:
+        labels = self._fixed_term_labels("y ~ x1 * x2 - x1:x2 - x1 + x1 + (1 | g)")
+        assert labels == ["x2", "x1"]
+
+    def test_fixed_intercept_can_be_reenabled(self) -> None:
+        formula = parse_formula("y ~ 0 + x1 + 1 + (1 | g)")
+        assert formula.fixed.has_intercept
+
+        formula = parse_formula("y ~ x1 - 1 - 0 + (1 | g)")
+        assert formula.fixed.has_intercept
+
     def test_random_effect_star_expands_to_terms(self) -> None:
         formula = parse_formula("y ~ x1 + (x1 * x2 | g)")
         labels = []
@@ -83,6 +94,26 @@ class TestFormulaParser:
             elif isinstance(term, InteractionTerm):
                 labels.append(":".join(term.variables))
         assert labels == ["x1", "x2", "x1:x2"]
+
+    def test_random_effect_term_subtraction(self) -> None:
+        formula = parse_formula("y ~ x1 + (x1 * x2 - x1:x2 - x1 | g)")
+        labels = []
+        for term in formula.random[0].expr:
+            if isinstance(term, VariableTerm):
+                labels.append(term.name)
+            elif isinstance(term, InteractionTerm):
+                labels.append(":".join(term.variables))
+        assert labels == ["x2"]
+
+    def test_random_effect_intercept_subtraction_roundtrips(self) -> None:
+        formula = parse_formula("y ~ x1 + (x2 - 1 | g)")
+        assert not formula.random[0].has_intercept
+        assert str(formula) == "y ~ x1 + (0 + x2 | g)"
+        assert not parse_formula(str(formula)).random[0].has_intercept
+
+    def test_random_term_subtraction(self) -> None:
+        formula = parse_formula("y ~ x1 + (1 | g) + (1 | h) - (1 | g)")
+        assert [term.grouping for term in formula.random] == ["h"]
 
 
 class TestModelMatrices:
@@ -125,3 +156,18 @@ class TestModelMatrices:
 
         assert matrices.fixed_names == ["(Intercept)", "x1", "x2", "x1:x2"]
         assert np.allclose(matrices.X[:, 3], data["x1"].to_numpy() * data["x2"].to_numpy())
+
+    def test_subtracted_interaction_is_absent_from_fixed_matrix(self) -> None:
+        data = pd.DataFrame(
+            {
+                "y": [1.0, 2.0, 3.0, 4.0],
+                "x1": [1.0, 2.0, 3.0, 4.0],
+                "x2": [2.0, 3.0, 4.0, 5.0],
+                "g": ["a", "a", "b", "b"],
+            }
+        )
+        formula = parse_formula("y ~ x1 * x2 - x1:x2 + (1 | g)")
+        matrices = build_model_matrices(formula, data)
+
+        assert matrices.fixed_names == ["(Intercept)", "x1", "x2"]
+        assert matrices.X.shape == (4, 3)
