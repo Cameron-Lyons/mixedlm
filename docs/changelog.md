@@ -20,6 +20,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Replaced the Py-BOBYQA dependency and default optimizer with SciPy COBYQA
 - Reduced unused and redundant Python and Rust dependencies
 
+### Fixed
+- GLMM PIRLS, Laplace, and adaptive-quadrature calculations now use the covariance factor
+  in spherical random-effect coordinates, with consistent likelihood normalization and
+  deterministic outer optimization
+
 ## [1.1.0] - 2026-01-27
 
 ### Added

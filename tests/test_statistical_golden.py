@@ -137,32 +137,37 @@ def test_penicillin_crossed_random_effects_golden() -> None:
 @pytest.mark.filterwarnings("ignore:invalid value encountered in multiply")
 def test_cbpp_binomial_glmer_golden() -> None:
     data = CBPP.copy()
-    model = mlm.glmer("y ~ period + (1 | herd)", data, family=families.Binomial())
+    model = mlm.glmer(
+        "y ~ period + (1 | herd)",
+        data,
+        family=families.Binomial(),
+        weights=data["size"].to_numpy(dtype=float),
+    )
 
     assert model.converged
     assert_allclose(
         model.beta,
-        [-1.7557176513849455, -0.4488534827602638, -0.1186586925007642, -0.6261372107626156],
+        [-1.861164732564236, -0.208553975355595, -0.078281733042295, -0.618291994021517],
         rtol=0,
         atol=_CBPP_FLOAT_ATOL,
     )
-    assert_allclose(model.theta, [0.6372400408998262], rtol=0, atol=_CBPP_FLOAT_ATOL)
+    assert_allclose(model.theta, [0.48750557774242], rtol=0, atol=_CBPP_FLOAT_ATOL)
     assert model.sigma == pytest.approx(1.0, abs=0.0)
-    assert model.deviance == pytest.approx(11.189698024186672, abs=_CBPP_FLOAT_ATOL)
+    assert model.deviance == pytest.approx(74.03136198466316, abs=_CBPP_FLOAT_ATOL)
 
     loglik = model.logLik()
-    assert loglik.value == pytest.approx(-5.594849012093336, abs=_CBPP_FLOAT_ATOL)
+    assert loglik.value == pytest.approx(-37.01568099233158, abs=_CBPP_FLOAT_ATOL)
     assert loglik.df == 5
     assert loglik.nobs == 56
-    assert model.AIC() == pytest.approx(21.189698024186672, abs=_CBPP_FLOAT_ATOL)
-    assert model.BIC() == pytest.approx(31.31645647786242, abs=_CBPP_FLOAT_ATOL)
+    assert model.AIC() == pytest.approx(84.03136198466316, abs=_CBPP_FLOAT_ATOL)
+    assert model.BIC() == pytest.approx(94.15812043833891, abs=_CBPP_FLOAT_ATOL)
     assert_allclose(
         model.vcov(),
         [
-            [0.743029787332, -0.561571672073, -0.562166624516, -0.561302529527],
-            [-0.561571672073, 1.341075534935, 0.562461023519, 0.562638393569],
-            [-0.562166624516, 0.562461023519, 1.172570250194, 0.562477114363],
-            [-0.561302529527, 0.562638393569, 0.562477114363, 1.458009117359],
+            [0.086506090158, -0.065213683451, -0.067123707411, -0.067040141073],
+            [-0.065213683451, 0.160280508337, 0.065151552713, 0.064818269431],
+            [-0.067123707411, 0.065151552713, 0.144882987863, 0.067106011166],
+            [-0.067040141073, 0.064818269431, 0.067106011166, 0.189605383319],
         ],
         rtol=0,
         atol=_CBPP_FLOAT_ATOL,
@@ -170,14 +175,14 @@ def test_cbpp_binomial_glmer_golden() -> None:
     assert_allclose(
         model.fitted()[:8],
         [
-            0.208594813036,
-            0.144023075002,
-            0.189682411694,
-            0.123515364543,
-            0.1414187027,
-            0.095141799419,
-            0.127614762741,
-            0.080936258204,
+            0.198309632363,
+            0.167221722142,
+            0.186157376781,
+            0.117617807046,
+            0.131593373719,
+            0.109535223114,
+            0.122902679701,
+            0.075491973286,
         ],
         rtol=0,
         atol=_CBPP_FLOAT_ATOL,
@@ -185,19 +190,19 @@ def test_cbpp_binomial_glmer_golden() -> None:
     assert_allclose(
         model.residuals()[:8],
         [
-            -0.169215458298,
-            0.278367338822,
-            0.580920231827,
-            -0.513490222305,
-            -0.014580538283,
-            -0.145270485489,
-            0.044944384645,
-            0.035914772383,
+            -0.541510359941,
+            0.726873965828,
+            1.773098171001,
+            -1.118615177302,
+            0.065853413303,
+            -0.802052054265,
+            0.272457372704,
+            0.265837027814,
         ],
         rtol=0,
         atol=_CBPP_FLOAT_ATOL,
     )
 
     herd = model.VarCorr().groups["herd"]
-    assert herd.variance["(Intercept)"] == pytest.approx(0.4060748697260122, abs=_CBPP_FLOAT_ATOL)
-    assert herd.stddev["(Intercept)"] == pytest.approx(0.6372400408998262, abs=_CBPP_FLOAT_ATOL)
+    assert herd.variance["(Intercept)"] == pytest.approx(0.23766168832997042, abs=_CBPP_FLOAT_ATOL)
+    assert herd.stddev["(Intercept)"] == pytest.approx(0.4875055777424197, abs=_CBPP_FLOAT_ATOL)
