@@ -1687,7 +1687,7 @@ class LmerResult(MerResultMixin):
         include_re = use_re and q > 0 and re_form not in ("~0", "NA")
 
         if not include_re:
-            fixed_part = self.matrices.X @ self.beta
+            fixed_part = self.matrices.X @ self.beta + self.matrices.offset
             result = np.random.randn(nsim, n).T
             result *= self.sigma
             result += fixed_part[:, None]
@@ -1714,7 +1714,7 @@ class LmerResult(MerResultMixin):
     ) -> NDArray[np.floating]:
         n = self.matrices.n_obs
 
-        fixed_part = self.matrices.X @ self.beta
+        fixed_part = self.matrices.X @ self.beta + self.matrices.offset
 
         n_levels = [s.n_levels for s in self.matrices.random_structures]
         n_terms = [s.n_terms for s in self.matrices.random_structures]
@@ -1747,7 +1747,7 @@ class LmerResult(MerResultMixin):
         n = self.matrices.n_obs
         q = self.matrices.n_random
 
-        fixed_part = self.matrices.X @ self.beta
+        fixed_part = self.matrices.X @ self.beta + self.matrices.offset
 
         if re_form == "~0" or re_form == "NA" or not use_re or q == 0:
             random_part = np.zeros(n)
