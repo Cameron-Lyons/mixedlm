@@ -216,6 +216,31 @@ class TestNLMMOptimizer:
         assert np.isscalar(dev)
         assert np.isfinite(dev)
 
+    def test_objective_is_deterministic(self, simple_nlmm_data):
+        x, y, groups = simple_nlmm_data
+        optimizer = NLMMOptimizer(y, x, groups, SSasymp(), [0])
+        theta = optimizer.get_start_theta()
+        nearby_theta = theta.copy()
+        nearby_theta[0] *= 1.1
+
+        first = optimizer.objective(theta)
+        optimizer.objective(nearby_theta)
+        repeated = optimizer.objective(theta)
+
+        assert repeated == pytest.approx(first, rel=0.0, abs=1e-12)
+
+    def test_python_and_rust_objectives_match(self, simple_nlmm_data):
+        x, y, groups = simple_nlmm_data
+        python_optimizer = NLMMOptimizer(y, x, groups, SSasymp(), [0], use_rust=False)
+        rust_optimizer = NLMMOptimizer(y, x, groups, SSasymp(), [0], use_rust=True)
+        if not rust_optimizer.use_rust:
+            pytest.skip("Rust extension is unavailable")
+
+        theta = python_optimizer.get_start_theta()
+        assert rust_optimizer.objective(theta) == pytest.approx(
+            python_optimizer.objective(theta), rel=1e-10
+        )
+
     def test_optimize_converges(self, simple_nlmm_data):
         x, y, groups = simple_nlmm_data
         model = SSasymp()
@@ -225,7 +250,9 @@ class TestNLMMOptimizer:
         result = optimizer.optimize(maxiter=50)
 
         assert isinstance(result, NLMMOptimizationResult)
+        assert result.converged
         assert result.deviance > 0
+        assert result.theta[0] > 1e-3
 
 
 class TestNLMMWithDifferentModels:

@@ -20,6 +20,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Replaced the Py-BOBYQA dependency and default optimizer with SciPy COBYQA
 - Reduced unused and redundant Python and Rust dependencies
 
+### Fixed
+- Nonlinear mixed-model optimization now uses a deterministic profiled Laplace deviance with consistent relative covariance scaling
+
 ## [1.1.0] - 2026-01-27
 
 ### Added

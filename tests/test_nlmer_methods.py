@@ -15,7 +15,7 @@ def create_nlme_data(n_groups: int = 8, n_per_group: int = 10, seed: int = 42) -
         r0 = 180 + np.random.randn() * 10
         lrc = -3 + np.random.randn() * 0.2
         for t in np.linspace(0, 10, n_per_group):
-            y = asym - (asym - r0) * np.exp(np.exp(lrc) * t) + np.random.randn() * 5
+            y = asym + (r0 - asym) * np.exp(-np.exp(lrc) * t) + np.random.randn() * 5
             data_rows.append({"subject": f"S{subj + 1}", "time": t, "y": y})
     return pd.DataFrame(data_rows)
 

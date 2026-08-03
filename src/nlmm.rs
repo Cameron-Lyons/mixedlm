@@ -2,6 +2,9 @@ use nalgebra::{Cholesky, DMatrix, DVector};
 use pyo3::PyResult;
 use pyo3::prelude::*;
 
+const PNLS_MAX_ITER: usize = 50;
+const PNLS_TOLERANCE: f64 = 1e-6;
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[allow(clippy::enum_variant_names)]
 pub enum NlmeModel {
@@ -177,7 +180,7 @@ impl NlmeModel {
     }
 }
 
-fn build_psi_matrix(theta: &[f64], n_random: usize) -> DMatrix<f64> {
+fn build_psi_factor(theta: &[f64], n_random: usize) -> DMatrix<f64> {
     if theta.is_empty() {
         return DMatrix::identity(n_random, n_random);
     }
@@ -185,7 +188,7 @@ fn build_psi_matrix(theta: &[f64], n_random: usize) -> DMatrix<f64> {
     let n_theta = theta.len();
     let q = ((-1.0 + (1.0 + 8.0 * n_theta as f64).sqrt()) / 2.0) as usize;
 
-    let l = if q * (q + 1) / 2 == n_theta {
+    if q * (q + 1) / 2 == n_theta {
         let mut l = DMatrix::zeros(q, q);
         let mut idx = 0;
         for i in 0..q {
@@ -200,8 +203,11 @@ fn build_psi_matrix(theta: &[f64], n_random: usize) -> DMatrix<f64> {
             n_random,
             theta.iter().take(n_random).cloned(),
         ))
-    };
+    }
+}
 
+fn build_psi_matrix(theta: &[f64], n_random: usize) -> DMatrix<f64> {
+    let l = build_psi_factor(theta, n_random);
     &l * l.transpose()
 }
 
@@ -220,7 +226,7 @@ pub fn pnls_step_impl(
     phi: &[f64],
     b: &DMatrix<f64>,
     psi: &DMatrix<f64>,
-    sigma: f64,
+    _sigma: f64,
     random_params: &[usize],
 ) -> PnlsResult {
     let n = y.len();
@@ -250,7 +256,9 @@ pub fn pnls_step_impl(
     let mut phi_new: Vec<f64> = phi.to_vec();
     let mut b_new = b.clone();
 
-    for _iteration in 0..10 {
+    for _iteration in 0..PNLS_MAX_ITER {
+        let phi_previous = phi_new.clone();
+        let b_previous = b_new.clone();
         let mut resid_total = vec![0.0; n];
         let mut grad_total = DMatrix::zeros(n, n_phi);
 
@@ -344,14 +352,13 @@ pub fn pnls_step_impl(
             let ztz = z_g.transpose() * &z_g;
             let ztr = z_g.transpose() * &resid_g;
 
-            let sigma_sq = sigma * sigma;
-            let c = &ztz / sigma_sq + &psi_inv;
+            let c = &ztz + &psi_inv;
 
             let b_g_new = match Cholesky::new(c.clone()) {
-                Some(chol) => chol.solve(&(&ztr / sigma_sq)),
+                Some(chol) => chol.solve(&ztr),
                 None => c
                     .try_inverse()
-                    .map_or(DVector::zeros(n_random), |inv| inv * &ztr / sigma_sq),
+                    .map_or(DVector::zeros(n_random), |inv| inv * &ztr),
             };
 
             for j in 0..n_random {
@@ -361,11 +368,17 @@ pub fn pnls_step_impl(
 
         let max_delta: f64 = phi_new
             .iter()
-            .zip(phi.iter())
+            .zip(phi_previous.iter())
             .map(|(a, b)| (a - b).abs())
+            .chain(
+                b_new
+                    .iter()
+                    .zip(b_previous.iter())
+                    .map(|(a, b)| (a - b).abs()),
+            )
             .fold(0.0, f64::max);
 
-        if max_delta < 1e-6 {
+        if max_delta < PNLS_TOLERANCE {
             break;
         }
     }
@@ -395,7 +408,13 @@ pub fn pnls_step_impl(
         }
     }
 
-    let sigma_new = (rss / n as f64).sqrt();
+    let mut penalty = 0.0;
+    for g_idx in 0..unique_groups.len() {
+        let b_g: DVector<f64> = DVector::from_fn(n_random, |j, _| b_new[(g_idx, j)]);
+        penalty += b_g.dot(&(&psi_inv * &b_g));
+    }
+
+    let sigma_new = ((rss + penalty) / n as f64).max(f64::MIN_POSITIVE).sqrt();
 
     PnlsResult {
         phi: phi_new,
@@ -426,13 +445,13 @@ pub fn nlmm_deviance_impl(
     let n_groups = unique_groups.len();
     let n_random = random_params.len();
 
-    let psi = build_psi_matrix(theta, n_random);
+    let psi_factor = build_psi_factor(theta, n_random);
+    let psi = &psi_factor * psi_factor.transpose();
 
     let result = pnls_step_impl(y, x, groups, model, phi, b, &psi, sigma, random_params);
 
     let phi_new = result.phi;
     let b_new = result.b;
-    let sigma_new = result.sigma;
 
     let mut rss = 0.0;
     for (g_idx, &g) in unique_groups.iter().enumerate() {
@@ -459,9 +478,6 @@ pub fn nlmm_deviance_impl(
         }
     }
 
-    let sigma_sq = sigma_new * sigma_new;
-    let mut deviance = n as f64 * (2.0 * std::f64::consts::PI * sigma_sq).ln() + rss / sigma_sq;
-
     let psi_reg = {
         let mut m = psi.clone();
         for i in 0..n_random {
@@ -475,32 +491,63 @@ pub fn nlmm_deviance_impl(
         None => DMatrix::identity(n_random, n_random),
     };
 
+    let mut penalty = 0.0;
     for g_idx in 0..n_groups {
         let b_g: DVector<f64> = DVector::from_fn(n_random, |j, _| b_new[(g_idx, j)]);
-        let penalty = b_g.dot(&(&psi_inv * &b_g));
-        deviance += penalty;
+        penalty += b_g.dot(&(&psi_inv * &b_g));
     }
 
-    let (sign, logdet) = {
-        match Cholesky::new(psi.clone()) {
-            Some(chol) => {
-                let l = chol.l();
-                let logdet = 2.0 * (0..n_random).map(|i| l[(i, i)].ln()).sum::<f64>();
-                (1.0, logdet)
-            }
-            None => {
-                let eigvals = psi.symmetric_eigenvalues();
-                let logdet: f64 = eigvals.iter().map(|&e| e.max(1e-10).ln()).sum();
-                (1.0, logdet)
+    let sigma_sq = ((rss + penalty) / n as f64).max(f64::MIN_POSITIVE);
+    let mut laplace_correction = 0.0;
+    let identity = DMatrix::identity(n_random, n_random);
+
+    for (g_idx, &g) in unique_groups.iter().enumerate() {
+        let mask: Vec<usize> = groups
+            .iter()
+            .enumerate()
+            .filter(|&(_, grp)| *grp == g)
+            .map(|(i, _)| i)
+            .collect();
+        let x_g: Vec<f64> = mask.iter().map(|&i| x[i]).collect();
+        let mut params_g = phi_new.clone();
+        for (j, &p_idx) in random_params.iter().enumerate() {
+            params_g[p_idx] += b_new[(g_idx, j)];
+        }
+
+        let grad_g = model.gradient(&params_g, &x_g);
+        let mut z_g = DMatrix::zeros(mask.len(), n_random);
+        for i in 0..mask.len() {
+            for (j, &p_idx) in random_params.iter().enumerate() {
+                z_g[(i, j)] = grad_g[(i, p_idx)];
             }
         }
-    };
 
-    if sign > 0.0 {
-        deviance += n_groups as f64 * logdet;
+        let ztz = z_g.transpose() * &z_g;
+        // Stable form of log|Psi| + log|Z'Z + Psi^-1| for Psi = L L'.
+        let system = &identity + psi_factor.transpose() * ztz * &psi_factor;
+        let logdet = match Cholesky::new(system.clone()) {
+            Some(chol) => {
+                let l = chol.l();
+                2.0 * (0..n_random).map(|i| l[(i, i)].ln()).sum::<f64>()
+            }
+            None => {
+                let eigenvalues = system.symmetric_eigenvalues();
+                if eigenvalues
+                    .iter()
+                    .any(|value| *value <= 0.0 || !value.is_finite())
+                {
+                    return (1e100, phi_new, b_new, sigma_sq.sqrt());
+                }
+                eigenvalues.iter().map(|value| value.ln()).sum()
+            }
+        };
+        laplace_correction += logdet;
     }
 
-    (deviance, phi_new, b_new, sigma_new)
+    let deviance =
+        n as f64 * (1.0 + (2.0 * std::f64::consts::PI * sigma_sq).ln()) + laplace_correction;
+
+    (deviance, phi_new, b_new, sigma_sq.sqrt())
 }
 
 #[pyfunction]
@@ -653,4 +700,98 @@ pub fn nlmm_deviance<'py>(
         .collect();
 
     Ok((deviance, phi_new, b_out, sigma_new))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn asymptotic_data() -> (Vec<f64>, Vec<f64>, Vec<i64>) {
+        let base = [10.0, 0.5, -0.5];
+        let group_effects = [-1.0, -0.3, 0.4, 1.0];
+        let mut x = Vec::new();
+        let mut y = Vec::new();
+        let mut groups = Vec::new();
+
+        for (group, effect) in group_effects.iter().enumerate() {
+            let params = [base[0] + effect, base[1], base[2]];
+            for observation in 0..10 {
+                let x_value = observation as f64 * 5.0 / 9.0;
+                let noise = (observation as f64 % 3.0 - 1.0) * 0.05;
+                x.push(x_value);
+                y.push(NlmeModel::SSasymp.predict(&params, &[x_value])[0] + noise);
+                groups.push(group as i64);
+            }
+        }
+
+        (x, y, groups)
+    }
+
+    #[test]
+    fn nlmm_deviance_is_repeatable_and_finite() {
+        let (x, y, groups) = asymptotic_data();
+        let phi = vec![10.0, 0.5, -0.5];
+        let b = DMatrix::zeros(4, 1);
+        let theta = vec![1.0];
+
+        let first = nlmm_deviance_impl(
+            &theta,
+            &y,
+            &x,
+            &groups,
+            NlmeModel::SSasymp,
+            &phi,
+            &b,
+            &[0],
+            0.3,
+        );
+        let repeated = nlmm_deviance_impl(
+            &theta,
+            &y,
+            &x,
+            &groups,
+            NlmeModel::SSasymp,
+            &phi,
+            &b,
+            &[0],
+            0.3,
+        );
+
+        assert!(first.0.is_finite());
+        assert!(first.3.is_finite() && first.3 > 0.0);
+        assert!((first.0 - repeated.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn laplace_correction_avoids_collapsed_variance_optimum() {
+        let (x, y, groups) = asymptotic_data();
+        let phi = vec![10.0, 0.5, -0.5];
+        let b = DMatrix::zeros(4, 1);
+
+        let collapsed = nlmm_deviance_impl(
+            &[1e-6],
+            &y,
+            &x,
+            &groups,
+            NlmeModel::SSasymp,
+            &phi,
+            &b,
+            &[0],
+            0.3,
+        );
+        let nonzero = nlmm_deviance_impl(
+            &[1.0],
+            &y,
+            &x,
+            &groups,
+            NlmeModel::SSasymp,
+            &phi,
+            &b,
+            &[0],
+            0.3,
+        );
+
+        assert!(collapsed.0.is_finite());
+        assert!(nonzero.0 < collapsed.0);
+    }
 }
