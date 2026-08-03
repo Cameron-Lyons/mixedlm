@@ -141,14 +141,19 @@ def drop1_lmer(
     n_jobs: int = 1,
 ) -> Drop1Result:
     from mixedlm.estimation.reml import _count_theta
-    from mixedlm.formula.terms import InteractionTerm, VariableTerm
+    from mixedlm.formula.terms import (
+        InteractionTerm,
+        PowerTerm,
+        VariableTerm,
+        format_term,
+    )
 
     droppable_terms: list[str] = []
     for formula_term in model.formula.fixed.terms:
         if isinstance(formula_term, VariableTerm):
             droppable_terms.append(formula_term.name)
-        elif isinstance(formula_term, InteractionTerm):
-            droppable_terms.append(":".join(formula_term.variables))
+        elif isinstance(formula_term, PowerTerm | InteractionTerm):
+            droppable_terms.append(format_term(formula_term))
 
     n_theta = _count_theta(model.matrices.random_structures)
     full_n_params = model.matrices.n_fixed + n_theta + 1
@@ -264,14 +269,19 @@ def drop1_glmer(
     n_jobs: int = 1,
 ) -> Drop1Result:
     from mixedlm.estimation.laplace import _count_theta
-    from mixedlm.formula.terms import InteractionTerm, VariableTerm
+    from mixedlm.formula.terms import (
+        InteractionTerm,
+        PowerTerm,
+        VariableTerm,
+        format_term,
+    )
 
     droppable_terms: list[str] = []
     for formula_term in model.formula.fixed.terms:
         if isinstance(formula_term, VariableTerm):
             droppable_terms.append(formula_term.name)
-        elif isinstance(formula_term, InteractionTerm):
-            droppable_terms.append(":".join(formula_term.variables))
+        elif isinstance(formula_term, PowerTerm | InteractionTerm):
+            droppable_terms.append(format_term(formula_term))
 
     n_theta = _count_theta(model.matrices.random_structures)
     full_n_params = model.matrices.n_fixed + n_theta
