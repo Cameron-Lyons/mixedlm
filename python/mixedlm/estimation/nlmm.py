@@ -14,7 +14,6 @@ from mixedlm.nlme.models import NonlinearModel
 
 try:
     from mixedlm._rust import nlmm_deviance as _rust_nlmm_deviance
-    from mixedlm._rust import pnls_step as _rust_pnls_step
 
     _HAS_RUST = True
 except ImportError:
@@ -22,6 +21,12 @@ except ImportError:
 
 
 _SUPPORTED_RUST_MODELS = {"ssasymp", "sslogis", "ssmicmen", "ssfpl", "ssgompertz", "ssbiexp"}
+_PSI_REGULARIZATION = 1e-8
+_PNLS_REGULARIZATION = 1e-6
+_PNLS_MAX_ITER = 50
+_PNLS_TOL = 1e-6
+_MIN_VARIANCE = np.finfo(np.float64).tiny
+_INVALID_OBJECTIVE = 1e100
 
 
 @dataclass
@@ -35,7 +40,7 @@ class NLMMOptimizationResult:
     n_iter: int
 
 
-def _build_psi_matrix(
+def _build_psi_factor(
     theta: NDArray[np.floating],
     n_random: int,
 ) -> NDArray[np.floating]:
@@ -47,13 +52,21 @@ def _build_psi_matrix(
 
     if q * (q + 1) // 2 != n_theta:
         q = int(np.sqrt(n_theta))
-        L = theta.reshape(q, q) if q * q == n_theta else np.diag(theta[:n_random])
+        return theta.reshape(q, q) if q * q == n_theta else np.diag(theta[:n_random])
     else:
         L = np.zeros((q, q), dtype=np.float64)
         row_indices, col_indices = np.tril_indices(q)
         L[row_indices, col_indices] = theta
 
-    return L @ L.T
+    return L
+
+
+def _build_psi_matrix(
+    theta: NDArray[np.floating],
+    n_random: int,
+) -> NDArray[np.floating]:
+    factor = _build_psi_factor(theta, n_random)
+    return factor @ factor.T
 
 
 def _compute_group_resid_grad(
@@ -89,7 +102,6 @@ def _update_group_random_effects(
     random_params: list[int],
     model: NonlinearModel,
     Psi_chol: NDArray,
-    sigma: float,
 ) -> tuple[int, NDArray]:
     mask = groups == g
     x_g = x[mask]
@@ -109,11 +121,11 @@ def _update_group_random_effects(
 
     n_random = len(random_params)
     Psi_inv = linalg.cho_solve((Psi_chol, True), np.eye(n_random))
-    C = ZtZ / sigma**2 + Psi_inv
+    C = ZtZ + Psi_inv
     try:
-        b_g = linalg.solve(C, Ztr / sigma**2, assume_a="pos")
+        b_g = linalg.solve(C, Ztr, assume_a="pos")
     except linalg.LinAlgError:
-        b_g = linalg.lstsq(C, Ztr / sigma**2)[0]
+        b_g = linalg.lstsq(C, Ztr)[0]
 
     return (g, b_g)
 
@@ -151,12 +163,13 @@ def pnls_step(
     random_params: list[int],
     n_jobs: int = 1,
 ) -> tuple[NDArray[np.floating], NDArray[np.floating], float]:
+    _ = sigma
     n = len(y)
     n_groups = len(np.unique(groups))
     n_phi = len(phi)
     n_random = len(random_params)
 
-    Psi_reg = Psi + 1e-8 * np.eye(n_random)
+    Psi_reg = Psi + _PSI_REGULARIZATION * np.eye(n_random)
     try:
         Psi_chol = linalg.cholesky(Psi_reg, lower=True)
         Psi_inv = linalg.cho_solve((Psi_chol, True), np.eye(n_random))
@@ -172,9 +185,9 @@ def pnls_step(
 
     use_parallel = n_jobs > 1 and n_groups >= n_jobs
 
-    reg_phi = 1e-6 * np.eye(n_phi)
+    reg_phi = _PNLS_REGULARIZATION * np.eye(n_phi)
 
-    for _iteration in range(10):
+    for _iteration in range(_PNLS_MAX_ITER):
         resid_total = np.zeros(n, dtype=np.float64)
         grad_total = np.zeros((n, n_phi), dtype=np.float64)
 
@@ -229,7 +242,6 @@ def pnls_step(
                         random_params,
                         model,
                         Psi_chol,
-                        sigma,
                     )
                     for g in range(n_groups)
                 ]
@@ -237,7 +249,6 @@ def pnls_step(
                     result = update_future.result()
                     b_new[result[0], :] = result[1]
         else:
-            sigma2 = sigma**2
             for g in range(n_groups):
                 mask = groups == g
                 x_g = x[mask]
@@ -255,17 +266,21 @@ def pnls_step(
                 ZtZ = Z_g.T @ Z_g
                 Ztr = Z_g.T @ resid_g
 
-                C = ZtZ / sigma2 + Psi_inv
+                C = ZtZ + Psi_inv
                 try:
-                    b_new[g, :] = linalg.solve(C, Ztr / sigma2, assume_a="pos")
+                    b_new[g, :] = linalg.solve(C, Ztr, assume_a="pos")
                 except linalg.LinAlgError:
-                    b_new[g, :] = linalg.lstsq(C, Ztr / sigma2)[0]
+                    b_new[g, :] = linalg.lstsq(C, Ztr)[0]
 
-        if np.max(np.abs(phi_new - phi)) < 1e-6:
-            break
+        max_delta = max(
+            float(np.max(np.abs(phi_new - phi))),
+            float(np.max(np.abs(b_new - b))),
+        )
 
         phi = phi_new
         b = b_new
+        if max_delta < _PNLS_TOL:
+            break
 
     rss: float
     if use_parallel:
@@ -291,7 +306,8 @@ def pnls_step(
             for g in range(n_groups)
         )
 
-    sigma_new = np.sqrt(rss / n)
+    penalty = float(np.einsum("gi,ij,gj->", b_new, Psi_inv, b_new, optimize=True))
+    sigma_new = np.sqrt(max((rss + penalty) / n, _MIN_VARIANCE))
 
     return phi_new, b_new, sigma_new
 
@@ -312,9 +328,10 @@ def nlmm_deviance(
     n_groups = len(np.unique(groups))
     n_random = len(random_params)
 
-    Psi = _build_psi_matrix(theta, n_random)
+    Psi_factor = _build_psi_factor(theta, n_random)
+    Psi = Psi_factor @ Psi_factor.T
 
-    phi_new, b_new, sigma_new = pnls_step(
+    phi_new, b_new, _sigma_new = pnls_step(
         y, x, groups, model, phi, b, Psi, sigma, random_params, n_jobs=n_jobs
     )
 
@@ -347,47 +364,35 @@ def nlmm_deviance(
             for g in range(n_groups)
         )
 
-    deviance = n * np.log(2 * np.pi * sigma_new**2) + rss / sigma_new**2
-
-    Psi_reg = Psi + 1e-8 * np.eye(n_random)
+    Psi_reg = Psi + _PSI_REGULARIZATION * np.eye(n_random)
     try:
-        for g in range(n_groups):
-            deviance += b_new[g, :] @ linalg.solve(Psi_reg, b_new[g, :], assume_a="pos")
+        Psi_chol = linalg.cholesky(Psi_reg, lower=True)
+        Psi_inv = linalg.cho_solve((Psi_chol, True), np.eye(n_random))
     except linalg.LinAlgError:
         Psi_inv = linalg.pinv(Psi_reg)
-        for g in range(n_groups):
-            deviance += b_new[g, :] @ Psi_inv @ b_new[g, :]
 
-    sign, logdet = np.linalg.slogdet(Psi)
-    if sign > 0:
-        deviance += n_groups * logdet
+    penalty = float(np.einsum("gi,ij,gj->", b_new, Psi_inv, b_new, optimize=True))
+    pwrss = rss + penalty
+    sigma_sq = max(pwrss / n, _MIN_VARIANCE)
 
-    return deviance, phi_new, b_new, sigma_new
+    laplace_correction = 0.0
+    identity = np.eye(n_random, dtype=np.float64)
+    for g in range(n_groups):
+        mask = groups == g
+        params_g = phi_new.copy()
+        np.add.at(params_g, random_params, b_new[g, :])
+        grad_g = model.gradient(params_g, x[mask])
+        Z_g = grad_g[:, random_params]
+        # Stable form of log|Psi| + log|Z'Z + Psi^-1| for Psi = L L'.
+        system = identity + Psi_factor.T @ (Z_g.T @ Z_g) @ Psi_factor
+        sign, logdet = np.linalg.slogdet(system)
+        if sign <= 0 or not np.isfinite(logdet):
+            return _INVALID_OBJECTIVE, phi_new, b_new, np.sqrt(sigma_sq)
+        laplace_correction += logdet
 
+    deviance = n * (1.0 + np.log(2.0 * np.pi * sigma_sq)) + laplace_correction
 
-def _pnls_step_rust(
-    y: NDArray[np.floating],
-    x: NDArray[np.floating],
-    groups: NDArray[np.integer],
-    model: NonlinearModel,
-    phi: NDArray[np.floating],
-    b: NDArray[np.floating],
-    theta: NDArray[np.floating],
-    sigma: float,
-    random_params: list[int],
-) -> tuple[NDArray[np.floating], NDArray[np.floating], float]:
-    phi_out, b_out, sigma_out = _rust_pnls_step(
-        y.astype(np.float64),
-        x.astype(np.float64),
-        groups.astype(np.int64),
-        model.name.lower(),
-        phi.astype(np.float64),
-        b.astype(np.float64),
-        theta.astype(np.float64),
-        float(sigma),
-        list(random_params),
-    )
-    return np.array(phi_out), np.array(b_out), sigma_out
+    return deviance, phi_new, b_new, np.sqrt(sigma_sq)
 
 
 def _nlmm_deviance_rust(
@@ -413,49 +418,6 @@ def _nlmm_deviance_rust(
         float(sigma),
     )
     return dev, np.array(phi_out), np.array(b_out), sigma_out
-
-
-def pnls_step_fast(
-    y: NDArray[np.floating],
-    x: NDArray[np.floating],
-    groups: NDArray[np.integer],
-    model: NonlinearModel,
-    phi: NDArray[np.floating],
-    b: NDArray[np.floating],
-    Psi: NDArray[np.floating],
-    sigma: float,
-    random_params: list[int],
-    n_jobs: int = 1,
-) -> tuple[NDArray[np.floating], NDArray[np.floating], float]:
-    if _HAS_RUST and model.name.lower() in _SUPPORTED_RUST_MODELS:
-        n_random = len(random_params)
-        n_theta = n_random * (n_random + 1) // 2
-        theta = np.zeros(n_theta, dtype=np.float64)
-        idx = 0
-        for i in range(n_random):
-            for j in range(i + 1):
-                if i == j:
-                    theta[idx] = 1.0
-                idx += 1
-        return _pnls_step_rust(y, x, groups, model, phi, b, theta, sigma, random_params)
-    return pnls_step(y, x, groups, model, phi, b, Psi, sigma, random_params, n_jobs=n_jobs)
-
-
-def nlmm_deviance_fast(
-    theta: NDArray[np.floating],
-    y: NDArray[np.floating],
-    x: NDArray[np.floating],
-    groups: NDArray[np.integer],
-    model: NonlinearModel,
-    phi: NDArray[np.floating],
-    b: NDArray[np.floating],
-    random_params: list[int],
-    sigma: float,
-    n_jobs: int = 1,
-) -> tuple[float, NDArray[np.floating], NDArray[np.floating], float]:
-    if _HAS_RUST and model.name.lower() in _SUPPORTED_RUST_MODELS:
-        return _nlmm_deviance_rust(theta, y, x, groups, model, phi, b, random_params, sigma)
-    return nlmm_deviance(theta, y, x, groups, model, phi, b, random_params, sigma, n_jobs=n_jobs)
 
 
 class NLMMOptimizer:
@@ -485,9 +447,18 @@ class NLMMOptimizer:
         self.n_random = len(random_params)
         self.n_theta = self.n_random * (self.n_random + 1) // 2
 
-        self._phi_cache: NDArray[np.floating] | None = None
-        self._b_cache: NDArray[np.floating] | None = None
-        self._sigma_cache: float = 1.0
+        self._start_phi: NDArray[np.floating] | None = None
+        self._start_sigma = max(float(np.std(self.y)), np.sqrt(_MIN_VARIANCE))
+        self._last_theta: NDArray[np.floating] | None = None
+        self._last_evaluation: (
+            tuple[
+                float,
+                NDArray[np.floating],
+                NDArray[np.floating],
+                float,
+            ]
+            | None
+        ) = None
 
     def get_start_theta(self) -> NDArray[np.floating]:
         theta = np.zeros(self.n_theta, dtype=np.float64)
@@ -502,43 +473,76 @@ class NLMMOptimizer:
     def get_start_phi(self) -> NDArray[np.floating]:
         return self.model.get_start(self.x, self.y)
 
-    def objective(self, theta: NDArray[np.floating]) -> float:
-        if self._phi_cache is None:
-            self._phi_cache = self.get_start_phi()
-        if self._b_cache is None:
-            self._b_cache = np.zeros((self.n_groups, self.n_random), dtype=np.float64)
+    def _evaluate(
+        self,
+        theta: NDArray[np.floating],
+    ) -> tuple[float, NDArray[np.floating], NDArray[np.floating], float]:
+        if (
+            self._last_theta is not None
+            and np.array_equal(theta, self._last_theta)
+            and self._last_evaluation is not None
+        ):
+            return self._last_evaluation
 
-        if self.use_rust:
-            dev, phi, b, sigma = _nlmm_deviance_rust(
-                theta,
-                self.y,
-                self.x,
-                self.groups,
-                self.model,
-                self._phi_cache,
-                self._b_cache,
-                self.random_params,
-                self._sigma_cache,
-            )
+        if self._start_phi is None:
+            self._start_phi = self.get_start_phi()
+
+        start_b = np.zeros((self.n_groups, self.n_random), dtype=np.float64)
+        invalid_evaluation: tuple[
+            float,
+            NDArray[np.floating],
+            NDArray[np.floating],
+            float,
+        ] = (
+            _INVALID_OBJECTIVE,
+            self._start_phi.copy(),
+            start_b,
+            self._start_sigma,
+        )
+
+        if not np.all(np.isfinite(theta)):
+            evaluation = invalid_evaluation
         else:
-            dev, phi, b, sigma = nlmm_deviance(
-                theta,
-                self.y,
-                self.x,
-                self.groups,
-                self.model,
-                self._phi_cache,
-                self._b_cache,
-                self.random_params,
-                self._sigma_cache,
-                n_jobs=self.n_jobs,
-            )
+            try:
+                with np.errstate(divide="raise", invalid="raise", over="raise"):
+                    if self.use_rust:
+                        evaluation = _nlmm_deviance_rust(
+                            theta,
+                            self.y,
+                            self.x,
+                            self.groups,
+                            self.model,
+                            self._start_phi,
+                            start_b,
+                            self.random_params,
+                            self._start_sigma,
+                        )
+                    else:
+                        evaluation = nlmm_deviance(
+                            theta,
+                            self.y,
+                            self.x,
+                            self.groups,
+                            self.model,
+                            self._start_phi,
+                            start_b,
+                            self.random_params,
+                            self._start_sigma,
+                            n_jobs=self.n_jobs,
+                        )
+            except (FloatingPointError, OverflowError, ValueError, linalg.LinAlgError):
+                evaluation = invalid_evaluation
 
-        self._phi_cache = phi
-        self._b_cache = b
-        self._sigma_cache = sigma
+        if not np.isfinite(evaluation[0]):
+            evaluation = invalid_evaluation
 
-        return dev
+        self._last_theta = theta.copy()
+        self._last_evaluation = evaluation
+        return evaluation
+
+    def objective(self, theta: NDArray[np.floating]) -> float:
+        deviance = float(self._evaluate(theta)[0])
+        return deviance if np.isfinite(deviance) else _INVALID_OBJECTIVE
 
     def optimize(
         self,
@@ -550,13 +554,10 @@ class NLMMOptimizer:
         if start_theta is None:
             start_theta = self.get_start_theta()
 
-        if start_phi is not None:
-            self._phi_cache = start_phi
-        else:
-            self._phi_cache = self.get_start_phi()
-
-        self._b_cache = np.zeros((self.n_groups, self.n_random), dtype=np.float64)
-        self._sigma_cache = np.std(self.y)
+        self._start_phi = start_phi.copy() if start_phi is not None else self.get_start_phi()
+        self._start_sigma = max(float(np.std(self.y)), np.sqrt(_MIN_VARIANCE))
+        self._last_theta = None
+        self._last_evaluation = None
 
         bounds: list[tuple[float | None, float | None]] = [(None, None)] * self.n_theta
         idx = 0
@@ -580,12 +581,14 @@ class NLMMOptimizer:
             callback=callback,
         )
 
+        deviance, phi, b, sigma = self._evaluate(result.x)
+
         return NLMMOptimizationResult(
-            phi=self._phi_cache,
+            phi=phi,
             theta=result.x,
-            sigma=self._sigma_cache,
-            b=self._b_cache,
-            deviance=result.fun,
-            converged=result.success,
+            sigma=sigma,
+            b=b,
+            deviance=deviance,
+            converged=bool(result.success and np.isfinite(deviance)),
             n_iter=result.nit,
         )
