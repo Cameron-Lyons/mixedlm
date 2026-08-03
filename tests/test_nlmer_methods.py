@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import pytest
-from mixedlm import nlme, nlmer
+from mixedlm import coef, fixef, getME, nlme, nlmer, ranef
 from mixedlm.inference.bootstrap import bootstrap_nlmer
 
 
@@ -274,6 +274,15 @@ class TestNlmerIsSingular:
 
 
 class TestNlmerAccessors:
+    def test_root_accessor_functions(self) -> None:
+        model = nlme.SSasymp()
+        result = nlmer(model, NLME_DATA, x_var="time", y_var="y", group_var="subject")
+
+        assert fixef(result) == result.fixef()
+        assert set(ranef(result)) == {"subject"}
+        assert set(coef(result)) == {"subject"}
+        assert np.allclose(getME(result, "phi"), result.phi)
+
     def test_nobs(self) -> None:
         model = nlme.SSasymp()
         result = nlmer(model, NLME_DATA, x_var="time", y_var="y", group_var="subject")

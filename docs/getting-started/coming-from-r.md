@@ -51,10 +51,10 @@ This guide helps lme4 users transition to mixedlm. The API is designed to be as 
 === "Python (mixedlm)"
 
     ```python
-    m.fixef()       # Fixed effects
-    m.ranef()       # Random effects
+    mlm.fixef(m)    # Fixed effects (m.fixef() also works)
+    mlm.ranef(m)    # Random effects (m.ranef() also works)
     m.VarCorr()     # Variance components
-    m.coef()        # Combined coefficients
+    mlm.coef(m)     # Combined coefficients (m.coef() also works)
     mlm.sigma(m)    # Residual SD
     m.logLik()      # Log-likelihood
     m.AIC()         # AIC
