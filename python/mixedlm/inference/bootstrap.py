@@ -186,6 +186,8 @@ def _glmer_bootstrap_worker(args: tuple[Any, ...]) -> tuple[int, NDArray | None,
         fixed_names,
         random_structures_data,
         response_name,
+        response_denominator,
+        trials,
         beta,
         theta,
         family,
@@ -230,7 +232,8 @@ def _glmer_bootstrap_worker(args: tuple[Any, ...]) -> tuple[int, NDArray | None,
 
         family_name = family.__class__.__name__
         if family_name == "Binomial":
-            y_sim = np.random.binomial(1, mu).astype(np.float64)
+            binomial_trials = 1 if trials is None else trials.astype(np.int64)
+            y_sim = np.random.binomial(binomial_trials, mu).astype(np.float64)
         elif family_name == "Poisson":
             y_sim = np.random.poisson(mu).astype(np.float64)
         elif family_name == "Gaussian":
@@ -240,6 +243,8 @@ def _glmer_bootstrap_worker(args: tuple[Any, ...]) -> tuple[int, NDArray | None,
 
         sim_df = pd.DataFrame(X, columns=fixed_names)
         sim_df[response_name] = y_sim
+        if response_denominator is not None:
+            sim_df[response_denominator] = trials
 
         for struct_data in random_structures_data:
             level_map = struct_data["level_map"]
@@ -334,6 +339,8 @@ def _prepare_glmer_worker_data(result: GlmerResult) -> dict[str, Any]:
         "fixed_names": result.matrices.fixed_names,
         "random_structures_data": random_structures_data,
         "response_name": result.formula.response,
+        "response_denominator": result.formula.response_denominator,
+        "trials": result.matrices.trials,
         "beta": result.beta.copy(),
         "theta": result.theta.copy(),
         "family": result.family,
@@ -537,6 +544,8 @@ def bootstrap_glmer(
                 sim_data = result.matrices.X.copy()
                 sim_df = pd.DataFrame(sim_data, columns=result.matrices.fixed_names)
                 sim_df[result.formula.response] = y_sim
+                if result.formula.response_denominator is not None:
+                    sim_df[result.formula.response_denominator] = result.matrices.trials
 
                 for struct in result.matrices.random_structures:
                     levels = list(struct.level_map.keys())
@@ -578,6 +587,8 @@ def bootstrap_glmer(
                 worker_data["fixed_names"],
                 worker_data["random_structures_data"],
                 worker_data["response_name"],
+                worker_data["response_denominator"],
+                worker_data["trials"],
                 worker_data["beta"],
                 worker_data["theta"],
                 worker_data["family"],
@@ -659,7 +670,8 @@ def _simulate_glmer(result: GlmerResult) -> NDArray[np.floating]:
     family_name = result.family.__class__.__name__
 
     if family_name == "Binomial":
-        y_sim = np.random.binomial(1, mu).astype(np.float64)
+        trials = 1 if result.matrices.trials is None else result.matrices.trials.astype(np.int64)
+        y_sim = np.random.binomial(trials, mu).astype(np.float64)
     elif family_name == "Poisson":
         y_sim = np.random.poisson(mu).astype(np.float64)
     elif family_name == "Gaussian":

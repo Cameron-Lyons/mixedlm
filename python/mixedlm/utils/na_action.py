@@ -68,6 +68,8 @@ def get_model_variables(formula: Formula) -> list[str]:
     from mixedlm.formula.terms import InteractionTerm, VariableTerm
 
     variables = [formula.response]
+    if formula.response_denominator is not None:
+        variables.append(formula.response_denominator)
 
     for term in formula.fixed.terms:
         if isinstance(term, VariableTerm):

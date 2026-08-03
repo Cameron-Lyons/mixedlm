@@ -54,6 +54,7 @@ class GlmerMod:
             offset=offset,
             na_action=na_action,
             contrasts=contrasts,
+            grouped_binomial=isinstance(self.family, Binomial),
         )
 
     def fit(
@@ -159,7 +160,8 @@ def glmer_nb(
     Parameters
     ----------
     formula : str
-        Model formula in lme4 syntax (e.g., "y ~ x + (1|group)").
+        Model formula in lme4 syntax (e.g., "y ~ x + (1|group)"). For grouped
+        binomial data, use "successes / trials ~ x + (1|group)".
     data : DataFrame
         Data containing the variables in the formula.
     verbose : int, default 0
@@ -167,7 +169,8 @@ def glmer_nb(
     nAGQ : int, default 1
         Number of adaptive Gauss-Hermite quadrature points.
     weights : array-like, optional
-        Prior weights for observations.
+        Prior weights for observations. With a grouped binomial response,
+        these are multiplied by the trial counts.
     offset : array-like, optional
         Offset term for the linear predictor.
     na_action : str, optional
