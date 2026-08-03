@@ -312,6 +312,24 @@ class TestWeightsOffset:
         fitted = result.fitted()
         assert len(fitted) == n
 
+    def test_lmer_simulate_preserves_offset(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        n_groups = 8
+        n_per_group = 10
+        n = n_groups * n_per_group
+        rng = np.random.default_rng(42)
+        group = np.repeat(np.arange(n_groups), n_per_group)
+        x = rng.normal(size=n)
+        offset = np.linspace(-0.4, 0.6, n)
+        y = 1.5 + 0.3 * x + offset + rng.normal(0.0, 0.2, n)
+        data = pd.DataFrame({"y": y, "x": x, "group": group.astype(str)})
+        result = lmer("y ~ x + (1 | group)", data, offset=offset)
+
+        monkeypatch.setattr(np.random, "randn", lambda *shape: np.zeros(shape))
+        simulated = result.simulate(nsim=3, use_re=False)
+
+        expected = result.matrices.X @ result.beta + offset
+        assert_allclose(simulated, np.broadcast_to(expected[:, None], (n, 3)))
+
     def test_glmer_weights(self) -> None:
         np.random.seed(42)
         n_groups = 10
@@ -361,6 +379,31 @@ class TestWeightsOffset:
         fitted = result.fitted()
         assert len(fitted) == n
         assert np.all(fitted > 0)
+
+    def test_glmer_simulate_preserves_offset(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        n_groups = 8
+        n_per_group = 10
+        n = n_groups * n_per_group
+        rng = np.random.default_rng(42)
+        group = np.repeat(np.arange(n_groups), n_per_group)
+        x = rng.normal(size=n)
+        offset = np.linspace(-0.3, 0.5, n)
+        mu = np.exp(-0.7 + 0.2 * x + offset)
+        y = rng.poisson(mu)
+        data = pd.DataFrame({"y": y, "x": x, "group": group.astype(str)})
+        result = glmer(
+            "y ~ x + (1 | group)",
+            data,
+            family=families.Poisson(),
+            offset=offset,
+        )
+
+        monkeypatch.setattr(np.random, "poisson", lambda lam: np.asarray(lam))
+        simulated = result.simulate(nsim=3, use_re=False)
+
+        eta = result.matrices.X @ result.beta + offset
+        expected = result.family.link.inverse(eta)
+        assert_allclose(simulated, np.broadcast_to(expected[:, None], (n, 3)))
 
     def test_lmer_weights_and_offset(self) -> None:
         np.random.seed(42)

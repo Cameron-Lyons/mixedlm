@@ -1551,9 +1551,9 @@ class GlmerResult(MerResultMixin):
         n = self.matrices.n_obs
         q = self.matrices.n_random
 
-        if re_form == "~0" or re_form == "NA" or not use_re or q == 0:
-            eta = self.matrices.X @ self.beta
-        else:
+        eta = self.matrices.X @ self.beta + self.matrices.offset
+
+        if re_form != "~0" and re_form != "NA" and use_re and q > 0:
             u_new = np.zeros(q, dtype=np.float64)
             u_idx = 0
             theta_start = 0
@@ -1586,7 +1586,7 @@ class GlmerResult(MerResultMixin):
                 u_idx += n_levels * n_terms
                 theta_start += n_theta
 
-            eta = self.matrices.X @ self.beta + self.matrices.Z @ u_new
+            eta += self.matrices.Z @ u_new
 
         mu = self.family.link.inverse(eta)
 
