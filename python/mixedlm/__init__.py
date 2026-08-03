@@ -12,6 +12,7 @@ from mixedlm.datasets import (
     load_sleepstudy,
     load_verbagg,
 )
+from mixedlm.diagnostics.fit_metrics import ICCResult, R2NakagawaResult, icc, r2_nakagawa
 from mixedlm.estimation.em_reml import EMResult, em_reml_simple
 from mixedlm.estimation.laplace import GQN, GQdk
 from mixedlm.estimation.optimizers import NelderMead, NelderMeadState, golden, nlminbwrap
@@ -162,6 +163,10 @@ __all__ = [
     "kenward_roger_df",
     "pvalues_with_ddf",
     "DenomDFResult",
+    "r2_nakagawa",
+    "R2NakagawaResult",
+    "icc",
+    "ICCResult",
     "powerSim",
     "powerCurve",
     "extend",

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from mixedlm.diagnostics.fit_metrics import ICCResult, R2NakagawaResult, icc, r2_nakagawa
 from mixedlm.diagnostics.influence import (
     InfluenceResult,
     cooks_distance,
@@ -38,4 +39,8 @@ __all__ = [
     "influence_plot",
     "influence_summary",
     "influential_obs",
+    "r2_nakagawa",
+    "R2NakagawaResult",
+    "icc",
+    "ICCResult",
 ]
