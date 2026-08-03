@@ -182,7 +182,7 @@ result = em_reml_simple(parsed.matrices, max_iter=100, tol=1e-5)
 
 **Returns:** `EMResult` with fields `theta`, `beta`, `sigma`, `converged`, `n_iter`, `final_loglik`
 
-**Supported models:** Random intercepts, correlated and uncorrelated random slopes, multiple random effect terms (cov_type='us' only).
+**Supported models:** Random intercepts, correlated and uncorrelated random slopes, multiple random effect terms, and compound-symmetry covariance (`cov_type='cs'`).
 
 !!! tip
     For most users, `em_init=True` in `LmerControl` or `GlmerControl` is the easier way to use EM-REML. The standalone function is for advanced workflows.

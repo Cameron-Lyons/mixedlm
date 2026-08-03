@@ -1,8 +1,12 @@
 """Tests for EM-REML algorithm."""
 
+import warnings
+
+import numpy as np
 import pytest
-from mixedlm import lFormula, lmer, load_penicillin, load_sleepstudy
-from mixedlm.estimation.em_reml import em_reml_simple
+from mixedlm import lFormula, lmer, lmerControl, load_penicillin, load_sleepstudy, set_cov_type
+from mixedlm.estimation.em_reml import _m_step_update_sigma, _sigma_to_theta, em_reml_simple
+from mixedlm.matrices.design import RandomEffectStructure, build_model_matrices
 
 
 class TestEMReml:
@@ -123,12 +127,60 @@ class TestEMReml:
         assert len(result.theta) == 1
         assert result.sigma > 0
 
-    def test_em_reml_cs_not_supported(self):
-        """Test that EM-REML raises error for unsupported covariance types."""
+    def test_em_reml_compound_symmetry(self):
+        """Test EM-REML with compound-symmetry covariance."""
         data = load_sleepstudy()
-        parsed = lFormula("Reaction ~ Days + (Days | Subject)", data)
+        formula = set_cov_type("Reaction ~ Days + (Days | Subject)", "cs")
+        matrices = build_model_matrices(formula, data)
 
-        parsed.matrices.random_structures[0].cov_type = "cs"
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            result = em_reml_simple(matrices, max_iter=100)
 
-        with pytest.raises(NotImplementedError, match="cov_type='cs'"):
-            em_reml_simple(parsed.matrices, max_iter=10)
+        assert result.converged
+        assert np.isfinite(result.final_loglik)
+        assert len(result.theta) == 2
+        assert result.theta[0] > 0
+        assert -1 < result.theta[1] < 1
+        assert result.sigma > 0
+
+        with warnings.catch_warnings(record=True) as fit_warnings:
+            warnings.simplefilter("always")
+            fit = lmer(formula, data, control=lmerControl(em_init=True, em_maxiter=100))
+
+        assert fit.converged
+        assert len(fit.theta) == 2
+        assert not any(issubclass(item.category, RuntimeWarning) for item in caught)
+        assert not any("EM initialization failed" in str(item.message) for item in fit_warnings)
+
+    def test_compound_symmetry_m_step(self):
+        """Test the exact constrained covariance update."""
+        struct = RandomEffectStructure(
+            grouping_factor="group",
+            term_names=["a", "b", "c"],
+            n_levels=2,
+            n_terms=3,
+            correlated=True,
+            level_map={"A": 0, "B": 1},
+            cov_type="cs",
+        )
+        u_block = np.array([1.0, 2.0, 3.0, -1.0, 0.0, 1.0])
+        var_u_block = np.eye(6) * 0.3
+
+        sigma = _m_step_update_sigma(struct, u_block, var_u_block, variance_floor=1e-8)
+
+        np.testing.assert_allclose(np.diag(sigma), np.repeat(89 / 30, 3))
+        np.testing.assert_allclose(sigma[np.triu_indices(3, k=1)], np.repeat(5 / 3, 3))
+        assert np.min(np.linalg.eigvalsh(sigma)) >= 1e-8
+
+        theta = _sigma_to_theta([struct], [sigma], sigma2_e=2.0)
+        np.testing.assert_allclose(theta, [np.sqrt(89 / 60), 50 / 89])
+
+    def test_em_reml_ar1_not_supported(self):
+        """Test that AR(1) still uses the explicit fallback path."""
+        data = load_sleepstudy()
+        formula = set_cov_type("Reaction ~ Days + (Days | Subject)", "ar1")
+        matrices = build_model_matrices(formula, data)
+
+        with pytest.raises(NotImplementedError, match="cov_type='ar1'"):
+            em_reml_simple(matrices, max_iter=10)
