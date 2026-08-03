@@ -215,38 +215,40 @@ print(ci)
 ### Basic Bootstrap
 
 ```python
-from mixedlm import bootMer
+from mixedlm import bootCI, bootMer
 
 # Bootstrap the model
-boot = bootMer(model, data, nsim=500)
+boot = bootMer(model, nsim=500, seed=42)
 
 # Access bootstrap samples
-boot.samples  # Array of parameter estimates
+boot.beta_samples   # Fixed-effect estimates
+boot.theta_samples  # Variance-parameter estimates
 
 # Bootstrap confidence intervals
-boot.confint()
+bootCI(boot, component="all")
 ```
 
 ### Bootstrap for Specific Statistics
 
 ```python
-# Define a function to extract the statistic of interest
-def my_stat(model):
-    return model.fixef()['Days']
+# Select a named parameter from the tidy interval table
+days_ci = bootCI(boot, parameters="Days")
 
-boot = bootMer(model, data, nsim=500, FUN=my_stat)
+# Or work directly with its bootstrap samples
+days_index = boot.fixed_names.index("Days")
+days_samples = boot.beta_samples[:, days_index]
 ```
 
 ### Bootstrap for Predictions
 
 ```python
-def predict_at_day_10(model):
-    import pandas as pd
-    new_data = pd.DataFrame({'Days': [10], 'Subject': ['308']})
-    return model.predict(newdata=new_data)[0]
+import numpy as np
 
-boot = bootMer(model, data, nsim=500, FUN=predict_at_day_10)
-ci = boot.confint()
+# Fixed-only linear prediction at Days=10 for every bootstrap replicate
+intercept = boot.beta_samples[:, boot.fixed_names.index("(Intercept)")]
+days = boot.beta_samples[:, boot.fixed_names.index("Days")]
+prediction_samples = intercept + 10 * days
+prediction_ci = np.quantile(prediction_samples, [0.025, 0.975])
 ```
 
 ## Testing Random Effects
@@ -321,9 +323,9 @@ print(mlm.anova(m_simple, m_full))
 
 # 4. Bootstrap CI for the Days effect
 print("\n=== Bootstrap CI for Days Effect ===")
-boot = mlm.bootMer(model, data, nsim=200)
-boot_ci = boot.confint()
-print(f"Days: [{boot_ci['Days'][0]:.2f}, {boot_ci['Days'][1]:.2f}]")
+boot = mlm.bootMer(model, nsim=200, seed=42)
+boot_ci = mlm.bootCI(boot, parameters="Days")
+print(boot_ci[["parameter", "conf.low", "conf.high"]])
 
 # 5. Check convergence
 conv = mlm.checkConv(model)

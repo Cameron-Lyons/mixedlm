@@ -211,7 +211,8 @@ mixedlm supports lme4-style formula syntax for specifying random effects:
 - `drop1(model, data)` - Single term deletions
 - `profile(model, data)` - 1D likelihood profiles
 - `slice2D(model, param1, param2)` - 2D profile likelihood
-- `bootMer(model, data, nsim)` - Parametric bootstrap
+- `bootMer(model, nsim)` - Parametric bootstrap
+- `bootCI(result, component, method)` - Tidy bootstrap confidence intervals
 - `satterthwaite_df(model)` - Satterthwaite denominator DF
 - `kenward_roger_df(model)` - Kenward-Roger denominator DF
 - `pvalues_with_ddf(model)` - P-values using denominator DF
