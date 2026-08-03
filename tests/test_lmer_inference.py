@@ -239,12 +239,57 @@ class TestInference:
         assert np.allclose(y_sim1, y_sim2)
 
     def test_glmer_simulate_binomial(self) -> None:
-        result = glmer("y ~ period + (1 | herd)", CBPP, family=families.Binomial())
+        from mixedlm._rust import simulate_re_batch
 
-        y_sim = result.simulate(nsim=5, seed=42)
+        result = glmer("y ~ period + (1 | herd)", CBPP, family=families.Binomial())
+        nsim = 5
+        seed = 42
+        structures = result.matrices.random_structures
+        u_batch = simulate_re_batch(
+            result.theta,
+            1.0,
+            [structure.n_levels for structure in structures],
+            [structure.n_terms for structure in structures],
+            [structure.correlated for structure in structures],
+            nsim,
+            seed,
+        )
+        eta = (
+            result.matrices.X @ result.beta + result.matrices.offset
+        )[:, None] + np.asarray(result.matrices.Z @ u_batch.T)
+        mu = np.clip(result.family.link.inverse(eta), 1e-6, 1 - 1e-6)
+        np.random.seed(seed)
+        expected = np.random.binomial(1, mu).astype(np.float64)
+
+        y_sim = result.simulate(nsim=nsim, seed=seed)
+        repeated = result.simulate(nsim=nsim, seed=seed)
 
         assert y_sim.shape == (56, 5)
         assert np.all((y_sim == 0) | (y_sim == 1))
+        assert_allclose(y_sim, expected)
+        assert_allclose(repeated, expected)
+
+    def test_glmer_simulate_rejects_nonpositive_nsim(self) -> None:
+        result = glmer("y ~ period + (1 | herd)", CBPP, family=families.Binomial())
+
+        with pytest.raises(ValueError, match="nsim must be at least 1"):
+            result.simulate(nsim=0)
+
+    def test_glmer_simulate_uses_family_subclasses(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        result = glmer("y ~ period + (1 | herd)", CBPP, family=families.Binomial())
+        mu = np.full((result.matrices.n_obs, 3), 0.75)
+        monkeypatch.setattr(np.random, "gamma", lambda shape, scale: np.asarray(scale))
+        monkeypatch.setattr(np.random, "wald", lambda mean, scale: np.asarray(mean))
+
+        result.family = families.GammaInverse()
+        gamma_draws = result._simulate_response(mu)
+        result.family = families.InverseGaussianCanonical()
+        inverse_gaussian_draws = result._simulate_response(mu)
+
+        assert_allclose(gamma_draws, mu)
+        assert_allclose(inverse_gaussian_draws, mu)
 
     def test_glmer_simulate_poisson(self) -> None:
         np.random.seed(42)
