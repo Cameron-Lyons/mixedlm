@@ -21,6 +21,7 @@ from mixedlm.inference.emmeans import (
     Emmeans,
     emmeans,
 )
+from mixedlm.inference.hypothesis import LinearHypothesisResult, linear_hypothesis
 from mixedlm.inference.profile import (
     ProfileResult,
     as_dataframe,
@@ -67,4 +68,6 @@ __all__ = [
     "satterthwaite_df",
     "kenward_roger_df",
     "pvalues_with_ddf",
+    "LinearHypothesisResult",
+    "linear_hypothesis",
 ]
