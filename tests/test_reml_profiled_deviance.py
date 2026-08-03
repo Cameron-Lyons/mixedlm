@@ -63,7 +63,11 @@ def _direct_profiled_likelihood(
     denom = matrices.n_obs - matrices.n_fixed if reml else matrices.n_obs
     sigma2 = pwrss / denom
     logdet_cov = float(np.linalg.slogdet(marginal_cov)[1])
-    deviance = denom * (1.0 + np.log(2.0 * np.pi * sigma2)) + logdet_cov
+    deviance = (
+        denom * (1.0 + np.log(2.0 * np.pi * sigma2))
+        + logdet_cov
+        - float(np.sum(np.log(matrices.weights)))
+    )
     if reml:
         deviance += float(np.linalg.slogdet(information)[1])
 

@@ -323,6 +323,7 @@ def em_reml_simple(
             + wrss / sigma2_e_new
             + np.linalg.slogdet(ZtWZ + D_inv)[1]
             + np.linalg.slogdet(XtWX)[1]
+            - np.sum(np.log(weights))
         )
 
         if not np.isfinite(loglik):

@@ -4,6 +4,7 @@ use nalgebra_sparse::csc::CscMatrix;
 use numpy::PyArray1;
 use numpy::ndarray::{ArrayView1, ArrayView2};
 use pyo3::PyResult;
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use rayon::prelude::*;
 
@@ -15,6 +16,31 @@ pub struct RandomEffectStructure {
     pub n_levels: usize,
     pub n_terms: usize,
     pub correlated: bool,
+}
+
+fn validate_prior_weights(weights: ArrayView1<'_, f64>, n: usize) -> PyResult<(Vec<f64>, f64)> {
+    if weights.len() != n {
+        return Err(PyValueError::new_err(format!(
+            "weights has length {}, expected {n}",
+            weights.len()
+        )));
+    }
+
+    let mut values = Vec::with_capacity(n);
+    let mut logdet = 0.0;
+    for &weight in weights {
+        if !weight.is_finite() {
+            return Err(PyValueError::new_err(
+                "weights must contain only finite values",
+            ));
+        }
+        if weight <= 0.0 {
+            return Err(PyValueError::new_err("weights must be strictly positive"));
+        }
+        values.push(weight);
+        logdet += weight.ln();
+    }
+    Ok((values, logdet))
 }
 
 fn csc_from_scipy(
@@ -405,8 +431,8 @@ pub fn profiled_deviance_impl(
         .zip(offset.iter())
         .map(|(yi, oi)| yi - oi)
         .collect();
-    let w: Vec<f64> = weights.iter().copied().collect();
-    let sqrt_w: Vec<f64> = weights.iter().map(|wi| wi.sqrt()).collect();
+    let (w, logdet_w) = validate_prior_weights(weights, n)?;
+    let sqrt_w: Vec<f64> = w.iter().map(|wi| wi.sqrt()).collect();
 
     let x = Mat::from_fn(n, p, |i, j| x_data[[i, j]]);
 
@@ -444,9 +470,9 @@ pub fn profiled_deviance_impl(
             0.0
         };
 
-        let mut dev = (n as f64) * (2.0 * std::f64::consts::PI * sigma2).ln() + wrss / sigma2;
+        let mut dev = denom * (1.0 + (2.0 * std::f64::consts::PI * sigma2).ln()) - logdet_w;
         if reml {
-            dev += logdet_xtwx - (p as f64) * sigma2.ln();
+            dev += logdet_xtwx;
         }
 
         return Ok(dev);
@@ -526,7 +552,7 @@ pub fn profiled_deviance_impl(
     let denom = if reml { n - p } else { n } as f64;
     let sigma2 = pwrss / denom;
 
-    let mut dev = denom * (1.0 + (2.0 * std::f64::consts::PI * sigma2).ln()) + logdet_v;
+    let mut dev = denom * (1.0 + (2.0 * std::f64::consts::PI * sigma2).ln()) + logdet_v - logdet_w;
     if reml {
         dev += logdet_xtvinvx;
     }
@@ -559,8 +585,8 @@ pub fn profiled_deviance_with_gradient_impl(
         .zip(offset.iter())
         .map(|(yi, oi)| yi - oi)
         .collect();
-    let w: Vec<f64> = weights.iter().copied().collect();
-    let sqrt_w: Vec<f64> = weights.iter().map(|wi| wi.sqrt()).collect();
+    let (w, logdet_w) = validate_prior_weights(weights, n)?;
+    let sqrt_w: Vec<f64> = w.iter().map(|wi| wi.sqrt()).collect();
 
     let x = Mat::from_fn(n, p, |i, j| x_data[[i, j]]);
 
@@ -598,9 +624,9 @@ pub fn profiled_deviance_with_gradient_impl(
             0.0
         };
 
-        let mut dev = (n as f64) * (2.0 * std::f64::consts::PI * sigma2).ln() + wrss / sigma2;
+        let mut dev = denom * (1.0 + (2.0 * std::f64::consts::PI * sigma2).ln()) - logdet_w;
         if reml {
-            dev += logdet_xtwx - (p as f64) * sigma2.ln();
+            dev += logdet_xtwx;
         }
 
         return Ok((dev, vec![0.0; n_theta]));
@@ -681,7 +707,7 @@ pub fn profiled_deviance_with_gradient_impl(
     let denom = if reml { n - p } else { n } as f64;
     let sigma2 = pwrss / denom;
 
-    let mut dev = denom * (1.0 + (2.0 * std::f64::consts::PI * sigma2).ln()) + logdet_v;
+    let mut dev = denom * (1.0 + (2.0 * std::f64::consts::PI * sigma2).ln()) + logdet_v - logdet_w;
     if reml {
         dev += logdet_xtvinvx;
     }
@@ -767,7 +793,7 @@ pub fn compute_ztwz<'py>(
         z_indptr.as_slice()?,
         z_shape,
     )?;
-    let w: Vec<f64> = weights.as_array().iter().copied().collect();
+    let (w, _) = validate_prior_weights(weights.as_array(), z_shape.0)?;
     let q = z_shape.1;
 
     let ztwz = compute_ztwz_sparse(&z, &w, q);
