@@ -63,6 +63,26 @@ class ModelMatrices:
         return self.Z.T.tocsc()
 
 
+def validate_prior_weights(
+    weights: NDArray[np.floating],
+    n: int,
+    *,
+    allow_missing: bool = False,
+) -> NDArray[np.float64]:
+    """Return validated, contiguous prior weights."""
+    weights_array = np.asarray(weights, dtype=np.float64)
+    if weights_array.ndim != 1:
+        raise ValueError("weights must be one-dimensional")
+    if len(weights_array) != n:
+        raise ValueError(f"weights has length {len(weights_array)}, expected {n}")
+    finite = ~np.isinf(weights_array) if allow_missing else np.isfinite(weights_array)
+    if not np.all(finite):
+        raise ValueError("weights must contain only finite values")
+    if np.any(weights_array <= 0.0):
+        raise ValueError("weights must be strictly positive")
+    return np.ascontiguousarray(weights_array)
+
+
 def _get_formula_variables(formula: Formula) -> set[str]:
     return formula.all_variables
 
@@ -78,6 +98,12 @@ def build_model_matrices(
     from mixedlm.utils.na_action import handle_na
 
     data = ensure_dataframe(data)
+    if weights is not None:
+        weights = validate_prior_weights(
+            weights,
+            dataframe_length(data),
+            allow_missing=True,
+        )
 
     if na_action is not None:
         clean_data, na_info, weights, offset = handle_na(data, formula, na_action, weights, offset)
@@ -97,6 +123,8 @@ def build_model_matrices(
     n = len(y)
     if weights is None:
         weights = np.ones(n, dtype=np.float64)
+    else:
+        weights = validate_prior_weights(weights, n)
     if offset is None:
         offset = np.zeros(n, dtype=np.float64)
 
