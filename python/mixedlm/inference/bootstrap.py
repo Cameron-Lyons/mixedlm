@@ -15,6 +15,113 @@ if TYPE_CHECKING:
     from mixedlm.models.nlmer import NlmerResult
 
 
+_BOOTSTRAP_CI_METHODS = ("percentile", "basic", "normal")
+
+
+def _validate_ci_options(level: float, method: str) -> None:
+    if not np.isfinite(level) or not 0.0 < level < 1.0:
+        raise ValueError("level must be strictly between 0 and 1")
+    if method not in _BOOTSTRAP_CI_METHODS:
+        raise ValueError(f"Unknown method: {method}")
+
+
+def _finite_bootstrap_samples(
+    samples: NDArray[np.floating],
+    column: int,
+) -> NDArray[np.floating]:
+    values = samples[:, column]
+    return values[np.isfinite(values)]
+
+
+def _bootstrap_ci(
+    samples: NDArray[np.floating],
+    original: NDArray[np.floating],
+    names: list[str],
+    level: float,
+    method: str,
+) -> dict[str, tuple[float, float]]:
+    _validate_ci_options(level, method)
+    alpha = 1.0 - level
+    lower_percentile = 100.0 * alpha / 2.0
+    upper_percentile = 100.0 * (1.0 - alpha / 2.0)
+    z_critical = stats.norm.ppf(1.0 - alpha / 2.0) if method == "normal" else None
+    result: dict[str, tuple[float, float]] = {}
+
+    for i, name in enumerate(names):
+        parameter_samples = _finite_bootstrap_samples(samples, i)
+        if len(parameter_samples) == 0:
+            result[name] = (np.nan, np.nan)
+            continue
+
+        if method == "percentile":
+            lower, upper = np.percentile(
+                parameter_samples,
+                [lower_percentile, upper_percentile],
+            )
+        elif method == "basic":
+            upper_sample, lower_sample = np.percentile(
+                parameter_samples,
+                [upper_percentile, lower_percentile],
+            )
+            lower = 2.0 * original[i] - upper_sample
+            upper = 2.0 * original[i] - lower_sample
+        else:
+            if len(parameter_samples) < 2:
+                result[name] = (np.nan, np.nan)
+                continue
+            standard_error = np.std(parameter_samples, ddof=1)
+            bias = np.mean(parameter_samples) - original[i]
+            center = original[i] - bias
+            assert z_critical is not None
+            lower = center - z_critical * standard_error
+            upper = center + z_critical * standard_error
+
+        result[name] = (float(lower), float(upper))
+
+    return result
+
+
+def _bootstrap_se(
+    samples: NDArray[np.floating],
+    names: list[str],
+) -> dict[str, float]:
+    result: dict[str, float] = {}
+    for i, name in enumerate(names):
+        parameter_samples = _finite_bootstrap_samples(samples, i)
+        result[name] = (
+            float(np.std(parameter_samples, ddof=1)) if len(parameter_samples) > 1 else np.nan
+        )
+    return result
+
+
+def _bootstrap_summary(
+    n_boot: int,
+    n_failed: int,
+    samples: NDArray[np.floating],
+    original: NDArray[np.floating],
+    names: list[str],
+) -> str:
+    lines = [
+        f"Parametric bootstrap with {n_boot} samples ({n_failed} failed)",
+        "",
+        "Fixed effects bootstrap statistics:",
+        "             Original    Mean       Bias     Std.Err",
+    ]
+
+    for i, name in enumerate(names):
+        parameter_samples = _finite_bootstrap_samples(samples, i)
+        if len(parameter_samples) == 0:
+            continue
+        mean = np.mean(parameter_samples)
+        bias = mean - original[i]
+        standard_error = np.std(parameter_samples, ddof=1) if len(parameter_samples) > 1 else np.nan
+        lines.append(
+            f"{name:12} {original[i]:10.4f} {mean:10.4f} {bias:10.4f} {standard_error:10.4f}"
+        )
+
+    return "\n".join(lines)
+
+
 @dataclass
 class BootstrapResult:
     n_boot: int
@@ -32,63 +139,25 @@ class BootstrapResult:
         level: float = 0.95,
         method: str = "percentile",
     ) -> dict[str, tuple[float, float]]:
-        alpha = 1 - level
-
-        result: dict[str, tuple[float, float]] = {}
-
-        for i, name in enumerate(self.fixed_names):
-            samples = self.beta_samples[:, i]
-            samples = samples[~np.isnan(samples)]
-
-            if len(samples) == 0:
-                result[name] = (np.nan, np.nan)
-                continue
-
-            if method == "percentile":
-                lower = np.percentile(samples, 100 * alpha / 2)
-                upper = np.percentile(samples, 100 * (1 - alpha / 2))
-            elif method == "basic":
-                lower = 2 * self.original_beta[i] - np.percentile(samples, 100 * (1 - alpha / 2))
-                upper = 2 * self.original_beta[i] - np.percentile(samples, 100 * alpha / 2)
-            elif method == "normal":
-                se = np.std(samples)
-                z = stats.norm.ppf(1 - alpha / 2)
-                lower = self.original_beta[i] - z * se
-                upper = self.original_beta[i] + z * se
-            else:
-                raise ValueError(f"Unknown method: {method}")
-
-            result[name] = (float(lower), float(upper))
-
-        return result
+        return _bootstrap_ci(
+            self.beta_samples,
+            self.original_beta,
+            self.fixed_names,
+            level,
+            method,
+        )
 
     def se(self) -> dict[str, float]:
-        result: dict[str, float] = {}
-        for i, name in enumerate(self.fixed_names):
-            samples = self.beta_samples[:, i]
-            samples = samples[~np.isnan(samples)]
-            result[name] = float(np.std(samples)) if len(samples) > 0 else np.nan
-        return result
+        return _bootstrap_se(self.beta_samples, self.fixed_names)
 
     def summary(self) -> str:
-        lines = []
-        lines.append(f"Parametric bootstrap with {self.n_boot} samples ({self.n_failed} failed)")
-        lines.append("")
-        lines.append("Fixed effects bootstrap statistics:")
-        lines.append("             Original    Mean       Bias     Std.Err")
-
-        for i, name in enumerate(self.fixed_names):
-            samples = self.beta_samples[:, i]
-            samples = samples[~np.isnan(samples)]
-            if len(samples) > 0:
-                mean = np.mean(samples)
-                bias = mean - self.original_beta[i]
-                se = np.std(samples)
-                lines.append(
-                    f"{name:12} {self.original_beta[i]:10.4f} {mean:10.4f} {bias:10.4f} {se:10.4f}"
-                )
-
-        return "\n".join(lines)
+        return _bootstrap_summary(
+            self.n_boot,
+            self.n_failed,
+            self.beta_samples,
+            self.original_beta,
+            self.fixed_names,
+        )
 
 
 def _lmer_bootstrap_worker(
@@ -803,63 +872,25 @@ class NlmerBootstrapResult:
         level: float = 0.95,
         method: str = "percentile",
     ) -> dict[str, tuple[float, float]]:
-        alpha = 1 - level
-
-        result: dict[str, tuple[float, float]] = {}
-
-        for i, name in enumerate(self.param_names):
-            samples = self.phi_samples[:, i]
-            samples = samples[~np.isnan(samples)]
-
-            if len(samples) == 0:
-                result[name] = (np.nan, np.nan)
-                continue
-
-            if method == "percentile":
-                lower = np.percentile(samples, 100 * alpha / 2)
-                upper = np.percentile(samples, 100 * (1 - alpha / 2))
-            elif method == "basic":
-                lower = 2 * self.original_phi[i] - np.percentile(samples, 100 * (1 - alpha / 2))
-                upper = 2 * self.original_phi[i] - np.percentile(samples, 100 * alpha / 2)
-            elif method == "normal":
-                se = np.std(samples)
-                z = stats.norm.ppf(1 - alpha / 2)
-                lower = self.original_phi[i] - z * se
-                upper = self.original_phi[i] + z * se
-            else:
-                raise ValueError(f"Unknown method: {method}")
-
-            result[name] = (float(lower), float(upper))
-
-        return result
+        return _bootstrap_ci(
+            self.phi_samples,
+            self.original_phi,
+            self.param_names,
+            level,
+            method,
+        )
 
     def se(self) -> dict[str, float]:
-        result: dict[str, float] = {}
-        for i, name in enumerate(self.param_names):
-            samples = self.phi_samples[:, i]
-            samples = samples[~np.isnan(samples)]
-            result[name] = float(np.std(samples)) if len(samples) > 0 else np.nan
-        return result
+        return _bootstrap_se(self.phi_samples, self.param_names)
 
     def summary(self) -> str:
-        lines = []
-        lines.append(f"Parametric bootstrap with {self.n_boot} samples ({self.n_failed} failed)")
-        lines.append("")
-        lines.append("Fixed effects bootstrap statistics:")
-        lines.append("             Original    Mean       Bias     Std.Err")
-
-        for i, name in enumerate(self.param_names):
-            samples = self.phi_samples[:, i]
-            samples = samples[~np.isnan(samples)]
-            if len(samples) > 0:
-                mean = np.mean(samples)
-                bias = mean - self.original_phi[i]
-                se = np.std(samples)
-                lines.append(
-                    f"{name:12} {self.original_phi[i]:10.4f} {mean:10.4f} {bias:10.4f} {se:10.4f}"
-                )
-
-        return "\n".join(lines)
+        return _bootstrap_summary(
+            self.n_boot,
+            self.n_failed,
+            self.phi_samples,
+            self.original_phi,
+            self.param_names,
+        )
 
 
 def bootstrap_nlmer(
