@@ -7,6 +7,7 @@ from mixedlm import lmer
 from mixedlm.power import (
     PowerCurveResult,
     PowerResult,
+    _binomial_score_interval,
     extend,
     powerCurve,
     powerSim,
@@ -66,6 +67,15 @@ class TestPowerResult:
         s = str(result)
         assert "Groups" not in s
         assert "Effect size" not in s
+
+    def test_wilson_interval_is_informative_at_boundaries(self) -> None:
+        lower_zero, upper_zero = _binomial_score_interval(0, 10, 0.05)
+        lower_one, upper_one = _binomial_score_interval(10, 10, 0.05)
+
+        assert lower_zero == 0.0
+        assert 0.0 < upper_zero < 1.0
+        assert 0.0 < lower_one < 1.0
+        assert upper_one == 1.0
 
 
 class TestPowerCurveResult:
@@ -142,6 +152,7 @@ class TestPowerSim:
         result = powerSim(model, nsim=10, seed=42)
 
         assert isinstance(result, PowerResult)
+        assert result.effect_size == pytest.approx(model.beta[1])
 
     def test_powersim_custom_test_function(self) -> None:
         model = lmer("y ~ x + (1|group)", POWER_DATA)
@@ -160,6 +171,19 @@ class TestPowerSim:
 
         assert result1.power == result2.power
         assert result1.n_successes == result2.n_successes
+        assert result1.ci_lower == result2.ci_lower
+        assert result1.ci_upper == result2.ci_upper
+
+    def test_powersim_preserves_global_random_state(self) -> None:
+        model = lmer("y ~ x + (1|group)", POWER_DATA)
+        np.random.seed(90210)
+        expected = np.random.random(5)
+        np.random.seed(90210)
+
+        powerSim(model, test="x", nsim=5, seed=42)
+        observed = np.random.random(5)
+
+        assert np.array_equal(observed, expected)
 
     def test_powersim_returns_effect_size(self) -> None:
         model = lmer("y ~ x + (1|group)", POWER_DATA)
@@ -174,12 +198,73 @@ class TestPowerSim:
 
         assert result.n_groups == 20
 
-    def test_powersim_invalid_param_returns_nan(self) -> None:
+    def test_powersim_invalid_param_raises(self) -> None:
         model = lmer("y ~ x + (1|group)", POWER_DATA)
 
-        result = powerSim(model, test="nonexistent", nsim=10, seed=42)
-        assert np.isnan(result.power)
+        with pytest.raises(ValueError, match="Parameter 'nonexistent' not found"):
+            powerSim(model, test="nonexistent", nsim=10, seed=42)
+
+    @pytest.mark.parametrize("nsim", [0, -1, True, 1.5])
+    def test_powersim_rejects_invalid_simulation_count(self, nsim) -> None:
+        model = lmer("y ~ x + (1|group)", POWER_DATA)
+
+        with pytest.raises(ValueError, match="nsim must be a positive integer"):
+            powerSim(model, test="x", nsim=nsim)
+
+    @pytest.mark.parametrize("alpha", [0.0, 1.0, -0.1, 1.1, np.nan])
+    def test_powersim_rejects_invalid_alpha(self, alpha) -> None:
+        model = lmer("y ~ x + (1|group)", POWER_DATA)
+
+        with pytest.raises(ValueError, match="alpha must be strictly between"):
+            powerSim(model, test="x", nsim=1, alpha=alpha)
+
+    def test_powersim_rejects_invalid_test_type(self) -> None:
+        model = lmer("y ~ x + (1|group)", POWER_DATA)
+
+        with pytest.raises(TypeError, match="test must be"):
+            powerSim(model, test=123, nsim=1)
+
+    def test_powersim_reports_only_completed_simulations(self, monkeypatch) -> None:
+        model = lmer("y ~ x + (1|group)", POWER_DATA)
+        call_count = 0
+
+        def flaky_refit(_response):
+            nonlocal call_count
+            call_count += 1
+            if call_count % 2:
+                raise RuntimeError("expected test failure")
+            return model
+
+        monkeypatch.setattr(model, "refit", flaky_refit)
+        with pytest.warns(RuntimeWarning, match="2 of 4 power simulations failed"):
+            result = powerSim(model, test=lambda _fit: False, nsim=4, seed=42)
+
+        assert result.n_simulations == 2
         assert result.n_successes == 0
+        assert result.ci_upper > 0.0
+
+    def test_power_interval_is_always_95_percent(self, monkeypatch) -> None:
+        model = lmer("y ~ x + (1|group)", POWER_DATA)
+        monkeypatch.setattr(model, "refit", lambda _response: model)
+
+        low_alpha = powerSim(model, test=lambda _fit: False, nsim=5, alpha=0.01, seed=42)
+        high_alpha = powerSim(model, test=lambda _fit: False, nsim=5, alpha=0.2, seed=42)
+
+        assert low_alpha.ci_lower == high_alpha.ci_lower
+        assert low_alpha.ci_upper == high_alpha.ci_upper
+
+    def test_powersim_warns_when_all_simulations_fail(self, monkeypatch) -> None:
+        model = lmer("y ~ x + (1|group)", POWER_DATA)
+
+        def failing_refit(_response):
+            raise RuntimeError("expected test failure")
+
+        monkeypatch.setattr(model, "refit", failing_refit)
+        with pytest.warns(RuntimeWarning, match="All 2 power simulations failed"):
+            result = powerSim(model, test=lambda _fit: False, nsim=2, seed=42)
+
+        assert np.isnan(result.power)
+        assert result.n_simulations == 0
 
 
 class TestExtend:
