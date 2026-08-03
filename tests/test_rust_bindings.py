@@ -1026,7 +1026,7 @@ class TestProfiledDevianceGradient:
             )
             grad_fd[i] = (dev_plus - dev_minus) / (2 * eps)
 
-        assert_allclose(grad, grad_fd, rtol=0.15)
+        assert_allclose(grad, grad_fd, rtol=1e-5, atol=1e-7)
 
     def test_gradient_multiple_theta(self):
         np.random.seed(42)
@@ -1102,7 +1102,7 @@ class TestProfiledDevianceGradient:
             )
             grad_fd[i] = (dev_plus - dev_minus) / (2 * eps)
 
-        assert_allclose(grad, grad_fd, rtol=0.15)
+        assert_allclose(grad, grad_fd, rtol=1e-5, atol=1e-7)
 
     def test_gradient_ml_vs_reml(self, simple_lmm_data):
         d = simple_lmm_data

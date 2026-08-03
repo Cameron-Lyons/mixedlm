@@ -267,6 +267,10 @@ impl BlockedCholesky {
         self.backward_solve(&y)
     }
 
+    pub fn solve_lower(&self, b: &Mat<f64>) -> Mat<f64> {
+        self.forward_solve(b)
+    }
+
     fn forward_solve(&self, b: &Mat<f64>) -> Mat<f64> {
         let total_dim: usize = self.block_dims.iter().sum();
         let ncols = b.ncols();

@@ -340,13 +340,15 @@ def _profiled_deviance_core(
     Xty_adj = XtWy - cu_star_RZX_beta_term
     beta = linalg.cho_solve((L_XtVinvX, True), Xty_adj)
 
-    resid = y_adj - matrices.X @ beta
-    wrss = np.dot(w * resid, resid)
+    marginal_resid = y_adj - matrices.X @ beta
 
-    Zt_resid = Zt @ (w * resid)
+    Zt_resid = Zt @ (w * marginal_resid)
     Lambda_t_Zt_resid = Lambda.T @ Zt_resid
     u_star = linalg.cho_solve((L_V, True), Lambda_t_Zt_resid)
 
+    u = np.asarray(Lambda @ u_star).reshape(-1)
+    conditional_resid = marginal_resid - matrices.Z @ u
+    wrss = np.dot(w * conditional_resid, conditional_resid)
     ussq = np.dot(u_star, u_star)
     pwrss = wrss + ussq
 
@@ -356,8 +358,6 @@ def _profiled_deviance_core(
     dev = denom * (1.0 + np.log(2.0 * np.pi * sigma2)) + ldL2
     if REML:
         dev += ldRX2
-
-    u = Lambda @ u_star
 
     return _DevianceCoreResult(
         deviance=float(dev),

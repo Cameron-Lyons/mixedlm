@@ -25,6 +25,7 @@ from mixedlm.models.lmer_types import (
     VarCorrGroup,
 )
 from mixedlm.models.result_mixin import MerResultMixin
+from mixedlm.models.shared_utils import is_singular_theta
 from mixedlm.utils import _get_signif_code
 
 
@@ -951,29 +952,7 @@ class GlmerResult(MerResultMixin):
         return plot_diagnostics(self, which=which, figsize=figsize)
 
     def isSingular(self, tol: float = 1e-4) -> bool:
-        theta_idx = 0
-
-        for struct in self.matrices.random_structures:
-            q = struct.n_terms
-
-            if struct.correlated:
-                n_theta = q * (q + 1) // 2
-                theta_block = self.theta[theta_idx : theta_idx + n_theta]
-                theta_idx += n_theta
-
-                diag_idx = 0
-                for i in range(q):
-                    if abs(theta_block[diag_idx]) < tol:
-                        return True
-                    diag_idx += i + 2
-            else:
-                theta_block = self.theta[theta_idx : theta_idx + q]
-                theta_idx += q
-
-                if np.any(np.abs(theta_block) < tol):
-                    return True
-
-        return False
+        return is_singular_theta(self.theta, self.matrices.random_structures, tol)
 
     def getME(self, name: str):
         """Extract model components by name.

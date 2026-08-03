@@ -241,6 +241,7 @@ def _profile_param_worker(
         REML,
         precomputed=precomputed,
     )
+    dev_mle = _profile_deviance_at_beta_direct_cached(mle, param_cache)
 
     for i, val in enumerate(param_values):
         dev = _profile_deviance_at_beta_direct_cached(val, param_cache)
@@ -489,7 +490,7 @@ def _profile_deviance_at_beta_direct_cached(
     Lambda_t_Zt_resid = cache["Lambda_T"] @ Zt_resid
     u_star = linalg.cho_solve((cache["L_V"], True), Lambda_t_Zt_resid)
 
-    pwrss = np.dot(resid, resid) + np.dot(u_star, u_star)
+    pwrss = np.dot(resid, resid) - np.dot(Lambda_t_Zt_resid, u_star)
     denom = cache["n"] - cache["p"] if cache["REML"] else cache["n"]
     sigma2 = pwrss / denom
 
@@ -549,6 +550,7 @@ def profile_lmer(
             range_high = mle + 4 * se
 
             cache = _ProfileCache.build(result, idx)
+            profile_dev_mle = _profile_deviance_cached(cache, mle)
 
             param_values = np.linspace(range_low, range_high, n_points)
             zeta_values = np.zeros(n_points)
@@ -556,12 +558,17 @@ def profile_lmer(
             for i, val in enumerate(param_values):
                 dev = _profile_deviance_cached(cache, val)
                 sign = 1 if val >= mle else -1
-                zeta_values[i] = sign * np.sqrt(max(0, dev - dev_mle))
+                zeta_values[i] = sign * np.sqrt(max(0, dev - profile_dev_mle))
 
-            def zeta_func(val: float, c: _ProfileCache = cache, m: float = mle) -> float:
+            def zeta_func(
+                val: float,
+                c: _ProfileCache = cache,
+                m: float = mle,
+                d0: float = profile_dev_mle,
+            ) -> float:
                 dev = _profile_deviance_cached(c, val)
                 sign = 1 if val >= m else -1
-                return sign * np.sqrt(max(0, dev - dev_mle))
+                return sign * np.sqrt(max(0, dev - d0))
 
             try:
                 ci_lower = brentq(
@@ -803,7 +810,7 @@ def _profile_deviance_cached(cache: _ProfileCache, value: float) -> float:
     Lambda_t_Zt_resid = cache.Lambda_T @ Zt_resid
     u_star = linalg.cho_solve((cache.L_V, True), Lambda_t_Zt_resid)
 
-    pwrss = np.dot(resid, resid) + np.dot(u_star, u_star)
+    pwrss = np.dot(resid, resid) - np.dot(Lambda_t_Zt_resid, u_star)
     denom = cache.n - cache.p if cache.REML else cache.n
     sigma2 = pwrss / denom
 
@@ -1155,7 +1162,8 @@ def slice2D(
     values1 = np.linspace(mle1 - 3 * se1, mle1 + 3 * se1, n_points)
     values2 = np.linspace(mle2 - 3 * se2, mle2 + 3 * se2, n_points)
 
-    dev_mle = result.deviance
+    reference_cache = _Slice2DCache.build(result, idx1, idx2)
+    dev_mle = _profile_deviance_2d_cached(reference_cache, mle1, mle2)
 
     zeta = np.zeros((n_points, n_points))
     if n_jobs == -1:
@@ -1168,7 +1176,7 @@ def slice2D(
     use_parallel = n_jobs_actual > 1 and (n_points * n_points) >= _SLICE2D_PARALLEL_MIN_TASKS
 
     if not use_parallel:
-        cache = _Slice2DCache.build(result, idx1, idx2)
+        cache = reference_cache
         for i, v1 in enumerate(values1):
             for j, v2 in enumerate(values2):
                 dev = _profile_deviance_2d_cached(cache, v1, v2)
@@ -1557,7 +1565,7 @@ def _profile_deviance_2d_cached(
     Lambda_t_Zt_resid = cache.Lambda_T @ Zt_resid
     u_star = linalg.cho_solve((cache.L_V, True), Lambda_t_Zt_resid)
 
-    pwrss = np.dot(resid, resid) + np.dot(u_star, u_star)
+    pwrss = np.dot(resid, resid) - np.dot(Lambda_t_Zt_resid, u_star)
     denom = cache.n - cache.p if cache.REML else cache.n
     sigma2 = pwrss / denom
 
