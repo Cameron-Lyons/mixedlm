@@ -5,6 +5,7 @@ from mixedlm import lmer
 from mixedlm.estimation.reml import LMMOptimizer
 from mixedlm.formula.parser import parse_formula
 from mixedlm.matrices.design import build_model_matrices
+from mixedlm.utils.variance import cov2sdcor, sdcor2cov
 
 
 @pytest.fixture
@@ -76,6 +77,17 @@ def large_crossed_sparse_data():
     )
 
 
+@pytest.fixture
+def covariance_data():
+    rng = np.random.default_rng(321)
+    q = 400
+    sd = rng.uniform(0.5, 2.0, size=q)
+    corr = np.full((q, q), 0.01)
+    np.fill_diagonal(corr, 1.0)
+    cov = corr * sd[:, np.newaxis] * sd[np.newaxis, :]
+    return sd, corr, cov
+
+
 @pytest.mark.benchmark(group="lmer")
 def test_benchmark_lmer_simple(benchmark, sleepstudy_data):
     def fit_model():
@@ -119,3 +131,22 @@ def test_benchmark_large_crossed_sparse_adaptive_start(benchmark, large_crossed_
 
     theta = benchmark(optimizer.get_start_theta)
     assert theta.shape == (2,)
+
+
+@pytest.mark.benchmark(group="covariance-conversion")
+def test_benchmark_sdcor2cov(benchmark, covariance_data):
+    sd, corr, expected = covariance_data
+
+    cov = benchmark(sdcor2cov, sd, corr)
+
+    np.testing.assert_allclose(cov, expected)
+
+
+@pytest.mark.benchmark(group="covariance-conversion")
+def test_benchmark_cov2sdcor(benchmark, covariance_data):
+    expected_sd, expected_corr, cov = covariance_data
+
+    sd, corr = benchmark(cov2sdcor, cov)
+
+    np.testing.assert_allclose(sd, expected_sd)
+    np.testing.assert_allclose(corr, expected_corr)
