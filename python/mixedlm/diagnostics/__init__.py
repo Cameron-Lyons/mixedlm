@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from mixedlm.diagnostics.collinearity import CollinearityResult, check_collinearity
 from mixedlm.diagnostics.influence import (
     InfluenceResult,
     cooks_distance,
@@ -38,4 +39,6 @@ __all__ = [
     "influence_plot",
     "influence_summary",
     "influential_obs",
+    "check_collinearity",
+    "CollinearityResult",
 ]
