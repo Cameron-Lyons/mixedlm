@@ -15,6 +15,14 @@ if TYPE_CHECKING:
     from mixedlm.models.lmer import LmerResult
 
 
+def _rowwise_quadratic_form(
+    coefficients: NDArray[np.floating],
+    covariance: NDArray[np.floating],
+) -> NDArray[np.floating]:
+    projected = coefficients @ covariance
+    return np.einsum("ij,ij->i", projected, coefficients)
+
+
 @dataclass
 class EmmeanResult:
     emmean: NDArray[np.floating]
@@ -117,10 +125,6 @@ class Emmeans:
         if n_levels < 2:
             raise ValueError("Need at least 2 levels for pairwise comparisons")
 
-        n_pairs = n_levels * (n_levels - 1) // 2
-        C = np.zeros((n_pairs, n_levels), dtype=np.float64)
-        contrast_labels: list[str] = []
-
         grid_labels = []
         for i in range(n_levels):
             parts = []
@@ -128,18 +132,15 @@ class Emmeans:
                 parts.append(str(self.result.grid.iloc[i][spec]))
             grid_labels.append(",".join(parts) if len(parts) > 1 else parts[0])
 
-        k = 0
-        for i in range(n_levels):
-            for j in range(i + 1, n_levels):
-                C[k, i] = 1
-                C[k, j] = -1
-                contrast_labels.append(f"{grid_labels[i]} - {grid_labels[j]}")
-                k += 1
-
-        L_contrast = C @ self._L
+        left_indices, right_indices = np.triu_indices(n_levels, k=1)
+        contrast_labels = [
+            f"{grid_labels[i]} - {grid_labels[j]}"
+            for i, j in zip(left_indices, right_indices, strict=True)
+        ]
+        L_contrast = self._L[left_indices] - self._L[right_indices]
 
         estimates = L_contrast @ self._beta
-        var_contrast = np.diag(L_contrast @ self._vcov @ L_contrast.T)
+        var_contrast = _rowwise_quadratic_form(L_contrast, self._vcov)
         se_contrast = np.sqrt(np.maximum(var_contrast, 0))
 
         t_ratio = estimates / se_contrast
@@ -180,27 +181,17 @@ class Emmeans:
         level: float = 0.95,
     ) -> ContrastResult:
         n_levels = len(self.result.emmean)
-        n_contrasts = n_levels - 1
-
-        C = np.zeros((n_contrasts, n_levels), dtype=np.float64)
-        contrast_labels: list[str] = []
 
         grid_labels = []
         for i in range(n_levels):
             parts = [str(self.result.grid.iloc[i][spec]) for spec in self._specs]
             grid_labels.append(",".join(parts) if len(parts) > 1 else parts[0])
 
-        k = 0
-        for i in range(n_levels):
-            if i != ctrl_idx:
-                C[k, i] = 1
-                C[k, ctrl_idx] = -1
-                contrast_labels.append(f"{grid_labels[i]} - {grid_labels[ctrl_idx]}")
-                k += 1
-
-        L_contrast = C @ self._L
+        treatment_indices = np.delete(np.arange(n_levels), ctrl_idx)
+        contrast_labels = [f"{grid_labels[i]} - {grid_labels[ctrl_idx]}" for i in treatment_indices]
+        L_contrast = self._L[treatment_indices] - self._L[ctrl_idx]
         estimates = L_contrast @ self._beta
-        var_contrast = np.diag(L_contrast @ self._vcov @ L_contrast.T)
+        var_contrast = _rowwise_quadratic_form(L_contrast, self._vcov)
         se_contrast = np.sqrt(np.maximum(var_contrast, 0))
         t_ratio = estimates / se_contrast
         raw_p = 2 * (1 - stats.t.cdf(np.abs(t_ratio), self._df))
@@ -225,7 +216,7 @@ class Emmeans:
         n_contrasts = C.shape[0]
         L_contrast = C @ self._L
         estimates = L_contrast @ self._beta
-        var_contrast = np.diag(L_contrast @ self._vcov @ L_contrast.T)
+        var_contrast = _rowwise_quadratic_form(L_contrast, self._vcov)
         se_contrast = np.sqrt(np.maximum(var_contrast, 0))
         t_ratio = estimates / se_contrast
         raw_p = 2 * (1 - stats.t.cdf(np.abs(t_ratio), self._df))
@@ -390,7 +381,7 @@ def emmeans(
         L[i] = X_subset.mean(axis=0)
 
     em_values = L @ beta
-    var_em = np.diag(L @ vcov @ L.T)
+    var_em = _rowwise_quadratic_form(L, vcov)
     se_em = np.sqrt(np.maximum(var_em, 0))
 
     family = getattr(model, "family", None)
