@@ -1244,6 +1244,22 @@ class TestModularInterface:
 
         assert parsed.REML is False
 
+    def test_lFormula_accepts_composed_formula(self) -> None:
+        from mixedlm import lFormula, mkLmerDevfun, mkLmerMod, optimizeLmer, set_cov_type
+
+        formula = set_cov_type("Reaction ~ Days + (Days | Subject)", "cs")
+        parsed = lFormula(formula, SLEEPSTUDY)
+
+        assert parsed.formula is formula
+        assert parsed.n_theta == 2
+        assert parsed.matrices.random_structures[0].cov_type == "cs"
+
+        devfun = mkLmerDevfun(parsed)
+        optimized = optimizeLmer(devfun)
+        result = mkLmerMod(devfun, optimized)
+        assert result.converged
+        assert len(result.theta) == 2
+
     def test_mkLmerDevfun_basic(self) -> None:
         from mixedlm import lFormula, mkLmerDevfun
 
@@ -1325,6 +1341,19 @@ class TestModularInterface:
         assert parsed.n_fixed == 4
         assert parsed.family is not None
         assert parsed.n_theta == 1
+
+    def test_glFormula_accepts_composed_formula(self) -> None:
+        from mixedlm import glFormula, set_cov_type
+
+        data = CBPP.copy()
+        data["y"] = data["incidence"] / data["size"]
+        formula = set_cov_type("y ~ period + (period | herd)", "cs")
+
+        parsed = glFormula(formula, data, family=families.Binomial())
+
+        assert parsed.formula is formula
+        assert parsed.n_theta == 2
+        assert parsed.matrices.random_structures[0].cov_type == "cs"
 
     def test_mkGlmerDevfun_basic(self) -> None:
         from mixedlm import glFormula, mkGlmerDevfun
