@@ -15,7 +15,7 @@ _GRADIENT_ZERO_THRESHOLD = 1e-10
 _MIN_DF = 1.0
 _CHOLESKY_REGULARIZATION = 1e-6
 
-_vcov_grad_cache: dict[bytes, list[NDArray[np.floating]]] = {}
+_vcov_grad_cache: dict[tuple[int, bytes, float], list[NDArray[np.floating]]] = {}
 _VCOV_GRAD_CACHE_MAX_SIZE = 4
 
 
@@ -158,7 +158,7 @@ def satterthwaite_df(
 
         return _matrix_inverse(XtVinvX)
 
-    cache_key = theta.tobytes() + np.array([sigma]).tobytes()
+    cache_key = (id(result), theta.tobytes(), float(sigma))
     if cache_key in _vcov_grad_cache:
         vcov_grads = _vcov_grad_cache[cache_key]
     else:
@@ -295,9 +295,10 @@ def pvalues_with_ddf(
     """
     from scipy import stats
 
-    if method == "Satterthwaite":
+    normalized_method = method.strip().lower().replace("_", "-")
+    if normalized_method in ("satterthwaite", "satt"):
         ddf_result = satterthwaite_df(result)
-    elif method == "Kenward-Roger":
+    elif normalized_method in ("kenward-roger", "kr"):
         ddf_result = kenward_roger_df(result)
     else:
         raise ValueError(f"Unknown method: {method}. Use 'Satterthwaite' or 'Kenward-Roger'.")
@@ -311,7 +312,7 @@ def pvalues_with_ddf(
     for i, name in enumerate(result.matrices.fixed_names):
         t_val = beta[i] / se[i] if se[i] > 0 else np.nan
         df = ddf_result.df[i]
-        p_val = 2 * (1 - stats.t.cdf(np.abs(t_val), df))
+        p_val = 2 * stats.t.sf(np.abs(t_val), df)
         results[name] = (float(beta[i]), float(t_val), float(p_val))
 
     return results
