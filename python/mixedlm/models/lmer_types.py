@@ -51,14 +51,37 @@ class PredictResult:
     interval: str = "none"
     level: float = 0.95
 
-    def __array__(self) -> NDArray[np.floating]:
-        return self.fit
+    def __array__(self, dtype=None, copy: bool | None = None) -> NDArray:
+        """Return predictions as an array while honoring NumPy conversion options."""
+        if copy is None:
+            return np.asarray(self.fit, dtype=dtype)
+        return np.array(self.fit, dtype=dtype, copy=copy)
 
     def __len__(self) -> int:
         return len(self.fit)
 
-    def __getitem__(self, idx: int) -> float:
-        return float(self.fit[idx])
+    def __iter__(self):
+        return iter(self.fit)
+
+    def __getitem__(self, idx):
+        value = self.fit[idx]
+        return float(value) if np.ndim(value) == 0 else value
+
+    @property
+    def shape(self) -> tuple[int, ...]:
+        return self.fit.shape
+
+    @property
+    def ndim(self) -> int:
+        return self.fit.ndim
+
+    @property
+    def dtype(self) -> np.dtype:
+        return self.fit.dtype
+
+    @property
+    def size(self) -> int:
+        return self.fit.size
 
 
 @dataclass
