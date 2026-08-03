@@ -845,6 +845,10 @@ class NlmerResult:
         """
         return bool(np.any(np.abs(self.theta) < tol))
 
+    def is_singular(self, tol: float = _DEFAULT_SINGULAR_TOL) -> bool:
+        """Return whether any variance component is near its boundary."""
+        return self.isSingular(tol=tol)
+
     def summary(self) -> str:
         lines = []
         lines.append("Nonlinear mixed model fit by maximum likelihood")

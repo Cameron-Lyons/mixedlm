@@ -157,12 +157,12 @@ Compute information criteria.
 #### profile
 
 ```python
-result.profile(data)
+result.profile(which=None, n_points=20, level=0.95)
 ```
 
 Compute profile likelihood.
 
-**Returns:** ProfileResult object.
+**Returns:** Dictionary mapping parameter names to `ProfileResult` objects.
 
 #### drop1
 
