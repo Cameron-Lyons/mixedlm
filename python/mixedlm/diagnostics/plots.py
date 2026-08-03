@@ -7,26 +7,29 @@ import numpy as np
 from scipy import stats
 
 if TYPE_CHECKING:
+    from matplotlib.axes import Axes
+    from matplotlib.figure import Figure
     from numpy.typing import NDArray
 
     from mixedlm.models.glmer import GlmerResult
     from mixedlm.models.lmer import LmerResult
+else:
+    Axes = Any
+    Figure = Any
 
-try:
-    import matplotlib.pyplot as plt
-    from matplotlib.axes import Axes
-    from matplotlib.figure import Figure
 
-    _HAS_MATPLOTLIB = True
-except ImportError:
-    _HAS_MATPLOTLIB = False
+def _get_pyplot() -> Any:
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError:
+        raise ImportError(
+            "matplotlib is required for plotting. Install it with: pip install mixedlm[plots]"
+        ) from None
+    return plt
 
 
 def _check_matplotlib() -> None:
-    if not _HAS_MATPLOTLIB:
-        raise ImportError(
-            "matplotlib is required for plotting. Install it with: pip install mixedlm[plots]"
-        )
+    _get_pyplot()
 
 
 def plot_resid_fitted(
@@ -56,7 +59,7 @@ def plot_resid_fitted(
     Axes
         The matplotlib axes with the plot.
     """
-    _check_matplotlib()
+    plt = _get_pyplot()
 
     if ax is None:
         _, ax = plt.subplots(figsize=(8, 6))
@@ -120,7 +123,7 @@ def plot_qq(
     Axes
         The matplotlib axes with the plot.
     """
-    _check_matplotlib()
+    plt = _get_pyplot()
 
     if ax is None:
         _, ax = plt.subplots(figsize=(8, 6))
@@ -186,7 +189,7 @@ def plot_scale_location(
     Axes
         The matplotlib axes with the plot.
     """
-    _check_matplotlib()
+    plt = _get_pyplot()
 
     if ax is None:
         _, ax = plt.subplots(figsize=(8, 6))
@@ -247,7 +250,7 @@ def plot_resid_group(
     Axes
         The matplotlib axes with the plot.
     """
-    _check_matplotlib()
+    plt = _get_pyplot()
 
     if ax is None:
         _, ax = plt.subplots(figsize=(10, 6))
@@ -348,7 +351,7 @@ def plot_ranef(
     Axes
         The matplotlib axes with the plot.
     """
-    _check_matplotlib()
+    plt = _get_pyplot()
 
     if ax is None:
         _, ax = plt.subplots(figsize=(8, 10))
@@ -446,7 +449,7 @@ def plot_diagnostics(
     Figure
         The matplotlib figure with diagnostic plots.
     """
-    _check_matplotlib()
+    plt = _get_pyplot()
 
     if which is None:
         which = [1, 2, 3, 4]
