@@ -283,96 +283,43 @@ def pvalues(
     """
     from scipy import stats
 
-    beta = model.fixef()
     if not hasattr(model, "vcov"):
         raise TypeError(f"{type(model).__name__} does not support vcov()")
-    vcov = model.vcov()
-    names = list(beta.keys())
-    beta_vals = np.array(list(beta.values()))
-    se_vals = np.sqrt(np.diag(vcov))
-
-    t_vals = beta_vals / se_vals
-
-    result: dict[str, float] = {}
-
-    if hasattr(model, "isGLMM") and model.isGLMM():
-        for i, name in enumerate(names):
-            p = 2 * (1 - stats.norm.cdf(np.abs(t_vals[i])))
-            result[name] = float(p)
-        return result
-
-    if hasattr(model, "isNLMM") and model.isNLMM():
-        n = len(model.fitted())
-        p_params = len(beta)
-        df_resid = n - p_params
-        for i, name in enumerate(names):
-            p = 2 * (1 - stats.t.cdf(np.abs(t_vals[i]), df_resid))
-            result[name] = float(p)
-        return result
-
-    method = method.lower()
-    if method in ("normal", "z"):
-        for i, name in enumerate(names):
-            p = 2 * (1 - stats.norm.cdf(np.abs(t_vals[i])))
-            result[name] = float(p)
-        return result
-
-    if not hasattr(model, "matrices"):
-        for i, name in enumerate(names):
-            p = 2 * (1 - stats.norm.cdf(np.abs(t_vals[i])))
-            result[name] = float(p)
-        return result
-
-    from mixedlm.models.glmer import GlmerResult
     from mixedlm.models.lmer import LmerResult
 
-    if not isinstance(model, LmerResult | GlmerResult):
-        for i, name in enumerate(names):
-            p = 2 * (1 - stats.norm.cdf(np.abs(t_vals[i])))
-            result[name] = float(p)
-        return result
+    if isinstance(model, LmerResult):
+        normalized_method = method.strip().lower().replace("_", "-")
+        if normalized_method in ("satterthwaite", "satt"):
+            ddf_method = "Satterthwaite"
+        elif normalized_method in ("kr", "kenward-roger"):
+            ddf_method = "Kenward-Roger"
+        elif normalized_method in ("normal", "z"):
+            ddf_method = None
+        else:
+            raise ValueError(f"Unknown method '{method}'. Use 'Satterthwaite', 'KR', or 'normal'.")
 
-    n = model.matrices.n_obs
-    p_fixed = model.matrices.n_fixed
+        if ddf_method is not None:
+            from mixedlm.inference.ddf import pvalues_with_ddf
 
-    if method in ("satterthwaite", "satt") or method in ("kr", "kenward-roger", "kenward_roger"):
-        for i, name in enumerate(names):
-            df = _satterthwaite_df(model, i, se_vals[i])
-            df = max(1, min(df, n - p_fixed))
-            p = 2 * (1 - stats.t.cdf(np.abs(t_vals[i]), df))
-            result[name] = float(p)
+            detailed = pvalues_with_ddf(model, method=ddf_method)
+            return {name: values[2] for name, values in detailed.items()}
+
+    beta = model.fixef()
+    vcov = model.vcov()
+    names = list(beta.keys())
+    beta_values = np.array(list(beta.values()))
+    standard_errors = np.sqrt(np.diag(vcov))
+    statistics = beta_values / standard_errors
+
+    if hasattr(model, "isNLMM") and model.isNLMM():
+        residual_df = len(model.fitted()) - len(beta)
+        probabilities = 2 * stats.t.sf(np.abs(statistics), residual_df)
     else:
-        raise ValueError(f"Unknown method '{method}'. Use 'Satterthwaite', 'KR', or 'normal'.")
+        probabilities = 2 * stats.norm.sf(np.abs(statistics))
 
-    return result
-
-
-def _satterthwaite_df(model: MerMod, _param_idx: int, _se: float) -> float:
-    """Compute Satterthwaite degrees of freedom approximation.
-
-    This is a simplified approximation based on the variance components.
-    """
-    if not hasattr(model, "matrices"):
-        return 100.0
-
-    n = model.matrices.n_obs
-    p = model.matrices.n_fixed
-    n_groups = sum(int(s.n_levels) for s in model.matrices.random_structures)
-
-    if n_groups == 0:
-        return float(n - p)
-
-    avg_obs_per_group = n / max(n_groups, 1)
-
-    df_between = n_groups - 1
-    df_within = n - n_groups - p + 1
-
-    model_sigma = getattr(model, "sigma", 1.0)
-    var_ratio = model_sigma**2 / (_se**2 * n + 1e-10)
-
-    df = max(df_between, 1) if var_ratio > avg_obs_per_group else df_within
-
-    return float(max(1, min(df, n - p)))
+    return {
+        name: float(probability) for name, probability in zip(names, probabilities, strict=False)
+    }
 
 
 def lmList(
