@@ -135,7 +135,10 @@ result = model.drop1(data)
 print(result)
 ```
 
-This fits the model without each term and reports the change in fit.
+This fits the model without each marginal term and reports the change in fit.
+Lower-order terms are retained when they belong to a higher-order interaction.
+Linear mixed models originally fitted with REML are automatically refitted with
+ML so that fixed-effect deletion likelihoods and AIC values are comparable.
 
 ## Estimated Marginal Means (emmeans)
 

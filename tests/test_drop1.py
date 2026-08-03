@@ -5,7 +5,7 @@ import pandas as pd
 import pytest
 from mixedlm import glmer, lmer
 from mixedlm.families import Binomial
-from mixedlm.inference.drop1 import Drop1Result, drop1_glmer, drop1_lmer
+from mixedlm.inference.drop1 import Drop1Result, _likelihood_ratio, drop1_glmer, drop1_lmer
 
 
 @pytest.fixture
@@ -87,6 +87,13 @@ class TestDrop1Result:
         s = str(result)
         assert "x1" in s
 
+    def test_extreme_likelihood_ratio_keeps_nonzero_tail_probability(self):
+        lrt, p_value = _likelihood_ratio(2, 1, 50.0, 0.0, "Chisq")
+
+        assert lrt == 100.0
+        assert p_value is not None
+        assert 0.0 < p_value < 1e-20
+
 
 class TestDrop1Lmer:
     def test_basic_drop1(self, multi_predictor_data):
@@ -127,6 +134,33 @@ class TestDrop1Lmer:
         for lrt, p in zip(result.lrt, result.p_value, strict=True):
             assert lrt is None
             assert p is None
+
+    def test_reml_model_is_compared_with_ml(self, multi_predictor_data):
+        model = lmer("y ~ x1 + x2 + x3 + (1|group)", multi_predictor_data)
+        result = drop1_lmer(model, multi_predictor_data)
+        ml_model = model.refitML()
+        expected = drop1_lmer(ml_model, multi_predictor_data)
+
+        assert model.REML
+        assert result.terms == expected.terms
+        assert result.full_model_aic == pytest.approx(ml_model.AIC())
+        assert result.aic == pytest.approx(expected.aic)
+        assert result.lrt == pytest.approx(expected.lrt)
+        assert result.p_value == pytest.approx(expected.p_value)
+
+    @pytest.mark.parametrize("test", ["invalid", "F", "LRT"])
+    def test_invalid_test_raises(self, multi_predictor_data, test):
+        model = lmer("y ~ x1 + x2 + (1|group)", multi_predictor_data)
+
+        with pytest.raises(ValueError, match="test must be"):
+            drop1_lmer(model, multi_predictor_data, test=test)
+
+    @pytest.mark.parametrize("n_jobs", [0, -2])
+    def test_invalid_worker_count_raises(self, multi_predictor_data, n_jobs):
+        model = lmer("y ~ x1 + x2 + (1|group)", multi_predictor_data)
+
+        with pytest.raises(ValueError, match="n_jobs"):
+            drop1_lmer(model, multi_predictor_data, n_jobs=n_jobs)
 
 
 class TestDrop1Glmer:
@@ -170,6 +204,17 @@ class TestDrop1AIC:
 
 
 class TestDrop1EdgeCases:
+    def test_intercept_only_model_has_no_deletions(self):
+        np.random.seed(42)
+        groups = np.repeat([f"G{i}" for i in range(5)], 20)
+        data = pd.DataFrame({"y": np.random.randn(100), "group": groups})
+        model = lmer("y ~ 1 + (1|group)", data)
+
+        result = drop1_lmer(model, data, n_jobs=2)
+
+        assert result.terms == []
+        assert result.aic == []
+
     def test_single_predictor(self):
         np.random.seed(42)
         n = 100
@@ -196,5 +241,19 @@ class TestDrop1EdgeCases:
         model = lmer("y ~ x1 * x2 + (1|group)", data)
         result = drop1_lmer(model, data)
 
-        term_set = set(result.terms)
-        assert len(term_set) >= 1
+        assert result.terms == ["x1:x2"]
+
+    def test_marginality_keeps_unrelated_main_effect(self):
+        np.random.seed(42)
+        n = 100
+        groups = np.repeat([f"G{i}" for i in range(5)], 20)
+        x1 = np.random.randn(n)
+        x2 = np.random.randn(n)
+        x3 = np.random.randn(n)
+        y = 5.0 + x1 + x2 + x3 + x1 * x2 + np.random.randn(n)
+        data = pd.DataFrame({"y": y, "x1": x1, "x2": x2, "x3": x3, "group": groups})
+
+        model = lmer("y ~ x1 * x2 + x3 + (1|group)", data)
+        result = drop1_lmer(model, data)
+
+        assert result.terms == ["x1:x2", "x3"]
