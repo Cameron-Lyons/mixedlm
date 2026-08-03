@@ -189,6 +189,26 @@ For fitting GLMMs, mixedlm uses Penalized Iteratively Reweighted Least Squares (
 
 This is nested within the outer optimization over variance parameters.
 
+The random effects are solved in spherical coordinates,
+
+\[
+\mathbf{b} = \boldsymbol{\Lambda}_{\theta}\mathbf{u},
+\qquad \mathbf{u} \sim N(\mathbf{0}, \mathbf{I}),
+\]
+
+so the penalized random-effect system is
+
+\[
+\mathbf{C} = \mathbf{I} +
+\boldsymbol{\Lambda}_{\theta}^{T}\mathbf{Z}^{T}\mathbf{W}\mathbf{Z}
+\boldsymbol{\Lambda}_{\theta}.
+\]
+
+This parameterization makes the covariance scale explicit, keeps zero-variance boundaries
+well-defined, and uses the same system for the PIRLS mode, Laplace determinant, post-fit
+covariance, and leverage calculations. Adaptive quadrature uses the normalized standard-normal
+prior in these coordinates and evaluates each grouping level's likelihood contribution once.
+
 ## Nonlinear Mixed Models
 
 ### The Model
