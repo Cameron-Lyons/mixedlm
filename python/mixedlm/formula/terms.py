@@ -113,10 +113,9 @@ def _format_fixed(fixed: FixedTerm) -> str:
 
 
 def _format_random(random: RandomTerm) -> str:
-    expr_parts = [_format_term(t) for t in random.expr]
-    if random.has_intercept and not any(isinstance(t, InterceptTerm) for t in random.expr):
-        expr_parts = ["1"] + expr_parts
-    expr_str = " + ".join(expr_parts) if expr_parts else "1"
+    expr_parts = [_format_term(t) for t in random.expr if not isinstance(t, InterceptTerm)]
+    expr_parts.insert(0, "1" if random.has_intercept else "0")
+    expr_str = " + ".join(expr_parts)
 
     group_str = "/".join(random.grouping) if isinstance(random.grouping, tuple) else random.grouping
 
