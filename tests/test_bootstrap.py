@@ -7,6 +7,8 @@ from mixedlm import glmer, lmer
 from mixedlm.families import Binomial
 from mixedlm.inference.bootstrap import (
     BootstrapResult,
+    _grouping_column,
+    _prepare_glmer_worker_data,
     bootMer,
     bootstrap_glmer,
     bootstrap_lmer,
@@ -130,6 +132,15 @@ class TestBootstrapGlmer:
         boot1 = bootstrap_glmer(glmer_result, n_boot=10, seed=42)
         boot2 = bootstrap_glmer(glmer_result, n_boot=10, seed=42)
         assert_allclose(boot1.beta_samples, boot2.beta_samples, rtol=1e-10)
+
+    def test_parallel_worker_reconstructs_sparse_group_labels(
+        self, glmer_result, simple_glmer_data
+    ):
+        worker_data = _prepare_glmer_worker_data(glmer_result)
+
+        labels = _grouping_column(worker_data["random_structures_data"][0])
+
+        assert labels == simple_glmer_data["group"].tolist()
 
 
 class TestBootMer:

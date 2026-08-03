@@ -540,6 +540,34 @@ class TestGLMMFunctions:
         )
         assert np.isfinite(deviance)
 
+    def test_pirls_poisson_preserves_large_means(self, simple_glmm_data):
+        d = simple_glmm_data
+        rng = np.random.default_rng(123)
+        eta = 3.0 + 0.3 * d["x"][:, 1]
+        d["y"] = rng.poisson(np.exp(eta)).astype(float)
+
+        beta, u, deviance, converged = pirls(
+            d["y"],
+            d["x"],
+            d["z_data"],
+            d["z_indices"],
+            d["z_indptr"],
+            d["z_shape"],
+            d["weights"],
+            d["offset"],
+            d["theta"],
+            d["n_levels"],
+            d["n_terms"],
+            d["correlated"],
+            "poisson",
+            "log",
+        )
+
+        assert converged
+        assert np.isfinite(deviance)
+        assert 2.5 < beta[0] < 3.5
+        assert np.max(np.exp(d["x"] @ beta)) > 10
+
     def test_pirls_gaussian(self, simple_glmm_data):
         d = simple_glmm_data
         d["y"] = np.random.randn(len(d["y"]))

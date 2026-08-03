@@ -91,6 +91,13 @@ class BootstrapResult:
         return "\n".join(lines)
 
 
+def _grouping_column(struct_data: dict[str, Any]) -> list[Any]:
+    levels = list(struct_data["level_map"].keys())
+    z_first_cols = struct_data["z_slice"][:, :: struct_data["n_terms"]]
+    level_indices = np.asarray((z_first_cols != 0).argmax(axis=1)).ravel()
+    return [levels[int(idx)] for idx in level_indices]
+
+
 def _lmer_bootstrap_worker(
     args: tuple[Any, ...],
 ) -> tuple[int, NDArray | None, NDArray | None, float | None]:
@@ -153,16 +160,8 @@ def _lmer_bootstrap_worker(
         sim_df[response_name] = y_sim
 
         for struct_data in random_structures_data:
-            level_map = struct_data["level_map"]
             grouping_factor = struct_data["grouping_factor"]
-            n_terms = struct_data["n_terms"]
-            z_slice = struct_data["z_slice"]
-
-            levels = list(level_map.keys())
-            z_first_cols = z_slice[:, ::n_terms]
-            level_indices = np.argmax(z_first_cols != 0, axis=1)
-            group_col = [levels[idx] for idx in level_indices]
-            sim_df[grouping_factor] = group_col
+            sim_df[grouping_factor] = _grouping_column(struct_data)
 
         model = LmerMod(formula, sim_df, REML=REML)
         boot_result = model.fit(start=theta)
@@ -189,13 +188,13 @@ def _glmer_bootstrap_worker(args: tuple[Any, ...]) -> tuple[int, NDArray | None,
         beta,
         theta,
         family,
+        offset,
+        prior_weights,
     ) = args
 
     np.random.seed(seed)
 
     try:
-        n = X.shape[0]
-
         if Z is not None and Z.shape[1] > 0:
             q = Z.shape[1]
             u_new = np.zeros(q, dtype=np.float64)
@@ -221,39 +220,27 @@ def _glmer_bootstrap_worker(args: tuple[Any, ...]) -> tuple[int, NDArray | None,
                 u_new[u_idx : u_idx + n_levels * n_terms] = b_all.ravel()
                 u_idx += n_levels * n_terms
 
-            eta = X @ beta + Z @ u_new
+            eta = X @ beta + Z @ u_new + offset
         else:
-            eta = X @ beta
+            eta = X @ beta + offset
 
         mu = family.link.inverse(eta)
-        mu = np.clip(mu, 1e-6, 1 - 1e-6)
-
-        family_name = family.__class__.__name__
-        if family_name == "Binomial":
-            y_sim = np.random.binomial(1, mu).astype(np.float64)
-        elif family_name == "Poisson":
-            y_sim = np.random.poisson(mu).astype(np.float64)
-        elif family_name == "Gaussian":
-            y_sim = np.random.normal(mu, 1.0)
-        else:
-            y_sim = mu + np.random.randn(n) * 0.1
+        y_sim = family.simulate(mu)
 
         sim_df = pd.DataFrame(X, columns=fixed_names)
         sim_df[response_name] = y_sim
 
         for struct_data in random_structures_data:
-            level_map = struct_data["level_map"]
             grouping_factor = struct_data["grouping_factor"]
-            n_terms = struct_data["n_terms"]
-            z_slice = struct_data["z_slice"]
+            sim_df[grouping_factor] = _grouping_column(struct_data)
 
-            levels = list(level_map.keys())
-            z_first_cols = z_slice[:, ::n_terms]
-            level_indices = np.argmax(z_first_cols != 0, axis=1)
-            group_col = [levels[idx] for idx in level_indices]
-            sim_df[grouping_factor] = group_col
-
-        model = GlmerMod(formula, sim_df, family=family)
+        model = GlmerMod(
+            formula,
+            sim_df,
+            family=family,
+            weights=prior_weights,
+            offset=offset,
+        )
         boot_result = model.fit(start=theta)
 
         return (boot_idx, boot_result.beta.copy(), boot_result.theta.copy())
@@ -337,6 +324,8 @@ def _prepare_glmer_worker_data(result: GlmerResult) -> dict[str, Any]:
         "beta": result.beta.copy(),
         "theta": result.theta.copy(),
         "family": result.family,
+        "offset": result.matrices.offset.copy(),
+        "weights": result.matrices.weights.copy(),
     }
 
 
@@ -554,6 +543,8 @@ def bootstrap_glmer(
                     result.formula,
                     sim_df,
                     family=result.family,
+                    weights=result.matrices.weights,
+                    offset=result.matrices.offset,
                 )
                 boot_result = model.fit(start=result.theta)
 
@@ -581,6 +572,8 @@ def bootstrap_glmer(
                 worker_data["beta"],
                 worker_data["theta"],
                 worker_data["family"],
+                worker_data["offset"],
+                worker_data["weights"],
             )
             for b in range(n_boot)
         ]
@@ -618,7 +611,6 @@ def bootstrap_glmer(
 
 
 def _simulate_glmer(result: GlmerResult) -> NDArray[np.floating]:
-    n = result.matrices.n_obs
     q = result.matrices.n_random
 
     if q > 0:
@@ -649,25 +641,12 @@ def _simulate_glmer(result: GlmerResult) -> NDArray[np.floating]:
             u_idx += n_levels * n_terms
             theta_start += n_theta
 
-        eta = result.matrices.X @ result.beta + result.matrices.Z @ u_new
+        eta = result.matrices.X @ result.beta + result.matrices.Z @ u_new + result.matrices.offset
     else:
-        eta = result.matrices.X @ result.beta
+        eta = result.matrices.X @ result.beta + result.matrices.offset
 
     mu = result.family.link.inverse(eta)
-    mu = np.clip(mu, 1e-6, 1 - 1e-6)
-
-    family_name = result.family.__class__.__name__
-
-    if family_name == "Binomial":
-        y_sim = np.random.binomial(1, mu).astype(np.float64)
-    elif family_name == "Poisson":
-        y_sim = np.random.poisson(mu).astype(np.float64)
-    elif family_name == "Gaussian":
-        y_sim = np.random.normal(mu, 1.0)
-    else:
-        y_sim = mu + np.random.randn(n) * 0.1
-
-    return y_sim
+    return result.family.simulate(mu)
 
 
 def bootMer(

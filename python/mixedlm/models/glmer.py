@@ -13,7 +13,6 @@ if TYPE_CHECKING:
 
 from mixedlm.estimation.laplace import GLMMOptimizer, _build_lambda, _count_theta
 from mixedlm.families.base import Family
-from mixedlm.families.negative_binomial import NegativeBinomial
 from mixedlm.formula.terms import Formula
 from mixedlm.matrices.design import ModelMatrices, build_model_matrices
 from mixedlm.models.lmer_types import (
@@ -92,7 +91,7 @@ class GlmerResult(MerResultMixin):
 
         eta = self.linear_predictor()
         mu = self.family.link.inverse(eta)
-        mu = np.clip(mu, 1e-10, 1 - 1e-10)
+        mu = self.family.clamp_mu(mu)
 
         W = self.family.weights(mu)
         W = np.maximum(W, 1e-10)
@@ -420,7 +419,7 @@ class GlmerResult(MerResultMixin):
 
         eta = self.linear_predictor()
         mu = self.family.link.inverse(eta)
-        mu = np.clip(mu, 1e-10, 1 - 1e-10)
+        mu = self.family.clamp_mu(mu)
 
         W = self.family.weights(mu)
         W = np.maximum(W, 1e-10)
@@ -486,7 +485,7 @@ class GlmerResult(MerResultMixin):
 
         eta = self.linear_predictor()
         mu = self.family.link.inverse(eta)
-        mu = np.clip(mu, 1e-10, 1 - 1e-10)
+        mu = self.family.clamp_mu(mu)
 
         W = self.family.weights(mu)
         W = np.maximum(W, 1e-10)
@@ -1548,11 +1547,10 @@ class GlmerResult(MerResultMixin):
         use_re: bool = True,
         re_form: str | None = None,
     ) -> NDArray[np.floating]:
-        n = self.matrices.n_obs
         q = self.matrices.n_random
 
         if re_form == "~0" or re_form == "NA" or not use_re or q == 0:
-            eta = self.matrices.X @ self.beta
+            eta = self.matrices.X @ self.beta + self.matrices.offset
         else:
             u_new = np.zeros(q, dtype=np.float64)
             u_idx = 0
@@ -1586,35 +1584,10 @@ class GlmerResult(MerResultMixin):
                 u_idx += n_levels * n_terms
                 theta_start += n_theta
 
-            eta = self.matrices.X @ self.beta + self.matrices.Z @ u_new
+            eta = self.matrices.X @ self.beta + self.matrices.Z @ u_new + self.matrices.offset
 
         mu = self.family.link.inverse(eta)
-
-        family_name = self.family.__class__.__name__
-
-        if family_name == "Binomial":
-            mu = np.clip(mu, 1e-6, 1 - 1e-6)
-            y_sim = np.random.binomial(1, mu).astype(np.float64)
-        elif family_name == "Poisson":
-            mu = np.clip(mu, 1e-6, 1e15)
-            y_sim = np.random.poisson(mu).astype(np.float64)
-        elif isinstance(self.family, NegativeBinomial):
-            mu = np.clip(mu, 1e-6, 1e10)
-            theta = self.family.theta
-            y_sim = np.random.negative_binomial(theta, theta / (mu + theta)).astype(np.float64)
-        elif family_name == "Gamma":
-            mu = np.clip(mu, 1e-6, 1e10)
-            shape = 1.0
-            y_sim = np.random.gamma(shape, mu / shape, n)
-        elif family_name == "InverseGaussian":
-            mu = np.clip(mu, 1e-6, 1e10)
-            y_sim = np.random.wald(mu, 1.0, n)
-        elif family_name == "Gaussian":
-            y_sim = np.random.normal(mu, 1.0)
-        else:
-            y_sim = mu + np.random.randn(n) * 0.1
-
-        return y_sim
+        return self.family.simulate(mu)
 
     def _refit_from_matrices(self, matrices: ModelMatrices, **kwargs) -> GlmerResult:
         optimizer = GLMMOptimizer(

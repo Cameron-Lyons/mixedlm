@@ -213,6 +213,23 @@ class TestGlmer:
         assert result.converged
         assert len(result.fixef()) == 2
 
+    def test_poisson_model_recovers_means_above_one(self) -> None:
+        rng = np.random.default_rng(42)
+        n_groups = 12
+        n_per_group = 10
+        group = np.repeat(np.arange(n_groups), n_per_group)
+        x = np.tile(np.linspace(-1, 1, n_per_group), n_groups)
+        group_effects = rng.normal(0, 0.2, n_groups)
+        y = rng.poisson(np.exp(3.0 + 0.4 * x + group_effects[group]))
+        data = pd.DataFrame({"y": y, "x": x, "group": group.astype(str)})
+
+        result = glmer("y ~ x + (1 | group)", data, family=families.Poisson())
+
+        assert result.converged
+        assert 2.5 < result.beta[0] < 3.5
+        assert 0.2 < result.beta[1] < 0.7
+        assert np.max(result.fitted()) > 10
+
     def test_glmer_aic_bic(self) -> None:
         result = glmer("y ~ period + (1 | herd)", CBPP, family=families.Binomial())
 

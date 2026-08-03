@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from typing import Any
 
 import numpy as np
 from numpy.typing import NDArray
@@ -95,6 +96,7 @@ class InverseLink(Link):
 
 class Family(ABC):
     link: Link
+    mean_bounds: tuple[float | None, float | None] = (None, None)
 
     @abstractmethod
     def variance(self, mu: NDArray[np.floating]) -> NDArray[np.floating]:
@@ -108,3 +110,35 @@ class Family(ABC):
 
     def weights(self, mu: NDArray[np.floating]) -> NDArray[np.floating]:
         return 1.0 / (self.link.deriv(mu) ** 2 * self.variance(mu))
+
+    def clamp_mu(
+        self,
+        mu: NDArray[np.floating],
+        eps: float = 1e-10,
+        *,
+        out: NDArray[np.floating] | None = None,
+    ) -> NDArray[np.floating]:
+        """Clamp response means to this family's valid domain.
+
+        Custom families can set ``mean_bounds`` or override this method when
+        their response mean has a more specialized domain.
+        """
+        lower, upper = self.mean_bounds
+        if lower is None and upper is None:
+            if out is None or out is mu:
+                return mu
+            np.copyto(out, mu)
+            return out
+
+        lower_bound = None if lower is None else lower + eps
+        upper_bound = None if upper is None else upper - eps
+        return np.clip(mu, lower_bound, upper_bound, out=out)
+
+    def simulate(self, mu: NDArray[np.floating], rng: Any | None = None) -> NDArray[np.floating]:
+        """Draw responses at the supplied means.
+
+        The default provides a small Gaussian perturbation for custom families.
+        Built-in families override it with their corresponding distribution.
+        """
+        rng = np.random if rng is None else rng
+        return mu + rng.standard_normal(mu.shape) * 0.1

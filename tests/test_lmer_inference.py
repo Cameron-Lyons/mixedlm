@@ -310,6 +310,40 @@ class TestWeightsOffset:
         assert len(fitted) == n
         assert np.all(fitted > 0)
 
+    def test_glmer_simulation_and_bootstrap_preserve_offset(self, monkeypatch) -> None:
+        from mixedlm.inference.bootstrap import _prepare_glmer_worker_data
+
+        rng = np.random.default_rng(17)
+        n_groups = 6
+        n_per_group = 8
+        n = n_groups * n_per_group
+        group = np.repeat(np.arange(n_groups), n_per_group)
+        x = rng.normal(size=n)
+        offset = np.linspace(-0.7, 0.7, n)
+        y = rng.poisson(np.exp(1.0 + 0.2 * x + offset))
+        data = pd.DataFrame({"y": y, "x": x, "group": group.astype(str)})
+        result = glmer(
+            "y ~ x + (1 | group)",
+            data,
+            family=families.Poisson(),
+            offset=offset,
+        )
+        captured: dict[str, np.ndarray] = {}
+
+        def record_mu(mu, rng=None):
+            captured["mu"] = mu.copy()
+            return np.zeros_like(mu)
+
+        monkeypatch.setattr(result.family, "simulate", record_mu)
+
+        result.simulate(use_re=False)
+
+        expected = result.family.link.inverse(result.matrices.X @ result.beta + offset)
+        np.testing.assert_allclose(captured["mu"], expected)
+        worker_data = _prepare_glmer_worker_data(result)
+        np.testing.assert_allclose(worker_data["offset"], offset)
+        np.testing.assert_allclose(worker_data["weights"], result.matrices.weights)
+
     def test_lmer_weights_and_offset(self) -> None:
         np.random.seed(42)
         n_groups = 10
