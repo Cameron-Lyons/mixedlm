@@ -41,6 +41,7 @@ class RandomEffectStructure:
     correlated: bool
     level_map: dict[str, int]
     cov_type: str = "us"
+    level_indices: NDArray[np.int32] | None = field(default=None, repr=False, compare=False)
 
 
 @dataclass
@@ -231,11 +232,11 @@ def _build_sparse_Z_block(
     n: int,
     n_levels: int,
     n_terms: int,
-) -> sparse.csc_matrix:
+) -> tuple[sparse.csc_matrix, NDArray[np.int32]]:
     """Build sparse Z block using vectorized operations."""
     n_random_cols = n_levels * n_terms
 
-    level_indices = np.full(n, -1, dtype=np.int64)
+    level_indices = np.full(n, -1, dtype=np.int32)
     for i, gv in enumerate(group_values):
         str_gv = str(gv) if not isinstance(gv, str) else gv
         if str_gv in level_map:
@@ -267,10 +268,13 @@ def _build_sparse_Z_block(
         col_indices = np.array([], dtype=np.int64)
         values = np.array([], dtype=np.float64)
 
-    return sparse.csc_matrix(
-        (values, (row_indices, col_indices)),
-        shape=(n, n_random_cols),
-        dtype=np.float64,
+    return (
+        sparse.csc_matrix(
+            (values, (row_indices, col_indices)),
+            shape=(n, n_random_cols),
+            dtype=np.float64,
+        ),
+        level_indices,
     )
 
 
@@ -334,7 +338,14 @@ def _build_random_block(
 
     n_terms = len(term_cols)
 
-    Z_block = _build_sparse_Z_block(group_values, level_map, term_cols, n, n_levels, n_terms)
+    Z_block, level_indices = _build_sparse_Z_block(
+        group_values,
+        level_map,
+        term_cols,
+        n,
+        n_levels,
+        n_terms,
+    )
 
     structure = RandomEffectStructure(
         grouping_factor=grouping_factor,
@@ -344,6 +355,7 @@ def _build_random_block(
         correlated=rterm.correlated,
         level_map=level_map,
         cov_type=rterm.cov_type,
+        level_indices=level_indices,
     )
 
     return Z_block, structure
@@ -388,7 +400,14 @@ def _build_nested_random_block(
 
     n_terms = len(term_cols)
 
-    Z_block = _build_sparse_Z_block(combined_group, level_map, term_cols, n, n_levels, n_terms)
+    Z_block, level_indices = _build_sparse_Z_block(
+        combined_group,
+        level_map,
+        term_cols,
+        n,
+        n_levels,
+        n_terms,
+    )
 
     structure = RandomEffectStructure(
         grouping_factor="/".join(grouping_factors),
@@ -398,6 +417,7 @@ def _build_nested_random_block(
         correlated=rterm.correlated,
         level_map=level_map,
         cov_type=rterm.cov_type,
+        level_indices=level_indices,
     )
 
     return Z_block, structure
