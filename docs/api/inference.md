@@ -2,6 +2,92 @@
 
 This page documents functions for statistical inference, hypothesis testing, and confidence intervals.
 
+## Cross-Validation
+
+### cross_validate
+
+Refit an LMM or GLMM across exhaustive folds and score aligned out-of-fold
+predictions.
+
+```python
+import mixedlm as mlm
+
+model = mlm.lmer("y ~ x + (1 | subject)", data)
+
+# Case-level validation: held-out rows can use random effects estimated from
+# other training rows for the same subject.
+case_cv = mlm.cross_validate(model, cv=5, random_state=42)
+
+# Cluster-level validation: each subject appears in exactly one test fold.
+# Predictions use fixed effects because held-out subjects are unseen.
+group_cv = mlm.cross_validate(
+    model,
+    cv=5,
+    group="subject",
+    metrics=["rmse", "mae", "r2"],
+    random_state=42,
+)
+
+print(group_cv)
+print(group_cv.scores)
+print(group_cv.fold_scores)
+```
+
+**Parameters:**
+
+- `model`: Fitted `LmerResult` or `GlmerResult`
+- `data`: Optional aligned data; the stored clean model frame is used by default
+- `cv`: Number of folds, default 5
+- `group`: Optional column defining whole clusters to hold out
+- `metrics`: Metric name, callable, or sequence; defaults are selected by model type
+- `shuffle`, `random_state`: Reproducible fold assignment controls
+- `re_form`: Random-effect prediction mode; `"auto"` uses fixed effects for grouped folds
+- `n_jobs`: Number of folds to fit concurrently, default 1
+- `fit_kwargs`: Additional refit options such as optimizer controls
+
+Built-in metrics are weighted `"mse"`, `"rmse"`, `"mae"`, `"r2"`, and GLMM
+`"deviance"`. A custom metric receives `(y_true, y_pred, weights)` and returns
+one finite scalar. Original model weights and offsets are automatically subset
+and preserved in every fold.
+
+The result exposes:
+
+- `scores`: Overall metrics computed from every out-of-fold prediction
+- `fold_scores`: Per-fold sizes, convergence and singularity flags, and metrics
+- `predictions`: Finite predictions aligned to the fitted observations
+- `fold_ids` and `folds`: Fold membership and explicit train/test positions
+- `summary()`: Overall, fold-mean, fold-SD, minimum, and maximum scores
+- `all_converged`: Whether every refit reported convergence
+- `any_singular`: Whether any refit is on a random-effects boundary
+
+### make_folds
+
+Construct folds without fitting a model:
+
+```python
+folds = mlm.make_folds(
+    len(data),
+    cv=5,
+    groups=data["subject"],
+    random_state=42,
+)
+```
+
+Grouped folds never split a cluster. Groups are assigned by decreasing size to
+the currently smallest fold, keeping test observation counts approximately
+balanced without adding a machine-learning dependency.
+
+### Weighted scoring helpers
+
+The vectorized scoring functions are also public:
+
+```python
+rmse = mlm.weighted_rmse(y_true, y_pred, weights)
+mse = mlm.weighted_mse(y_true, y_pred, weights)
+mae = mlm.weighted_mae(y_true, y_pred, weights)
+r2 = mlm.weighted_r2(y_true, y_pred, weights)
+```
+
 ## Model Comparison
 
 ### anova
