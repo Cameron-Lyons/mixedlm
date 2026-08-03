@@ -134,17 +134,14 @@ def build_fixed_matrix(
         columns.append(np.ones(n, dtype=np.float64))
         names.append("(Intercept)")
 
-    for term in formula.fixed.terms:
-        if isinstance(term, InterceptTerm):
-            continue
-        elif isinstance(term, VariableTerm):
-            col, col_names = _encode_variable(term.name, data, contrasts)
-            columns.extend(col)
-            names.extend(col_names)
-        elif isinstance(term, InteractionTerm):
-            col, col_names = _encode_interaction(term.variables, data, contrasts)
-            columns.extend(col)
-            names.extend(col_names)
+    term_columns, term_names = _encode_terms(
+        formula.fixed.terms,
+        data,
+        has_intercept=formula.fixed.has_intercept,
+        contrasts=contrasts,
+    )
+    columns.extend(term_columns)
+    names.extend(term_names)
 
     if not columns:
         columns.append(np.ones(n, dtype=np.float64))
@@ -158,9 +155,10 @@ def _encode_variable(
     name: str,
     data: Any,
     contrasts: dict[str, str | NDArray[np.floating]] | None = None,
+    full_rank: bool = False,
 ) -> tuple[list[NDArray[np.floating]], list[str]]:
     if is_categorical_or_string(data, name):
-        return _encode_categorical(name, data, contrasts)
+        return _encode_categorical(name, data, contrasts, full_rank=full_rank)
     else:
         arr = get_column_numpy(data, name, dtype=np.float64)
         return [arr], [name]
@@ -170,6 +168,7 @@ def _encode_categorical(
     name: str,
     data: Any,
     contrasts: dict[str, str | NDArray[np.floating]] | None = None,
+    full_rank: bool = False,
 ) -> tuple[list[NDArray[np.floating]], list[str]]:
     from mixedlm.utils.contrasts import apply_contrasts_array, get_contrast_matrix
 
@@ -180,14 +179,53 @@ def _encode_categorical(
     if n_levels < 2:
         return [np.ones(n, dtype=np.float64)], [f"{name}"]
 
-    contrast_spec = None
-    if contrasts is not None and name in contrasts:
-        contrast_spec = contrasts[name]
-
-    contrast_matrix = get_contrast_matrix(n_levels, contrast_spec)
+    contrast_matrix: NDArray[np.floating]
+    if full_rank:
+        contrast_matrix = np.eye(n_levels, dtype=np.float64)
+    else:
+        contrast_spec = None
+        if contrasts is not None and name in contrasts:
+            contrast_spec = contrasts[name]
+        contrast_matrix = get_contrast_matrix(n_levels, contrast_spec)
 
     col_values = get_column_numpy(data, name)
-    return apply_contrasts_array(col_values, name, contrast_matrix, categories)
+    columns, names = apply_contrasts_array(col_values, name, contrast_matrix, categories)
+    if full_rank:
+        names = [f"{name}.{category}" for category in categories]
+    return columns, names
+
+
+def _encode_terms(
+    terms: tuple[InterceptTerm | VariableTerm | InteractionTerm, ...],
+    data: Any,
+    has_intercept: bool,
+    contrasts: dict[str, str | NDArray[np.floating]] | None = None,
+) -> tuple[list[NDArray[np.floating]], list[str]]:
+    """Encode model terms, using full indicators for the first factor without an intercept."""
+    columns: list[NDArray[np.floating]] = []
+    names: list[str] = []
+    use_full_rank_factor = not has_intercept
+
+    for term in terms:
+        if isinstance(term, InterceptTerm):
+            continue
+        if isinstance(term, VariableTerm):
+            full_rank = use_full_rank_factor and is_categorical_or_string(data, term.name)
+            term_columns, term_names = _encode_variable(
+                term.name,
+                data,
+                contrasts,
+                full_rank=full_rank,
+            )
+            if full_rank:
+                use_full_rank_factor = False
+        else:
+            term_columns, term_names = _encode_interaction(term.variables, data, contrasts)
+
+        columns.extend(term_columns)
+        names.extend(term_names)
+
+    return columns, names
 
 
 def _encode_interaction(
@@ -313,24 +351,18 @@ def _build_random_block(
 
     group_values = get_column_numpy(data, grouping_factor)
 
-    term_cols: list[NDArray[np.floating]] = []
-    term_names: list[str] = []
-
-    if rterm.has_intercept:
-        term_cols.append(np.ones(n, dtype=np.float64))
-        term_names.append("(Intercept)")
-
-    for term in rterm.expr:
-        if isinstance(term, InterceptTerm):
-            continue
-        elif isinstance(term, VariableTerm):
-            cols, nms = _encode_variable(term.name, data, contrasts)
-            term_cols.extend(cols)
-            term_names.extend(nms)
-        elif isinstance(term, InteractionTerm):
-            cols, nms = _encode_interaction(term.variables, data, contrasts)
-            term_cols.extend(cols)
-            term_names.extend(nms)
+    term_cols: list[NDArray[np.floating]] = (
+        [np.ones(n, dtype=np.float64)] if rterm.has_intercept else []
+    )
+    term_names = ["(Intercept)"] if rterm.has_intercept else []
+    encoded_cols, encoded_names = _encode_terms(
+        rterm.expr,
+        data,
+        has_intercept=rterm.has_intercept,
+        contrasts=contrasts,
+    )
+    term_cols.extend(encoded_cols)
+    term_names.extend(encoded_names)
 
     n_terms = len(term_cols)
 
@@ -367,24 +399,18 @@ def _build_nested_random_block(
     level_map = {lv: i for i, lv in enumerate(levels)}
     n_levels = len(levels)
 
-    term_cols: list[NDArray[np.floating]] = []
-    term_names: list[str] = []
-
-    if rterm.has_intercept:
-        term_cols.append(np.ones(n, dtype=np.float64))
-        term_names.append("(Intercept)")
-
-    for term in rterm.expr:
-        if isinstance(term, InterceptTerm):
-            continue
-        elif isinstance(term, VariableTerm):
-            cols, nms = _encode_variable(term.name, data, contrasts)
-            term_cols.extend(cols)
-            term_names.extend(nms)
-        elif isinstance(term, InteractionTerm):
-            cols, nms = _encode_interaction(term.variables, data, contrasts)
-            term_cols.extend(cols)
-            term_names.extend(nms)
+    term_cols: list[NDArray[np.floating]] = (
+        [np.ones(n, dtype=np.float64)] if rterm.has_intercept else []
+    )
+    term_names = ["(Intercept)"] if rterm.has_intercept else []
+    encoded_cols, encoded_names = _encode_terms(
+        rterm.expr,
+        data,
+        has_intercept=rterm.has_intercept,
+        contrasts=contrasts,
+    )
+    term_cols.extend(encoded_cols)
+    term_names.extend(encoded_names)
 
     n_terms = len(term_cols)
 
