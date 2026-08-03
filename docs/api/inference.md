@@ -84,6 +84,39 @@ pvals = mlm.pvalues_with_ddf(model, method="Satterthwaite")
 
 ## Estimated Marginal Means
 
+### ggpredict
+
+Compute adjusted fixed-effect predictions for continuous variables, factors,
+or their Cartesian product. Numeric variables outside the requested grid are
+held at their mean and factors at their reference level.
+
+```python
+predictions = mlm.ggpredict(
+    model,
+    ["Days", "treatment"],
+    at={"Days": [0, 5, 10]},
+)
+```
+
+The returned data frame contains the requested grid columns plus `predicted`,
+`std.error`, `conf.low`, and `conf.high`. For GLMMs, `type="response"` builds
+the confidence interval on the link scale before transforming both endpoints.
+Use `type="link"` to keep results on the linear-predictor scale.
+
+### allEffects
+
+Compute a separate adjusted prediction grid for every fixed-effect variable.
+
+```python
+effects = mlm.allEffects(model, n_points=25)
+days_effect = effects["Days"]
+```
+
+Both functions are batched, use the fitted fixed-effect covariance matrix, and
+require no plotting package. If a model was fit with non-default categorical
+contrasts, pass the same mapping with `contrasts=` so the prediction grid uses
+the fitted parameterization.
+
 ### emmeans
 
 Compute estimated marginal means.
