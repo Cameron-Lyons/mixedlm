@@ -20,6 +20,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Replaced the Py-BOBYQA dependency and default optimizer with SciPy COBYQA
 - Reduced unused and redundant Python and Rust dependencies
 
+### Fixed
+- LMM prediction uncertainty now includes conditional random-effect covariance, fixed/random cross-covariance, correlated slopes, and unseen-group prior variance
+
 ## [1.1.0] - 2026-01-27
 
 ### Added
