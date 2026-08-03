@@ -939,7 +939,13 @@ polars = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "hypothesis" },
+    { name = "mypy" },
     { name = "polars" },
+    { name = "pytest" },
+    { name = "pytest-benchmark" },
+    { name = "pytest-cov" },
+    { name = "ruff" },
 ]
 
 [package.metadata]
@@ -963,7 +969,15 @@ requires-dist = [
 provides-extras = ["dev", "plots", "optimizers", "polars", "pandas", "docs"]
 
 [package.metadata.requires-dev]
-dev = [{ name = "polars", specifier = ">=1.37.1" }]
+dev = [
+    { name = "hypothesis", specifier = ">=6.0" },
+    { name = "mypy", specifier = ">=1.0" },
+    { name = "polars", specifier = ">=0.20" },
+    { name = "pytest", specifier = ">=7.0" },
+    { name = "pytest-benchmark", specifier = ">=4.0" },
+    { name = "pytest-cov", specifier = ">=4.0" },
+    { name = "ruff", specifier = ">=0.1" },
+]
 
 [[package]]
 name = "mkdocs"
