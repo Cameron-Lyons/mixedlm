@@ -111,6 +111,64 @@ class TestModelMatrices:
         assert len(matrices.random_structures) == 1
         assert matrices.random_structures[0].n_terms == 2
 
+    def test_no_intercept_categorical_fixed_effect_uses_all_levels(self) -> None:
+        data = pd.DataFrame(
+            {
+                "y": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+                "treatment": ["a", "b", "c", "a", "b", "c"],
+                "group": ["g1", "g1", "g1", "g2", "g2", "g2"],
+            }
+        )
+
+        for formula in (
+            "y ~ 0 + treatment + (1 | group)",
+            "y ~ treatment - 1 + (1 | group)",
+        ):
+            matrices = build_model_matrices(parse_formula(formula), data)
+
+            assert matrices.fixed_names == ["treatment.a", "treatment.b", "treatment.c"]
+            assert np.array_equal(matrices.X, np.tile(np.eye(3), (2, 1)))
+
+    def test_no_intercept_categorical_random_effect_uses_all_levels(self) -> None:
+        data = pd.DataFrame(
+            {
+                "y": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+                "treatment": ["a", "b", "c", "a", "b", "c"],
+                "group": ["g1", "g1", "g1", "g2", "g2", "g2"],
+            }
+        )
+
+        matrices = build_model_matrices(
+            parse_formula("y ~ 1 + (0 + treatment | group)"),
+            data,
+        )
+
+        structure = matrices.random_structures[0]
+        assert structure.term_names == ["treatment.a", "treatment.b", "treatment.c"]
+        assert structure.n_terms == 3
+        assert np.array_equal(matrices.Z.toarray(), np.eye(6))
+
+    def test_categorical_effect_with_intercept_remains_reduced_rank(self) -> None:
+        data = pd.DataFrame(
+            {
+                "y": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+                "treatment": ["a", "b", "c", "a", "b", "c"],
+                "group": ["g1", "g1", "g1", "g2", "g2", "g2"],
+            }
+        )
+
+        matrices = build_model_matrices(
+            parse_formula("y ~ treatment + (1 + treatment | group)"),
+            data,
+        )
+
+        assert matrices.fixed_names == ["(Intercept)", "treatment.1", "treatment.2"]
+        assert matrices.random_structures[0].term_names == [
+            "(Intercept)",
+            "treatment.1",
+            "treatment.2",
+        ]
+
     def test_star_fixed_matrix_includes_main_effect_columns(self) -> None:
         data = pd.DataFrame(
             {
