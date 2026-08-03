@@ -79,6 +79,18 @@ class TestPolarsLmer:
         assert predicted.shape == (2,)
         assert np.all(np.isfinite(predicted))
 
+    def test_prediction_offset_column(self, sleepstudy_polars):
+        result = mlm.lmer("Reaction ~ Days + (1 | Subject)", sleepstudy_polars)
+        offset = np.array([-0.5, 0.0, 0.75])
+        new_data = sleepstudy_polars.head(3).select("Days").with_columns(
+            pl.Series("exposure_offset", offset)
+        )
+
+        baseline = result.predict(new_data, re_form="NA")
+        predicted = result.predict(new_data, re_form="NA", offset="exposure_offset")
+
+        assert np.allclose(predicted, baseline + offset)
+
     def test_lmer_summary(self, sleepstudy_polars):
         """Test summary output with polars."""
         result = mlm.lmer("Reaction ~ Days + (1 | Subject)", sleepstudy_polars)

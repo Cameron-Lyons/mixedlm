@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- New-data LMM and GLMM predictions accept numeric, scalar, or column-based offsets
 - EM-REML now supports multiple random effects and random slopes (correlated and uncorrelated)
 - Automatic convergence recommendations in `summary()` output for non-converged and singular fits
 - `em_init` control parameter is now wired up in `lmer()` and `glmer()` model fitting
