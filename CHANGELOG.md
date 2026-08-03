@@ -23,6 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - LMM profiling now applies fitted random effects before computing the penalized residual sum of squares, preventing variance estimates from being biased toward zero
 - LMM likelihood reporting and fixed-effect profiles now use the corrected profiled criterion consistently
+- One- and two-parameter LMM profiles now honor prior weights and offsets, including weight-scale invariant REML normalization
 
 ## [1.1.0] - 2026-01-27
 
