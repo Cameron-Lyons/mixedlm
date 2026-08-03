@@ -31,7 +31,9 @@ class MerResultMixin:
     def fixef(self) -> dict[str, float]:
         raise NotImplementedError
 
-    def _compute_condVar(self) -> dict[str, dict[str, NDArray[np.floating]]]:
+    def _compute_condVar(
+        self, include_cov: bool = False
+    ) -> dict[str, dict[str, NDArray[np.floating]]]:
         raise NotImplementedError
 
     def _fixef_dict(self, beta: NDArray[np.floating]) -> dict[str, float]:
@@ -149,29 +151,6 @@ class MerResultMixin:
             grouping_factors=grouping_factors,
             has_intercept=formula.fixed.has_intercept,
         )
-
-    def _condvar_from_cov(
-        self, cond_cov: NDArray[np.floating]
-    ) -> dict[str, dict[str, NDArray[np.floating]]]:
-        result: dict[str, dict[str, NDArray[np.floating]]] = {}
-        u_idx = 0
-
-        for struct in self.matrices.random_structures:
-            n_levels = struct.n_levels
-            n_terms = struct.n_terms
-            n_u = n_levels * n_terms
-
-            block_cov = cond_cov[u_idx : u_idx + n_u, u_idx : u_idx + n_u]
-            block_diag = np.diag(block_cov).reshape(n_levels, n_terms)
-
-            term_vars: dict[str, NDArray[np.floating]] = {}
-            for j, term_name in enumerate(struct.term_names):
-                term_vars[term_name] = block_diag[:, j]
-
-            result[struct.grouping_factor] = term_vars
-            u_idx += n_u
-
-        return result
 
     def _iter_random_cov_blocks(
         self, scale: float = 1.0
