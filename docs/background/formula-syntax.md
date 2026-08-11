@@ -82,6 +82,22 @@ Use `I()` with a non-negative integer exponent to include raw polynomial columns
 "y ~ x - 1"
 ```
 
+### Removing Terms
+
+Use `-` to remove individual terms or terms introduced by `*`. Operations are
+applied from left to right, so a later `+` can add a term back:
+
+```python
+# Main effects without their interaction
+"y ~ x1 * x2 - x1:x2"
+
+# Remove one random slope from an expanded random-effects expression
+"y ~ x1 + (x1 * x2 - x1:x2 | group)"
+
+# Re-enable an intercept after removing it
+"y ~ 0 + x + 1"
+```
+
 ### Categorical Variables
 
 Categorical variables are automatically dummy-coded:

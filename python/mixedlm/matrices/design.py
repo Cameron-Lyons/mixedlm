@@ -12,10 +12,10 @@ from mixedlm.utils.dataframe import (
     concat_columns_as_string,
     dataframe_length,
     ensure_dataframe,
+    factorize_levels,
     get_categories,
     get_column_numpy,
     get_columns,
-    get_unique_sorted,
     is_categorical_or_string,
     select_columns,
 )
@@ -281,8 +281,7 @@ def _encode_interaction(
 
 
 def _build_sparse_Z_block(
-    group_values: NDArray,
-    level_map: dict,
+    level_indices: NDArray[np.int64],
     term_cols: list[NDArray[np.floating]],
     n: int,
     n_levels: int,
@@ -290,14 +289,6 @@ def _build_sparse_Z_block(
 ) -> sparse.csc_matrix:
     """Build sparse Z block using vectorized operations."""
     n_random_cols = n_levels * n_terms
-
-    level_indices = np.full(n, -1, dtype=np.int64)
-    for i, gv in enumerate(group_values):
-        str_gv = str(gv) if not isinstance(gv, str) else gv
-        if str_gv in level_map:
-            level_indices[i] = level_map[str_gv]
-        elif gv in level_map:
-            level_indices[i] = level_map[gv]
 
     valid_mask = level_indices >= 0
 
@@ -371,11 +362,9 @@ def _build_random_block(
     grouping_factor = rterm.grouping
     assert isinstance(grouping_factor, str)
 
-    levels = get_unique_sorted(data, grouping_factor)
-    level_map = {lv: i for i, lv in enumerate(levels)}
-    n_levels = len(levels)
-
     group_values = get_column_numpy(data, grouping_factor)
+    level_indices, level_map = factorize_levels(group_values)
+    n_levels = len(level_map)
 
     term_cols: list[NDArray[np.floating]] = []
     term_names: list[str] = []
@@ -407,7 +396,7 @@ def _build_random_block(
 
     n_terms = len(term_cols)
 
-    Z_block = _build_sparse_Z_block(group_values, level_map, term_cols, n, n_levels, n_terms)
+    Z_block = _build_sparse_Z_block(level_indices, term_cols, n, n_levels, n_terms)
 
     structure = RandomEffectStructure(
         grouping_factor=grouping_factor,
@@ -432,14 +421,8 @@ def _build_nested_random_block(
     grouping_factors = rterm.grouping_factors
     combined_group = concat_columns_as_string(data, list(grouping_factors), separator="/")
 
-    if np.issubdtype(combined_group.dtype, np.floating):
-        valid_mask = ~np.isnan(combined_group.astype(float, casting="safe"))
-    else:
-        valid_mask = np.ones(len(combined_group), dtype=bool)
-    unique_combined = np.unique(combined_group[valid_mask])
-    levels = sorted([str(x) for x in unique_combined if x is not None and str(x) != "nan"])
-    level_map = {lv: i for i, lv in enumerate(levels)}
-    n_levels = len(levels)
+    level_indices, level_map = factorize_levels(combined_group)
+    n_levels = len(level_map)
 
     term_cols: list[NDArray[np.floating]] = []
     term_names: list[str] = []
@@ -471,7 +454,7 @@ def _build_nested_random_block(
 
     n_terms = len(term_cols)
 
-    Z_block = _build_sparse_Z_block(combined_group, level_map, term_cols, n, n_levels, n_terms)
+    Z_block = _build_sparse_Z_block(level_indices, term_cols, n, n_levels, n_terms)
 
     structure = RandomEffectStructure(
         grouping_factor="/".join(grouping_factors),
