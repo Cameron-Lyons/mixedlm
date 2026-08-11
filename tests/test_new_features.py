@@ -419,6 +419,14 @@ class TestFormulaUtilities:
 
         assert result == original
 
+    def test_expandDoubleVerts_preserves_quoted_names(self):
+        result = expandDoubleVerts("`response value` ~ x + (`random|slope` || `group id`)")
+
+        assert result == (
+            "`response value` ~ x + (1 | `group id`) + (0 + `random|slope` | `group id`)"
+        )
+        assert parse_formula(result).response == "response value"
+
     def test_dropOffset_basic(self):
         result = dropOffset("y ~ x + offset(log(t)) + (1 | group)")
 
@@ -463,6 +471,13 @@ class TestFormulaUtilities:
 
         assert "group" in result
         assert "subject" in result
+
+    def test_formula_strings_preserve_quoted_names(self):
+        formula = "`response value` ~ `fixed + value` + (`random slope` | `group id`)"
+
+        assert getFixedFormulaStr(formula) == "`response value` ~ `fixed + value`"
+        assert getRandomFormulaStr(formula) == "(1 + `random slope` | `group id`)"
+        assert getResponseName(formula) == "response value"
 
     def test_getNGroups(self):
         assert getNGroups("y ~ x + (1 | group)") == 1

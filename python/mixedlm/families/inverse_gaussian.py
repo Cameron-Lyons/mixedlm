@@ -19,6 +19,8 @@ class InverseSquaredLink(Link):
 
 
 class InverseGaussian(Family):
+    mu_lower_bound = 0.0
+
     def __init__(self, link: Link | None = None) -> None:
         self.link = link if link is not None else LogLink()
 
