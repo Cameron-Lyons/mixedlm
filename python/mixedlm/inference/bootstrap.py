@@ -503,7 +503,6 @@ def _simulate_glmer_components(
     theta: NDArray[np.floating],
     family: Family,
 ) -> NDArray[np.floating]:
-    n = matrices.n_obs
     q = matrices.n_random
 
     if q > 0:
@@ -539,22 +538,12 @@ def _simulate_glmer_components(
         eta = matrices.X @ beta + matrices.offset
 
     mu = family.link.inverse(eta)
-    mu = np.clip(mu, 1e-6, 1 - 1e-6)
-
-    family_name = family.__class__.__name__
-
-    if family_name == "Binomial":
-        trials = 1 if matrices.trials is None else matrices.trials.astype(np.int64)
+    if family.__class__.__name__ == "Binomial" and matrices.trials is not None:
+        mu = family.clamp_mu(mu, eps=1e-6)
+        trials = matrices.trials.astype(np.int64)
         successes = np.random.binomial(trials, mu).astype(np.float64)
-        y_sim = successes if matrices.trials is None else successes / trials
-    elif family_name == "Poisson":
-        y_sim = np.random.poisson(mu).astype(np.float64)
-    elif family_name == "Gaussian":
-        y_sim = np.random.normal(mu, 1.0)
-    else:
-        y_sim = mu + np.random.randn(n) * 0.1
-
-    return y_sim
+        return successes / trials
+    return family.simulate(mu)
 
 
 def bootMer(

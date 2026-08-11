@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - Grouped-binomial `successes / trials` responses with automatic trial weights and validation
+- Configurable named links and documented family/link helper APIs
 - Backtick quoting for column names with spaces or formula operators
 - EM-REML now supports multiple random effects and random slopes (correlated and uncorrelated)
 - Automatic convergence recommendations in `summary()` output for non-converged and singular fits
@@ -35,6 +36,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Nonlinear mixed models now apply offsets consistently to responses, fitted values, simulations, refits, covariance estimates, and leverage diagnostics
 
 ### Fixed
+- GLMM PIRLS, Laplace, and adaptive-quadrature calculations now use the covariance factor
+  in spherical random-effect coordinates, with consistent likelihood normalization and
+  deterministic outer optimization
 - LMM prediction uncertainty now includes conditional random-effect covariance, fixed/random cross-covariance, correlated slopes, and unseen-group prior variance
 - Covariance tables, PCA diagnostics, singularity checks, and parameter bounds now honor compound-symmetry and AR(1) random-effect structures
 - Gamma GLMMs now minimize the non-negative unit deviance instead of its negative
