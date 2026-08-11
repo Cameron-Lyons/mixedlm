@@ -4,6 +4,7 @@ from mixedlm.formula.terms import (
     Formula,
     InteractionTerm,
     InterceptTerm,
+    PowerTerm,
     RandomTerm,
 )
 
@@ -14,4 +15,5 @@ __all__ = [
     "RandomTerm",
     "InterceptTerm",
     "InteractionTerm",
+    "PowerTerm",
 ]
