@@ -20,6 +20,7 @@ A Python implementation of mixed-effects models inspired by R's [lme4](https://g
 - **Formula interface** - lme4-style formulas with random effects syntax
 - **Inference tools** - Linear hypotheses, profile likelihood, bootstrap, confidence intervals, Satterthwaite/Kenward-Roger degrees of freedom
 - **Model comparison** - ANOVA (including Type III), drop1, allFit
+- **Model validation** - Case-level and whole-group cross-validation with weighted scoring
 - **Power analysis** - powerSim, powerCurve for sample size planning
 - **Diagnostics** - Influence measures, Cook's distance, leverage
 
@@ -157,7 +158,7 @@ extended_data = extend(fitted_model, data, along="n", n=200)
 from mixedlm import plot_profiles, slice2D
 
 # 1D profile likelihood
-profiles = result.profile(data)
+profiles = result.profile()
 plot_profiles(profiles)
 
 # 2D profile likelihood slice
