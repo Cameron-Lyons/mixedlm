@@ -73,6 +73,18 @@ class TestSSlogis:
         grad = model.gradient(params, x)
         assert grad.shape == (3, 3)
 
+    def test_extreme_inputs_have_finite_predictions_and_gradients(self):
+        model = SSlogis()
+        params = np.array([10.0, 0.0, 1.0])
+        x = np.array([-1e6, 0.0, 1e6])
+
+        with np.errstate(over="raise", invalid="raise"):
+            pred = model.predict(params, x)
+            grad = model.gradient(params, x)
+
+        assert_allclose(pred, [0.0, 5.0, 10.0])
+        assert np.isfinite(grad).all()
+
     def test_get_start(self):
         model = SSlogis()
         x = np.array([0.0, 2.0, 4.0, 6.0])
@@ -132,6 +144,18 @@ class TestSSfpl:
         x = np.array([0.0, 5.0, 10.0])
         grad = model.gradient(params, x)
         assert grad.shape == (3, 4)
+
+    def test_extreme_inputs_have_finite_predictions_and_gradients(self):
+        model = SSfpl()
+        params = np.array([2.0, 10.0, 0.0, 1.0])
+        x = np.array([-1e6, 0.0, 1e6])
+
+        with np.errstate(over="raise", invalid="raise"):
+            pred = model.predict(params, x)
+            grad = model.gradient(params, x)
+
+        assert_allclose(pred, [2.0, 6.0, 10.0])
+        assert np.isfinite(grad).all()
 
 
 class TestSSgompertz:

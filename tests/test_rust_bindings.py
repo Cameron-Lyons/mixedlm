@@ -7,6 +7,7 @@ from scipy import sparse
 
 try:
     from mixedlm._rust import (
+        adaptive_gauss_hermite_1d,
         adaptive_gh_deviance,
         compute_zu,
         gauss_hermite,
@@ -221,6 +222,29 @@ class TestDirectRustFunctions:
         assert len(nodes) == 50
         assert all(np.isfinite(nodes))
         assert all(np.isfinite(weights))
+        assert_allclose(sum(weights), np.sqrt(np.pi), rtol=1e-12)
+
+    def test_gauss_hermite_high_order_moments(self):
+        nodes, weights = map(np.asarray, gauss_hermite(200))
+        assert_allclose(weights.sum(), np.sqrt(np.pi), rtol=1e-12)
+        assert_allclose((weights * nodes**2).sum(), np.sqrt(np.pi) / 2, rtol=1e-12)
+
+    def test_adaptive_gauss_hermite_rejects_mismatched_lengths(self):
+        with pytest.raises(ValueError, match="same length"):
+            adaptive_gauss_hermite_1d([0.0, 1.0], [1.0], 0.0, 1.0)
+
+    @pytest.mark.parametrize("scale", [0.0, -1.0, np.nan, np.inf])
+    def test_adaptive_gauss_hermite_rejects_invalid_scale(self, scale):
+        with pytest.raises(ValueError, match="scale"):
+            adaptive_gauss_hermite_1d([0.0], [1.0], 0.0, scale)
+
+    @pytest.mark.parametrize(
+        ("nodes", "weights", "mode"),
+        [([np.nan], [1.0], 0.0), ([0.0], [np.inf], 0.0), ([0.0], [1.0], np.inf)],
+    )
+    def test_adaptive_gauss_hermite_rejects_nonfinite_inputs(self, nodes, weights, mode):
+        with pytest.raises(ValueError, match="finite"):
+            adaptive_gauss_hermite_1d(nodes, weights, mode, 1.0)
 
     def test_sparse_cholesky_solve_basic(self):
         A = sparse.csc_matrix(np.array([[4.0, 1.0], [1.0, 3.0]]))
