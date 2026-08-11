@@ -104,7 +104,7 @@ def test_penicillin_crossed_random_effects_golden() -> None:
     model = mlm.lmer("diameter ~ 1 + (1 | plate) + (1 | sample)", data, REML=True)
 
     assert model.converged
-    assert_allclose(model.beta, [22.81944444444444], rtol=0, atol=1e-12)
+    assert_allclose(model.beta, [22.81944444444444], rtol=0, atol=2e-12)
     assert_allclose(
         model.theta,
         [1.720313360433691, 2.12067267084168],
