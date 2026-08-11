@@ -1,11 +1,15 @@
 use nalgebra::{Cholesky, DMatrix, DVector};
 use nalgebra_sparse::csc::CscMatrix;
 use pyo3::PyResult;
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use rayon::prelude::*;
 
 use crate::linalg::LinalgError;
 use crate::quadrature::gauss_hermite_nodes_weights;
+
+const PIRLS_MAX_ITER: usize = 100;
+const PIRLS_TOLERANCE: f64 = 1e-6;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum LinkFunction {
@@ -45,17 +49,17 @@ impl LinkFunction {
 }
 
 impl FamilyType {
-    fn clip_mu(&self, mu: &mut DVector<f64>) {
+    fn clamp_mu(&self, mu: &mut DVector<f64>, eps: f64) {
         match self {
             FamilyType::Gaussian => {}
             FamilyType::Binomial => {
                 for value in mu.iter_mut() {
-                    *value = value.clamp(1e-10, 1.0 - 1e-10);
+                    *value = value.clamp(eps, 1.0 - eps);
                 }
             }
             FamilyType::Poisson => {
                 for value in mu.iter_mut() {
-                    *value = value.max(1e-10);
+                    *value = value.max(eps);
                 }
             }
         }
@@ -132,14 +136,32 @@ impl FamilyType {
             1.0 / (d * d * v).max(1e-10)
         })
     }
+}
 
-    fn default_link(&self) -> LinkFunction {
-        match self {
-            FamilyType::Gaussian => LinkFunction::Identity,
-            FamilyType::Binomial => LinkFunction::Logit,
-            FamilyType::Poisson => LinkFunction::Log,
+fn parse_family_and_link(family: &str, link: &str) -> PyResult<(FamilyType, LinkFunction)> {
+    let family_type = match family {
+        "gaussian" => FamilyType::Gaussian,
+        "binomial" => FamilyType::Binomial,
+        "poisson" => FamilyType::Poisson,
+        _ => {
+            return Err(PyValueError::new_err(format!(
+                "Unsupported GLMM family: {family}"
+            )));
         }
-    }
+    };
+
+    let link_function = match link {
+        "identity" => LinkFunction::Identity,
+        "log" => LinkFunction::Log,
+        "logit" => LinkFunction::Logit,
+        _ => {
+            return Err(PyValueError::new_err(format!(
+                "Unsupported GLMM link: {link}"
+            )));
+        }
+    };
+
+    Ok((family_type, link_function))
 }
 
 #[derive(Debug, Clone)]
@@ -321,7 +343,7 @@ pub fn pirls_impl(
         }
 
         let mut mu = link.inverse(&eta);
-        family.clip_mu(&mut mu);
+        family.clamp_mu(&mut mu, 1e-10);
 
         let mut w_vec = family.weights(&mu, link);
         for i in 0..n {
@@ -471,7 +493,7 @@ pub fn pirls_impl(
     }
 
     let mut mu_final = link.inverse(&eta_final);
-    family.clip_mu(&mut mu_final);
+    family.clamp_mu(&mut mu_final, 1e-10);
 
     let dev_resids = family.deviance_resids(y, &mu_final, weights);
 
@@ -517,14 +539,37 @@ pub fn laplace_deviance_impl(
 
     if q == 0 {
         let result = pirls_impl(
-            y, x, z, weights, offset, theta, structures, family, link, beta_start, u_start, 25,
-            1e-6,
+            y,
+            x,
+            z,
+            weights,
+            offset,
+            theta,
+            structures,
+            family,
+            link,
+            beta_start,
+            u_start,
+            PIRLS_MAX_ITER,
+            PIRLS_TOLERANCE,
         );
         return (result.deviance, result.beta, result.u);
     }
 
     let result = pirls_impl(
-        y, x, z, weights, offset, theta, structures, family, link, beta_start, u_start, 25, 1e-6,
+        y,
+        x,
+        z,
+        weights,
+        offset,
+        theta,
+        structures,
+        family,
+        link,
+        beta_start,
+        u_start,
+        PIRLS_MAX_ITER,
+        PIRLS_TOLERANCE,
     );
 
     let beta = result.beta;
@@ -544,7 +589,7 @@ pub fn laplace_deviance_impl(
     }
 
     let mut mu = link.inverse(&eta);
-    family.clip_mu(&mut mu);
+    family.clamp_mu(&mut mu, 1e-10);
 
     let dev_resids = family.deviance_resids(y, &mu, weights);
 
@@ -676,7 +721,7 @@ fn compute_group_log_integral(
         }
 
         let mut mu_quad = link.inverse(&eta_quad);
-        family.clip_mu(&mut mu_quad);
+        family.clamp_mu(&mut mu_quad, 1e-10);
 
         let dev_resids = family.deviance_resids(y, &mu_quad, prior_weights);
         let log_lik_y = -0.5 * dev_resids;
@@ -749,7 +794,19 @@ pub fn adaptive_gh_deviance_impl(
     }
 
     let result = pirls_impl(
-        y, x, z, weights, offset, theta, structures, family, link, beta_start, u_start, 25, 1e-6,
+        y,
+        x,
+        z,
+        weights,
+        offset,
+        theta,
+        structures,
+        family,
+        link,
+        beta_start,
+        u_start,
+        PIRLS_MAX_ITER,
+        PIRLS_TOLERANCE,
     );
 
     let beta = result.beta;
@@ -770,7 +827,7 @@ pub fn adaptive_gh_deviance_impl(
     }
 
     let mut mu = link.inverse(&eta);
-    family.clip_mu(&mut mu);
+    family.clamp_mu(&mut mu, 1e-10);
 
     let mut w_vec = family.weights(&mu, link);
     for i in 0..n {
@@ -936,19 +993,7 @@ pub fn pirls<'py>(
         })
         .collect();
 
-    let family_type = match family {
-        "gaussian" => FamilyType::Gaussian,
-        "binomial" => FamilyType::Binomial,
-        "poisson" => FamilyType::Poisson,
-        _ => FamilyType::Gaussian,
-    };
-
-    let link_fn = match link {
-        "identity" => LinkFunction::Identity,
-        "log" => LinkFunction::Log,
-        "logit" => LinkFunction::Logit,
-        _ => family_type.default_link(),
-    };
+    let (family_type, link_fn) = parse_family_and_link(family, link)?;
 
     let y_arr = y.as_array();
     let x_arr = x.as_array();
@@ -977,8 +1022,8 @@ pub fn pirls<'py>(
         link_fn,
         None,
         None,
-        25,
-        1e-6,
+        PIRLS_MAX_ITER,
+        PIRLS_TOLERANCE,
     );
 
     Ok((
@@ -1034,19 +1079,7 @@ pub fn laplace_deviance<'py>(
         })
         .collect();
 
-    let family_type = match family {
-        "gaussian" => FamilyType::Gaussian,
-        "binomial" => FamilyType::Binomial,
-        "poisson" => FamilyType::Poisson,
-        _ => FamilyType::Gaussian,
-    };
-
-    let link_fn = match link {
-        "identity" => LinkFunction::Identity,
-        "log" => LinkFunction::Log,
-        "logit" => LinkFunction::Logit,
-        _ => family_type.default_link(),
-    };
+    let (family_type, link_fn) = parse_family_and_link(family, link)?;
 
     let y_arr = y.as_array();
     let x_arr = x.as_array();
@@ -1131,19 +1164,7 @@ pub fn adaptive_gh_deviance<'py>(
         })
         .collect();
 
-    let family_type = match family {
-        "gaussian" => FamilyType::Gaussian,
-        "binomial" => FamilyType::Binomial,
-        "poisson" => FamilyType::Poisson,
-        _ => FamilyType::Gaussian,
-    };
-
-    let link_fn = match link {
-        "identity" => LinkFunction::Identity,
-        "log" => LinkFunction::Log,
-        "logit" => LinkFunction::Logit,
-        _ => family_type.default_link(),
-    };
+    let (family_type, link_fn) = parse_family_and_link(family, link)?;
 
     let y_arr = y.as_array();
     let x_arr = x.as_array();

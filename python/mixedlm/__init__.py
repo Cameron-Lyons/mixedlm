@@ -69,6 +69,7 @@ if TYPE_CHECKING:
     )
     from mixedlm.inference.effects import allEffects, ggpredict
     from mixedlm.inference.emmeans import Emmeans, emmeans
+    from mixedlm.inference.model_selection import ModelSelectionResult, model_selection
     from mixedlm.inference.profile import (
         Profile2DResult,
         logProf,
@@ -180,6 +181,8 @@ __all__ = [
     "AnovaType3Result",
     "emmeans",
     "Emmeans",
+    "model_selection",
+    "ModelSelectionResult",
     "ggpredict",
     "allEffects",
     "bootMer",
@@ -410,6 +413,9 @@ _LAZY_EXPORTS: dict[str, tuple[str, str | None]] = {
     ),
     **_module_exports("mixedlm.inference.effects", "allEffects", "ggpredict"),
     **_module_exports("mixedlm.inference.emmeans", "Emmeans", "emmeans"),
+    **_module_exports(
+        "mixedlm.inference.model_selection", "ModelSelectionResult", "model_selection"
+    ),
     **_module_exports(
         "mixedlm.inference.profile",
         "Profile2DResult",
