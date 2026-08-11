@@ -24,6 +24,7 @@ A Python implementation of mixed-effects models inspired by R's [lme4](https://g
 - **Model validation** - Case-level and whole-group cross-validation with weighted scoring
 - **Power analysis** - powerSim, powerCurve for sample size planning
 - **Diagnostics** - Dispersion and zero-inflation checks, influence measures, Cook's distance, leverage, VIF/GVIF, condition indices
+- **Fit metrics** - Nakagawa marginal/conditional R² and adjusted/unadjusted ICC
 
 ## Installation
 
@@ -66,6 +67,8 @@ result.confint(method="boot")     # Bootstrap confidence intervals
 result.tidy(conf_int=True)          # Fixed effects, uncertainty, tests
 result.tidy(effects="all")         # Fixed, random parameters, random values
 result.glance()                     # One-row model fit summary
+mlm.r2_nakagawa(result)            # Marginal and conditional R²
+mlm.icc(result)                     # Adjusted and unadjusted ICC
 mlm.check_collinearity(result)     # VIF/GVIF and condition diagnostics
 ```
 

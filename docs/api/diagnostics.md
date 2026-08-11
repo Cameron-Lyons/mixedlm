@@ -12,6 +12,37 @@ from mixedlm import diagnostics
 mlm.diagnostics.plot_diagnostics(model)
 ```
 
+## Model Fit Metrics
+
+### r2_nakagawa
+
+Compute marginal R² (fixed effects) and conditional R² (fixed plus random effects):
+
+```python
+r2 = diagnostics.r2_nakagawa(model)
+print(r2.marginal, r2.conditional)
+print(r2.random_by_group)
+```
+
+Random-slope variance is evaluated at every observation, retaining covariance and predictor
+values. Linear and nonlinear Gaussian models use the fitted residual variance. Generalized
+models use a link-scale residual approximation: lognormal for log links, link-specific
+theoretical variance for binomial models, or the delta method when requested.
+
+### icc
+
+Compute adjusted and unadjusted intraclass correlation coefficients:
+
+```python
+correlation = diagnostics.icc(model)
+print(correlation.adjusted, correlation.unadjusted)
+print(correlation.by_group)
+```
+
+The adjusted ICC excludes fixed-effect variance from its denominator. The unadjusted ICC
+uses total fixed, random, and residual variance. Group-specific dictionaries partition each
+overall coefficient for crossed or nested random effects.
+
 ## Collinearity Diagnostics
 
 ### check_collinearity
