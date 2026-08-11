@@ -201,6 +201,10 @@ def test_weighted_profiles_preserve_offsets_scale_and_parallel_fallback(monkeypa
     with pytest.warns(RuntimeWarning, match="falling back to serial execution"):
         fallback_profile = profile_lmer(shifted_fit, which="x", n_points=9, n_jobs=2)["x"]
 
+    for profile in (baseline_profile, shifted_profile, scaled_profile, fallback_profile):
+        assert profile.values[4] == profile.mle
+        assert profile.zeta[4] == 0.0
+
     for profile in (shifted_profile, scaled_profile, fallback_profile):
         assert_allclose(profile.values, baseline_profile.values, rtol=3e-5, atol=1e-7)
         assert_allclose(profile.zeta, baseline_profile.zeta, rtol=3e-5, atol=1e-7)

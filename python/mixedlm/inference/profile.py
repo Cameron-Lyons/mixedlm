@@ -22,6 +22,14 @@ if TYPE_CHECKING:
 _SLICE2D_PARALLEL_MIN_TASKS = 400
 
 
+def _profile_parameter_grid(mle: float, se: float, n_points: int) -> NDArray[np.float64]:
+    """Build a symmetric profile grid with an exact center for odd sizes."""
+    values = np.linspace(mle - 4 * se, mle + 4 * se, n_points)
+    if n_points % 2 == 1:
+        values[n_points // 2] = mle
+    return values
+
+
 def plot_profiles(
     profiles: dict[str, ProfileResult],
     plot_type: str = "zeta",
@@ -219,7 +227,7 @@ def _profile_param_worker(
     range_low = mle - 4 * se
     range_high = mle + 4 * se
 
-    param_values = np.linspace(range_low, range_high, n_points)
+    param_values = _profile_parameter_grid(mle, se, n_points)
     zeta_values = np.zeros(n_points)
 
     param_cache = _ProfileCache.from_components(
@@ -332,7 +340,7 @@ def profile_lmer(
             cache = _ProfileCache.build(result, idx)
             profile_dev_mle = _profile_deviance_cached(cache, mle)
 
-            param_values = np.linspace(range_low, range_high, n_points)
+            param_values = _profile_parameter_grid(mle, se, n_points)
             zeta_values = np.zeros(n_points)
 
             for i, val in enumerate(param_values):
