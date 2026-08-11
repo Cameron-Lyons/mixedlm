@@ -17,6 +17,7 @@ if TYPE_CHECKING:
 
 
 class MerResultMixin:
+    formula: Formula
     matrices: ModelMatrices
     beta: NDArray[np.floating]
     theta: NDArray[np.floating]
@@ -82,16 +83,46 @@ class MerResultMixin:
             return (self.matrices.X, self.matrices.Z)
         raise ValueError(f"Unknown type '{type}'. Use 'fixed', 'random', 'X', 'Z', or 'both'.")
 
-    def _align_fixed_matrix(self, matrices: ModelMatrices) -> NDArray[np.floating]:
-        """Align a newly built fixed-effects matrix to the fitted columns."""
-        column_indices = {name: index for index, name in enumerate(matrices.fixed_names)}
+    def _prediction_fixed_matrix(self, newdata: pd.DataFrame) -> NDArray[np.floating]:
+        """Build a fixed-effects matrix using the fitted encoding schema."""
+        import pandas as pd
+
+        from mixedlm.matrices.design import build_fixed_matrix
+        from mixedlm.utils.dataframe import ensure_dataframe, get_column_numpy, get_columns
+
+        data = ensure_dataframe(newdata)
+        columns = set(get_columns(data))
+        missing = sorted(self.formula.fixed_variables - columns)
+        if missing:
+            names = ", ".join(repr(name) for name in missing)
+            raise ValueError(f"New data is missing fixed-effect variable(s): {names}.")
+
+        for name, fitted_levels in self.matrices.category_levels.items():
+            if name not in self.formula.fixed_variables or name not in columns:
+                continue
+            unknown_levels: list[object] = []
+            for value in get_column_numpy(data, name):
+                if pd.isna(value) or value in fitted_levels or value in unknown_levels:
+                    continue
+                unknown_levels.append(value)
+            if unknown_levels:
+                levels = ", ".join(repr(value) for value in unknown_levels)
+                raise ValueError(f"New level(s) {levels} in fixed-effect factor '{name}'.")
+
+        X, fixed_names = build_fixed_matrix(
+            self.formula,
+            data,
+            contrasts=self.matrices.contrasts,
+            category_levels=self.matrices.category_levels,
+        )
+        column_indices = {name: index for index, name in enumerate(fixed_names)}
         try:
             fitted_indices = [column_indices[name] for name in self.matrices.fixed_names]
         except KeyError as exc:
             raise ValueError(
                 f"New data is missing fitted fixed-effect column '{exc.args[0]}'."
             ) from None
-        return matrices.X[:, fitted_indices]
+        return X[:, fitted_indices]
 
     def _model_frame(self) -> pd.DataFrame:
         import pandas as pd
@@ -291,6 +322,8 @@ class MerResultMixin:
             offset=self.matrices.offset,
             frame=self.matrices.frame,
             na_info=self.matrices.na_info,
+            category_levels=self.matrices.category_levels,
+            contrasts=self.matrices.contrasts,
         )
 
     def coef(self) -> dict[str, dict[str, NDArray[np.floating]]]:
