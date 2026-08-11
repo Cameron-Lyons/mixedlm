@@ -222,7 +222,7 @@ def test_grouped_glmm_cross_validation_includes_deviance(grouped_binomial_model)
 
 def test_polars_model_frame_cross_validation() -> None:
     pl = pytest.importorskip("polars")
-    data = pl.from_pandas(SLEEPSTUDY)
+    data = pl.DataFrame(SLEEPSTUDY.to_dict(orient="list"))
     control = lmerControl(check_singular=False)
     model = lmer("Reaction ~ Days + (1 | Subject)", data, REML=False, control=control)
 
