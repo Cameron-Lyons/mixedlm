@@ -267,14 +267,15 @@ model = mlm.glmer("y ~ x + (1 | group)", data, family=mlm.families.Binomial(), c
 
 ### Supported Models
 
-EM-REML supports all random effect structures with unstructured covariance (`cov_type='us'`):
+EM-REML supports:
 
 - Random intercepts: `(1 | group)`
 - Correlated random slopes: `(x | group)`
 - Uncorrelated random slopes: `(x || group)`
 - Multiple random effects: `(1 | group1) + (1 | group2)`
+- Compound symmetry via `set_cov_type(formula, "cs")`
 
-Compound symmetry and AR(1) covariance types are not supported; EM initialization is silently skipped for these models.
+AR(1) covariance is not supported; EM initialization falls back to the direct optimizer for these models.
 
 ### Trade-offs
 

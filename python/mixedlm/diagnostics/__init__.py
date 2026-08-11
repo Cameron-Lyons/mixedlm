@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from mixedlm.diagnostics.collinearity import CollinearityResult, check_collinearity
 from mixedlm.diagnostics.dispersion import (
     DispersionResult,
     ZeroInflationResult,
@@ -7,6 +8,7 @@ from mixedlm.diagnostics.dispersion import (
     check_zero_inflation,
     check_zeroinflation,
 )
+from mixedlm.diagnostics.fit_metrics import ICCResult, R2NakagawaResult, icc, r2_nakagawa
 from mixedlm.diagnostics.influence import (
     InfluenceResult,
     cooks_distance,
@@ -50,4 +52,10 @@ __all__ = [
     "influence_plot",
     "influence_summary",
     "influential_obs",
+    "r2_nakagawa",
+    "R2NakagawaResult",
+    "icc",
+    "ICCResult",
+    "check_collinearity",
+    "CollinearityResult",
 ]

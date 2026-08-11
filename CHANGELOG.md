@@ -37,6 +37,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - GLMM PIRLS, Laplace, and adaptive-quadrature calculations now use the covariance factor
   in spherical random-effect coordinates, with consistent likelihood normalization and
   deterministic outer optimization
+- LMM prediction uncertainty now includes conditional random-effect covariance, fixed/random cross-covariance, correlated slopes, and unseen-group prior variance
 - Covariance tables, PCA diagnostics, singularity checks, and parameter bounds now honor compound-symmetry and AR(1) random-effect structures
 - Gamma GLMMs now minimize the non-negative unit deviance instead of its negative
 - Poisson and other unbounded GLMM families no longer clamp fitted means below one
