@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import numpy as np
 from numpy.typing import NDArray
@@ -10,6 +10,7 @@ from scipy import sparse
 from mixedlm.formula.terms import Formula
 from mixedlm.matrices.design import ModelMatrices, RandomEffectStructure
 from mixedlm.models.lmer_types import ModelTerms, RanefResult
+from mixedlm.utils.dataframe import concat_columns_as_string, get_column_numpy, get_columns
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -203,13 +204,16 @@ class MerResultMixin:
 
     def _random_effect_prediction_contrib(
         self,
-        newdata: pd.DataFrame,
+        newdata: Any,
         allow_new_levels: bool,
         u: NDArray[np.floating],
     ) -> NDArray[np.floating]:
+        import pandas as pd
+
         n = len(newdata)
         contrib = np.zeros(n, dtype=np.float64)
         u_idx = 0
+        columns = set(get_columns(newdata))
 
         for struct in self.matrices.random_structures:
             group_col = struct.grouping_factor
@@ -217,16 +221,25 @@ class MerResultMixin:
             n_levels = struct.n_levels
             n_u = n_levels * n_terms
 
-            if group_col not in newdata.columns:
-                u_idx += n_u
-                continue
+            if group_col in columns:
+                group_values = get_column_numpy(newdata, group_col)
+            else:
+                nested_cols = group_col.split("/")
+                if len(nested_cols) < 2 or not all(col in columns for col in nested_cols):
+                    u_idx += n_u
+                    continue
+                group_values = concat_columns_as_string(newdata, nested_cols)
 
-            group_values = newdata[group_col].astype(str)
-            mapped_levels = group_values.map(struct.level_map)
-            known_mask = mapped_levels.notna().to_numpy()
+            string_level_map = {str(level): idx for level, idx in struct.level_map.items()}
+            group_series = pd.Series(group_values, copy=False)
+            mapped = group_series.map(struct.level_map)
+            if mapped.isna().any():
+                mapped = mapped.fillna(group_series.astype(str).map(string_level_map))
+            mapped_levels = mapped.fillna(-1).to_numpy(dtype=np.int64)
+            known_mask = mapped_levels >= 0
 
             if not allow_new_levels and not np.all(known_mask):
-                unknown_level = str(group_values[~known_mask].iloc[0])
+                unknown_level = str(group_values[np.flatnonzero(~known_mask)[0]])
                 raise ValueError(
                     f"New level '{unknown_level}' in grouping factor '{group_col}'. "
                     "Set allow_new_levels=True to predict with random effects = 0."
@@ -236,7 +249,7 @@ class MerResultMixin:
                 u_idx += n_u
                 continue
 
-            level_idx = mapped_levels[known_mask].astype(int).to_numpy()
+            level_idx = mapped_levels[known_mask]
             u_block = u[u_idx : u_idx + n_u].reshape(n_levels, n_terms)
             u_idx += n_u
 
@@ -244,8 +257,8 @@ class MerResultMixin:
             for i, term_name in enumerate(struct.term_names):
                 if term_name == "(Intercept)":
                     term_values = np.ones(n, dtype=np.float64)
-                elif term_name in newdata.columns:
-                    term_values = np.asarray(newdata[term_name], dtype=np.float64)
+                elif term_name in columns:
+                    term_values = get_column_numpy(newdata, term_name, dtype=np.float64)
                 else:
                     continue
 
