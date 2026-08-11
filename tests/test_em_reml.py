@@ -1,11 +1,68 @@
 """Tests for EM-REML algorithm."""
 
+import numpy as np
 import pytest
 from mixedlm import lFormula, lmer, load_penicillin, load_sleepstudy
-from mixedlm.estimation.em_reml import em_reml_simple
+from mixedlm.estimation.em_reml import _weighted_crossproducts, em_reml_simple
+from scipy import sparse
 
 
 class TestEMReml:
+    def test_weighted_crossproducts_match_dense_reference(self):
+        rng = np.random.default_rng(20260803)
+        X = rng.normal(size=(20, 3))
+        Z_dense = rng.normal(size=(20, 8))
+        Z_dense[np.abs(Z_dense) < 0.8] = 0.0
+        Z = sparse.csc_matrix(Z_dense)
+        y = rng.normal(size=20)
+        weights = rng.uniform(0.25, 2.0, size=20)
+
+        XtWX, XtWZ, ZtWZ, XtWy, ZtWy = _weighted_crossproducts(X, Z, y, weights)
+
+        assert np.allclose(XtWX, X.T @ (weights[:, None] * X))
+        assert np.allclose(XtWZ, X.T @ (weights[:, None] * Z_dense))
+        assert np.allclose(ZtWZ, Z_dense.T @ (weights[:, None] * Z_dense))
+        assert np.allclose(XtWy, X.T @ (weights * y))
+        assert np.allclose(ZtWy, Z_dense.T @ (weights * y))
+
+    def test_em_reml_keeps_random_design_sparse(self, monkeypatch):
+        data = load_sleepstudy()
+        parsed = lFormula("Reaction ~ Days + (Days | Subject)", data)
+        random_design_shape = parsed.matrices.Z.shape
+        original_toarray = sparse.csc_matrix.toarray
+
+        def reject_random_design(self, *args, **kwargs):
+            if self.shape == random_design_shape:
+                raise AssertionError("EM-REML should not densify the random-effects design")
+            return original_toarray(self, *args, **kwargs)
+
+        monkeypatch.setattr(sparse.csc_matrix, "toarray", reject_random_design)
+
+        result = em_reml_simple(parsed.matrices, max_iter=3, min_iter_converge=10)
+        assert result.n_iter == 3
+
+    def test_converged_result_contains_latest_iteration(self):
+        data = load_sleepstudy()
+        parsed = lFormula("Reaction ~ Days + (1 | Subject)", data)
+
+        result = em_reml_simple(
+            parsed.matrices,
+            max_iter=2,
+            tol=2.0,
+            min_iter_converge=0,
+        )
+
+        assert result.converged
+        assert result.n_iter == 1
+        assert np.isfinite(result.final_loglik)
+
+    def test_max_iter_must_be_positive(self):
+        data = load_sleepstudy()
+        parsed = lFormula("Reaction ~ Days + (1 | Subject)", data)
+
+        with pytest.raises(ValueError, match="max_iter must be at least 1"):
+            em_reml_simple(parsed.matrices, max_iter=0)
+
     def test_em_reml_simple_intercept(self):
         """Test EM-REML with simple random intercept model."""
         data = load_sleepstudy()

@@ -238,9 +238,7 @@ Control arguments are similar:
 
 These lme4/related functions are not yet implemented:
 
-- `allEffects` (effects package)
 - `bootCI` (boot package style)
-- `ggpredict` (ggeffects)
 - `plot.merMod` (use `mlm.plot_diagnostics` instead)
 
 ## Getting Help
