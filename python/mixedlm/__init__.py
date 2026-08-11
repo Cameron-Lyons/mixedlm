@@ -27,6 +27,7 @@ if TYPE_CHECKING:
         load_sleepstudy,
         load_verbagg,
     )
+    from mixedlm.diagnostics.collinearity import CollinearityResult, check_collinearity
     from mixedlm.estimation.em_reml import EMResult, em_reml_simple
     from mixedlm.estimation.laplace import GQN, GQdk
     from mixedlm.estimation.optimizers import NelderMead, NelderMeadState, golden, nlminbwrap
@@ -195,6 +196,8 @@ __all__ = [
     "kenward_roger_df",
     "pvalues_with_ddf",
     "DenomDFResult",
+    "check_collinearity",
+    "CollinearityResult",
     "powerSim",
     "powerCurve",
     "extend",
@@ -343,6 +346,9 @@ _LAZY_EXPORTS: dict[str, tuple[str, str | None]] = {
         "load_penicillin",
         "load_sleepstudy",
         "load_verbagg",
+    ),
+    **_module_exports(
+        "mixedlm.diagnostics.collinearity", "CollinearityResult", "check_collinearity"
     ),
     **_module_exports("mixedlm.estimation.em_reml", "EMResult", "em_reml_simple"),
     **_module_exports("mixedlm.estimation.laplace", "GQN", "GQdk"),

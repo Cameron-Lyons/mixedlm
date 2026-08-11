@@ -41,6 +41,7 @@ class RandomEffectStructure:
     correlated: bool
     level_map: dict[str, int]
     cov_type: str = "us"
+    level_indices: NDArray[np.int32] | None = field(default=None, repr=False, compare=False)
 
 
 @dataclass
@@ -79,7 +80,7 @@ def build_model_matrices(
 ) -> ModelMatrices:
     from mixedlm.utils.na_action import handle_na
 
-    data = ensure_dataframe(data)
+    data = ensure_dataframe(data, columns=sorted(_get_formula_variables(formula)))
 
     if na_action is not None:
         clean_data, na_info, weights, offset = handle_na(data, formula, na_action, weights, offset)
@@ -428,6 +429,7 @@ def _build_random_block(
         correlated=rterm.correlated,
         level_map=level_map,
         cov_type=rterm.cov_type,
+        level_indices=level_indices,
     )
 
     return Z_block, structure
@@ -472,6 +474,7 @@ def _build_nested_random_block(
         correlated=rterm.correlated,
         level_map=level_map,
         cov_type=rterm.cov_type,
+        level_indices=level_indices,
     )
 
     return Z_block, structure

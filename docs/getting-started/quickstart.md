@@ -134,7 +134,8 @@ result.predict(newdata=new_data)
 
 ## Using Polars
 
-mixedlm works directly with polars DataFrames:
+mixedlm works directly with eager and lazy polars frames. Lazy inputs are
+projected to the columns required by the formula before collection:
 
 ```python
 import polars as pl
@@ -147,6 +148,8 @@ data_pl = pl.DataFrame({
 
 result = mlm.lmer("y ~ x + (1 | group)", data_pl)
 print(result.summary())
+
+lazy_result = mlm.lmer("y ~ x + (1 | group)", data_pl.lazy())
 ```
 
 ## Next Steps
