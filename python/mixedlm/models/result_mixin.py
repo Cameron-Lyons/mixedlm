@@ -165,7 +165,7 @@ class MerResultMixin:
         )
 
     def _build_model_terms(self, formula: Formula) -> ModelTerms:
-        from mixedlm.formula.terms import InteractionTerm, VariableTerm
+        from mixedlm.formula.terms import InteractionTerm, PowerTerm, VariableTerm
 
         fixed_terms = list(self.matrices.fixed_names)
 
@@ -178,18 +178,18 @@ class MerResultMixin:
 
         fixed_variables: set[str] = set()
         for term in formula.fixed.terms:
-            if isinstance(term, VariableTerm):
+            if isinstance(term, VariableTerm | PowerTerm):
                 fixed_variables.add(term.name)
             elif isinstance(term, InteractionTerm):
-                fixed_variables.update(term.variables)
+                fixed_variables.update(term.source_variables)
 
         random_variables: set[str] = set()
         for rterm in formula.random:
             for term in rterm.expr:
-                if isinstance(term, VariableTerm):
+                if isinstance(term, VariableTerm | PowerTerm):
                     random_variables.add(term.name)
                 elif isinstance(term, InteractionTerm):
-                    random_variables.update(term.variables)
+                    random_variables.update(term.source_variables)
 
         grouping_factors = {struct.grouping_factor for struct in self.matrices.random_structures}
 
