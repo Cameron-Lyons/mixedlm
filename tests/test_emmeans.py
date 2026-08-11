@@ -8,7 +8,9 @@ from mixedlm.families import Binomial
 from mixedlm.inference.emmeans import (
     ContrastResult,
     EmmeanResult,
+    Emmeans,
     _adjust_pvalues,
+    _rowwise_quadratic_form,
     emmeans,
 )
 from numpy.testing import assert_allclose
@@ -38,6 +40,34 @@ def simple_data():
 @pytest.fixture
 def lmer_result(simple_data):
     return lmer("y ~ treatment + (1|group)", simple_data)
+
+
+def _synthetic_emmeans(n_levels: int = 12, n_beta: int = 5) -> Emmeans:
+    rng = np.random.default_rng(91)
+    coefficients = rng.normal(size=(n_levels, n_beta))
+    covariance_factor = rng.normal(size=(n_beta, n_beta))
+    covariance = covariance_factor @ covariance_factor.T
+    beta = rng.normal(size=n_beta)
+    estimates = coefficients @ beta
+    zeros = np.zeros(n_levels)
+    result = EmmeanResult(
+        emmean=estimates,
+        se=zeros,
+        df=80.0,
+        lower=zeros,
+        upper=zeros,
+        grid=pd.DataFrame({"treatment": [f"L{i}" for i in range(n_levels)]}),
+        level=0.95,
+    )
+    return Emmeans(
+        result=result,
+        _L=coefficients,
+        _vcov=covariance,
+        _beta=beta,
+        _df=80.0,
+        _specs=["treatment"],
+        _levels=[list(range(n_levels))],
+    )
 
 
 @pytest.fixture(scope="module")
@@ -78,6 +108,32 @@ class TestAdjustPvalues:
         adjusted = _adjust_pvalues(p, "tukey", 3, 100, t_ratio)
         assert len(adjusted) == 1
         assert 0 <= adjusted[0] <= 1
+
+
+class TestRowwiseQuadraticForm:
+    def test_matches_full_covariance_diagonal(self):
+        rng = np.random.default_rng(2026)
+        coefficients = rng.normal(size=(250, 12))
+        covariance_factor = rng.normal(size=(12, 12))
+        covariance = covariance_factor @ covariance_factor.T
+
+        actual = _rowwise_quadratic_form(coefficients, covariance)
+        expected = np.diag(coefficients @ covariance @ coefficients.T)
+
+        assert_allclose(actual, expected, rtol=1e-12, atol=1e-12)
+
+    def test_does_not_form_coefficient_transpose(self):
+        class NoTransposeArray(np.ndarray):
+            @property
+            def T(self):
+                raise AssertionError("row-wise projection must not form a square covariance")
+
+        coefficients = np.arange(24.0).reshape(6, 4).view(NoTransposeArray)
+        covariance = np.eye(4)
+
+        actual = _rowwise_quadratic_form(coefficients, covariance)
+
+        assert_allclose(actual, np.sum(np.asarray(coefficients) ** 2, axis=1))
 
 
 class TestEmmeanResult:
@@ -180,6 +236,37 @@ class TestEmmeansPairs:
         assert pairs_bonf.adjust == "bonferroni"
         assert pairs_none.p_value[0] <= pairs_bonf.p_value[0]
 
+    def test_pairs_match_explicit_contrast_matrix(self):
+        em = _synthetic_emmeans()
+        n_levels = len(em.result.emmean)
+        left, right = np.triu_indices(n_levels, k=1)
+        explicit = np.zeros((len(left), n_levels))
+        explicit[np.arange(len(left)), left] = 1
+        explicit[np.arange(len(right)), right] = -1
+        coefficients = explicit @ em._L
+
+        result = em.pairs(adjust="none")
+
+        assert_allclose(result.estimate, coefficients @ em._beta)
+        expected_variance = np.diag(coefficients @ em._vcov @ coefficients.T)
+        assert_allclose(result.se, np.sqrt(np.maximum(expected_variance, 0)))
+
+    def test_pairs_do_not_allocate_dense_level_contrasts(self, monkeypatch):
+        em = _synthetic_emmeans(n_levels=80)
+        forbidden_shape = (80 * 79 // 2, 80)
+        real_zeros = np.zeros
+
+        def reject_dense_contrasts(shape, *args, **kwargs):
+            if shape == forbidden_shape:
+                raise AssertionError("pairwise contrasts must not allocate a dense level matrix")
+            return real_zeros(shape, *args, **kwargs)
+
+        monkeypatch.setattr(np, "zeros", reject_dense_contrasts)
+
+        result = em.pairs(adjust="none")
+
+        assert len(result.estimate) == forbidden_shape[0]
+
 
 class TestEmmeansContrast:
     def test_pairwise_contrast(self, lmer_result, simple_data):
@@ -191,6 +278,17 @@ class TestEmmeansContrast:
         em = emmeans(lmer_result, "treatment")
         contrast = em.contrast(method="trt.vs.ctrl")
         assert len(contrast.contrast) == 1
+
+    def test_trt_vs_ctrl_matches_direct_differences(self):
+        em = _synthetic_emmeans()
+        treatment_indices = np.arange(1, len(em.result.emmean))
+        coefficients = em._L[treatment_indices] - em._L[0]
+
+        result = em._trt_vs_ctrl(ctrl_idx=0, adjust="none")
+
+        assert_allclose(result.estimate, coefficients @ em._beta)
+        expected_variance = np.diag(coefficients @ em._vcov @ coefficients.T)
+        assert_allclose(result.se, np.sqrt(np.maximum(expected_variance, 0)))
 
     def test_custom_contrast(self, lmer_result, simple_data):
         em = emmeans(lmer_result, "treatment")
@@ -221,6 +319,27 @@ class TestEmmeansEdgeCases:
         result = lmer("y ~ treatment * factor2 + (1|group)", simple_data)
         em = emmeans(result, "treatment", at={"factor2": "X"})
         assert len(em.result.emmean) == 2
+
+    def test_uses_fitted_contrasts(self):
+        data = pd.DataFrame(
+            {
+                "y": np.arange(18.0),
+                "treatment": ["A", "B", "C"] * 6,
+                "group": np.repeat([f"G{i}" for i in range(6)], 3),
+            }
+        )
+        custom = np.array([[-1.0, -1.0], [1.0, 0.0], [0.0, 1.0]])
+        result = lmer(
+            "y ~ treatment + (1 | group)",
+            data,
+            contrasts={"treatment": custom},
+        )
+        grid = pd.DataFrame({"treatment": ["A", "B", "C"]})
+
+        em = emmeans(result, "treatment")
+        expected = result.predict(grid, re_form="NA")
+
+        assert_allclose(em.result.emmean, expected)
 
     def test_invalid_type_raises(self, lmer_result):
         with pytest.raises(ValueError, match="type must be 'link' or 'response'"):

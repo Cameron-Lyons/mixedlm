@@ -15,7 +15,7 @@ from mixedlm.estimation.laplace import GLMMOptimizer, _build_lambda, _count_thet
 from mixedlm.families.base import Family
 from mixedlm.families.negative_binomial import NegativeBinomial
 from mixedlm.formula.terms import Formula
-from mixedlm.matrices.design import ModelMatrices, build_model_matrices
+from mixedlm.matrices.design import ModelMatrices
 from mixedlm.models.lmer_types import (
     LogLik,
     PredictResult,
@@ -338,12 +338,8 @@ class GlmerResult(MerResultMixin):
                 eta = self.matrices.X @ self.beta + self.matrices.offset
             X = self.matrices.X
         else:
-            pred_matrices = build_model_matrices(self.formula, newdata)
-            X = self._align_fixed_matrix(pred_matrices)
+            X = self._prediction_fixed_matrix(newdata)
             eta = X @ self.beta
-
-            if pred_matrices.offset is not None:
-                eta = eta + pred_matrices.offset
 
             if include_re:
                 eta = self._add_random_effects_to_eta(eta, newdata, allow_new_levels)
@@ -611,7 +607,7 @@ class GlmerResult(MerResultMixin):
     def VarCorr(self) -> GlmerVarCorr:
         groups: dict[str, VarCorrGroup] = {}
         for struct, cov in self._iter_random_cov_blocks(scale=1.0):
-            if struct.correlated:
+            if struct.correlated or struct.cov_type in ("cs", "ar1"):
                 stddevs = np.sqrt(np.diag(cov))
                 with np.errstate(divide="ignore", invalid="ignore"):
                     corr = cov / np.outer(stddevs, stddevs)
@@ -952,29 +948,7 @@ class GlmerResult(MerResultMixin):
         return plot_diagnostics(self, which=which, figsize=figsize)
 
     def isSingular(self, tol: float = 1e-4) -> bool:
-        theta_idx = 0
-
-        for struct in self.matrices.random_structures:
-            q = struct.n_terms
-
-            if struct.correlated:
-                n_theta = q * (q + 1) // 2
-                theta_block = self.theta[theta_idx : theta_idx + n_theta]
-                theta_idx += n_theta
-
-                diag_idx = 0
-                for i in range(q):
-                    if abs(theta_block[diag_idx]) < tol:
-                        return True
-                    diag_idx += i + 2
-            else:
-                theta_block = self.theta[theta_idx : theta_idx + q]
-                theta_idx += q
-
-                if np.any(np.abs(theta_block) < tol):
-                    return True
-
-        return False
+        return self._is_singular_covariance(tol)
 
     def getME(self, name: str):
         """Extract model components by name.
@@ -1049,19 +1023,7 @@ class GlmerResult(MerResultMixin):
         elif name in ("q", "n_random"):
             return self.matrices.n_random
         elif name == "lower":
-            bounds = []
-            for struct in self.matrices.random_structures:
-                q = struct.n_terms
-                if struct.correlated:
-                    for i in range(q):
-                        for j in range(i + 1):
-                            if i == j:
-                                bounds.append(0.0)
-                            else:
-                                bounds.append(-np.inf)
-                else:
-                    bounds.extend([0.0] * q)
-            return np.array(bounds)
+            return self._theta_lower_bounds()
         elif name == "weights":
             return self.matrices.weights.copy()
         elif name == "offset":

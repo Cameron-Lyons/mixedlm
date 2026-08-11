@@ -54,15 +54,35 @@ Extract variance-covariance components of random effects.
 
 **Returns:** VarCorr object with variance, standard deviation, and correlation information.
 
+Compound-symmetry and AR(1) structures are reported on their exact fitted covariance scale.
+The same structured covariance is used by `rePCA()`, `isSingular()`, and the parameter bounds
+returned by `getME("lower")`:
+
+```python
+from mixedlm import lmer, set_cov_type
+
+formula = set_cov_type("y ~ time + (time | subject)", "ar1")
+result = lmer(formula, data)
+
+print(result.VarCorr())
+print(result.rePCA())
+print(result.isSingular())
+```
+
 #### coef
 
 ```python
 result.coef()
 ```
 
-Extract combined coefficients (fixed + random) for each group.
+Extract combined coefficients (fixed + random) for each grouping factor.
 
-**Returns:** Dictionary mapping group names to coefficient DataFrames.
+Every fixed-effect coefficient is repeated across the grouping levels, then the
+matching conditional random effect is added. Random-only terms are included with
+a zero fixed baseline.
+
+**Returns:** Nested dictionary mapping grouping factors to coefficient names and
+their per-level NumPy arrays.
 
 #### fitted
 
@@ -141,7 +161,8 @@ result.logLik()
 
 Extract log-likelihood.
 
-**Returns:** LogLik object with value and degrees of freedom.
+**Returns:** Numeric `LogLik` value with `value`, `df`, `nobs`, and `REML`
+metadata. It can be used directly in arithmetic and NumPy operations.
 
 #### AIC / BIC
 
@@ -157,12 +178,12 @@ Compute information criteria.
 #### profile
 
 ```python
-result.profile(data)
+result.profile(which=None, n_points=20, level=0.95)
 ```
 
 Compute profile likelihood.
 
-**Returns:** ProfileResult object.
+**Returns:** Dictionary mapping parameter names to `ProfileResult` objects.
 
 #### drop1
 

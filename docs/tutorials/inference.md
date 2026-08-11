@@ -2,6 +2,72 @@
 
 This tutorial covers hypothesis testing, confidence intervals, and model comparison for mixed models.
 
+## Cross-Validation
+
+Cross-validation asks how accurately a fitted model predicts observations that
+were not used for estimation. Mixed models require choosing the level of
+generalization explicitly.
+
+### Predicting New Rows Within Known Groups
+
+Case-level folds split individual observations. A held-out row can use a random
+effect estimated from other training rows for the same group.
+
+```python
+import mixedlm as mlm
+
+data = mlm.load_sleepstudy()
+model = mlm.lmer("Reaction ~ Days + (Days | Subject)", data)
+
+case_cv = mlm.cross_validate(
+    model,
+    cv=5,
+    random_state=123,
+)
+
+print(case_cv.scores)
+```
+
+### Predicting Entirely New Groups
+
+Set `group` to keep every cluster wholly inside one test fold. Since test groups
+are absent from training, the default prediction uses the fixed-effects portion
+of each fold model.
+
+```python
+subject_cv = mlm.cross_validate(
+    model,
+    cv=5,
+    group="Subject",
+    metrics=["rmse", "mae", "r2"],
+    random_state=123,
+    n_jobs=2,
+)
+
+print(subject_cv)
+print(subject_cv.fold_scores)
+```
+
+The grouped splitter assigns larger clusters first to the smallest available
+fold. This preserves groups while balancing the number of held-out observations.
+Use the same `random_state` when comparing models so they receive identical
+fold assignments.
+
+For GLMMs, the default metrics are weighted RMSE and mean unit deviance:
+
+```python
+glmm_cv = mlm.cross_validate(
+    glmm_model,
+    cv=5,
+    group="site",
+    random_state=123,
+)
+```
+
+Always inspect `all_converged`, `any_singular`, and their per-fold columns. A
+validation score based on failed or boundary fold fits should not be interpreted
+without revisiting the model or optimizer settings.
+
 ## P-values for Fixed Effects
 
 ### Satterthwaite Degrees of Freedom
@@ -137,7 +203,10 @@ result = model.drop1(data)
 print(result)
 ```
 
-This fits the model without each term and reports the change in fit.
+This fits the model without each marginal term and reports the change in fit.
+Lower-order terms are retained when they belong to a higher-order interaction.
+Linear mixed models originally fitted with REML are automatically refitted with
+ML so that fixed-effect deletion likelihoods and AIC values are comparable.
 
 ## Estimated Marginal Means (emmeans)
 
@@ -217,38 +286,40 @@ print(ci)
 ### Basic Bootstrap
 
 ```python
-from mixedlm import bootMer
+from mixedlm import bootCI, bootMer
 
 # Bootstrap the model
-boot = bootMer(model, data, nsim=500)
+boot = bootMer(model, nsim=500, seed=42)
 
 # Access bootstrap samples
-boot.samples  # Array of parameter estimates
+boot.beta_samples   # Fixed-effect estimates
+boot.theta_samples  # Variance-parameter estimates
 
 # Bootstrap confidence intervals
-boot.confint()
+bootCI(boot, component="all")
 ```
 
 ### Bootstrap for Specific Statistics
 
 ```python
-# Define a function to extract the statistic of interest
-def my_stat(model):
-    return model.fixef()['Days']
+# Select a named parameter from the tidy interval table
+days_ci = bootCI(boot, parameters="Days")
 
-boot = bootMer(model, data, nsim=500, FUN=my_stat)
+# Or work directly with its bootstrap samples
+days_index = boot.fixed_names.index("Days")
+days_samples = boot.beta_samples[:, days_index]
 ```
 
 ### Bootstrap for Predictions
 
 ```python
-def predict_at_day_10(model):
-    import pandas as pd
-    new_data = pd.DataFrame({'Days': [10], 'Subject': ['308']})
-    return model.predict(newdata=new_data)[0]
+import numpy as np
 
-boot = bootMer(model, data, nsim=500, FUN=predict_at_day_10)
-ci = boot.confint()
+# Fixed-only linear prediction at Days=10 for every bootstrap replicate
+intercept = boot.beta_samples[:, boot.fixed_names.index("(Intercept)")]
+days = boot.beta_samples[:, boot.fixed_names.index("Days")]
+prediction_samples = intercept + 10 * days
+prediction_ci = np.quantile(prediction_samples, [0.025, 0.975])
 ```
 
 ## Testing Random Effects
@@ -323,9 +394,9 @@ print(mlm.anova(m_simple, m_full))
 
 # 4. Bootstrap CI for the Days effect
 print("\n=== Bootstrap CI for Days Effect ===")
-boot = mlm.bootMer(model, data, nsim=200)
-boot_ci = boot.confint()
-print(f"Days: [{boot_ci['Days'][0]:.2f}, {boot_ci['Days'][1]:.2f}]")
+boot = mlm.bootMer(model, nsim=200, seed=42)
+boot_ci = mlm.bootCI(boot, parameters="Days")
+print(boot_ci[["parameter", "conf.low", "conf.high"]])
 
 # 5. Check convergence
 conv = mlm.checkConv(model)

@@ -79,6 +79,14 @@ testpaths = ["tests"]
 addopts = "-v"
 
 [dependency-groups]
+# Mirror the `dev` extra so both `uv sync` and `pip install .[dev]`
+# create an environment with the documented test and quality tools.
 dev = [
-    "polars>=1.37.1",
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "pytest-benchmark>=4.0",
+    "hypothesis>=6.0",
+    "ruff>=0.1",
+    "mypy>=1.0",
+    "polars>=0.20",
 ]

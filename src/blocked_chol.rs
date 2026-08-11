@@ -551,20 +551,16 @@ fn rank_update_subtract(
     Ok(())
 }
 
-fn solve_lower(l: &Mat<f64>, b: &Mat<f64>) -> Mat<f64> {
-    let n = l.nrows();
-    let ncols = b.ncols();
-    let mut x = b.clone();
-
-    for c in 0..ncols {
-        for i in 0..n {
-            for k in 0..i {
-                x[(i, c)] -= l[(i, k)] * x[(k, c)];
+fn solve_lower_rows_into(l: &Mat<f64>, b: &Mat<f64>, result: &mut Mat<f64>, column_offset: usize) {
+    for row in 0..b.nrows() {
+        for column in 0..l.nrows() {
+            let mut value = b[(row, column_offset + column)];
+            for previous in 0..column {
+                value -= l[(column, previous)] * result[(row, column_offset + previous)];
             }
-            x[(i, c)] /= l[(i, i)];
+            result[(row, column_offset + column)] = value / l[(column, column)];
         }
     }
-    x
 }
 
 fn forward_solve_block_transpose(l: &BlockType, b: &BlockType) -> Result<BlockType, LinalgError> {
@@ -582,20 +578,7 @@ fn forward_solve_block_transpose(l: &BlockType, b: &BlockType) -> Result<BlockTy
 
             let bs = *bs;
             for (k, l_block) in l_blocks.iter().enumerate() {
-                let col_offset = k * bs;
-
-                for row in 0..nrows {
-                    let mut col_vec = Mat::zeros(bs, 1);
-                    for j in 0..bs {
-                        col_vec[(j, 0)] = b_mat[(row, col_offset + j)];
-                    }
-
-                    let solved = solve_lower(l_block, &col_vec);
-
-                    for j in 0..bs {
-                        result[(row, col_offset + j)] = solved[(j, 0)];
-                    }
-                }
+                solve_lower_rows_into(l_block, b_mat, &mut result, k * bs);
             }
 
             Ok(BlockType::Dense(result))
@@ -604,19 +587,7 @@ fn forward_solve_block_transpose(l: &BlockType, b: &BlockType) -> Result<BlockTy
             let nrows = b_mat.nrows();
             let ncols = b_mat.ncols();
             let mut result = Mat::zeros(nrows, ncols);
-
-            for row in 0..nrows {
-                let mut col_vec = Mat::zeros(ncols, 1);
-                for j in 0..ncols {
-                    col_vec[(j, 0)] = b_mat[(row, j)];
-                }
-
-                let solved = solve_lower(l_mat, &col_vec);
-
-                for j in 0..ncols {
-                    result[(row, j)] = solved[(j, 0)];
-                }
-            }
+            solve_lower_rows_into(l_mat, b_mat, &mut result, 0);
 
             Ok(BlockType::Dense(result))
         }
@@ -643,19 +614,7 @@ fn forward_solve_block_transpose(l: &BlockType, b: &BlockType) -> Result<BlockTy
             let nrows = b_dense.nrows();
             let ncols = b_dense.ncols();
             let mut result = Mat::zeros(nrows, ncols);
-
-            for row in 0..nrows {
-                let mut col_vec = Mat::zeros(ncols, 1);
-                for j in 0..ncols {
-                    col_vec[(j, 0)] = b_dense[(row, j)];
-                }
-
-                let solved = solve_lower(&l_dense, &col_vec);
-
-                for j in 0..ncols {
-                    result[(row, j)] = solved[(j, 0)];
-                }
-            }
+            solve_lower_rows_into(&l_dense, &b_dense, &mut result, 0);
 
             Ok(BlockType::Dense(result))
         }
@@ -906,6 +865,52 @@ mod tests {
                 blocked_x[(i, 0)],
                 dense_x[(i, 0)]
             );
+        }
+    }
+
+    #[test]
+    fn test_crossed_block_solve_multiple_rhs() {
+        let structures = vec![
+            RandomEffectStructure {
+                n_levels: 4,
+                n_terms: 2,
+                correlated: true,
+            },
+            RandomEffectStructure {
+                n_levels: 3,
+                n_terms: 2,
+                correlated: true,
+            },
+        ];
+        let lambda_blocks = structures
+            .iter()
+            .map(|_| {
+                let mut lambda = Mat::zeros(2, 2);
+                lambda[(0, 0)] = 1.1;
+                lambda[(1, 0)] = 0.2;
+                lambda[(1, 1)] = 0.9;
+                lambda
+            })
+            .collect::<Vec<_>>();
+        let q = 4 * 2 + 3 * 2;
+        let ztwz = make_test_ztwz(q);
+
+        let blocked = BlockedMatrix::from_lambda_ztwz(&ztwz, &lambda_blocks, &structures, true);
+        let dense_v = blocked.to_dense();
+        let blocked_chol = BlockedCholesky::factor(&blocked).expect("Blocked Cholesky failed");
+        let dense_chol = Llt::new(dense_v.as_ref(), Side::Lower).expect("Dense Cholesky failed");
+        let b = Mat::from_fn(q, 4, |row, column| (row + 2 * column + 1) as f64);
+
+        let blocked_x = blocked_chol.solve(&b);
+        let dense_x = dense_chol.solve(&b);
+
+        for row in 0..q {
+            for column in 0..b.ncols() {
+                assert!(
+                    (blocked_x[(row, column)] - dense_x[(row, column)]).abs() < 1e-10,
+                    "solve mismatch at ({row}, {column})"
+                );
+            }
         }
     }
 

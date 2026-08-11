@@ -1,5 +1,6 @@
 from mixedlm.inference.allfit import AllFitResult, allfit_glmer, allfit_lmer
 from mixedlm.inference.anova import AnovaResult, anova
+from mixedlm.inference.boot_ci import bootCI
 from mixedlm.inference.bootstrap import (
     BootstrapResult,
     NlmerBootstrapResult,
@@ -8,6 +9,16 @@ from mixedlm.inference.bootstrap import (
     bootstrap_lmer,
     bootstrap_nlmer,
 )
+from mixedlm.inference.cross_validation import (
+    CrossValidationFold,
+    CrossValidationResult,
+    cross_validate,
+    make_folds,
+    weighted_mae,
+    weighted_mse,
+    weighted_r2,
+    weighted_rmse,
+)
 from mixedlm.inference.ddf import (
     DenomDFResult,
     kenward_roger_df,
@@ -15,6 +26,7 @@ from mixedlm.inference.ddf import (
     satterthwaite_df,
 )
 from mixedlm.inference.drop1 import Drop1Result, drop1_glmer, drop1_lmer
+from mixedlm.inference.effects import allEffects, ggpredict
 from mixedlm.inference.emmeans import (
     ContrastResult,
     EmmeanResult,
@@ -40,6 +52,7 @@ __all__ = [
     "allfit_glmer",
     "AnovaResult",
     "anova",
+    "bootCI",
     "Drop1Result",
     "drop1_lmer",
     "drop1_glmer",
@@ -47,6 +60,8 @@ __all__ = [
     "EmmeanResult",
     "ContrastResult",
     "emmeans",
+    "ggpredict",
+    "allEffects",
     "ProfileResult",
     "profile_lmer",
     "profile_glmer",
@@ -63,6 +78,14 @@ __all__ = [
     "bootstrap_glmer",
     "bootstrap_nlmer",
     "bootMer",
+    "CrossValidationFold",
+    "CrossValidationResult",
+    "cross_validate",
+    "make_folds",
+    "weighted_mae",
+    "weighted_mse",
+    "weighted_r2",
+    "weighted_rmse",
     "DenomDFResult",
     "satterthwaite_df",
     "kenward_roger_df",

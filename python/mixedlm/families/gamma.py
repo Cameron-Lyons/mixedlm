@@ -24,7 +24,8 @@ class Gamma(Family):
         mu = np.maximum(mu, eps)
         y = np.maximum(y, eps)
 
-        return 2 * wt * (-((y - mu) / mu) + np.log(y / mu))
+        ratio = y / mu
+        return 2 * wt * (ratio - 1 - np.log(ratio))
 
 
 class GammaInverse(Gamma):
