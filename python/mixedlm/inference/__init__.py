@@ -33,6 +33,7 @@ from mixedlm.inference.emmeans import (
     Emmeans,
     emmeans,
 )
+from mixedlm.inference.model_selection import ModelSelectionResult, model_selection
 from mixedlm.inference.profile import (
     ProfileResult,
     as_dataframe,
@@ -60,6 +61,8 @@ __all__ = [
     "EmmeanResult",
     "ContrastResult",
     "emmeans",
+    "ModelSelectionResult",
+    "model_selection",
     "ggpredict",
     "allEffects",
     "ProfileResult",
