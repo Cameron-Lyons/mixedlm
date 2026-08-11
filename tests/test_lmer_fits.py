@@ -209,9 +209,14 @@ class TestGlmer:
         data = pd.DataFrame({"y": y, "x": x, "group": [str(g) for g in group]})
 
         result = glmer("y ~ x + (1 | group)", data, family=families.Poisson())
+        fitted = result.fitted(type="response")
 
         assert result.converged
         assert len(result.fixef()) == 2
+        assert np.isfinite(result.deviance)
+        assert np.all(np.isfinite(fitted))
+        assert np.max(fitted) > 1.0
+        assert np.isclose(np.mean(fitted), np.mean(y), rtol=0.1)
 
     def test_poisson_model_recovers_means_above_one(self) -> None:
         rng = np.random.default_rng(42)
