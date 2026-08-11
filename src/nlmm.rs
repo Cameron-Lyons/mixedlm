@@ -2,6 +2,15 @@ use nalgebra::{Cholesky, DMatrix, DVector};
 use pyo3::PyResult;
 use pyo3::prelude::*;
 
+fn logistic(value: f64) -> f64 {
+    if value >= 0.0 {
+        1.0 / (1.0 + (-value).exp())
+    } else {
+        let exp_value = value.exp();
+        exp_value / (1.0 + exp_value)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[allow(clippy::enum_variant_names)]
 pub enum NlmeModel {
@@ -11,6 +20,48 @@ pub enum NlmeModel {
     SSfpl,
     SSgompertz,
     SSbiexp,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn logistic_is_finite_at_extreme_values() {
+        assert_eq!(logistic(-1e6), 0.0);
+        assert_eq!(logistic(0.0), 0.5);
+        assert_eq!(logistic(1e6), 1.0);
+    }
+
+    #[test]
+    fn sslogis_extreme_predictions_and_gradients_are_finite() {
+        let model = NlmeModel::SSlogis;
+        let params = [10.0, 0.0, 1.0];
+        let x = [-1e6, 0.0, 1e6];
+
+        assert_eq!(model.predict(&params, &x), vec![0.0, 5.0, 10.0]);
+        assert!(
+            model
+                .gradient(&params, &x)
+                .iter()
+                .all(|value| value.is_finite())
+        );
+    }
+
+    #[test]
+    fn ssfpl_extreme_predictions_and_gradients_are_finite() {
+        let model = NlmeModel::SSfpl;
+        let params = [2.0, 10.0, 0.0, 1.0];
+        let x = [-1e6, 0.0, 1e6];
+
+        assert_eq!(model.predict(&params, &x), vec![2.0, 6.0, 10.0]);
+        assert!(
+            model
+                .gradient(&params, &x)
+                .iter()
+                .all(|value| value.is_finite())
+        );
+    }
 }
 
 impl NlmeModel {
@@ -44,7 +95,7 @@ impl NlmeModel {
                 let xmid = params[1];
                 let scal = params[2];
                 for i in 0..n {
-                    result[i] = asym / (1.0 + ((xmid - x[i]) / scal).exp());
+                    result[i] = asym * logistic((x[i] - xmid) / scal);
                 }
             }
             NlmeModel::SSmicmen => {
@@ -60,7 +111,7 @@ impl NlmeModel {
                 let xmid = params[2];
                 let scal = params[3];
                 for i in 0..n {
-                    result[i] = a + (b - a) / (1.0 + ((xmid - x[i]) / scal).exp());
+                    result[i] = a + (b - a) * logistic((x[i] - xmid) / scal);
                 }
             }
             NlmeModel::SSgompertz => {
@@ -110,12 +161,11 @@ impl NlmeModel {
                 let xmid = params[1];
                 let scal = params[2];
                 for i in 0..n {
-                    let exp_term = ((xmid - x[i]) / scal).exp();
-                    let denom = 1.0 + exp_term;
-                    let denom_sq = denom * denom;
-                    grad[(i, 0)] = 1.0 / denom;
-                    grad[(i, 1)] = -asym * exp_term / (scal * denom_sq);
-                    grad[(i, 2)] = asym * (xmid - x[i]) * exp_term / (scal * scal * denom_sq);
+                    let fraction = logistic((x[i] - xmid) / scal);
+                    let sensitivity = fraction * (1.0 - fraction);
+                    grad[(i, 0)] = fraction;
+                    grad[(i, 1)] = -asym * sensitivity / scal;
+                    grad[(i, 2)] = asym * (xmid - x[i]) * sensitivity / (scal * scal);
                 }
             }
             NlmeModel::SSmicmen => {
@@ -134,13 +184,12 @@ impl NlmeModel {
                 let xmid = params[2];
                 let scal = params[3];
                 for i in 0..n {
-                    let exp_term = ((xmid - x[i]) / scal).exp();
-                    let denom = 1.0 + exp_term;
-                    let denom_sq = denom * denom;
-                    grad[(i, 0)] = 1.0 - 1.0 / denom;
-                    grad[(i, 1)] = 1.0 / denom;
-                    grad[(i, 2)] = -(b - a) * exp_term / (scal * denom_sq);
-                    grad[(i, 3)] = (b - a) * (xmid - x[i]) * exp_term / (scal * scal * denom_sq);
+                    let fraction = logistic((x[i] - xmid) / scal);
+                    let sensitivity = fraction * (1.0 - fraction);
+                    grad[(i, 0)] = 1.0 - fraction;
+                    grad[(i, 1)] = fraction;
+                    grad[(i, 2)] = -(b - a) * sensitivity / scal;
+                    grad[(i, 3)] = (b - a) * (xmid - x[i]) * sensitivity / (scal * scal);
                 }
             }
             NlmeModel::SSgompertz => {

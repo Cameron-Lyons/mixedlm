@@ -2,6 +2,72 @@
 
 This tutorial covers hypothesis testing, confidence intervals, and model comparison for mixed models.
 
+## Cross-Validation
+
+Cross-validation asks how accurately a fitted model predicts observations that
+were not used for estimation. Mixed models require choosing the level of
+generalization explicitly.
+
+### Predicting New Rows Within Known Groups
+
+Case-level folds split individual observations. A held-out row can use a random
+effect estimated from other training rows for the same group.
+
+```python
+import mixedlm as mlm
+
+data = mlm.load_sleepstudy()
+model = mlm.lmer("Reaction ~ Days + (Days | Subject)", data)
+
+case_cv = mlm.cross_validate(
+    model,
+    cv=5,
+    random_state=123,
+)
+
+print(case_cv.scores)
+```
+
+### Predicting Entirely New Groups
+
+Set `group` to keep every cluster wholly inside one test fold. Since test groups
+are absent from training, the default prediction uses the fixed-effects portion
+of each fold model.
+
+```python
+subject_cv = mlm.cross_validate(
+    model,
+    cv=5,
+    group="Subject",
+    metrics=["rmse", "mae", "r2"],
+    random_state=123,
+    n_jobs=2,
+)
+
+print(subject_cv)
+print(subject_cv.fold_scores)
+```
+
+The grouped splitter assigns larger clusters first to the smallest available
+fold. This preserves groups while balancing the number of held-out observations.
+Use the same `random_state` when comparing models so they receive identical
+fold assignments.
+
+For GLMMs, the default metrics are weighted RMSE and mean unit deviance:
+
+```python
+glmm_cv = mlm.cross_validate(
+    glmm_model,
+    cv=5,
+    group="site",
+    random_state=123,
+)
+```
+
+Always inspect `all_converged`, `any_singular`, and their per-fold columns. A
+validation score based on failed or boundary fold fits should not be interpreted
+without revisiting the model or optimizer settings.
+
 ## P-values for Fixed Effects
 
 ### Satterthwaite Degrees of Freedom
@@ -137,7 +203,10 @@ result = model.drop1(data)
 print(result)
 ```
 
-This fits the model without each term and reports the change in fit.
+This fits the model without each marginal term and reports the change in fit.
+Lower-order terms are retained when they belong to a higher-order interaction.
+Linear mixed models originally fitted with REML are automatically refitted with
+ML so that fixed-effect deletion likelihoods and AIC values are comparable.
 
 ## Estimated Marginal Means (emmeans)
 

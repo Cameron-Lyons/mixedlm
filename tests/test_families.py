@@ -5,6 +5,7 @@ import warnings
 import numpy as np
 import pandas as pd
 import pytest
+from mixedlm import glmer
 from mixedlm.estimation import laplace
 from mixedlm.estimation.laplace import pirls
 from mixedlm.families import Binomial, Gamma, InverseGaussian, NegativeBinomial, Poisson
@@ -36,6 +37,51 @@ def test_poisson_deviance_handles_zero_counts_without_warnings() -> None:
 
     expected = 2 * weights * np.array([0.5, 2 * np.log(4 / 3) - 0.5])
     np.testing.assert_allclose(deviance, expected)
+
+
+def test_gamma_deviance_matches_unit_deviance() -> None:
+    y = np.array([0.5, 1.0, 2.0, 4.0])
+    mu = np.array([1.0, 2.0, 1.0, 2.0])
+    weights = np.array([1.0, 2.0, 3.0, 4.0])
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        deviance = Gamma().deviance_resids(y, mu, weights)
+
+    ratio = y / mu
+    expected = 2 * weights * (ratio - 1 - np.log(ratio))
+    np.testing.assert_allclose(deviance, expected)
+    assert np.all(deviance >= 0)
+
+
+def test_gamma_deviance_is_zero_at_observed_mean() -> None:
+    y = np.array([0.25, 1.0, 4.0])
+
+    deviance = Gamma().deviance_resids(y, y, np.ones_like(y))
+
+    np.testing.assert_array_equal(deviance, np.zeros_like(y))
+
+
+def test_gamma_fit_recovers_finite_coefficients_and_deviance() -> None:
+    rng = np.random.default_rng(123)
+    n_groups = 12
+    observations_per_group = 30
+    n = n_groups * observations_per_group
+    group = np.repeat(np.arange(n_groups), observations_per_group)
+    x = rng.normal(size=n)
+    random_intercepts = rng.normal(0.0, 0.15, n_groups)
+    eta = 0.7 + 0.35 * x + random_intercepts[group]
+    mu = np.exp(eta)
+    y = rng.gamma(12.0, mu / 12.0)
+    data = pd.DataFrame({"y": y, "x": x, "group": group.astype(str)})
+
+    result = glmer("y ~ x + (1 | group)", data, family=Gamma())
+
+    assert result.converged
+    assert np.isfinite(result.deviance)
+    assert result.deviance >= 0
+    np.testing.assert_allclose(result.beta, np.array([0.7, 0.35]), atol=0.06)
+    assert np.all((result.fitted() > 0) & (result.fitted() < 10))
 
 
 def test_python_pirls_preserves_poisson_means_above_one() -> None:
