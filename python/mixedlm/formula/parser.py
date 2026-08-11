@@ -11,6 +11,11 @@ from mixedlm.formula.terms import (
     InterceptTerm,
     RandomTerm,
     VariableTerm,
+    _format_fixed,
+    _format_grouping,
+    _format_identifier,
+    _format_random,
+    _format_term,
 )
 
 ParsedTerm = InterceptTerm | VariableTerm | InteractionTerm
@@ -102,6 +107,27 @@ class Lexer:
             elif ch == ")":
                 self.advance()
                 yield Token(TokenType.RPAREN, ")", start_pos)
+            elif ch == "`":
+                self.advance()
+                ident = ""
+                while True:
+                    next_ch = self.advance()
+                    if next_ch is None:
+                        raise ValueError(
+                            f"Unterminated quoted identifier starting at position {start_pos}"
+                        )
+                    if next_ch == "`":
+                        break
+                    if next_ch == "\\":
+                        escaped = self.advance()
+                        if escaped is None:
+                            raise ValueError(
+                                f"Unterminated quoted identifier starting at position {start_pos}"
+                            )
+                        ident += escaped
+                    else:
+                        ident += next_ch
+                yield Token(TokenType.IDENTIFIER, ident, start_pos)
             elif ch.isdigit():
                 num = ""
                 next_ch = self.peek()
@@ -185,9 +211,7 @@ class Parser:
                     random_terms = [term for term in random_terms if term != random_term]
                 else:
                     terms = self._parse_term()
-                    has_intercept = self._subtract_parsed_terms(
-                        fixed_terms, terms, has_intercept
-                    )
+                    has_intercept = self._subtract_parsed_terms(fixed_terms, terms, has_intercept)
             elif self.peek().type == TokenType.PLUS:
                 self.advance()
             else:
@@ -321,9 +345,7 @@ class Parser:
             elif self.peek().type == TokenType.MINUS:
                 self.advance()
                 terms = self._parse_term()
-                has_intercept = self._subtract_parsed_terms(
-                    expr_terms, terms, has_intercept
-                )
+                has_intercept = self._subtract_parsed_terms(expr_terms, terms, has_intercept)
             else:
                 break
 
@@ -367,14 +389,11 @@ def parse_formula(formula: str) -> Formula:
 def update_formula(old_formula: Formula, new_formula_str: str) -> Formula:
     new_formula_str = new_formula_str.strip()
 
-    if "~" not in new_formula_str:
-        raise ValueError("Formula must contain '~'")
-
-    lhs, rhs = new_formula_str.split("~", 1)
+    lhs, rhs = _split_formula_parts(new_formula_str)
     lhs = lhs.strip()
     rhs = rhs.strip()
 
-    response = old_formula.response if lhs == "." else lhs
+    response = old_formula.response if lhs == "." else parse_formula(f"{lhs} ~ 1").response
 
     if rhs == ".":
         return Formula(
@@ -383,129 +402,109 @@ def update_formula(old_formula: Formula, new_formula_str: str) -> Formula:
             random=old_formula.random,
         )
 
-    additions: list[str] = []
-    removals: list[str] = []
-    random_additions: list[str] = []
-    random_removals: list[str] = []
-    keep_old_rhs = False
+    updates = _split_update_rhs(rhs)
+    if not any(term == "." for _, term in updates):
+        return parse_formula(f"{_format_identifier(response)} ~ {rhs}")
 
-    i = 0
-    rhs_clean = rhs.replace(" ", "")
+    new_fixed_terms = list(old_formula.fixed.terms)
+    has_intercept = old_formula.fixed.has_intercept
+    new_random = list(old_formula.random)
 
-    while i < len(rhs_clean):
-        if rhs_clean[i] == ".":
-            keep_old_rhs = True
-            i += 1
-        elif rhs_clean[i] == "+":
-            i += 1
-            if i < len(rhs_clean) and rhs_clean[i] == "(":
-                paren_count = 1
-                start = i
-                i += 1
-                while i < len(rhs_clean) and paren_count > 0:
-                    if rhs_clean[i] == "(":
-                        paren_count += 1
-                    elif rhs_clean[i] == ")":
-                        paren_count -= 1
-                    i += 1
-                random_additions.append(rhs_clean[start:i])
+    for operation, term_str in updates:
+        if term_str == ".":
+            continue
+
+        adding = operation == "+"
+        if term_str.startswith("("):
+            parsed_random = parse_formula(f"y ~ 1 + {term_str}").random
+            if adding:
+                for random_term in parsed_random:
+                    if random_term not in new_random:
+                        new_random.append(random_term)
             else:
-                term_start = i
-                while i < len(rhs_clean) and rhs_clean[i] not in "+-":
-                    i += 1
-                term = rhs_clean[term_start:i]
-                if term:
-                    additions.append(term)
-        elif rhs_clean[i] == "-":
-            i += 1
-            if i < len(rhs_clean) and rhs_clean[i] == "(":
-                paren_count = 1
-                start = i
-                i += 1
-                while i < len(rhs_clean) and paren_count > 0:
-                    if rhs_clean[i] == "(":
-                        paren_count += 1
-                    elif rhs_clean[i] == ")":
-                        paren_count -= 1
-                    i += 1
-                random_removals.append(rhs_clean[start:i])
-            else:
-                term_start = i
-                while i < len(rhs_clean) and rhs_clean[i] not in "+-":
-                    i += 1
-                term = rhs_clean[term_start:i]
-                if term:
-                    removals.append(term)
-        elif rhs_clean[i] == "(":
-            paren_count = 1
-            start = i
-            i += 1
-            while i < len(rhs_clean) and paren_count > 0:
-                if rhs_clean[i] == "(":
-                    paren_count += 1
-                elif rhs_clean[i] == ")":
-                    paren_count -= 1
-                i += 1
-            random_additions.append(rhs_clean[start:i])
-        else:
-            term_start = i
-            while i < len(rhs_clean) and rhs_clean[i] not in "+-":
-                i += 1
-            term = rhs_clean[term_start:i]
-            if term:
-                additions.append(term)
+                new_random = [term for term in new_random if term not in parsed_random]
+            continue
 
-    if not keep_old_rhs and not additions and not random_additions:
-        return parse_formula(new_formula_str.replace(".", response))
-
-    if keep_old_rhs:
-        new_fixed_terms = list(old_formula.fixed.terms)
-        has_intercept = old_formula.fixed.has_intercept
-        new_random = list(old_formula.random)
-    else:
-        new_fixed_terms = []
-        has_intercept = True
-        new_random = []
-
-    for term_str in additions:
         if term_str == "1":
-            has_intercept = True
-        elif term_str == "0":
-            has_intercept = False
-        elif ":" in term_str:
-            vars_tuple = tuple(term_str.split(":"))
-            interaction_term = InteractionTerm(vars_tuple)
-            if interaction_term not in new_fixed_terms:
-                new_fixed_terms.append(interaction_term)
+            has_intercept = adding
+            continue
+        if term_str == "0":
+            has_intercept = not adding
+            continue
+
+        parsed_terms = parse_formula(f"y ~ 0 + {term_str}").fixed.terms
+        if adding:
+            for term in parsed_terms:
+                if term not in new_fixed_terms:
+                    new_fixed_terms.append(term)
         else:
-            variable_term = VariableTerm(term_str)
-            if variable_term not in new_fixed_terms:
-                new_fixed_terms.append(variable_term)
-
-    for term_str in removals:
-        if term_str == "1":
-            has_intercept = False
-        elif ":" in term_str:
-            vars_tuple = tuple(term_str.split(":"))
-            interaction_to_remove = InteractionTerm(vars_tuple)
-            new_fixed_terms = [t for t in new_fixed_terms if t != interaction_to_remove]
-        else:
-            variable_to_remove = VariableTerm(term_str)
-            new_fixed_terms = [t for t in new_fixed_terms if t != variable_to_remove]
-
-    for random_str in random_additions:
-        temp_formula = parse_formula(f"y ~ 1 + {random_str}")
-        for rt in temp_formula.random:
-            if rt not in new_random:
-                new_random.append(rt)
-
-    for random_str in random_removals:
-        temp_formula = parse_formula(f"y ~ 1 + {random_str}")
-        for rt in temp_formula.random:
-            new_random = [r for r in new_random if r != rt]
+            new_fixed_terms = [term for term in new_fixed_terms if term not in parsed_terms]
 
     new_fixed = FixedTerm(terms=tuple(new_fixed_terms), has_intercept=has_intercept)
     return Formula(response=response, fixed=new_fixed, random=tuple(new_random))
+
+
+def _split_formula_parts(formula: str) -> tuple[str, str]:
+    quoted = False
+    escaped = False
+    for index, char in enumerate(formula):
+        if quoted:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == "`":
+                quoted = False
+        elif char == "`":
+            quoted = True
+        elif char == "~":
+            return formula[:index], formula[index + 1 :]
+
+    raise ValueError("Formula must contain '~'")
+
+
+def _split_update_rhs(rhs: str) -> list[tuple[str, str]]:
+    updates: list[tuple[str, str]] = []
+    operation = "+"
+    current: list[str] = []
+    depth = 0
+    quoted = False
+    escaped = False
+
+    def append_current() -> None:
+        term = "".join(current).strip()
+        if term:
+            updates.append((operation, term))
+        current.clear()
+
+    for char in rhs:
+        if quoted:
+            current.append(char)
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == "`":
+                quoted = False
+            continue
+
+        if char == "`":
+            quoted = True
+            current.append(char)
+        elif char == "(":
+            depth += 1
+            current.append(char)
+        elif char == ")":
+            depth -= 1
+            current.append(char)
+        elif depth == 0 and char in "+-":
+            append_current()
+            operation = char
+        else:
+            current.append(char)
+
+    append_current()
+    return updates
 
 
 def nobars(formula: Formula | str) -> Formula:
@@ -612,13 +611,10 @@ def subbars(formula: Formula | str) -> str:
     for term in formula.fixed.terms:
         if isinstance(term, InterceptTerm):
             continue
-        elif isinstance(term, VariableTerm):
-            fixed_parts.append(term.name)
-        elif isinstance(term, InteractionTerm):
-            fixed_parts.append(":".join(term.variables))
+        fixed_parts.append(_format_term(term))
 
     for rterm in formula.random:
-        grouping = "/".join(rterm.grouping) if isinstance(rterm.grouping, tuple) else rterm.grouping
+        grouping = _format_grouping(rterm.grouping)
 
         if rterm.has_intercept:
             fixed_parts.append(grouping)
@@ -626,14 +622,10 @@ def subbars(formula: Formula | str) -> str:
         for term in rterm.expr:
             if isinstance(term, InterceptTerm):
                 continue
-            elif isinstance(term, VariableTerm):
-                fixed_parts.append(f"{grouping}:{term.name}")
-            elif isinstance(term, InteractionTerm):
-                interaction = ":".join(term.variables)
-                fixed_parts.append(f"{grouping}:{interaction}")
+            fixed_parts.append(f"{grouping}:{_format_term(term)}")
 
     rhs = " + ".join(fixed_parts) if fixed_parts else "1"
-    return f"{formula.response} ~ {rhs}"
+    return f"{_format_identifier(formula.response)} ~ {rhs}"
 
 
 def is_mixed_formula(formula: Formula | str) -> bool:
@@ -754,47 +746,40 @@ def expandDoubleVerts(formula: str) -> str:
     >>> expandDoubleVerts("y ~ x + (time || subject)")
     'y ~ x + (1 | subject) + (0 + time | subject)'
     """
-    import re
+    parsed = parse_formula(formula)
+    if all(term.correlated for term in parsed.random):
+        return formula
 
-    result = formula
+    expanded: list[RandomTerm] = []
+    for random_term in parsed.random:
+        if random_term.correlated:
+            expanded.append(random_term)
+            continue
 
-    pattern = r"\(([^|()]+)\|\|([^()]+)\)"
+        if random_term.has_intercept:
+            expanded.append(
+                RandomTerm(
+                    expr=(),
+                    grouping=random_term.grouping,
+                    correlated=True,
+                    has_intercept=True,
+                    cov_type=random_term.cov_type,
+                )
+            )
 
-    while True:
-        match = re.search(pattern, result)
-        if not match:
-            break
+        expanded.extend(
+            RandomTerm(
+                expr=(term,),
+                grouping=random_term.grouping,
+                correlated=True,
+                has_intercept=False,
+                cov_type=random_term.cov_type,
+            )
+            for term in random_term.expr
+            if not isinstance(term, InterceptTerm)
+        )
 
-        terms_str = match.group(1).strip()
-        grouping = match.group(2).strip()
-
-        terms = [t.strip() for t in re.split(r"[+]", terms_str)]
-        terms = [t for t in terms if t]
-
-        has_intercept = True
-        if "0" in terms:
-            has_intercept = False
-            terms = [t for t in terms if t != "0"]
-        elif "-1" in terms:
-            has_intercept = False
-            terms = [t for t in terms if t != "-1"]
-
-        expanded_parts = []
-
-        if has_intercept:
-            expanded_parts.append(f"(1 | {grouping})")
-
-        for term in terms:
-            if term == "1":
-                if not has_intercept:
-                    expanded_parts.append(f"(1 | {grouping})")
-            else:
-                expanded_parts.append(f"(0 + {term} | {grouping})")
-
-        replacement = " + ".join(expanded_parts)
-        result = result[: match.start()] + replacement + result[match.end() :]
-
-    return result
+    return str(Formula(response=parsed.response, fixed=parsed.fixed, random=tuple(expanded)))
 
 
 def dropOffset(formula: str | Formula) -> str:
@@ -886,21 +871,7 @@ def getFixedFormulaStr(formula: Formula | str) -> str:
     if isinstance(formula, str):
         formula = parse_formula(formula)
 
-    fixed_parts = []
-
-    if not formula.fixed.has_intercept:
-        fixed_parts.append("0")
-
-    for term in formula.fixed.terms:
-        if isinstance(term, InterceptTerm):
-            continue
-        elif isinstance(term, VariableTerm):
-            fixed_parts.append(term.name)
-        elif isinstance(term, InteractionTerm):
-            fixed_parts.append(":".join(term.variables))
-
-    rhs = " + ".join(fixed_parts) if fixed_parts else "1"
-    return f"{formula.response} ~ {rhs}"
+    return f"{_format_identifier(formula.response)} ~ {_format_fixed(formula.fixed)}"
 
 
 def getRandomFormulaStr(formula: Formula | str) -> str:
@@ -927,30 +898,7 @@ def getRandomFormulaStr(formula: Formula | str) -> str:
     if isinstance(formula, str):
         formula = parse_formula(formula)
 
-    random_parts = []
-
-    for rterm in formula.random:
-        grouping = "/".join(rterm.grouping) if isinstance(rterm.grouping, tuple) else rterm.grouping
-
-        terms = []
-        if rterm.has_intercept:
-            terms.append("1")
-        else:
-            terms.append("0")
-
-        for term in rterm.expr:
-            if isinstance(term, InterceptTerm):
-                continue
-            elif isinstance(term, VariableTerm):
-                terms.append(term.name)
-            elif isinstance(term, InteractionTerm):
-                terms.append(":".join(term.variables))
-
-        expr_str = " + ".join(terms)
-        separator = "||" if not rterm.correlated else "|"
-        random_parts.append(f"({expr_str} {separator} {grouping})")
-
-    return " + ".join(random_parts) if random_parts else ""
+    return " + ".join(_format_random(term) for term in formula.random)
 
 
 def getNGroups(formula: Formula | str) -> int:

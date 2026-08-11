@@ -30,6 +30,19 @@ The formula has two parts:
 "y ~ x1 + x2 + x3"
 ```
 
+### Column Names with Spaces or Operators
+
+Wrap non-syntactic column names in backticks. This works for responses, fixed effects,
+interactions, random slopes, and grouping factors:
+
+```python
+"`response value` ~ `treatment + dose` + (1 | `group id`)"
+"y ~ `first value`:`second/value` + (`random slope` | `group id`)"
+```
+
+Formula objects preserve the required backticks when converted back to strings, so these
+names also work with formula utilities and model updates.
+
 ### Interactions
 
 ```python

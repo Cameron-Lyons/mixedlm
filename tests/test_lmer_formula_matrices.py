@@ -5,6 +5,7 @@ from mixedlm import (
 )
 from mixedlm.formula.terms import InteractionTerm, VariableTerm
 from mixedlm.matrices import build_model_matrices
+from mixedlm.utils.dataframe import concat_columns_as_string
 
 from tests._lmer_data import SLEEPSTUDY
 
@@ -115,6 +116,41 @@ class TestFormulaParser:
         formula = parse_formula("y ~ x1 + (1 | g) + (1 | h) - (1 | g)")
         assert [term.grouping for term in formula.random] == ["h"]
 
+    def test_backticks_quote_names_and_formula_operators(self) -> None:
+        formula = parse_formula(
+            "`response value` ~ `fixed + value`:`second:value` + (`random slope` | `group/id`)"
+        )
+
+        assert formula.response == "response value"
+        assert formula.fixed.terms == (InteractionTerm(("fixed + value", "second:value")),)
+        assert formula.random[0].expr == (VariableTerm("random slope"),)
+        assert formula.random[0].grouping == "group/id"
+        assert parse_formula(str(formula)) == formula
+
+    def test_backticks_support_nested_grouping_factors(self) -> None:
+        formula = parse_formula("y ~ x + (1 | `school id`/`class/id`)")
+
+        assert formula.random[0].grouping == ("school id", "class/id")
+        assert str(formula) == "y ~ x + (1 | `school id`/`class/id`)"
+
+    def test_quoted_random_slope_without_intercept_round_trips(self) -> None:
+        formula = parse_formula("y ~ x + (0 + `random slope` | `group id`)")
+
+        assert not formula.random[0].has_intercept
+        assert str(formula) == "y ~ x + (0 + `random slope` | `group id`)"
+        assert parse_formula(str(formula)) == formula
+
+    def test_backticks_can_be_escaped(self) -> None:
+        formula = parse_formula(r"`response\`name` ~ `fixed\`name`")
+
+        assert formula.response == "response`name"
+        assert formula.fixed.terms == (VariableTerm("fixed`name"),)
+        assert parse_formula(str(formula)) == formula
+
+    def test_unterminated_backtick_name_is_rejected(self) -> None:
+        with np.testing.assert_raises_regex(ValueError, "Unterminated quoted identifier"):
+            parse_formula("`response ~ x")
+
 
 class TestModelMatrices:
     def test_fixed_matrix_with_intercept(self) -> None:
@@ -141,6 +177,18 @@ class TestModelMatrices:
         assert matrices.n_random == 36
         assert len(matrices.random_structures) == 1
         assert matrices.random_structures[0].n_terms == 2
+
+    def test_nested_group_labels_preserve_mixed_values(self) -> None:
+        data = pd.DataFrame(
+            {
+                "school": [1, 1, 2, 2],
+                "classroom": pd.Categorical(["A", "B", "A", "B"]),
+            }
+        )
+
+        labels = concat_columns_as_string(data, ["school", "classroom"])
+
+        np.testing.assert_array_equal(labels, ["1/A", "1/B", "2/A", "2/B"])
 
     def test_star_fixed_matrix_includes_main_effect_columns(self) -> None:
         data = pd.DataFrame(
@@ -171,3 +219,19 @@ class TestModelMatrices:
 
         assert matrices.fixed_names == ["(Intercept)", "x1", "x2"]
         assert matrices.X.shape == (4, 3)
+
+    def test_quoted_names_build_model_matrices(self) -> None:
+        data = pd.DataFrame(
+            {
+                "response value": [1.0, 2.0, 3.0, 4.0],
+                "fixed + value": [0.0, 1.0, 2.0, 3.0],
+                "group/id": ["a", "a", "b", "b"],
+            }
+        )
+        formula = parse_formula("`response value` ~ `fixed + value` + (1 | `group/id`)")
+        matrices = build_model_matrices(formula, data)
+
+        assert np.array_equal(matrices.y, data["response value"].to_numpy())
+        assert matrices.fixed_names == ["(Intercept)", "fixed + value"]
+        assert matrices.random_structures[0].grouping_factor == "group/id"
+        assert matrices.Z.shape == (4, 2)
