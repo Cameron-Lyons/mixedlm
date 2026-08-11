@@ -47,6 +47,7 @@ from mixedlm.inference.profile import (
     splom_profiles,
     varianceProf,
 )
+from mixedlm.inference.reporting import glance, tidy
 
 __all__ = [
     "AllFitResult",
@@ -94,6 +95,8 @@ __all__ = [
     "satterthwaite_df",
     "kenward_roger_df",
     "pvalues_with_ddf",
+    "tidy",
+    "glance",
     "LinearHypothesisResult",
     "linear_hypothesis",
 ]

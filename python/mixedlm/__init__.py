@@ -78,6 +78,7 @@ if TYPE_CHECKING:
         splom_profiles,
         varianceProf,
     )
+    from mixedlm.inference.reporting import glance, tidy
     from mixedlm.models.control import GlmerControl, LmerControl, glmerControl, lmerControl
     from mixedlm.models.glmer import GlmerMod, GlmerVarCorr, glmer, glmer_nb
     from mixedlm.models.lmer import (
@@ -183,6 +184,8 @@ __all__ = [
     "Emmeans",
     "model_selection",
     "ModelSelectionResult",
+    "tidy",
+    "glance",
     "ggpredict",
     "allEffects",
     "bootMer",
@@ -416,6 +419,7 @@ _LAZY_EXPORTS: dict[str, tuple[str, str | None]] = {
     **_module_exports(
         "mixedlm.inference.model_selection", "ModelSelectionResult", "model_selection"
     ),
+    **_module_exports("mixedlm.inference.reporting", "glance", "tidy"),
     **_module_exports(
         "mixedlm.inference.profile",
         "Profile2DResult",

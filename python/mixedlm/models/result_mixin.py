@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 import numpy as np
@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     import pandas as pd
 
     from mixedlm.inference.profile_types import ProfileResult
+    from mixedlm.inference.reporting import MixedModelResult
 
 
 class MerResultMixin:
@@ -191,6 +192,31 @@ class MerResultMixin:
         if self.matrices.frame is not None:
             return copy_dataframe(self.matrices.frame)
         return pd.DataFrame({"y": self.matrices.y})
+
+    def tidy(
+        self,
+        effects: str | Sequence[str] = "fixed",
+        *,
+        conf_int: bool = False,
+        conf_level: float = 0.95,
+        ddf_method: str | None = "Satterthwaite",
+    ) -> pd.DataFrame:
+        """Return model components in an analysis-ready table."""
+        from mixedlm.inference.reporting import tidy
+
+        return tidy(
+            cast("MixedModelResult", self),
+            effects=effects,
+            conf_int=conf_int,
+            conf_level=conf_level,
+            ddf_method=ddf_method,
+        )
+
+    def glance(self) -> pd.DataFrame:
+        """Return one row of model-level fit statistics."""
+        from mixedlm.inference.reporting import glance
+
+        return glance(cast("MixedModelResult", self))
 
     def _weights_array(self, copy: bool = True) -> NDArray[np.floating]:
         return self.matrices.weights.copy() if copy else self.matrices.weights

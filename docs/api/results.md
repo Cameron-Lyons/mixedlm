@@ -2,6 +2,41 @@
 
 This page documents the result objects returned by model fitting functions and their methods.
 
+## Tidy reporting
+
+Linear, generalized, and nonlinear result objects share two reporting methods. The same
+functions are also available as `mixedlm.tidy(model, ...)` and `mixedlm.glance(model)`.
+
+### tidy
+
+```python
+fixed = result.tidy(conf_int=True)
+everything = result.tidy(effects="all", conf_int=True)
+```
+
+Return a row-oriented pandas table. `effects` accepts:
+
+- `"fixed"` for estimates, standard errors, test statistics, p-values, and optional
+  confidence intervals
+- `"ran_pars"` for random-effect standard deviations and correlations
+- `"ran_vals"` for group-level conditional modes and conditional standard errors when available
+- `"all"` for all three components in one stable schema
+
+For linear mixed models, `ddf_method` accepts `"Satterthwaite"` (the default),
+`"Kenward-Roger"`, or `"normal"`. Generalized models use Wald z tests, while nonlinear
+models use residual degrees of freedom.
+
+### glance
+
+```python
+fit_stats = result.glance()
+```
+
+Return one row containing the model type, family, observation and group counts, parameter
+counts, residual scale, log likelihood, deviance, AIC, BIC, fit method, convergence state,
+singularity state, and iteration count. The schema is common across all model families, so
+rows from several fits can be concatenated directly.
+
 ## LmerResult
 
 The result object returned by `lmer()`.

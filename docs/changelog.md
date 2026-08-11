@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `tidy()` and `glance()` analysis-ready reports for linear, generalized, and nonlinear fits
 - Arbitrary linear fixed-effect hypothesis tests with named or matrix constraints
 - Grouped-binomial `successes / trials` responses with automatic trial weights and validation
 - Configurable named links and documented family/link helper APIs

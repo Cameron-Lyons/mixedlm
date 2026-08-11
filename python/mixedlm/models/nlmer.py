@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, cast
 
@@ -337,6 +338,31 @@ class NlmerResult:
         if self._data is not None:
             return self._data.copy()
         return pd.DataFrame({self._x_var: self.x, self._y_var: self.y, self.group_var: self.groups})
+
+    def tidy(
+        self,
+        effects: str | Sequence[str] = "fixed",
+        *,
+        conf_int: bool = False,
+        conf_level: float = 0.95,
+        ddf_method: str | None = "Satterthwaite",
+    ) -> pd.DataFrame:
+        """Return model components in an analysis-ready table."""
+        from mixedlm.inference.reporting import tidy
+
+        return tidy(
+            self,
+            effects=effects,
+            conf_int=conf_int,
+            conf_level=conf_level,
+            ddf_method=ddf_method,
+        )
+
+    def glance(self) -> pd.DataFrame:
+        """Return one row of model-level fit statistics."""
+        from mixedlm.inference.reporting import glance
+
+        return glance(self)
 
     def simulate(
         self,

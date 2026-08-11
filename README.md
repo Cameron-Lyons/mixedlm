@@ -18,6 +18,7 @@ A Python implementation of mixed-effects models inspired by R's [lme4](https://g
 - **Generalized Linear Mixed Models (GLMM)** via `glmer()` - Laplace approximation and adaptive Gauss-Hermite quadrature
 - **Nonlinear Mixed Models (NLMM)** via `nlmer()` - Self-starting models (SSasymp, SSlogis, SSmicmen)
 - **Formula interface** - lme4-style formulas with random effects syntax
+- **Tidy reporting** - Analysis-ready coefficient, random-effect, and model-fit tables
 - **Inference tools** - Linear hypotheses, profile likelihood, bootstrap, confidence intervals, Satterthwaite/Kenward-Roger degrees of freedom
 - **Model comparison** - ANOVA (including Type III), drop1, allFit
 - **Model selection** - AIC/AICc/BIC rankings, normalized weights, and evidence sets
@@ -64,6 +65,10 @@ result.coef()       # Combined coefficients
 # Inference
 result.confint(method="profile")  # Profile confidence intervals
 result.confint(method="boot")     # Bootstrap confidence intervals
+# Analysis-ready pandas tables
+result.tidy(conf_int=True)          # Fixed effects, uncertainty, tests
+result.tidy(effects="all")         # Fixed, random parameters, random values
+result.glance()                     # One-row model fit summary
 mlm.r2_nakagawa(result)            # Marginal and conditional R²
 mlm.icc(result)                     # Adjusted and unadjusted ICC
 mlm.check_collinearity(result)     # VIF/GVIF and condition diagnostics
@@ -224,6 +229,8 @@ print(model.VarCorr())
 | `logLik()` | Log-likelihood with df |
 | `AIC()` / `BIC()` | Information criteria |
 | `summary(ddf_method)` | Model summary with optional p-values |
+| `tidy(effects, conf_int)` | Analysis-ready parameter table |
+| `glance()` | One-row model fit summary |
 | `getME(name)` | Extract model components (X, Z, theta, Lambda, etc.) |
 | `get_deviance_components()` | Breakdown of deviance into components |
 
