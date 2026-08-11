@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Collection
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from numpy.typing import NDArray
@@ -29,6 +30,8 @@ def get_column_numpy(data: Any, name: str, dtype: type | None = None) -> NDArray
     dtype : type, optional
         If provided, convert to this dtype. If None, preserve original dtype.
     """
+    data = ensure_dataframe(data, columns=[name])
+
     if _is_polars(data):
         arr = data.get_column(name).to_numpy()
         if dtype is not None:
@@ -46,6 +49,7 @@ def get_column_numpy(data: Any, name: str, dtype: type | None = None) -> NDArray
 
 def get_column_values(data: Any, name: str) -> NDArray:
     """Extract column values preserving dtype (for categorical handling)."""
+    data = ensure_dataframe(data, columns=[name])
     if _is_polars(data):
         col = data.get_column(name)
         return col.to_numpy()
@@ -54,6 +58,7 @@ def get_column_values(data: Any, name: str) -> NDArray:
 
 def get_row_value(data: Any, col_name: str, row_idx: int) -> Any:
     """Get a single value from a column at a specific row index."""
+    data = ensure_dataframe(data, columns=[col_name])
     if _is_polars(data):
         return data.get_column(col_name)[row_idx]
     return data[col_name].iloc[row_idx]
@@ -61,6 +66,7 @@ def get_row_value(data: Any, col_name: str, row_idx: int) -> Any:
 
 def get_unique_sorted(data: Any, col_name: str) -> list:
     """Get sorted unique values from a column, excluding nulls."""
+    data = ensure_dataframe(data, columns=[col_name])
     if _is_polars(data):
         col = data.get_column(col_name)
         unique_vals = col.drop_nulls().unique().sort().to_list()
@@ -71,6 +77,7 @@ def get_unique_sorted(data: Any, col_name: str) -> list:
 
 def get_categories(data: Any, col_name: str) -> list:
     """Get category levels for a categorical column, or sorted unique values."""
+    data = ensure_dataframe(data, columns=[col_name])
     if _is_polars(data):
         col = data.get_column(col_name)
         dtype_name = str(col.dtype)
@@ -87,6 +94,7 @@ def get_categories(data: Any, col_name: str) -> list:
 
 def is_categorical_or_string(data: Any, col_name: str) -> bool:
     """Check if a column is categorical or string type."""
+    data = ensure_dataframe(data, columns=[col_name])
     if _is_polars(data):
         import polars as pl
 
@@ -107,6 +115,7 @@ def is_categorical_or_string(data: Any, col_name: str) -> bool:
 
 def dataframe_length(data: Any) -> int:
     """Get the number of rows in a DataFrame."""
+    data = ensure_dataframe(data)
     if _is_polars(data):
         return data.height
     return len(data)
@@ -114,6 +123,8 @@ def dataframe_length(data: Any) -> int:
 
 def get_columns(data: Any) -> list[str]:
     """Get column names from a DataFrame."""
+    if _is_polars_lazy(data):
+        return data.collect_schema().names()
     if _is_polars(data):
         return data.columns
     return list(data.columns)
@@ -121,9 +132,18 @@ def get_columns(data: Any) -> list[str]:
 
 def select_columns(data: Any, columns: list[str]) -> Any:
     """Select specific columns from a DataFrame."""
+    data = ensure_dataframe(data, columns=columns)
     if _is_polars(data):
         return data.select(columns)
     return data[columns].copy()
+
+
+def copy_dataframe(data: Any) -> Any:
+    """Return an independent copy while preserving the dataframe backend."""
+    data = ensure_dataframe(data)
+    if _is_polars(data):
+        return data.clone()
+    return data.copy()
 
 
 def concat_columns_as_string(data: Any, columns: list[str], separator: str = "/") -> NDArray:
@@ -133,6 +153,7 @@ def concat_columns_as_string(data: Any, columns: list[str], separator: str = "/"
     if not columns:
         return np.full(dataframe_length(data), "", dtype=object)
 
+    data = ensure_dataframe(data, columns=columns)
     if _is_polars(data):
         import polars as pl
 
@@ -162,22 +183,33 @@ def factorize_levels(values: NDArray) -> tuple[NDArray, dict[Any, int]]:
 
 def _is_polars(data: Any) -> bool:
     """Check if data is a polars DataFrame or LazyFrame."""
-    type_name = type(data).__module__
-    return "polars" in type_name
+    return type(data).__module__.partition(".")[0] == "polars"
+
+
+def _is_polars_lazy(data: Any) -> bool:
+    """Check if data is a polars LazyFrame without importing polars."""
+    return _is_polars(data) and type(data).__name__ == "LazyFrame"
 
 
 def _is_pandas(data: Any) -> bool:
     """Check if data is a pandas DataFrame."""
-    type_name = type(data).__module__
-    return "pandas" in type_name
+    return type(data).__module__.partition(".")[0] == "pandas"
 
 
-def ensure_dataframe(data: Any) -> Any:
-    """Validate that data is a supported DataFrame type.
+def ensure_dataframe(data: Any, columns: Collection[str] | None = None) -> Any:
+    """Validate and materialize a supported DataFrame type.
 
-    Returns the data unchanged if valid, raises TypeError otherwise.
+    Polars LazyFrames are collected once. When ``columns`` is provided, the
+    projection is applied before collection so Polars can avoid evaluating and
+    loading columns that are not needed by the model.
     """
-    if _is_pandas(data) or _is_polars(data):
+    if _is_pandas(data):
+        return data
+    if _is_polars_lazy(data):
+        if columns is not None:
+            data = data.select(list(columns))
+        return data.collect()
+    if _is_polars(data):
         return data
     raise TypeError(
         f"Expected pandas or polars DataFrame, got {type(data).__name__}. "

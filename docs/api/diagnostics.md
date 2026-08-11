@@ -43,6 +43,29 @@ The adjusted ICC excludes fixed-effect variance from its denominator. The unadju
 uses total fixed, random, and residual variance. Group-specific dictionaries partition each
 overall coefficient for crossed or nested random effects.
 
+## Collinearity Diagnostics
+
+### check_collinearity
+
+Compute weighted VIF, generalized VIF, tolerance, severity, and global condition indices:
+
+```python
+result = diagnostics.check_collinearity(model)
+print(result)
+print(result.to_dataframe())
+print(result.problematic(threshold=5.0))
+```
+
+One-column terms report the conventional VIF. Multi-column categorical or interaction terms
+also report raw GVIF, `GVIF^(1/(2*df))`, and a VIF-equivalent `GVIF^(1/df)` value so the same
+thresholds can be used across terms. By default, values from 5 to 10 are marked moderate and
+values of 10 or more are marked high; both thresholds are configurable.
+
+Linear fits use prior weights, generalized fits use prior times local working weights, and
+nonlinear fits use the locally weighted, uncentered parameter-gradient design so constant
+information directions are preserved. The calculation uses one correlation eigendecomposition
+and does not form the random-effect covariance matrix.
+
 ## Generalized-Model Diagnostics
 
 ### check_overdispersion

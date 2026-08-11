@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from mixedlm.diagnostics.collinearity import CollinearityResult, check_collinearity
 from mixedlm.diagnostics.dispersion import (
     DispersionResult,
     ZeroInflationResult,
@@ -55,4 +56,6 @@ __all__ = [
     "R2NakagawaResult",
     "icc",
     "ICCResult",
+    "check_collinearity",
+    "CollinearityResult",
 ]

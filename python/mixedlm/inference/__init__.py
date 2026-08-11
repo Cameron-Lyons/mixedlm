@@ -1,5 +1,6 @@
 from mixedlm.inference.allfit import AllFitResult, allfit_glmer, allfit_lmer
 from mixedlm.inference.anova import AnovaResult, anova
+from mixedlm.inference.boot_ci import bootCI
 from mixedlm.inference.bootstrap import (
     BootstrapResult,
     NlmerBootstrapResult,
@@ -51,6 +52,7 @@ __all__ = [
     "allfit_glmer",
     "AnovaResult",
     "anova",
+    "bootCI",
     "Drop1Result",
     "drop1_lmer",
     "drop1_glmer",

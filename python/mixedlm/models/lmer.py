@@ -109,26 +109,28 @@ class LmerResult(MerResultMixin):
     ) -> dict[str, dict[str, NDArray[np.floating]]] | RanefResult:
         return self._ranef_with_optional_condvar(self.u, condVar)
 
-    def _compute_condVar(self) -> dict[str, dict[str, NDArray[np.floating]]]:
+    def _compute_condVar(
+        self, include_cov: bool = False
+    ) -> dict[str, dict[str, NDArray[np.floating]]]:
+        from mixedlm.utils.variance import _conditional_variance_blocks
+
         q = self.matrices.n_random
         if q == 0:
             return {}
 
         Lambda = _build_lambda(self.theta, self.matrices.random_structures)
+        sqrt_weights = np.sqrt(self.matrices.weights)
+        weighted_z = self.matrices.Z.multiply(sqrt_weights[:, np.newaxis])
+        ztwz = weighted_z.T @ weighted_z
+        precision = Lambda.T @ ztwz @ Lambda + sparse.eye(q, format="csc")
 
-        Zt = self.matrices.Zt
-        ZtZ = Zt @ Zt.T
-        LambdatZtZLambda = Lambda.T @ ZtZ @ Lambda
-
-        I_q = sparse.eye(q, format="csc")
-        V = LambdatZtZLambda + I_q
-
-        V_dense = V.toarray()
-
-        Lambda_dense = Lambda.toarray() if sparse.issparse(Lambda) else Lambda
-        V_inv_Lambda_t = linalg.solve(V_dense, Lambda_dense.T, assume_a="pos")
-        cond_cov = self.sigma**2 * Lambda_dense @ V_inv_Lambda_t
-        return self._condvar_from_cov(cond_cov)
+        return _conditional_variance_blocks(
+            precision,
+            Lambda,
+            self.matrices.random_structures,
+            scale=self.sigma**2,
+            include_cov=include_cov,
+        )
 
     def get_sigma(self) -> float:
         return self.sigma
@@ -227,7 +229,7 @@ class LmerResult(MerResultMixin):
         """
         return self._build_model_terms(self.formula)
 
-    def model_frame(self) -> pd.DataFrame:
+    def model_frame(self) -> Any:
         """Get the model frame.
 
         Returns the data frame containing only the variables used
@@ -235,9 +237,9 @@ class LmerResult(MerResultMixin):
 
         Returns
         -------
-        pd.DataFrame
-            Data frame with the response variable, fixed effect
-            variables, and grouping factors.
+        DataFrame
+            Data frame with the response variable, fixed effect variables,
+            and grouping factors. The fitted input's backend is preserved.
 
         Examples
         --------
@@ -652,7 +654,7 @@ class LmerResult(MerResultMixin):
         groups: dict[str, VarCorrGroup] = {}
 
         for struct, cov in self._iter_random_cov_blocks(scale=self.sigma**2):
-            if struct.correlated:
+            if struct.correlated or struct.cov_type in ("cs", "ar1"):
                 stddevs = np.sqrt(np.diag(cov))
                 with np.errstate(divide="ignore", invalid="ignore"):
                     corr = cov / np.outer(stddevs, stddevs)
@@ -1008,29 +1010,7 @@ class LmerResult(MerResultMixin):
         return plot_diagnostics(self, which=which, figsize=figsize)
 
     def isSingular(self, tol: float = 1e-4) -> bool:
-        theta_idx = 0
-
-        for struct in self.matrices.random_structures:
-            q = struct.n_terms
-
-            if struct.correlated:
-                n_theta = q * (q + 1) // 2
-                theta_block = self.theta[theta_idx : theta_idx + n_theta]
-                theta_idx += n_theta
-
-                diag_idx = 0
-                for i in range(q):
-                    if abs(theta_block[diag_idx]) < tol:
-                        return True
-                    diag_idx += i + 2
-            else:
-                theta_block = self.theta[theta_idx : theta_idx + q]
-                theta_idx += q
-
-                if np.any(np.abs(theta_block) < tol):
-                    return True
-
-        return False
+        return self._is_singular_covariance(tol)
 
     def getME(self, name: str):
         """Extract model components by name.
@@ -1110,19 +1090,7 @@ class LmerResult(MerResultMixin):
         elif name in ("q", "n_random"):
             return self.matrices.n_random
         elif name == "lower":
-            bounds = []
-            for struct in self.matrices.random_structures:
-                q = struct.n_terms
-                if struct.correlated:
-                    for i in range(q):
-                        for j in range(i + 1):
-                            if i == j:
-                                bounds.append(0.0)
-                            else:
-                                bounds.append(-np.inf)
-                else:
-                    bounds.extend([0.0] * q)
-            return np.array(bounds)
+            return self._theta_lower_bounds()
         elif name == "weights":
             return self.matrices.weights.copy()
         elif name == "offset":

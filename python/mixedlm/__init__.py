@@ -12,6 +12,7 @@ from mixedlm.datasets import (
     load_sleepstudy,
     load_verbagg,
 )
+from mixedlm.diagnostics.collinearity import CollinearityResult, check_collinearity
 from mixedlm.diagnostics.fit_metrics import ICCResult, R2NakagawaResult, icc, r2_nakagawa
 from mixedlm.estimation.em_reml import EMResult, em_reml_simple
 from mixedlm.estimation.laplace import GQN, GQdk
@@ -42,6 +43,7 @@ from mixedlm.formula.parser import (
     subbars,
 )
 from mixedlm.inference.anova import AnovaResult, AnovaType3Result, anova, anova_type3
+from mixedlm.inference.boot_ci import bootCI
 from mixedlm.inference.bootstrap import bootMer, bootstrap_nlmer
 from mixedlm.inference.cross_validation import (
     CrossValidationFold,
@@ -175,6 +177,7 @@ __all__ = [
     "ggpredict",
     "allEffects",
     "bootMer",
+    "bootCI",
     "bootstrap_nlmer",
     "cross_validate",
     "make_folds",
@@ -192,6 +195,8 @@ __all__ = [
     "R2NakagawaResult",
     "icc",
     "ICCResult",
+    "check_collinearity",
+    "CollinearityResult",
     "powerSim",
     "powerCurve",
     "extend",
