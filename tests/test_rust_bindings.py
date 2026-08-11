@@ -569,6 +569,34 @@ class TestGLMMFunctions:
         assert np.isfinite(deviance)
         assert_allclose(fitted, 5.0, rtol=1e-6)
 
+    def test_pirls_poisson_preserves_large_means(self, simple_glmm_data):
+        d = simple_glmm_data
+        rng = np.random.default_rng(123)
+        eta = 3.0 + 0.3 * d["x"][:, 1]
+        d["y"] = rng.poisson(np.exp(eta)).astype(float)
+
+        beta, u, deviance, converged = pirls(
+            d["y"],
+            d["x"],
+            d["z_data"],
+            d["z_indices"],
+            d["z_indptr"],
+            d["z_shape"],
+            d["weights"],
+            d["offset"],
+            d["theta"],
+            d["n_levels"],
+            d["n_terms"],
+            d["correlated"],
+            "poisson",
+            "log",
+        )
+
+        assert converged
+        assert np.isfinite(deviance)
+        assert 2.5 < beta[0] < 3.5
+        assert np.max(np.exp(d["x"] @ beta)) > 10
+
     def test_pirls_gaussian(self, simple_glmm_data):
         d = simple_glmm_data
         d["y"] = np.random.randn(len(d["y"]))
@@ -1055,7 +1083,7 @@ class TestProfiledDevianceGradient:
             )
             grad_fd[i] = (dev_plus - dev_minus) / (2 * eps)
 
-        assert_allclose(grad, grad_fd, rtol=0.15)
+        assert_allclose(grad, grad_fd, rtol=1e-5, atol=1e-7)
 
     def test_gradient_multiple_theta(self):
         np.random.seed(42)
@@ -1131,7 +1159,7 @@ class TestProfiledDevianceGradient:
             )
             grad_fd[i] = (dev_plus - dev_minus) / (2 * eps)
 
-        assert_allclose(grad, grad_fd, rtol=0.15)
+        assert_allclose(grad, grad_fd, rtol=1e-5, atol=1e-7)
 
     def test_gradient_ml_vs_reml(self, simple_lmm_data):
         d = simple_lmm_data
