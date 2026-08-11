@@ -16,6 +16,7 @@ from mixedlm.inference.ddf import (
     satterthwaite_df,
 )
 from mixedlm.inference.drop1 import Drop1Result, drop1_glmer, drop1_lmer
+from mixedlm.inference.effects import allEffects, ggpredict
 from mixedlm.inference.emmeans import (
     ContrastResult,
     EmmeanResult,
@@ -49,6 +50,8 @@ __all__ = [
     "EmmeanResult",
     "ContrastResult",
     "emmeans",
+    "ggpredict",
+    "allEffects",
     "ProfileResult",
     "profile_lmer",
     "profile_glmer",
