@@ -54,6 +54,7 @@ if TYPE_CHECKING:
         pvalues_with_ddf,
         satterthwaite_df,
     )
+    from mixedlm.inference.effects import allEffects, ggpredict
     from mixedlm.inference.emmeans import Emmeans, emmeans
     from mixedlm.inference.profile import (
         Profile2DResult,
@@ -162,6 +163,8 @@ __all__ = [
     "AnovaType3Result",
     "emmeans",
     "Emmeans",
+    "ggpredict",
+    "allEffects",
     "bootMer",
     "bootstrap_nlmer",
     "satterthwaite_df",
@@ -351,6 +354,7 @@ _LAZY_EXPORTS: dict[str, tuple[str, str | None]] = {
         "pvalues_with_ddf",
         "satterthwaite_df",
     ),
+    **_module_exports("mixedlm.inference.effects", "allEffects", "ggpredict"),
     **_module_exports("mixedlm.inference.emmeans", "Emmeans", "emmeans"),
     **_module_exports(
         "mixedlm.inference.profile",
