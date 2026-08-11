@@ -30,6 +30,12 @@ def sdcor2cov(
     ndarray
         Covariance matrix (q x q).
 
+    Raises
+    ------
+    ValueError
+        If standard deviations are negative or non-finite, or if the
+        correlation matrix has an incompatible shape or non-finite values.
+
     Examples
     --------
     >>> sd = np.array([1.0, 2.0])
@@ -38,18 +44,28 @@ def sdcor2cov(
     array([[1. , 1. ],
            [1. , 4. ]])
     """
-    sd = np.asarray(sd)
+    sd = np.asarray(sd, dtype=np.float64)
+    if sd.ndim != 1:
+        raise ValueError(f"sd must be one-dimensional, got shape {sd.shape}")
+    if not np.all(np.isfinite(sd)):
+        raise ValueError("sd must contain only finite values")
+    if np.any(sd < 0):
+        raise ValueError("sd must contain non-negative values")
+
     q = len(sd)
 
     if corr is None:
-        return np.diag(sd**2)
+        return np.diag(np.square(sd))
 
-    corr = np.asarray(corr)
+    corr = np.asarray(corr, dtype=np.float64)
     if corr.shape != (q, q):
         raise ValueError(f"corr must be {q}x{q}, got {corr.shape}")
+    if not np.all(np.isfinite(corr)):
+        raise ValueError("corr must contain only finite values")
 
-    D = np.diag(sd)
-    return D @ corr @ D
+    cov = corr * sd[:, np.newaxis]
+    cov *= sd[np.newaxis, :]
+    return cov
 
 
 def cov2sdcor(
@@ -69,6 +85,12 @@ def cov2sdcor(
     corr : ndarray
         Correlation matrix (q x q).
 
+    Raises
+    ------
+    ValueError
+        If ``cov`` is non-square, non-finite, asymmetric, has a materially
+        negative diagonal, or pairs zero variance with non-zero covariance.
+
     Examples
     --------
     >>> cov = np.array([[1.0, 1.0], [1.0, 4.0]])
@@ -79,14 +101,31 @@ def cov2sdcor(
     array([[1. , 0.5],
            [0.5, 1. ]])
     """
-    cov = np.asarray(cov)
-    sd = np.sqrt(np.diag(cov))
+    cov = np.asarray(cov, dtype=np.float64)
+    if cov.ndim != 2 or cov.shape[0] != cov.shape[1]:
+        raise ValueError(f"cov must be a square matrix, got shape {cov.shape}")
+    if not np.all(np.isfinite(cov)):
+        raise ValueError("cov must contain only finite values")
 
-    with np.errstate(divide="ignore", invalid="ignore"):
-        D_inv = np.diag(1.0 / sd)
-        corr = D_inv @ cov @ D_inv
+    scale = max(1.0, float(np.max(np.abs(cov), initial=0.0)))
+    tol = 10.0 * np.finfo(np.float64).eps * max(1, cov.shape[0]) * scale
+    if not np.allclose(cov, cov.T, rtol=1e-10, atol=tol):
+        raise ValueError("cov must be symmetric")
 
-    corr = np.nan_to_num(corr, nan=0.0)
+    variances = np.diag(cov).copy()
+    if np.any(variances < -tol):
+        raise ValueError("cov must have a non-negative diagonal")
+    variances = np.maximum(variances, 0.0)
+    sd = np.sqrt(variances)
+
+    zero_variance = sd == 0
+    if np.any(zero_variance) and np.any(np.abs(cov[zero_variance]) > tol):
+        raise ValueError("zero-variance entries cannot have non-zero covariance")
+
+    corr = np.zeros_like(cov)
+    np.divide(cov, sd[:, np.newaxis], out=corr, where=sd[:, np.newaxis] > 0)
+    np.divide(corr, sd[np.newaxis, :], out=corr, where=sd[np.newaxis, :] > 0)
+
     np.fill_diagonal(corr, 1.0)
 
     return sd, corr

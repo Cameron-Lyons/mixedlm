@@ -47,6 +47,7 @@ if TYPE_CHECKING:
         subbars,
     )
     from mixedlm.inference.anova import AnovaResult, AnovaType3Result, anova, anova_type3
+    from mixedlm.inference.boot_ci import bootCI
     from mixedlm.inference.bootstrap import bootMer, bootstrap_nlmer
     from mixedlm.inference.cross_validation import (
         CrossValidationFold,
@@ -180,6 +181,7 @@ __all__ = [
     "ggpredict",
     "allEffects",
     "bootMer",
+    "bootCI",
     "bootstrap_nlmer",
     "cross_validate",
     "make_folds",
@@ -372,6 +374,7 @@ _LAZY_EXPORTS: dict[str, tuple[str, str | None]] = {
     **_module_exports(
         "mixedlm.inference.anova", "AnovaResult", "AnovaType3Result", "anova", "anova_type3"
     ),
+    **_module_exports("mixedlm.inference.boot_ci", "bootCI"),
     **_module_exports("mixedlm.inference.bootstrap", "bootMer", "bootstrap_nlmer"),
     **_module_exports(
         "mixedlm.inference.cross_validation",
