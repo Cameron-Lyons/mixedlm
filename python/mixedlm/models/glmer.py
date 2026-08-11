@@ -25,7 +25,7 @@ from mixedlm.models.lmer_types import (
     VarCorrGroup,
 )
 from mixedlm.models.result_mixin import MerResultMixin
-from mixedlm.models.shared_utils import is_singular_theta, symmetric_inverse
+from mixedlm.models.shared_utils import symmetric_inverse
 from mixedlm.utils import _get_signif_code
 
 
@@ -567,7 +567,7 @@ class GlmerResult(MerResultMixin):
     def VarCorr(self) -> GlmerVarCorr:
         groups: dict[str, VarCorrGroup] = {}
         for struct, cov in self._iter_random_cov_blocks(scale=1.0):
-            if struct.correlated:
+            if struct.correlated or struct.cov_type in ("cs", "ar1"):
                 stddevs = np.sqrt(np.diag(cov))
                 with np.errstate(divide="ignore", invalid="ignore"):
                     corr = cov / np.outer(stddevs, stddevs)
@@ -908,7 +908,7 @@ class GlmerResult(MerResultMixin):
         return plot_diagnostics(self, which=which, figsize=figsize)
 
     def isSingular(self, tol: float = 1e-4) -> bool:
-        return is_singular_theta(self.theta, self.matrices.random_structures, tol)
+        return self._is_singular_covariance(tol)
 
     def getME(self, name: str):
         """Extract model components by name.
@@ -983,19 +983,7 @@ class GlmerResult(MerResultMixin):
         elif name in ("q", "n_random"):
             return self.matrices.n_random
         elif name == "lower":
-            bounds = []
-            for struct in self.matrices.random_structures:
-                q = struct.n_terms
-                if struct.correlated:
-                    for i in range(q):
-                        for j in range(i + 1):
-                            if i == j:
-                                bounds.append(0.0)
-                            else:
-                                bounds.append(-np.inf)
-                else:
-                    bounds.extend([0.0] * q)
-            return np.array(bounds)
+            return self._theta_lower_bounds()
         elif name == "weights":
             return self.matrices.weights.copy()
         elif name == "offset":
