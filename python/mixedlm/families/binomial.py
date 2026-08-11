@@ -8,6 +8,9 @@ from mixedlm.families.base import Family, LogitLink
 
 
 class Binomial(Family):
+    mu_lower_bound = 0.0
+    mu_upper_bound = 1.0
+
     def __init__(self) -> None:
         self.link = LogitLink()
 
