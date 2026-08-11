@@ -500,8 +500,161 @@ class TestSimulateFormula:
 
         np.testing.assert_array_equal(result1["Reaction"].values, result2["Reaction"].values)
 
+    @pytest.mark.parametrize(
+        ("family", "response_kind"),
+        [
+            (families.Gaussian(), "continuous"),
+            (families.Binomial(), "binary"),
+            (families.Poisson(), "count"),
+            (families.NegativeBinomial(theta=2.0), "count"),
+            (families.Gamma(), "positive"),
+            (families.GammaInverse(), "positive"),
+            (families.InverseGaussian(), "positive"),
+            (families.InverseGaussianCanonical(), "positive"),
+        ],
+    )
+    def test_simulate_formula_supports_builtin_families(self, family, response_kind) -> None:
+        from mixedlm.models.modular import simulate_formula
+
+        simulations = simulate_formula(
+            "Reaction ~ Days + (1 | Subject)",
+            SLEEPSTUDY,
+            beta=np.array([0.2, 0.0]),
+            theta=np.array([0.0]),
+            sigma=0.5,
+            family=family,
+            nsim=3,
+            seed=42,
+        )
+        values = np.concatenate([simulation["Reaction"].to_numpy() for simulation in simulations])
+
+        assert np.all(np.isfinite(values))
+        if response_kind == "binary":
+            assert np.all((values == 0) | (values == 1))
+        elif response_kind == "count":
+            assert np.all(values >= 0)
+            assert np.all(values == values.astype(int))
+        elif response_kind == "positive":
+            assert np.all(values > 0)
+
+    def test_simulate_formula_preserves_global_random_state(self) -> None:
+        from mixedlm.models.modular import simulate_formula
+
+        np.random.seed(123)
+        expected = np.random.random(5)
+        np.random.seed(123)
+
+        simulate_formula(
+            "Reaction ~ Days + (1 | Subject)",
+            SLEEPSTUDY,
+            theta=np.array([0.0]),
+            seed=999,
+        )
+        observed = np.random.random(5)
+
+        np.testing.assert_array_equal(observed, expected)
+
+    def test_simulate_formula_orders_uncorrelated_effects_by_level(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from mixedlm.models.modular import simulate_formula
+
+        class StubRNG:
+            def standard_normal(self, size):
+                assert size == 4
+                return np.array([1.0, 10.0, 2.0, 20.0])
+
+            def normal(self, loc, scale):
+                return np.asarray(loc)
+
+        data = pd.DataFrame(
+            {
+                "y": np.zeros(4),
+                "x": [0.0, 1.0, 0.0, 1.0],
+                "group": ["a", "a", "b", "b"],
+            }
+        )
+        monkeypatch.setattr(np.random, "default_rng", lambda seed: StubRNG())
+
+        simulated = simulate_formula(
+            "y ~ 1 + (1 + x || group)",
+            data,
+            beta=np.array([0.0]),
+            theta=np.array([2.0, 3.0]),
+            sigma=1.0,
+            family=families.Gaussian(),
+            seed=42,
+        )
+
+        np.testing.assert_allclose(simulated["y"], [2.0, 32.0, 4.0, 64.0])
+
+    def test_simulate_formula_uses_lower_triangular_theta_order(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from mixedlm.models.modular import simulate_formula
+
+        class StubRNG:
+            def standard_normal(self, size):
+                assert size == 3
+                return np.array([1.0, 10.0, 100.0])
+
+            def normal(self, loc, scale):
+                return np.asarray(loc)
+
+        data = pd.DataFrame(
+            {
+                "y": np.zeros(3),
+                "x": [0.0, 1.0, 0.0],
+                "z": [0.0, 0.0, 1.0],
+                "group": ["a", "a", "a"],
+            }
+        )
+        monkeypatch.setattr(np.random, "default_rng", lambda seed: StubRNG())
+
+        simulated = simulate_formula(
+            "y ~ 1 + (1 + x + z | group)",
+            data,
+            beta=np.array([0.0]),
+            theta=np.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0]),
+            sigma=1.0,
+            family=families.Gaussian(),
+            seed=42,
+        )
+
+        np.testing.assert_allclose(simulated["y"], [1.0, 33.0, 655.0])
+
+    @pytest.mark.parametrize(
+        ("kwargs", "message"),
+        [
+            ({"nsim": 0}, "nsim must be at least 1"),
+            ({"sigma": -1.0}, "sigma must be finite and non-negative"),
+            ({"sigma": np.inf}, "sigma must be finite and non-negative"),
+            ({"beta": np.array([1.0])}, "beta has length 1; expected 2"),
+            ({"theta": np.array([1.0, 2.0])}, "theta must contain 1 parameters, got 2"),
+            ({"theta": np.array([np.nan])}, "theta must contain only finite values"),
+        ],
+    )
+    def test_simulate_formula_validates_inputs(self, kwargs, message) -> None:
+        from mixedlm.models.modular import simulate_formula
+
+        with pytest.raises(ValueError, match=message):
+            simulate_formula(
+                "Reaction ~ Days + (1 | Subject)",
+                SLEEPSTUDY,
+                seed=42,
+                **kwargs,
+            )
+
     def test_simulate_formula_correlated_theta_order(self, monkeypatch) -> None:
         from mixedlm.models.modular import simulate_formula
+
+        class StubRNG:
+            def standard_normal(self, size):
+                assert size == 6
+                return np.ones(6)
+
+            def normal(self, loc, scale):
+                return np.asarray(loc)
 
         data = pd.DataFrame(
             {
@@ -512,8 +665,7 @@ class TestSimulateFormula:
                 "group": ["A", "A", "A", "B", "B", "B"],
             }
         )
-        draws = iter([np.ones(6), np.zeros(6)])
-        monkeypatch.setattr(np.random, "randn", lambda *shape: next(draws))
+        monkeypatch.setattr(np.random, "default_rng", lambda seed: StubRNG())
 
         result = simulate_formula(
             "y ~ 0 + x + z + w + (0 + x + z + w | group)",
@@ -527,6 +679,14 @@ class TestSimulateFormula:
     def test_simulate_formula_uncorrelated_level_order(self, monkeypatch) -> None:
         from mixedlm.models.modular import simulate_formula
 
+        class StubRNG:
+            def standard_normal(self, size):
+                assert size == 4
+                return np.array([1, 2, 3, 4])
+
+            def normal(self, loc, scale):
+                return np.asarray(loc)
+
         data = pd.DataFrame(
             {
                 "y": np.zeros(4),
@@ -535,8 +695,7 @@ class TestSimulateFormula:
                 "group": ["A", "A", "B", "B"],
             }
         )
-        draws = iter([np.array([1, 2, 3, 4]), np.zeros(4)])
-        monkeypatch.setattr(np.random, "randn", lambda *shape: next(draws))
+        monkeypatch.setattr(np.random, "default_rng", lambda seed: StubRNG())
 
         result = simulate_formula(
             "y ~ 0 + x + z + (0 + x + z || group)",
@@ -551,6 +710,14 @@ class TestSimulateFormula:
         from mixedlm import set_cov_type
         from mixedlm.models.modular import simulate_formula
 
+        class StubRNG:
+            def standard_normal(self, size):
+                assert size == 2
+                return np.array([1, 0])
+
+            def normal(self, loc, scale):
+                return np.asarray(loc)
+
         data = pd.DataFrame(
             {
                 "y": np.zeros(2),
@@ -560,8 +727,7 @@ class TestSimulateFormula:
             }
         )
         formula = set_cov_type("y ~ 0 + x + z + (0 + x + z | group)", "cs")
-        draws = iter([np.array([1, 0]), np.zeros(2)])
-        monkeypatch.setattr(np.random, "randn", lambda *shape: next(draws))
+        monkeypatch.setattr(np.random, "default_rng", lambda seed: StubRNG())
 
         result = simulate_formula(formula, data, beta=np.zeros(2), theta=np.array([2, 0.5]))
 

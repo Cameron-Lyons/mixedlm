@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - Arbitrary linear fixed-effect hypothesis tests with named or matrix constraints
+- Grouped-binomial `successes / trials` responses with automatic trial weights and validation
+- Configurable named links and documented family/link helper APIs
+- Formula-driven simulation now supports every built-in response family
+- New-data LMM and GLMM predictions accept numeric, scalar, or column-based offsets
 - Vectorized AIC/AICc/BIC model rankings with normalized weights and evidence sets
 - Nakagawa marginal/conditional R² and adjusted/unadjusted ICC for all model families
 - Weighted VIF/GVIF, tolerance, severity, and condition diagnostics for all model types
@@ -22,10 +26,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Root-level CHANGELOG.md
 
 ### Changed
+- Multi-draw GLMM simulation now batches random effects and response generation
 - Vectorized grouping-level factorization and nested-key construction for sparse designs
 - EM-REML algorithm generalized from single random intercept to arbitrary unstructured covariance models
 - Replaced the Py-BOBYQA dependency and default optimizer with SciPy COBYQA
 - Reduced unused and redundant Python and Rust dependencies
+- Top-level public exports now load on demand to reduce startup time and memory use
 - Vectorized pandas nested-group construction for faster large model setup
 - Consolidated duplicate CI and security checks while preserving coverage
 
@@ -39,6 +45,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Nonlinear mixed models now apply offsets consistently to responses, fitted values, simulations, refits, covariance estimates, and leverage diagnostics
 
 ### Fixed
+- Canonical Gamma and inverse-Gaussian variants now simulate from their family distributions
+- LMM and GLMM simulations now preserve model offsets in generated responses
+- Formula simulation now preserves global random state and random-effect coefficient ordering
+- Nonlinear mixed-model optimization now uses a deterministic profiled Laplace deviance with consistent relative covariance scaling
 - GLMM PIRLS, Laplace, and adaptive-quadrature calculations now use the covariance factor
   in spherical random-effect coordinates, with consistent likelihood normalization and
   deterministic outer optimization

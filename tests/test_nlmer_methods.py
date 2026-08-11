@@ -17,7 +17,7 @@ def create_nlme_data(n_groups: int = 8, n_per_group: int = 10, seed: int = 42) -
         r0 = 180 + np.random.randn() * 10
         lrc = -3 + np.random.randn() * 0.2
         for t in np.linspace(0, 10, n_per_group):
-            y = asym - (asym - r0) * np.exp(np.exp(lrc) * t) + np.random.randn() * 5
+            y = asym + (r0 - asym) * np.exp(-np.exp(lrc) * t) + np.random.randn() * 5
             data_rows.append({"subject": f"S{subj + 1}", "time": t, "y": y})
     return pd.DataFrame(data_rows)
 
@@ -113,6 +113,24 @@ class TestNlmerSimulate:
 
         sim = result.simulate(nsim=1, seed=123, re_form="NA")
         assert sim.shape == (len(NLME_DATA),)
+
+    def test_simulate_uses_inverse_weight_residual_variance(self) -> None:
+        model = nlme.SSasymp()
+        weights = np.ones(len(NLME_DATA))
+        weights[1] = 4.0
+        result = nlmer(
+            model,
+            NLME_DATA,
+            x_var="time",
+            y_var="y",
+            group_var="subject",
+            weights=weights,
+        )
+
+        simulations = result.simulate(nsim=1500, seed=123, use_re=False)
+        empirical_scale = np.std(simulations, axis=1)
+
+        assert empirical_scale[0] / empirical_scale[1] == pytest.approx(2.0, rel=0.1)
 
 
 class TestNlmerRefit:
@@ -378,6 +396,9 @@ class TestNlmerWeightsOffset:
         w = result.weights()
         assert np.allclose(w, weights)
 
+        expected_pearson = np.sqrt(weights) * result.residuals("response") / result.sigma
+        assert np.allclose(result.residuals("pearson"), expected_pearson)
+
     def test_offset_default(self) -> None:
         model = nlme.SSasymp()
         result = nlmer(model, NLME_DATA, x_var="time", y_var="y", group_var="subject")
@@ -430,9 +451,9 @@ class TestNlmerWeightsOffset:
         adjusted_refitted = without_offset.refit(adjusted_simulated)
         assert refitted.converged
         assert adjusted_refitted.converged
-        np.testing.assert_allclose(refitted.phi, adjusted_refitted.phi)
-        np.testing.assert_allclose(refitted.theta, adjusted_refitted.theta)
-        np.testing.assert_allclose(refitted.b, adjusted_refitted.b)
+        np.testing.assert_allclose(refitted.phi, adjusted_refitted.phi, rtol=1e-6, atol=1e-6)
+        np.testing.assert_allclose(refitted.theta, adjusted_refitted.theta, rtol=1e-6, atol=1e-6)
+        np.testing.assert_allclose(refitted.b, adjusted_refitted.b, rtol=1e-6, atol=1e-6)
         np.testing.assert_allclose(refitted.deviance, adjusted_refitted.deviance)
         np.testing.assert_allclose(refitted.y, simulated)
         np.testing.assert_allclose(refitted.model_frame()["y"], simulated)
@@ -447,6 +468,25 @@ class TestNlmerWeightsOffset:
                 y_var="y",
                 group_var="subject",
                 weights=np.array([1, 2, 3]),
+            )
+
+    @pytest.mark.parametrize(
+        ("weights", "message"),
+        [
+            (np.zeros(len(NLME_DATA)), "strictly positive"),
+            (np.full(len(NLME_DATA), np.inf), "finite values"),
+            (np.ones((len(NLME_DATA), 1)), "one-dimensional"),
+        ],
+    )
+    def test_invalid_weights_raise(self, weights, message) -> None:
+        with pytest.raises(ValueError, match=message):
+            nlmer(
+                nlme.SSasymp(),
+                NLME_DATA,
+                x_var="time",
+                y_var="y",
+                group_var="subject",
+                weights=weights,
             )
 
     def test_offset_wrong_length_raises(self) -> None:
