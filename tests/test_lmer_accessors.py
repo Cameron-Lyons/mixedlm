@@ -545,6 +545,7 @@ class TestIsSingular:
         result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
 
         assert isinstance(result.isSingular(), bool)
+        assert result.is_singular() == result.isSingular()
 
     def test_lmer_singular_with_high_tolerance(self) -> None:
         result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
@@ -588,6 +589,7 @@ class TestIsSingular:
         result = glmer("y ~ period + (1 | herd)", CBPP, family=families.Binomial())
 
         assert isinstance(result.isSingular(), bool)
+        assert result.is_singular() == result.isSingular()
 
     def test_glmer_singular_with_high_tolerance(self) -> None:
         result = glmer("y ~ period + (1 | herd)", CBPP, family=families.Binomial())

@@ -15,6 +15,8 @@ from mixedlm.utils.dataframe import concat_columns_as_string, get_column_numpy, 
 if TYPE_CHECKING:
     import pandas as pd
 
+    from mixedlm.inference.profile_types import ProfileResult
+
 
 class MerResultMixin:
     formula: Formula
@@ -366,6 +368,39 @@ class MerResultMixin:
 
     def isNLMM(self) -> bool:
         return self._IS_NLMM
+
+    def isSingular(self, tol: float = 1e-4) -> bool:
+        raise NotImplementedError
+
+    def is_singular(self, tol: float = 1e-4) -> bool:
+        """Return whether any variance component is near its boundary."""
+        return self.isSingular(tol=tol)
+
+    def profile(
+        self,
+        which: str | list[str] | None = None,
+        n_points: int = 20,
+        level: float = 0.95,
+        n_jobs: int = 1,
+    ) -> dict[str, ProfileResult]:
+        """Compute fixed-effect likelihood profiles for this fitted model."""
+        from mixedlm.inference.profile import profile_glmer, profile_lmer
+        from mixedlm.models.glmer import GlmerResult
+        from mixedlm.models.lmer import LmerResult
+
+        if isinstance(self, LmerResult):
+            return profile_lmer(
+                self,
+                which=which,
+                n_points=n_points,
+                level=level,
+                n_jobs=n_jobs,
+            )
+        if isinstance(self, GlmerResult):
+            if n_jobs != 1:
+                raise ValueError("Parallel profiling is currently supported only for LmerResult")
+            return profile_glmer(self, which=which, n_points=n_points, level=level)
+        raise TypeError(f"Profiling is not supported for {type(self).__name__}")
 
     def _npar_count(self, include_sigma: bool = False) -> int:
         n = len(self.beta) + len(self.theta)
