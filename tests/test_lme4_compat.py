@@ -1,3 +1,5 @@
+from collections.abc import Callable
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -583,6 +585,21 @@ class TestDatasets:
         assert "id" in data.columns
         assert "item" in data.columns
         assert len(data) > 0
+
+    @pytest.mark.parametrize(
+        "loader",
+        [load_arabidopsis, load_grouseticks, load_verbagg],
+    )
+    def test_synthetic_loader_rng_isolation(self, loader: Callable[[], pd.DataFrame]) -> None:
+        np.random.seed(20260803)
+        expected = np.random.random(4)
+
+        np.random.seed(20260803)
+        first = loader()
+        observed = np.random.random(4)
+
+        np.testing.assert_array_equal(observed, expected)
+        pd.testing.assert_frame_equal(first, loader())
 
 
 class TestIsNested:
