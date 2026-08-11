@@ -21,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - EM-REML algorithm generalized from single random intercept to arbitrary unstructured covariance models
 - Replaced the Py-BOBYQA dependency and default optimizer with SciPy COBYQA
 - Reduced unused and redundant Python and Rust dependencies
+- Top-level public exports now load on demand to reduce startup time and memory use
 - Vectorized pandas nested-group construction for faster large model setup
 - Consolidated duplicate CI and security checks while preserving coverage
 
