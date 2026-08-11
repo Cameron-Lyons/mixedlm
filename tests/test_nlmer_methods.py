@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from unittest.mock import patch
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -34,6 +36,43 @@ def create_offset_nlme_data(seed: int = 20260803) -> pd.DataFrame:
 
 
 NLME_DATA = create_nlme_data()
+
+
+class TestNlmerPredict:
+    def test_grouped_prediction_batches_rows_and_preserves_order(self) -> None:
+        model = nlme.SSasymp()
+        result = nlmer(
+            model,
+            NLME_DATA,
+            x_var="time",
+            y_var="y",
+            group_var="subject",
+            random_params=["Asym", "R0"],
+        )
+        first_group, second_group = result.group_levels[:2]
+        new_data = pd.DataFrame(
+            {
+                "time": [0.5, 1.5, 2.5, 3.5, 4.5, 5.5],
+                "subject": [first_group, "new-a", second_group, first_group, "new-b", second_group],
+            }
+        )
+
+        expected = np.empty(len(new_data), dtype=np.float64)
+        group_lookup = {group: index for index, group in enumerate(result.group_levels)}
+        for row, (x_value, group) in enumerate(
+            zip(new_data["time"], new_data["subject"], strict=True)
+        ):
+            params = result.phi.copy()
+            group_index = group_lookup.get(group)
+            if group_index is not None:
+                params[result.random_params] += result.b[group_index]
+            expected[row] = model.predict(params, np.array([x_value]))[0]
+
+        with patch.object(model, "predict", wraps=model.predict) as predict:
+            actual = result.predict(new_data, group_var="subject")
+
+        assert np.allclose(actual, expected)
+        assert predict.call_count == 3
 
 
 class TestNlmerSimulate:

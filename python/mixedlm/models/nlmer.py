@@ -124,12 +124,32 @@ class NlmerResult:
     def predict(
         self,
         newdata: pd.DataFrame | None = None,
-        x_var: str = "x",
+        x_var: str | None = None,
         group_var: str | None = None,
     ) -> NDArray[np.floating]:
+        """Predict responses for new observations.
+
+        Parameters
+        ----------
+        newdata : DataFrame, optional
+            New observations. If omitted, return fitted values for the
+            original data.
+        x_var : str, optional
+            Predictor column. Defaults to the column used when fitting.
+        group_var : str, optional
+            Grouping column used to add fitted random effects for known
+            levels. Unknown levels receive population-level predictions.
+
+        Returns
+        -------
+        NDArray
+            Predicted responses in the same row order as ``newdata``.
+        """
         if newdata is None:
             return self.fitted()
 
+        if x_var is None:
+            x_var = self._x_var
         x_new = newdata[x_var].to_numpy(dtype=np.float64)
         n_new = len(x_new)
 
@@ -137,17 +157,19 @@ class NlmerResult:
             pred = self.model.predict(self.phi, x_new)
         else:
             groups_new = newdata[group_var].astype(str).tolist()
-            pred = np.zeros(n_new, dtype=np.float64)
+            group_lookup = {group: index for index, group in enumerate(self.group_levels)}
+            rows_by_group: dict[int | None, list[int]] = {}
+            for row, group in enumerate(groups_new):
+                rows_by_group.setdefault(group_lookup.get(group), []).append(row)
 
-            for i, g in enumerate(groups_new):
-                if g in self.group_levels:
-                    g_idx = self.group_levels.index(g)
+            pred = np.empty(n_new, dtype=np.float64)
+            for group_index, rows in rows_by_group.items():
+                row_indices = np.asarray(rows, dtype=np.intp)
+                params = self.phi
+                if group_index is not None:
                     params = self.phi.copy()
-                    for j, p_idx in enumerate(self.random_params):
-                        params[p_idx] += self.b[g_idx, j]
-                    pred[i] = self.model.predict(params, np.array([x_new[i]]))[0]
-                else:
-                    pred[i] = self.model.predict(self.phi, np.array([x_new[i]]))[0]
+                    params[self.random_params] += self.b[group_index]
+                pred[row_indices] = self.model.predict(params, x_new[row_indices])
 
         return pred
 
