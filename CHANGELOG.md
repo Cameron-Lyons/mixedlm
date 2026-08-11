@@ -25,6 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - LMM likelihood reporting and fixed-effect profiles now use the corrected profiled criterion consistently
 - Exported influence diagnostics now use the fitted mixed-model projection, prior weights, random effects, and offsets
 - GLMM covariance, leverage, conditional variance, Pearson residuals, and influence diagnostics now honor prior weights
+- One- and two-parameter LMM profiles now honor prior weights and offsets, including weight-scale invariant REML normalization
 
 ## [1.1.0] - 2026-01-27
 
