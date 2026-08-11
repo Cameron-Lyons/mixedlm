@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+from functools import lru_cache, wraps
+
 import pandas as pd
 
 
@@ -15,6 +18,23 @@ def _ensure_object_strings(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _copy_cached_dataset(
+    loader: Callable[[], pd.DataFrame],
+) -> Callable[[], pd.DataFrame]:
+    """Cache a private dataset prototype and return an independent copy."""
+
+    @lru_cache(maxsize=1)
+    def prototype() -> pd.DataFrame:
+        return loader()
+
+    @wraps(loader)
+    def load_copy() -> pd.DataFrame:
+        return prototype().copy(deep=True)
+
+    return load_copy
+
+
+@_copy_cached_dataset
 def load_sleepstudy() -> pd.DataFrame:
     """Load the sleepstudy dataset from lme4.
 
@@ -255,6 +275,7 @@ def load_sleepstudy() -> pd.DataFrame:
     return _ensure_object_strings(pd.DataFrame(data))
 
 
+@_copy_cached_dataset
 def load_cbpp() -> pd.DataFrame:
     """Load the cbpp dataset from lme4.
 
@@ -472,6 +493,7 @@ def load_cbpp() -> pd.DataFrame:
     return _ensure_object_strings(pd.DataFrame(data))
 
 
+@_copy_cached_dataset
 def load_dyestuff() -> pd.DataFrame:
     """Load the Dyestuff dataset from lme4.
 
@@ -548,6 +570,7 @@ def load_dyestuff() -> pd.DataFrame:
     return _ensure_object_strings(pd.DataFrame(data))
 
 
+@_copy_cached_dataset
 def load_dyestuff2() -> pd.DataFrame:
     """Load the Dyestuff2 dataset from lme4.
 
@@ -608,6 +631,7 @@ def load_dyestuff2() -> pd.DataFrame:
     return _ensure_object_strings(pd.DataFrame(data))
 
 
+@_copy_cached_dataset
 def load_penicillin() -> pd.DataFrame:
     """Load the Penicillin dataset from lme4.
 
@@ -812,6 +836,7 @@ def load_penicillin() -> pd.DataFrame:
     return _ensure_object_strings(pd.DataFrame(data))
 
 
+@_copy_cached_dataset
 def load_cake() -> pd.DataFrame:
     """Load the cake dataset from lme4.
 
@@ -1145,6 +1170,7 @@ def load_cake() -> pd.DataFrame:
     return _ensure_object_strings(pd.DataFrame(data))
 
 
+@_copy_cached_dataset
 def load_pastes() -> pd.DataFrame:
     """Load the Pastes dataset from lme4.
 
@@ -1264,6 +1290,7 @@ def load_pastes() -> pd.DataFrame:
     return _ensure_object_strings(pd.DataFrame(data))
 
 
+@_copy_cached_dataset
 def load_insteval() -> pd.DataFrame:
     """Load a subset of the InstEval dataset from lme4.
 
@@ -1631,6 +1658,7 @@ def load_insteval() -> pd.DataFrame:
     )
 
 
+@_copy_cached_dataset
 def load_arabidopsis() -> pd.DataFrame:
     """Load the Arabidopsis dataset from lme4.
 
@@ -1672,7 +1700,7 @@ def load_arabidopsis() -> pd.DataFrame:
     """
     import numpy as np
 
-    np.random.seed(42)
+    rng = np.random.RandomState(42)
 
     n = 625
     gens = [f"g{i}" for i in range(1, 25)]
@@ -1681,17 +1709,17 @@ def load_arabidopsis() -> pd.DataFrame:
     poessions = [f"p{i}" for i in range(1, 10)]
 
     data = {
-        "reg": np.random.choice(regs, n).tolist(),
-        "poession": np.random.choice(poessions, n).tolist(),
-        "gen": np.random.choice(gens, n).tolist(),
-        "rack": np.random.choice(racks, n).tolist(),
-        "nutrient": np.random.choice([1, 8], n).tolist(),
-        "apts": np.random.choice([0, 1, 2], n, p=[0.7, 0.2, 0.1]).tolist(),
-        "status": np.random.choice([1, 2], n, p=[0.8, 0.2]).tolist(),
+        "reg": rng.choice(regs, n).tolist(),
+        "poession": rng.choice(poessions, n).tolist(),
+        "gen": rng.choice(gens, n).tolist(),
+        "rack": rng.choice(racks, n).tolist(),
+        "nutrient": rng.choice([1, 8], n).tolist(),
+        "apts": rng.choice([0, 1, 2], n, p=[0.7, 0.2, 0.1]).tolist(),
+        "status": rng.choice([1, 2], n, p=[0.8, 0.2]).tolist(),
     }
 
-    gen_effects = {g: np.random.normal(0, 0.5) for g in gens}
-    rack_effects = {r: np.random.normal(0, 0.2) for r in racks}
+    gen_effects = {g: rng.normal(0, 0.5) for g in gens}
+    rack_effects = {r: rng.normal(0, 0.2) for r in racks}
 
     fruits = []
     for i in range(n):
@@ -1702,16 +1730,17 @@ def load_arabidopsis() -> pd.DataFrame:
         mu += rack_effects[data["rack"][i]]
         mu = max(0.1, mu)
 
-        if np.random.random() < 0.15:
+        if rng.random() < 0.15:
             fruits.append(0)
         else:
-            fruits.append(int(np.random.poisson(np.exp(mu))))
+            fruits.append(int(rng.poisson(np.exp(mu))))
 
     data["total_fruits"] = fruits
 
     return _ensure_object_strings(pd.DataFrame(data))
 
 
+@_copy_cached_dataset
 def load_grouseticks() -> pd.DataFrame:
     """Load the grouseticks dataset from lme4.
 
@@ -1752,7 +1781,7 @@ def load_grouseticks() -> pd.DataFrame:
     """
     import numpy as np
 
-    np.random.seed(123)
+    rng = np.random.RandomState(123)
 
     n_broods = 118
     locations = [f"L{i}" for i in range(1, 64)]
@@ -1767,17 +1796,17 @@ def load_grouseticks() -> pd.DataFrame:
         "cTICKS": [],
     }
 
-    brood_effects = {f"B{i}": np.random.normal(0, 0.8) for i in range(1, n_broods + 1)}
-    loc_effects = {loc: np.random.normal(0, 0.5) for loc in locations}
+    brood_effects = {f"B{i}": rng.normal(0, 0.8) for i in range(1, n_broods + 1)}
+    loc_effects = {loc: rng.normal(0, 0.5) for loc in locations}
 
     idx = 1
     for brood_num in range(1, n_broods + 1):
         brood = f"B{brood_num}"
-        location = np.random.choice(locations)
-        year = np.random.choice(years)
-        height = np.random.uniform(350, 550)
+        location = rng.choice(locations)
+        year = rng.choice(years)
+        height = rng.uniform(350, 550)
 
-        n_chicks = np.random.randint(1, 6)
+        n_chicks = rng.randint(1, 6)
 
         for _ in range(n_chicks):
             mu = 1.5
@@ -1790,7 +1819,7 @@ def load_grouseticks() -> pd.DataFrame:
             elif year == "97":
                 mu -= 0.2
 
-            ticks = int(np.random.poisson(max(0.1, np.exp(mu))))
+            ticks = int(rng.poisson(max(0.1, np.exp(mu))))
 
             data["INDEX"].append(idx)
             data["LOCATION"].append(location)
@@ -1803,6 +1832,7 @@ def load_grouseticks() -> pd.DataFrame:
     return _ensure_object_strings(pd.DataFrame(data))
 
 
+@_copy_cached_dataset
 def load_verbagg() -> pd.DataFrame:
     """Load the VerbAgg dataset from lme4.
 
@@ -1848,7 +1878,7 @@ def load_verbagg() -> pd.DataFrame:
     """
     import numpy as np
 
-    np.random.seed(456)
+    rng = np.random.RandomState(456)
 
     n_subjects = 316
     btypes = ["curse", "scold", "shout"]
@@ -1873,13 +1903,13 @@ def load_verbagg() -> pd.DataFrame:
         "r2": [],
     }
 
-    subject_effects = {f"S{i}": np.random.normal(0, 1.0) for i in range(1, n_subjects + 1)}
-    item_effects = {item: np.random.normal(0, 0.5) for item in items}
+    subject_effects = {f"S{i}": rng.normal(0, 1.0) for i in range(1, n_subjects + 1)}
+    item_effects = {item: rng.normal(0, 0.5) for item in items}
 
     for subj_num in range(1, n_subjects + 1):
         subj_id = f"S{subj_num}"
-        anger = np.random.randint(20, 80)
-        gender = np.random.choice(["M", "F"])
+        anger = rng.randint(20, 80)
+        gender = rng.choice(["M", "F"])
 
         for item_idx, item in enumerate(items):
             btype = btypes[item_idx // 4]
@@ -1897,9 +1927,9 @@ def load_verbagg() -> pd.DataFrame:
 
             p = 1 / (1 + np.exp(-prob))
 
-            if np.random.random() < p * 0.3:
+            if rng.random() < p * 0.3:
                 resp = 2
-            elif np.random.random() < p:
+            elif rng.random() < p:
                 resp = 1
             else:
                 resp = 0
