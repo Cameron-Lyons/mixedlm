@@ -81,7 +81,11 @@ def _build_scipy_options(
     xtol: float,
     opt_ctrl: dict[str, Any],
 ) -> dict[str, Any]:
-    options: dict[str, Any] = {"maxiter": maxiter}
+    options: dict[str, Any]
+    if optimizer == "TNC":
+        options = {"maxfun": maxiter, "ftol": ftol, "gtol": gtol, "xtol": xtol}
+    else:
+        options = {"maxiter": maxiter}
 
     if optimizer in ("L-BFGS-B", "BFGS"):
         options["gtol"] = gtol
@@ -89,15 +93,42 @@ def _build_scipy_options(
     if optimizer == "L-BFGS-B":
         options["ftol"] = ftol
 
-    if optimizer in ("Nelder-Mead", "Powell"):
+    if optimizer == "Nelder-Mead":
         options["xatol"] = xtol
         options["fatol"] = ftol
+
+    if optimizer == "Powell":
+        options["xtol"] = xtol
+        options["ftol"] = ftol
 
     if optimizer == "trust-constr":
         options["gtol"] = gtol
         options["xtol"] = xtol
 
-    options.update(opt_ctrl)
+    if optimizer == "SLSQP":
+        options["ftol"] = ftol
+
+    if optimizer == "COBYLA":
+        options["tol"] = xtol
+
+    if optimizer.startswith("nloptwrap_"):
+        options["ftol"] = ftol
+        options["xtol"] = xtol
+
+    overrides = dict(opt_ctrl)
+    if optimizer == "TNC" and "maxiter" in overrides:
+        if "maxfun" not in overrides:
+            overrides["maxfun"] = overrides["maxiter"]
+        del overrides["maxiter"]
+    if optimizer == "Powell":
+        if "xatol" in overrides and "xtol" not in overrides:
+            overrides["xtol"] = overrides["xatol"]
+        if "fatol" in overrides and "ftol" not in overrides:
+            overrides["ftol"] = overrides["fatol"]
+        overrides.pop("xatol", None)
+        overrides.pop("fatol", None)
+
+    options.update(overrides)
     return options
 
 
@@ -198,11 +229,15 @@ class LmerControl:
             check_rankX=self.check_rankX,
         )
 
-    def get_scipy_options(self) -> dict[str, Any]:
+    def get_scipy_options(
+        self,
+        optimizer: str | None = None,
+        maxiter: int | None = None,
+    ) -> dict[str, Any]:
         """Get options dict for scipy.optimize.minimize."""
         return _build_scipy_options(
-            optimizer=self.optimizer,
-            maxiter=self.maxiter,
+            optimizer=optimizer if optimizer is not None else self.optimizer,
+            maxiter=maxiter if maxiter is not None else self.maxiter,
             ftol=self.ftol,
             gtol=self.gtol,
             xtol=self.xtol,
@@ -319,11 +354,15 @@ class GlmerControl:
             check_rankX=self.check_rankX,
         )
 
-    def get_scipy_options(self) -> dict[str, Any]:
+    def get_scipy_options(
+        self,
+        optimizer: str | None = None,
+        maxiter: int | None = None,
+    ) -> dict[str, Any]:
         """Get options dict for scipy.optimize.minimize."""
         return _build_scipy_options(
-            optimizer=self.optimizer,
-            maxiter=self.maxiter,
+            optimizer=optimizer if optimizer is not None else self.optimizer,
+            maxiter=maxiter if maxiter is not None else self.maxiter,
             ftol=self.ftol,
             gtol=self.gtol,
             xtol=self.xtol,

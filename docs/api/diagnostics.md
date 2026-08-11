@@ -43,6 +43,80 @@ The adjusted ICC excludes fixed-effect variance from its denominator. The unadju
 uses total fixed, random, and residual variance. Group-specific dictionaries partition each
 overall coefficient for crossed or nested random effects.
 
+## Generalized-Model Diagnostics
+
+### check_overdispersion
+
+Compute a weighted Pearson chi-squared dispersion diagnostic for a fitted GLMM.
+
+```python
+result = diagnostics.check_overdispersion(
+    model,
+    alpha=0.05,
+    alternative="two-sided",
+)
+
+print(result.dispersion_ratio)
+print(result.p_value)
+print(result.ci_low, result.ci_high)
+```
+
+The statistic is
+
+\[
+X^2 = \sum_i w_i \frac{(y_i - \hat{\mu}_i)^2}{V(\hat{\mu}_i)},
+\]
+
+and the dispersion ratio is \(X^2\) divided by the residual degrees of
+freedom. Residual degrees of freedom subtract both fixed-effect and estimated
+random-effect covariance parameters. The result exposes:
+
+- `pearson_chi_square`: weighted Pearson statistic
+- `residual_df`: residual degrees of freedom
+- `dispersion_ratio`: estimated conditional dispersion
+- `ci_low`, `ci_high`: chi-squared confidence interval for the ratio
+- `p_value`: p-value for the requested alternative
+- `status`: `"overdispersed"`, `"underdispersed"`, or `"ok"`
+- `is_overdispersed`, `is_underdispersed`: convenience flags
+
+Set `alternative="greater"` to test only for overdispersion or `"less"` to
+test only for underdispersion. This is an analytic approximation conditional on
+the fitted random effects. It is most useful for Poisson and grouped-binomial
+models with moderate expected counts.
+
+### check_zero_inflation
+
+Compare the observed number of zeros with the fitted distribution's expected
+number of zeros.
+
+```python
+result = diagnostics.check_zero_inflation(model)
+
+print(result.observed_zeros)
+print(result.expected_zeros)
+print(result.observed_to_expected)
+print(result.p_value)
+```
+
+The function computes each observation's probability of zero directly for
+Poisson, negative-binomial, or binomial families. For grouped-binomial models,
+integer model weights are interpreted as trial counts. It then uses the exact
+Poisson-binomial mean and variance with a continuity-corrected normal
+approximation for the zero-count p-value.
+
+The default `alternative="greater"` tests for excess zeros. Use
+`"two-sided"` to detect either excess or fewer-than-expected zeros. The result
+exposes:
+
+- `observed_zeros`, `expected_zeros`, and `observed_to_expected`
+- `variance` and `z_score` for the zero-count approximation
+- `p_value` and `status` (`"excess"`, `"deficit"`, or `"ok"`)
+- `is_zero_inflated`: convenience flag for a significant excess
+
+`check_zeroinflation()` is an alias. Quasi-families are unsupported because
+they specify a mean-variance relationship without a complete probability
+distribution.
+
 ## Diagnostic Plots
 
 ### plot_diagnostics

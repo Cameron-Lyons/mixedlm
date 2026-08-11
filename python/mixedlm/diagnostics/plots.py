@@ -13,6 +13,9 @@ if TYPE_CHECKING:
 
     from mixedlm.models.glmer import GlmerResult
     from mixedlm.models.lmer import LmerResult
+else:
+    Axes = Any
+    Figure = Any
 
 
 def _get_pyplot() -> Any:
