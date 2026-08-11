@@ -15,6 +15,113 @@ if TYPE_CHECKING:
     from mixedlm.models.nlmer import NlmerResult
 
 
+_BOOTSTRAP_CI_METHODS = ("percentile", "basic", "normal")
+
+
+def _validate_ci_options(level: float, method: str) -> None:
+    if not np.isfinite(level) or not 0.0 < level < 1.0:
+        raise ValueError("level must be strictly between 0 and 1")
+    if method not in _BOOTSTRAP_CI_METHODS:
+        raise ValueError(f"Unknown method: {method}")
+
+
+def _finite_bootstrap_samples(
+    samples: NDArray[np.floating],
+    column: int,
+) -> NDArray[np.floating]:
+    values = samples[:, column]
+    return values[np.isfinite(values)]
+
+
+def _bootstrap_ci(
+    samples: NDArray[np.floating],
+    original: NDArray[np.floating],
+    names: list[str],
+    level: float,
+    method: str,
+) -> dict[str, tuple[float, float]]:
+    _validate_ci_options(level, method)
+    alpha = 1.0 - level
+    lower_percentile = 100.0 * alpha / 2.0
+    upper_percentile = 100.0 * (1.0 - alpha / 2.0)
+    z_critical = stats.norm.ppf(1.0 - alpha / 2.0) if method == "normal" else None
+    result: dict[str, tuple[float, float]] = {}
+
+    for i, name in enumerate(names):
+        parameter_samples = _finite_bootstrap_samples(samples, i)
+        if len(parameter_samples) == 0:
+            result[name] = (np.nan, np.nan)
+            continue
+
+        if method == "percentile":
+            lower, upper = np.percentile(
+                parameter_samples,
+                [lower_percentile, upper_percentile],
+            )
+        elif method == "basic":
+            upper_sample, lower_sample = np.percentile(
+                parameter_samples,
+                [upper_percentile, lower_percentile],
+            )
+            lower = 2.0 * original[i] - upper_sample
+            upper = 2.0 * original[i] - lower_sample
+        else:
+            if len(parameter_samples) < 2:
+                result[name] = (np.nan, np.nan)
+                continue
+            standard_error = np.std(parameter_samples, ddof=1)
+            bias = np.mean(parameter_samples) - original[i]
+            center = original[i] - bias
+            assert z_critical is not None
+            lower = center - z_critical * standard_error
+            upper = center + z_critical * standard_error
+
+        result[name] = (float(lower), float(upper))
+
+    return result
+
+
+def _bootstrap_se(
+    samples: NDArray[np.floating],
+    names: list[str],
+) -> dict[str, float]:
+    result: dict[str, float] = {}
+    for i, name in enumerate(names):
+        parameter_samples = _finite_bootstrap_samples(samples, i)
+        result[name] = (
+            float(np.std(parameter_samples, ddof=1)) if len(parameter_samples) > 1 else np.nan
+        )
+    return result
+
+
+def _bootstrap_summary(
+    n_boot: int,
+    n_failed: int,
+    samples: NDArray[np.floating],
+    original: NDArray[np.floating],
+    names: list[str],
+) -> str:
+    lines = [
+        f"Parametric bootstrap with {n_boot} samples ({n_failed} failed)",
+        "",
+        "Fixed effects bootstrap statistics:",
+        "             Original    Mean       Bias     Std.Err",
+    ]
+
+    for i, name in enumerate(names):
+        parameter_samples = _finite_bootstrap_samples(samples, i)
+        if len(parameter_samples) == 0:
+            continue
+        mean = np.mean(parameter_samples)
+        bias = mean - original[i]
+        standard_error = np.std(parameter_samples, ddof=1) if len(parameter_samples) > 1 else np.nan
+        lines.append(
+            f"{name:12} {original[i]:10.4f} {mean:10.4f} {bias:10.4f} {standard_error:10.4f}"
+        )
+
+    return "\n".join(lines)
+
+
 @dataclass
 class BootstrapResult:
     n_boot: int
@@ -32,70 +139,48 @@ class BootstrapResult:
         level: float = 0.95,
         method: str = "percentile",
     ) -> dict[str, tuple[float, float]]:
-        alpha = 1 - level
-
-        result: dict[str, tuple[float, float]] = {}
-
-        for i, name in enumerate(self.fixed_names):
-            samples = self.beta_samples[:, i]
-            samples = samples[~np.isnan(samples)]
-
-            if len(samples) == 0:
-                result[name] = (np.nan, np.nan)
-                continue
-
-            if method == "percentile":
-                lower = np.percentile(samples, 100 * alpha / 2)
-                upper = np.percentile(samples, 100 * (1 - alpha / 2))
-            elif method == "basic":
-                lower = 2 * self.original_beta[i] - np.percentile(samples, 100 * (1 - alpha / 2))
-                upper = 2 * self.original_beta[i] - np.percentile(samples, 100 * alpha / 2)
-            elif method == "normal":
-                se = np.std(samples)
-                z = stats.norm.ppf(1 - alpha / 2)
-                lower = self.original_beta[i] - z * se
-                upper = self.original_beta[i] + z * se
-            else:
-                raise ValueError(f"Unknown method: {method}")
-
-            result[name] = (float(lower), float(upper))
-
-        return result
+        return _bootstrap_ci(
+            self.beta_samples,
+            self.original_beta,
+            self.fixed_names,
+            level,
+            method,
+        )
 
     def se(self) -> dict[str, float]:
-        result: dict[str, float] = {}
-        for i, name in enumerate(self.fixed_names):
-            samples = self.beta_samples[:, i]
-            samples = samples[~np.isnan(samples)]
-            result[name] = float(np.std(samples)) if len(samples) > 0 else np.nan
-        return result
+        return _bootstrap_se(self.beta_samples, self.fixed_names)
 
     def summary(self) -> str:
-        lines = []
-        lines.append(f"Parametric bootstrap with {self.n_boot} samples ({self.n_failed} failed)")
-        lines.append("")
-        lines.append("Fixed effects bootstrap statistics:")
-        lines.append("             Original    Mean       Bias     Std.Err")
+        return _bootstrap_summary(
+            self.n_boot,
+            self.n_failed,
+            self.beta_samples,
+            self.original_beta,
+            self.fixed_names,
+        )
 
-        for i, name in enumerate(self.fixed_names):
-            samples = self.beta_samples[:, i]
-            samples = samples[~np.isnan(samples)]
-            if len(samples) > 0:
-                mean = np.mean(samples)
-                bias = mean - self.original_beta[i]
-                se = np.std(samples)
-                lines.append(
-                    f"{name:12} {self.original_beta[i]:10.4f} {mean:10.4f} {bias:10.4f} {se:10.4f}"
-                )
 
-        return "\n".join(lines)
+def _get_bootstrap_frame(result: LmerResult | GlmerResult) -> Any:
+    frame = result.matrices.frame
+    if frame is None:
+        raise ValueError("Parametric bootstrap requires the original model frame")
+    return frame
+
+
+def _replace_bootstrap_response(frame: Any, response_name: str, values: NDArray) -> Any:
+    if type(frame).__module__.split(".", 1)[0] == "polars":
+        import polars as pl
+
+        return frame.with_columns(pl.Series(response_name, values))
+
+    result = frame.copy()
+    result[response_name] = values
+    return result
 
 
 def _lmer_bootstrap_worker(
     args: tuple[Any, ...],
 ) -> tuple[int, NDArray | None, NDArray | None, float | None]:
-    import pandas as pd
-
     from mixedlm.models.lmer import LmerMod
 
     (
@@ -104,7 +189,7 @@ def _lmer_bootstrap_worker(
         formula,
         X,
         Z,
-        fixed_names,
+        model_frame,
         random_structures_data,
         response_name,
         beta,
@@ -149,20 +234,7 @@ def _lmer_bootstrap_worker(
         noise = np.random.randn(n) * sigma
         y_sim = fixed_part + random_part + noise
 
-        sim_df = pd.DataFrame(X, columns=fixed_names)
-        sim_df[response_name] = y_sim
-
-        for struct_data in random_structures_data:
-            level_map = struct_data["level_map"]
-            grouping_factor = struct_data["grouping_factor"]
-            n_terms = struct_data["n_terms"]
-            z_slice = struct_data["z_slice"]
-
-            levels = list(level_map.keys())
-            z_first_cols = z_slice[:, ::n_terms]
-            level_indices = np.argmax(z_first_cols != 0, axis=1)
-            group_col = [levels[idx] for idx in level_indices]
-            sim_df[grouping_factor] = group_col
+        sim_df = _replace_bootstrap_response(model_frame, response_name, y_sim)
 
         model = LmerMod(formula, sim_df, REML=REML)
         boot_result = model.fit(start=theta)
@@ -173,8 +245,6 @@ def _lmer_bootstrap_worker(
 
 
 def _glmer_bootstrap_worker(args: tuple[Any, ...]) -> tuple[int, NDArray | None, NDArray | None]:
-    import pandas as pd
-
     from mixedlm.models.glmer import GlmerMod
 
     (
@@ -183,7 +253,7 @@ def _glmer_bootstrap_worker(args: tuple[Any, ...]) -> tuple[int, NDArray | None,
         formula,
         X,
         Z,
-        fixed_names,
+        model_frame,
         random_structures_data,
         response_name,
         beta,
@@ -238,20 +308,7 @@ def _glmer_bootstrap_worker(args: tuple[Any, ...]) -> tuple[int, NDArray | None,
         else:
             y_sim = mu + np.random.randn(n) * 0.1
 
-        sim_df = pd.DataFrame(X, columns=fixed_names)
-        sim_df[response_name] = y_sim
-
-        for struct_data in random_structures_data:
-            level_map = struct_data["level_map"]
-            grouping_factor = struct_data["grouping_factor"]
-            n_terms = struct_data["n_terms"]
-            z_slice = struct_data["z_slice"]
-
-            levels = list(level_map.keys())
-            z_first_cols = z_slice[:, ::n_terms]
-            level_indices = np.argmax(z_first_cols != 0, axis=1)
-            group_col = [levels[idx] for idx in level_indices]
-            sim_df[grouping_factor] = group_col
+        sim_df = _replace_bootstrap_response(model_frame, response_name, y_sim)
 
         model = GlmerMod(formula, sim_df, family=family)
         boot_result = model.fit(start=theta)
@@ -265,33 +322,24 @@ def _prepare_lmer_worker_data(result: LmerResult) -> dict[str, Any]:
     n_structs = len(result.matrices.random_structures)
     random_structures_data: list[dict[str, Any]] = [{}] * n_structs
     theta_offset = 0
-    z_start = 0
-
     for s_idx, struct in enumerate(result.matrices.random_structures):
         n_terms = struct.n_terms
         n_theta = n_terms * (n_terms + 1) // 2 if struct.correlated else n_terms
         theta_block = result.theta[theta_offset : theta_offset + n_theta]
         theta_offset += n_theta
 
-        z_end = z_start + struct.n_levels * struct.n_terms
-        z_slice = result.matrices.Z[:, z_start:z_end]
-
         random_structures_data[s_idx] = {
             "n_levels": struct.n_levels,
             "n_terms": struct.n_terms,
             "correlated": struct.correlated,
-            "level_map": dict(struct.level_map),
-            "grouping_factor": struct.grouping_factor,
             "theta_block": theta_block.copy(),
-            "z_slice": z_slice.copy() if hasattr(z_slice, "copy") else np.array(z_slice),
         }
-        z_start = z_end
 
     return {
         "formula": result.formula,
         "X": result.matrices.X.copy(),
         "Z": result.matrices.Z.copy() if result.matrices.Z is not None else None,
-        "fixed_names": result.matrices.fixed_names,
+        "model_frame": _get_bootstrap_frame(result),
         "random_structures_data": random_structures_data,
         "response_name": result.formula.response,
         "beta": result.beta.copy(),
@@ -305,33 +353,24 @@ def _prepare_glmer_worker_data(result: GlmerResult) -> dict[str, Any]:
     n_structs = len(result.matrices.random_structures)
     random_structures_data: list[dict[str, Any]] = [{}] * n_structs
     theta_offset = 0
-    z_start = 0
-
     for s_idx, struct in enumerate(result.matrices.random_structures):
         n_terms = struct.n_terms
         n_theta = n_terms * (n_terms + 1) // 2 if struct.correlated else n_terms
         theta_block = result.theta[theta_offset : theta_offset + n_theta]
         theta_offset += n_theta
 
-        z_end = z_start + struct.n_levels * struct.n_terms
-        z_slice = result.matrices.Z[:, z_start:z_end]
-
         random_structures_data[s_idx] = {
             "n_levels": struct.n_levels,
             "n_terms": struct.n_terms,
             "correlated": struct.correlated,
-            "level_map": dict(struct.level_map),
-            "grouping_factor": struct.grouping_factor,
             "theta_block": theta_block.copy(),
-            "z_slice": z_slice.copy() if hasattr(z_slice, "copy") else np.array(z_slice),
         }
-        z_start = z_end
 
     return {
         "formula": result.formula,
         "X": result.matrices.X.copy(),
         "Z": result.matrices.Z.copy() if result.matrices.Z is not None else None,
-        "fixed_names": result.matrices.fixed_names,
+        "model_frame": _get_bootstrap_frame(result),
         "random_structures_data": random_structures_data,
         "response_name": result.formula.response,
         "beta": result.beta.copy(),
@@ -358,12 +397,10 @@ def bootstrap_lmer(
     seeds = rng.integers(0, 2**31, size=n_boot)
 
     if n_jobs == 1:
-        import pandas as pd
-
         from mixedlm.models.lmer import LmerMod
 
         n_failed = 0
-        n = result.matrices.n_obs
+        model_frame = _get_bootstrap_frame(result)
 
         for b in range(n_boot):
             if verbose and (b + 1) % 100 == 0:
@@ -374,21 +411,7 @@ def bootstrap_lmer(
             try:
                 y_sim = _simulate_lmer(result)
 
-                sim_data = result.matrices.X.copy()
-                sim_df = pd.DataFrame(sim_data, columns=result.matrices.fixed_names)
-                sim_df[result.formula.response] = y_sim
-
-                for struct in result.matrices.random_structures:
-                    levels = list(struct.level_map.keys())
-                    group_col = []
-                    for i in range(n):
-                        for lv, idx in struct.level_map.items():
-                            if result.matrices.Z[i, idx * struct.n_terms] != 0:
-                                group_col.append(lv)
-                                break
-                        else:
-                            group_col.append(levels[0])
-                    sim_df[struct.grouping_factor] = group_col
+                sim_df = _replace_bootstrap_response(model_frame, result.formula.response, y_sim)
 
                 model = LmerMod(
                     result.formula,
@@ -416,7 +439,7 @@ def bootstrap_lmer(
                 worker_data["formula"],
                 worker_data["X"],
                 worker_data["Z"],
-                worker_data["fixed_names"],
+                worker_data["model_frame"],
                 worker_data["random_structures_data"],
                 worker_data["response_name"],
                 worker_data["beta"],
@@ -518,12 +541,10 @@ def bootstrap_glmer(
     seeds = rng.integers(0, 2**31, size=n_boot)
 
     if n_jobs == 1:
-        import pandas as pd
-
         from mixedlm.models.glmer import GlmerMod
 
         n_failed = 0
-        n = result.matrices.n_obs
+        model_frame = _get_bootstrap_frame(result)
 
         for b in range(n_boot):
             if verbose and (b + 1) % 100 == 0:
@@ -534,21 +555,7 @@ def bootstrap_glmer(
             try:
                 y_sim = _simulate_glmer(result)
 
-                sim_data = result.matrices.X.copy()
-                sim_df = pd.DataFrame(sim_data, columns=result.matrices.fixed_names)
-                sim_df[result.formula.response] = y_sim
-
-                for struct in result.matrices.random_structures:
-                    levels = list(struct.level_map.keys())
-                    group_col = []
-                    for i in range(n):
-                        for lv, idx in struct.level_map.items():
-                            if result.matrices.Z[i, idx * struct.n_terms] != 0:
-                                group_col.append(lv)
-                                break
-                        else:
-                            group_col.append(levels[0])
-                    sim_df[struct.grouping_factor] = group_col
+                sim_df = _replace_bootstrap_response(model_frame, result.formula.response, y_sim)
 
                 model = GlmerMod(
                     result.formula,
@@ -575,7 +582,7 @@ def bootstrap_glmer(
                 worker_data["formula"],
                 worker_data["X"],
                 worker_data["Z"],
-                worker_data["fixed_names"],
+                worker_data["model_frame"],
                 worker_data["random_structures_data"],
                 worker_data["response_name"],
                 worker_data["beta"],
@@ -803,63 +810,25 @@ class NlmerBootstrapResult:
         level: float = 0.95,
         method: str = "percentile",
     ) -> dict[str, tuple[float, float]]:
-        alpha = 1 - level
-
-        result: dict[str, tuple[float, float]] = {}
-
-        for i, name in enumerate(self.param_names):
-            samples = self.phi_samples[:, i]
-            samples = samples[~np.isnan(samples)]
-
-            if len(samples) == 0:
-                result[name] = (np.nan, np.nan)
-                continue
-
-            if method == "percentile":
-                lower = np.percentile(samples, 100 * alpha / 2)
-                upper = np.percentile(samples, 100 * (1 - alpha / 2))
-            elif method == "basic":
-                lower = 2 * self.original_phi[i] - np.percentile(samples, 100 * (1 - alpha / 2))
-                upper = 2 * self.original_phi[i] - np.percentile(samples, 100 * alpha / 2)
-            elif method == "normal":
-                se = np.std(samples)
-                z = stats.norm.ppf(1 - alpha / 2)
-                lower = self.original_phi[i] - z * se
-                upper = self.original_phi[i] + z * se
-            else:
-                raise ValueError(f"Unknown method: {method}")
-
-            result[name] = (float(lower), float(upper))
-
-        return result
+        return _bootstrap_ci(
+            self.phi_samples,
+            self.original_phi,
+            self.param_names,
+            level,
+            method,
+        )
 
     def se(self) -> dict[str, float]:
-        result: dict[str, float] = {}
-        for i, name in enumerate(self.param_names):
-            samples = self.phi_samples[:, i]
-            samples = samples[~np.isnan(samples)]
-            result[name] = float(np.std(samples)) if len(samples) > 0 else np.nan
-        return result
+        return _bootstrap_se(self.phi_samples, self.param_names)
 
     def summary(self) -> str:
-        lines = []
-        lines.append(f"Parametric bootstrap with {self.n_boot} samples ({self.n_failed} failed)")
-        lines.append("")
-        lines.append("Fixed effects bootstrap statistics:")
-        lines.append("             Original    Mean       Bias     Std.Err")
-
-        for i, name in enumerate(self.param_names):
-            samples = self.phi_samples[:, i]
-            samples = samples[~np.isnan(samples)]
-            if len(samples) > 0:
-                mean = np.mean(samples)
-                bias = mean - self.original_phi[i]
-                se = np.std(samples)
-                lines.append(
-                    f"{name:12} {self.original_phi[i]:10.4f} {mean:10.4f} {bias:10.4f} {se:10.4f}"
-                )
-
-        return "\n".join(lines)
+        return _bootstrap_summary(
+            self.n_boot,
+            self.n_failed,
+            self.phi_samples,
+            self.original_phi,
+            self.param_names,
+        )
 
 
 def bootstrap_nlmer(

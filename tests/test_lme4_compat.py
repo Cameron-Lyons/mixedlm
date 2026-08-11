@@ -1,8 +1,13 @@
+from collections.abc import Callable
+
 import numpy as np
 import pandas as pd
 import pytest
 from mixedlm import (
+    coef,
     families,
+    fixef,
+    getME,
     glmer,
     glmer_nb,
     lmer,
@@ -17,6 +22,7 @@ from mixedlm import (
     load_penicillin,
     load_sleepstudy,
     load_verbagg,
+    ranef,
 )
 from mixedlm.inference.bootstrap import bootMer
 from mixedlm.inference.ddf import pvalues_with_ddf
@@ -26,19 +32,15 @@ from mixedlm.utils.lme4_compat import (
     GHrule,
     VarCorr,
     checkConv,
-    coef,
     convergence_ok,
     devcomp,
     factorize,
-    fixef,
     fortify,
-    getME,
     isNested,
     lmList,
     mkMerMod,
     ngrps,
     pvalues,
-    ranef,
     scale_vcov,
     sigma,
     vcconv,
@@ -74,6 +76,14 @@ class TestAccessorFunctions:
     def test_sigma_glmer(self, glmer_model) -> None:
         s = sigma(glmer_model)
         assert s == 1.0
+
+    def test_root_accessors_are_canonical_functions(self) -> None:
+        import mixedlm.utils.lme4_compat as compat
+
+        assert coef is compat.coef
+        assert fixef is compat.fixef
+        assert getME is compat.getME
+        assert ranef is compat.ranef
 
     def test_ngrps_lmer(self, lmer_model) -> None:
         groups = ngrps(lmer_model)
@@ -144,6 +154,12 @@ class TestAccessorFunctions:
         assert "Subject" in c
         assert len(c["Subject"]["(Intercept)"]) == 18
         assert len(c["Subject"]["Days"]) == 18
+
+    def test_root_accessors_glmer(self, glmer_model) -> None:
+        assert fixef(glmer_model) == glmer_model.fixef()
+        assert set(ranef(glmer_model)) == {"group"}
+        assert set(coef(glmer_model)) == {"group"}
+        assert np.allclose(getME(glmer_model, "theta"), glmer_model.theta)
 
 
 class TestPvalues:
@@ -608,6 +624,21 @@ class TestDatasets:
         assert "id" in data.columns
         assert "item" in data.columns
         assert len(data) > 0
+
+    @pytest.mark.parametrize(
+        "loader",
+        [load_arabidopsis, load_grouseticks, load_verbagg],
+    )
+    def test_synthetic_loader_rng_isolation(self, loader: Callable[[], pd.DataFrame]) -> None:
+        np.random.seed(20260803)
+        expected = np.random.random(4)
+
+        np.random.seed(20260803)
+        first = loader()
+        observed = np.random.random(4)
+
+        np.testing.assert_array_equal(observed, expected)
+        pd.testing.assert_frame_equal(first, loader())
 
 
 class TestIsNested:

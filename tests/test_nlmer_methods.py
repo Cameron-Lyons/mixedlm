@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from unittest.mock import patch
+
 import numpy as np
 import pandas as pd
 import pytest
-from mixedlm import nlme, nlmer
+from mixedlm import coef, fixef, getME, nlme, nlmer, ranef
 from mixedlm.inference.bootstrap import bootstrap_nlmer
 
 
@@ -20,7 +22,57 @@ def create_nlme_data(n_groups: int = 8, n_per_group: int = 10, seed: int = 42) -
     return pd.DataFrame(data_rows)
 
 
+def create_offset_nlme_data(seed: int = 20260803) -> pd.DataFrame:
+    rng = np.random.default_rng(seed)
+    data_rows = []
+    for subject in range(8):
+        asym = 200 + rng.normal(0, 12)
+        r0 = 180 + rng.normal(0, 6)
+        lrc = -3 + rng.normal(0, 0.1)
+        for time in np.linspace(0, 10, 10):
+            y = asym + (r0 - asym) * np.exp(-np.exp(lrc) * time) + rng.normal(0, 2)
+            data_rows.append({"subject": f"S{subject + 1}", "time": time, "y": y})
+    return pd.DataFrame(data_rows)
+
+
 NLME_DATA = create_nlme_data()
+
+
+class TestNlmerPredict:
+    def test_grouped_prediction_batches_rows_and_preserves_order(self) -> None:
+        model = nlme.SSasymp()
+        result = nlmer(
+            model,
+            NLME_DATA,
+            x_var="time",
+            y_var="y",
+            group_var="subject",
+            random_params=["Asym", "R0"],
+        )
+        first_group, second_group = result.group_levels[:2]
+        new_data = pd.DataFrame(
+            {
+                "time": [0.5, 1.5, 2.5, 3.5, 4.5, 5.5],
+                "subject": [first_group, "new-a", second_group, first_group, "new-b", second_group],
+            }
+        )
+
+        expected = np.empty(len(new_data), dtype=np.float64)
+        group_lookup = {group: index for index, group in enumerate(result.group_levels)}
+        for row, (x_value, group) in enumerate(
+            zip(new_data["time"], new_data["subject"], strict=True)
+        ):
+            params = result.phi.copy()
+            group_index = group_lookup.get(group)
+            if group_index is not None:
+                params[result.random_params] += result.b[group_index]
+            expected[row] = model.predict(params, np.array([x_value]))[0]
+
+        with patch.object(model, "predict", wraps=model.predict) as predict:
+            actual = result.predict(new_data, group_var="subject")
+
+        assert np.allclose(actual, expected)
+        assert predict.call_count == 3
 
 
 class TestNlmerSimulate:
@@ -262,6 +314,7 @@ class TestNlmerIsSingular:
         result = nlmer(model, NLME_DATA, x_var="time", y_var="y", group_var="subject")
 
         assert isinstance(result.isSingular(), bool)
+        assert result.is_singular() == result.isSingular()
 
     def test_is_singular_with_tolerance(self) -> None:
         model = nlme.SSasymp()
@@ -274,6 +327,15 @@ class TestNlmerIsSingular:
 
 
 class TestNlmerAccessors:
+    def test_root_accessor_functions(self) -> None:
+        model = nlme.SSasymp()
+        result = nlmer(model, NLME_DATA, x_var="time", y_var="y", group_var="subject")
+
+        assert fixef(result) == result.fixef()
+        assert set(ranef(result)) == {"subject"}
+        assert set(coef(result)) == {"subject"}
+        assert np.allclose(getME(result, "phi"), result.phi)
+
     def test_nobs(self) -> None:
         model = nlme.SSasymp()
         result = nlmer(model, NLME_DATA, x_var="time", y_var="y", group_var="subject")
@@ -333,6 +395,47 @@ class TestNlmerWeightsOffset:
 
         off = result.offset()
         assert np.allclose(off, offset)
+
+    def test_offset_applied_consistently(self) -> None:
+        data = create_offset_nlme_data()
+        offset = np.linspace(-2.0, 2.0, len(data))
+        adjusted_data = data.assign(y=data["y"].to_numpy() - offset)
+        fit_kwargs = {
+            "x_var": "time",
+            "y_var": "y",
+            "group_var": "subject",
+            "random_params": ["Asym"],
+        }
+
+        with_offset = nlmer(nlme.SSasymp(), data, offset=offset, **fit_kwargs)
+        without_offset = nlmer(nlme.SSasymp(), adjusted_data, **fit_kwargs)
+
+        assert with_offset.converged
+        assert without_offset.converged
+        np.testing.assert_allclose(with_offset.phi, without_offset.phi)
+        np.testing.assert_allclose(with_offset.theta, without_offset.theta)
+        np.testing.assert_allclose(with_offset.b, without_offset.b)
+        np.testing.assert_allclose(with_offset.y, data["y"].to_numpy())
+        np.testing.assert_allclose(with_offset.getME("y"), data["y"].to_numpy())
+        np.testing.assert_allclose(with_offset.fitted(), without_offset.fitted() + offset)
+        np.testing.assert_allclose(with_offset.residuals(), without_offset.residuals())
+        np.testing.assert_allclose(with_offset.vcov(), without_offset.vcov())
+        np.testing.assert_allclose(with_offset.hatvalues(), without_offset.hatvalues())
+
+        simulated = with_offset.simulate(seed=123, use_re=False)
+        adjusted_simulated = without_offset.simulate(seed=123, use_re=False)
+        np.testing.assert_allclose(simulated, adjusted_simulated + offset)
+
+        refitted = with_offset.refit(simulated)
+        adjusted_refitted = without_offset.refit(adjusted_simulated)
+        assert refitted.converged
+        assert adjusted_refitted.converged
+        np.testing.assert_allclose(refitted.phi, adjusted_refitted.phi)
+        np.testing.assert_allclose(refitted.theta, adjusted_refitted.theta)
+        np.testing.assert_allclose(refitted.b, adjusted_refitted.b)
+        np.testing.assert_allclose(refitted.deviance, adjusted_refitted.deviance)
+        np.testing.assert_allclose(refitted.y, simulated)
+        np.testing.assert_allclose(refitted.model_frame()["y"], simulated)
 
     def test_weights_wrong_length_raises(self) -> None:
         model = nlme.SSasymp()

@@ -7,6 +7,11 @@ from mixedlm import glmer, lmer
 from mixedlm.families import Binomial
 from mixedlm.inference.bootstrap import (
     BootstrapResult,
+    NlmerBootstrapResult,
+    _glmer_bootstrap_worker,
+    _lmer_bootstrap_worker,
+    _prepare_glmer_worker_data,
+    _prepare_lmer_worker_data,
     bootMer,
     bootstrap_glmer,
     bootstrap_lmer,
@@ -47,6 +52,33 @@ def simple_glmer_data():
 
 
 @pytest.fixture
+def categorical_lmer_data():
+    rng = np.random.default_rng(47)
+    n_groups = 8
+    n_per_group = 12
+    groups = np.repeat([f"G{i}" for i in range(n_groups)], n_per_group)
+    treatment = np.tile(np.repeat(["control", "treated"], n_per_group // 2), n_groups)
+    group_effects = np.repeat(rng.normal(0, 0.7, n_groups), n_per_group)
+    y = 2.0 + 1.5 * (treatment == "treated") + group_effects + rng.normal(0, 0.5, len(groups))
+
+    return pd.DataFrame({"y": y, "treatment": treatment, "group": groups})
+
+
+@pytest.fixture
+def categorical_glmer_data():
+    rng = np.random.default_rng(53)
+    n_groups = 8
+    n_per_group = 16
+    groups = np.repeat([f"G{i}" for i in range(n_groups)], n_per_group)
+    treatment = np.tile(np.repeat(["control", "treated"], n_per_group // 2), n_groups)
+    group_effects = np.repeat(rng.normal(0, 0.5, n_groups), n_per_group)
+    eta = -0.5 + 1.0 * (treatment == "treated") + group_effects
+    y = rng.binomial(1, 1 / (1 + np.exp(-eta)))
+
+    return pd.DataFrame({"y": y, "treatment": treatment, "group": groups})
+
+
+@pytest.fixture
 def lmer_result(simple_lmer_data):
     return lmer("y ~ x + (1|group)", simple_lmer_data)
 
@@ -57,6 +89,21 @@ def glmer_result(simple_glmer_data):
 
 
 class TestBootstrapResult:
+    @staticmethod
+    def result_from_samples(samples: list[float], original: float = 1.5) -> BootstrapResult:
+        beta_samples = np.asarray(samples, dtype=np.float64)[:, None]
+        return BootstrapResult(
+            n_boot=len(samples),
+            beta_samples=beta_samples,
+            theta_samples=np.empty((len(samples), 0)),
+            sigma_samples=None,
+            fixed_names=["x"],
+            original_beta=np.array([original]),
+            original_theta=np.empty(0),
+            original_sigma=None,
+            n_failed=int(np.count_nonzero(~np.isfinite(beta_samples))),
+        )
+
     def test_ci_percentile(self, lmer_result, simple_lmer_data):
         boot = bootstrap_lmer(lmer_result, n_boot=20, seed=42)
         ci = boot.ci(level=0.95, method="percentile")
@@ -94,6 +141,56 @@ class TestBootstrapResult:
         assert "Parametric bootstrap" in summary
         assert "Fixed effects" in summary
 
+    def test_se_uses_sample_standard_deviation(self):
+        boot = self.result_from_samples([1.0, 3.0])
+
+        assert boot.se()["x"] == pytest.approx(np.sqrt(2.0))
+        assert "1.4142" in boot.summary()
+
+    def test_statistics_ignore_all_nonfinite_samples(self):
+        boot = self.result_from_samples([1.0, np.nan, np.inf, 3.0])
+
+        assert boot.se()["x"] == pytest.approx(np.sqrt(2.0))
+        assert boot.ci(method="percentile")["x"] == pytest.approx((1.05, 2.95))
+
+    def test_normal_ci_corrects_bootstrap_bias(self):
+        boot = self.result_from_samples([1.0, 3.0], original=1.5)
+
+        lower, upper = boot.ci(level=0.95, method="normal")["x"]
+        expected_half_width = 1.959963984540054 * np.sqrt(2.0)
+        assert lower == pytest.approx(1.0 - expected_half_width)
+        assert upper == pytest.approx(1.0 + expected_half_width)
+
+    @pytest.mark.parametrize("level", [0.0, 1.0, -0.1, 1.1, np.nan, -np.inf, np.inf])
+    def test_ci_rejects_invalid_level(self, level):
+        boot = self.result_from_samples([1.0, 3.0])
+
+        with pytest.raises(ValueError, match="level must be strictly between"):
+            boot.ci(level=level)
+
+    def test_single_finite_sample_has_undefined_standard_error(self):
+        boot = self.result_from_samples([2.0, np.nan])
+
+        assert np.isnan(boot.se()["x"])
+        lower, upper = boot.ci(method="normal")["x"]
+        assert np.isnan(lower)
+        assert np.isnan(upper)
+
+    def test_nlmer_result_uses_same_statistics(self):
+        boot = NlmerBootstrapResult(
+            n_boot=2,
+            phi_samples=np.array([[1.0], [3.0]]),
+            theta_samples=np.empty((2, 0)),
+            sigma_samples=np.ones(2),
+            param_names=["Asym"],
+            original_phi=np.array([1.5]),
+            original_theta=np.empty(0),
+            original_sigma=1.0,
+            n_failed=0,
+        )
+
+        assert boot.se()["Asym"] == pytest.approx(np.sqrt(2.0))
+
 
 class TestBootstrapLmer:
     def test_basic_bootstrap(self, lmer_result, simple_lmer_data):
@@ -118,6 +215,48 @@ class TestBootstrapLmer:
         assert_allclose(boot.original_theta, lmer_result.theta)
         assert boot.original_sigma == pytest.approx(lmer_result.sigma)
 
+    def test_categorical_predictor_uses_original_model_frame(self, categorical_lmer_data):
+        result = lmer("y ~ treatment + (1 | group)", categorical_lmer_data)
+
+        boot = bootstrap_lmer(result, n_boot=5, seed=42)
+
+        assert boot.n_failed == 0
+        assert np.isfinite(boot.beta_samples).all()
+
+    def test_parallel_worker_uses_original_model_frame(self, categorical_lmer_data):
+        result = lmer("y ~ treatment + (1 | group)", categorical_lmer_data)
+        worker_data = _prepare_lmer_worker_data(result)
+        task = (
+            0,
+            42,
+            worker_data["formula"],
+            worker_data["X"],
+            worker_data["Z"],
+            worker_data["model_frame"],
+            worker_data["random_structures_data"],
+            worker_data["response_name"],
+            worker_data["beta"],
+            worker_data["theta"],
+            worker_data["sigma"],
+            worker_data["REML"],
+        )
+
+        _, beta, theta, sigma = _lmer_bootstrap_worker(task)
+
+        assert beta is not None
+        assert theta is not None
+        assert sigma is not None
+
+    def test_polars_categorical_predictor(self, categorical_lmer_data):
+        pl = pytest.importorskip("polars")
+        data = pl.DataFrame(categorical_lmer_data.to_dict(orient="list"))
+        result = lmer("y ~ treatment + (1 | group)", data)
+
+        boot = bootstrap_lmer(result, n_boot=3, seed=42)
+
+        assert boot.n_failed == 0
+        assert np.isfinite(boot.beta_samples).all()
+
 
 class TestBootstrapGlmer:
     def test_basic_bootstrap(self, glmer_result, simple_glmer_data):
@@ -130,6 +269,36 @@ class TestBootstrapGlmer:
         boot1 = bootstrap_glmer(glmer_result, n_boot=10, seed=42)
         boot2 = bootstrap_glmer(glmer_result, n_boot=10, seed=42)
         assert_allclose(boot1.beta_samples, boot2.beta_samples, rtol=1e-10)
+
+    def test_categorical_predictor_uses_original_model_frame(self, categorical_glmer_data):
+        result = glmer("y ~ treatment + (1 | group)", categorical_glmer_data, family=Binomial())
+
+        boot = bootstrap_glmer(result, n_boot=3, seed=42)
+
+        assert boot.n_failed == 0
+        assert np.isfinite(boot.beta_samples).all()
+
+    def test_parallel_worker_uses_original_model_frame(self, categorical_glmer_data):
+        result = glmer("y ~ treatment + (1 | group)", categorical_glmer_data, family=Binomial())
+        worker_data = _prepare_glmer_worker_data(result)
+        task = (
+            0,
+            42,
+            worker_data["formula"],
+            worker_data["X"],
+            worker_data["Z"],
+            worker_data["model_frame"],
+            worker_data["random_structures_data"],
+            worker_data["response_name"],
+            worker_data["beta"],
+            worker_data["theta"],
+            worker_data["family"],
+        )
+
+        _, beta, theta = _glmer_bootstrap_worker(task)
+
+        assert beta is not None
+        assert theta is not None
 
 
 class TestBootMer:
@@ -182,3 +351,6 @@ class TestBootstrapEdgeCases:
         ci = boot.ci()
         assert np.isnan(ci["a"][0])
         assert np.isnan(ci["a"][1])
+
+        with pytest.raises(ValueError, match="Unknown method"):
+            boot.ci(method="invalid")

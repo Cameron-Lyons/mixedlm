@@ -1,45 +1,14 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-import numpy as np
-import pandas as pd
-
 if TYPE_CHECKING:
+    import pandas as pd
+
+    from mixedlm.models.glmer import GlmerResult
     from mixedlm.models.lmer import LmerResult
 
-
-@dataclass
-class AllFitResult:
-    """Results from fitting with multiple optimizers.
-
-    Attributes
-    ----------
-    results : dict[str, LmerResult | Exception]
-        Dictionary mapping optimizer name to either a successful result or an exception.
-    summary : pd.DataFrame
-        Summary table comparing optimizer performance.
-    best_optimizer : str
-        Name of the optimizer with the lowest deviance.
-    """
-
-    results: dict[str, LmerResult | Exception]
-    summary: pd.DataFrame
-    best_optimizer: str
-
-    def __str__(self) -> str:
-        lines = ["allFit() summary:"]
-        lines.append("=" * 80)
-        lines.append(str(self.summary))
-        lines.append("")
-        lines.append(f"Best optimizer: {self.best_optimizer}")
-        return "\n".join(lines)
-
-    def __repr__(self) -> str:
-        n_success = sum(1 for r in self.results.values() if not isinstance(r, Exception))
-        n_total = len(self.results)
-        return f"AllFitResult({n_success}/{n_total} successful, best={self.best_optimizer})"
+from mixedlm.inference.allfit import AllFitResult
 
 
 def allFit(
@@ -105,15 +74,15 @@ def allFit(
     lmer : Fit linear mixed-effects model
     lmerControl : Control parameters for optimization
     """
-    import pandas as pd
-
     from mixedlm.models.control import lmerControl
     from mixedlm.models.lmer import lmer
 
     if optimizers is None:
         optimizers = ["COBYQA", "Nelder-Mead", "L-BFGS-B"]
 
-    results: dict[str, LmerResult | Exception] = {}
+    fits: dict[str, LmerResult | GlmerResult | None] = {}
+    errors: dict[str, str] = {}
+    warnings: dict[str, list[str]] = {}
 
     if verbose >= 1:
         print(f"Fitting model with {len(optimizers)} optimizers...")
@@ -125,56 +94,22 @@ def allFit(
         try:
             ctrl = lmerControl(optimizer=opt_name)
             fit_result = lmer(formula, data, REML=REML, control=ctrl, verbose=0, **kwargs)
-            results[opt_name] = fit_result
+            fits[opt_name] = fit_result
+            warnings[opt_name] = []
+            if not fit_result.converged:
+                warnings[opt_name].append("Did not converge")
+            if fit_result.isSingular():
+                warnings[opt_name].append("Singular fit")
 
             if verbose >= 1:
                 status = "OK" if fit_result.converged else "FAILED"
                 print(f"{status} (deviance={fit_result.deviance:.4f}, iter={fit_result.n_iter})")
 
         except Exception as e:
-            results[opt_name] = e
+            fits[opt_name] = None
+            errors[opt_name] = str(e)
+            warnings[opt_name] = []
             if verbose >= 1:
                 print(f"ERROR: {e}")
 
-    summary_data = []
-    for opt_name in results:
-        result_or_error = results[opt_name]
-        if isinstance(result_or_error, Exception):
-            summary_data.append(
-                {
-                    "optimizer": opt_name,
-                    "converged": False,
-                    "deviance": np.nan,
-                    "iterations": np.nan,
-                    "gradient_norm": np.nan,
-                    "at_boundary": np.nan,
-                    "error": str(result_or_error),
-                }
-            )
-        else:
-            summary_data.append(
-                {
-                    "optimizer": opt_name,
-                    "converged": result_or_error.converged,
-                    "deviance": result_or_error.deviance,
-                    "iterations": result_or_error.n_iter,
-                    "gradient_norm": result_or_error.gradient_norm or np.nan,
-                    "at_boundary": result_or_error.at_boundary,
-                    "error": None,
-                }
-            )
-
-    summary = pd.DataFrame(summary_data)
-
-    successful_results = {
-        name: res for name, res in results.items() if not isinstance(res, Exception)
-    }
-
-    if successful_results:
-        best_optimizer = min(
-            successful_results.keys(), key=lambda k: successful_results[k].deviance
-        )
-    else:
-        best_optimizer = optimizers[0]
-
-    return AllFitResult(results=results, summary=summary, best_optimizer=best_optimizer)
+    return AllFitResult(fits=fits, errors=errors, warnings=warnings)
