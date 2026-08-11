@@ -338,9 +338,10 @@ class GlmerResult(MerResultMixin):
         if newdata is None:
             if offset is not None:
                 raise ValueError("Prediction offset can only be supplied with newdata.")
-            if not se_fit and interval == "none":
-                return self.fitted(type=type)
-            eta = self._linear_predictor.copy()
+            if include_re:
+                eta = self._linear_predictor.copy()
+            else:
+                eta = self.matrices.X @ self.beta + self.matrices.offset
             X = self.matrices.X
         else:
             X = self._prediction_fixed_matrix(newdata)

@@ -34,6 +34,26 @@ class TestPredict:
         expected_fixed = fixef["(Intercept)"] + fixef["Days"] * SLEEPSTUDY["Days"].values
         assert np.allclose(pred_fixed, expected_fixed)
 
+    def test_lmer_predict_fixed_only_without_newdata(self):
+        rng = np.random.default_rng(42)
+        n_groups = 8
+        n_per_group = 15
+        groups = np.repeat(np.arange(n_groups), n_per_group)
+        x = rng.normal(size=len(groups))
+        group_effects = np.repeat(rng.normal(0, 3, n_groups), n_per_group)
+        y = 2 + 0.5 * x + group_effects + rng.normal(0, 0.3, len(groups))
+        data = pd.DataFrame({"y": y, "x": x, "group": groups.astype(str)})
+        result = lmer("y ~ x + (1 | group)", data)
+        expected = result.matrices.X @ result.beta + result.matrices.offset
+
+        assert not np.allclose(result.fitted(), expected)
+        assert np.allclose(result.predict(re_form="NA"), expected)
+        assert np.allclose(result.predict(re_form="~0"), expected)
+        with_se = result.predict(re_form="NA", se_fit=True)
+        with_interval = result.predict(re_form="~0", interval="confidence")
+        assert np.allclose(with_se.fit, expected)
+        assert np.allclose(with_interval.fit, expected)
+
     def test_lmer_predict_new_levels_error(self):
         result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
 
@@ -105,6 +125,23 @@ class TestPredict:
         pred_full = result.predict(newdata=CBPP)
 
         assert not np.allclose(pred_fixed, pred_full)
+
+    def test_glmer_predict_fixed_only_without_newdata(self):
+        result = glmer("y ~ period + (1 | herd)", CBPP, family=families.Binomial())
+        expected_link = result.matrices.X @ result.beta + result.matrices.offset
+        expected_response = result.family.link.inverse(expected_link)
+
+        assert not np.allclose(result.fitted(type="link"), expected_link)
+        for re_form in ("NA", "~0"):
+            assert np.allclose(result.predict(type="link", re_form=re_form), expected_link)
+            assert np.allclose(
+                result.predict(type="response", re_form=re_form),
+                expected_response,
+            )
+        with_se = result.predict(type="link", re_form="NA", se_fit=True)
+        with_interval = result.predict(type="response", re_form="~0", interval="confidence")
+        assert np.allclose(with_se.fit, expected_link)
+        assert np.allclose(with_interval.fit, expected_response)
 
     def test_glmer_predict_link_scale(self):
         result = glmer("y ~ period + (1 | herd)", CBPP, family=families.Binomial())
