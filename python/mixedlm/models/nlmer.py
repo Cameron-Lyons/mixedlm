@@ -416,7 +416,10 @@ class NlmerResult:
         maxiter = kwargs.pop("maxiter", _DEFAULT_MAXITER)
 
         opt_result = optimizer.optimize(
+            start_theta=self.theta,
             start_phi=start_phi,
+            start_b=self.b,
+            start_sigma=self.sigma,
             method=method,
             maxiter=maxiter,
         )
