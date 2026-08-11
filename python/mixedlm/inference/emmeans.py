@@ -304,8 +304,6 @@ def emmeans(
     type: str = "response",
     level: float = 0.95,
 ) -> Emmeans:
-    from mixedlm.matrices.design import build_fixed_matrix
-
     if type not in {"link", "response"}:
         raise ValueError("type must be 'link' or 'response'")
 
@@ -376,7 +374,7 @@ def emmeans(
 
     grid = pd.DataFrame(grid_data)
 
-    X_grid, _ = build_fixed_matrix(model.formula, grid)
+    X_grid = model._prediction_fixed_matrix(grid)
 
     spec_combinations = list(itertools.product(*spec_levels))
     n_emmeans = len(spec_combinations)
