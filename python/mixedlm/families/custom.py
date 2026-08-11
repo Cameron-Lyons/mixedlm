@@ -44,6 +44,9 @@ class CustomFamily(Family):
     - variance(mu): Return the variance function V(mu)
     - deviance_resids(y, mu, wt): Return the weighted deviance residuals
 
+    Set ``mean_bounds`` or override ``clamp_mu()`` when the response mean is
+    restricted. The default is unbounded.
+
     The weights() method is inherited and computed from the link and variance.
 
     Example
@@ -197,11 +200,12 @@ class QuasiFamily(CustomFamily):
     """
 
     def __init__(self, base_family: Family, phi: float = 1.0):
+        if not np.isfinite(phi) or phi <= 0:
+            raise ValueError("phi must be finite and greater than zero")
         self.base_family = base_family
         self.phi = phi
         self.link = base_family.link
-        self.mu_lower_bound = base_family.mu_lower_bound
-        self.mu_upper_bound = base_family.mu_upper_bound
+        self.mean_bounds = base_family.mean_bounds
 
     def variance(self, mu: NDArray[np.floating]) -> NDArray[np.floating]:
         return self.phi * self.base_family.variance(mu)

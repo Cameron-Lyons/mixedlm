@@ -13,12 +13,6 @@ if TYPE_CHECKING:
 
 from mixedlm.estimation.laplace import GLMMOptimizer, _build_lambda, _count_theta
 from mixedlm.families.base import Family
-from mixedlm.families.binomial import Binomial
-from mixedlm.families.gamma import Gamma
-from mixedlm.families.gaussian import Gaussian
-from mixedlm.families.inverse_gaussian import InverseGaussian
-from mixedlm.families.negative_binomial import NegativeBinomial
-from mixedlm.families.poisson import Poisson
 from mixedlm.formula.terms import Formula
 from mixedlm.matrices.design import ModelMatrices
 from mixedlm.models.lmer_types import (
@@ -66,6 +60,15 @@ class GlmerVarCorr:
         return self.groups[group].corr
 
 
+@dataclass(frozen=True)
+class _GLMMProjection:
+    weights: NDArray[np.floating]
+    Lambda: sparse.csc_matrix
+    random_cholesky: NDArray[np.floating]
+    RZX: NDArray[np.floating]
+    fixed_information: NDArray[np.floating]
+
+
 @dataclass
 class GlmerResult(MerResultMixin):
     _IS_GLMM: ClassVar[bool] = True
@@ -97,24 +100,14 @@ class GlmerResult(MerResultMixin):
         if q == 0:
             return {}
 
-        Lambda = _build_lambda(self.theta, self.matrices.random_structures)
-
-        eta = self.linear_predictor()
-        mu = self.family.link.inverse(eta)
-        if hasattr(self.family, "clamp_mu"):
-            mu = self.family.clamp_mu(mu)
-        else:
-            mu = np.clip(mu, 1e-10, 1 - 1e-10)
-
-        W = self.family.weights(mu) * self.matrices.weights
-        W = np.maximum(W, 1e-10)
-        weighted_z = self.matrices.Z.multiply(np.sqrt(W)[:, np.newaxis])
+        projection = self._working_projection
+        weighted_z = self.matrices.Z.multiply(np.sqrt(projection.weights)[:, np.newaxis])
         ztwz = weighted_z.T @ weighted_z
-        precision = Lambda.T @ ztwz @ Lambda + sparse.eye(q, format="csc")
+        precision = projection.Lambda.T @ ztwz @ projection.Lambda + sparse.eye(q, format="csc")
 
         return _conditional_variance_blocks(
             precision,
-            Lambda,
+            projection.Lambda,
             self.matrices.random_structures,
             include_cov=include_cov,
         )
@@ -232,6 +225,57 @@ class GlmerResult(MerResultMixin):
         fixed_part = self.matrices.X @ self.beta
         random_part = self.matrices.Z @ self.u
         return fixed_part + random_part + self.matrices.offset
+
+    @cached_property
+    def _working_projection(self) -> _GLMMProjection:
+        """Final PIRLS projection in spherical random-effect coordinates."""
+        X = self.matrices.X
+        q = self.matrices.n_random
+        mu = self.family.link.inverse(self._linear_predictor)
+        mu = self.family.clamp_mu(mu)
+        weights = np.clip(
+            self.family.weights(mu) * self.matrices.weights,
+            1e-10,
+            1e10,
+        )
+        sqrt_weights = np.sqrt(weights)
+        WX = sqrt_weights[:, None] * X
+        XtWX = WX.T @ WX
+        Lambda = _build_lambda(self.theta, self.matrices.random_structures)
+
+        if q == 0:
+            return _GLMMProjection(
+                weights=weights,
+                Lambda=Lambda,
+                random_cholesky=np.empty((0, 0), dtype=np.float64),
+                RZX=np.empty((0, X.shape[1]), dtype=np.float64),
+                fixed_information=np.asarray(XtWX),
+            )
+
+        WZ = self.matrices.Z.multiply(sqrt_weights[:, None]).tocsc()
+        ZtWZ = WZ.T @ WZ
+        random_information = Lambda.T @ ZtWZ @ Lambda + sparse.eye(q, format="csc")
+        random_information_dense = random_information.toarray()
+        try:
+            random_cholesky = linalg.cholesky(random_information_dense, lower=True)
+        except linalg.LinAlgError:
+            random_information_dense += 1e-6 * np.eye(q)
+            random_cholesky = linalg.cholesky(random_information_dense, lower=True)
+
+        XtWZ = WX.T @ WZ
+        XtWZ_dense = XtWZ.toarray() if sparse.issparse(XtWZ) else np.asarray(XtWZ)
+        spherical_cross = np.asarray(Lambda.T @ XtWZ_dense.T)
+        RZX = linalg.solve_triangular(random_cholesky, spherical_cross, lower=True)
+        fixed_information = np.asarray(XtWX - RZX.T @ RZX)
+        fixed_information = 0.5 * (fixed_information + fixed_information.T)
+
+        return _GLMMProjection(
+            weights=weights,
+            Lambda=Lambda,
+            random_cholesky=random_cholesky,
+            RZX=RZX,
+            fixed_information=fixed_information,
+        )
 
     def linear_predictor(self, na_expand: bool = True) -> NDArray[np.floating]:
         values = self._linear_predictor
@@ -415,54 +459,16 @@ class GlmerResult(MerResultMixin):
         return eta
 
     def vcov(self) -> NDArray[np.floating]:
-        q = self.matrices.n_random
-        Lambda = _build_lambda(self.theta, self.matrices.random_structures)
-
-        eta = self.linear_predictor()
-        mu = self.family.link.inverse(eta)
-        mu = np.clip(mu, 1e-10, 1 - 1e-10)
-
-        W = self.family.weights(mu)
-        W = np.maximum(W, 1e-10)
-        W_diag = sparse.diags(W, format="csc")
-
-        XtWX = self.matrices.X.T @ W_diag @ self.matrices.X
-
-        if q > 0:
-            Zt = self.matrices.Zt
-            XtWZ = self.matrices.X.T @ W_diag @ self.matrices.Z
-            ZtWZ = Zt @ W_diag @ self.matrices.Z
-
-            LambdatLambda = Lambda.T @ Lambda
-            if sparse.issparse(LambdatLambda):
-                LambdatLambda = LambdatLambda.toarray()
-            if sparse.issparse(ZtWZ):
-                ZtWZ = ZtWZ.toarray()
-
-            C = ZtWZ + LambdatLambda
-            try:
-                L_C = linalg.cholesky(C, lower=True)
-            except linalg.LinAlgError:
-                C += 1e-6 * np.eye(q)
-                L_C = linalg.cholesky(C, lower=True)
-
-            if sparse.issparse(XtWZ):
-                XtWZ = XtWZ.toarray()
-
-            RZX = linalg.solve_triangular(L_C, XtWZ.T, lower=True)
-            XtVinvX = XtWX - RZX.T @ RZX
-        else:
-            XtVinvX = XtWX
-
-        p = XtVinvX.shape[0]
+        information = self._working_projection.fixed_information
+        p = information.shape[0]
         try:
-            L = linalg.cholesky(XtVinvX, lower=True)
+            L = linalg.cholesky(information, lower=True)
             return linalg.cho_solve((L, True), np.eye(p))
         except linalg.LinAlgError:
             try:
-                return linalg.solve(XtVinvX, np.eye(p))
+                return linalg.solve(information, np.eye(p))
             except linalg.LinAlgError:
-                return linalg.pinv(XtVinvX)
+                return linalg.pinv(information)
 
     def hatvalues(self) -> NDArray[np.floating]:
         """Compute leverage values (diagonal of the hat matrix).
@@ -483,75 +489,35 @@ class GlmerResult(MerResultMixin):
         """
         q = self.matrices.n_random
         X = self.matrices.X
-
-        eta = self.linear_predictor()
-        mu = self.family.link.inverse(eta)
-        mu = np.clip(mu, 1e-10, 1 - 1e-10)
-
-        W = self.family.weights(mu)
-        W = np.maximum(W, 1e-10)
-        sqrt_W = np.sqrt(W)
+        projection = self._working_projection
+        W = projection.weights
+        vcov_beta = self.vcov()
 
         if q == 0:
-            XW = X * sqrt_W[:, np.newaxis]
-            XtWX = XW.T @ XW
-            try:
-                L = linalg.cholesky(XtWX, lower=True)
-                XtWX_inv = linalg.cho_solve((L, True), np.eye(X.shape[1]))
-            except linalg.LinAlgError:
-                XtWX_inv = linalg.pinv(XtWX)
-            h = W * np.sum((X @ XtWX_inv) * X, axis=1)
+            h = W * np.sum((X @ vcov_beta) * X, axis=1)
             return np.clip(h, 0, 1 - 1e-10)
 
-        Lambda = _build_lambda(self.theta, self.matrices.random_structures)
-        Z = self.matrices.Z
-        Zt = self.matrices.Zt
-        W_diag = sparse.diags(W, format="csc")
+        ZLambda = (self.matrices.Z @ projection.Lambda).tocsr()
+        random_fixed_map = linalg.solve_triangular(
+            projection.random_cholesky.T,
+            projection.RZX,
+            lower=False,
+        )
+        adjusted_X = X - np.asarray(ZLambda @ random_fixed_map)
+        diagonal = np.sum((adjusted_X @ vcov_beta) * adjusted_X, axis=1)
 
-        ZtWZ = Zt @ W_diag @ self.matrices.Z
-        LambdatLambda = Lambda.T @ Lambda
+        chunk_size = max(1, min(len(X), 1_000_000 // max(q, 1)))
+        for start in range(0, len(X), chunk_size):
+            stop = min(start + chunk_size, len(X))
+            block = ZLambda[start:stop].toarray()
+            solved = linalg.solve_triangular(
+                projection.random_cholesky,
+                block.T,
+                lower=True,
+            )
+            diagonal[start:stop] += np.sum(solved * solved, axis=0)
 
-        if sparse.issparse(LambdatLambda):
-            LambdatLambda = LambdatLambda.toarray()
-        if sparse.issparse(ZtWZ):
-            ZtWZ = ZtWZ.toarray()
-
-        C = ZtWZ + LambdatLambda
-
-        try:
-            L_C = linalg.cholesky(C, lower=True)
-        except linalg.LinAlgError:
-            C += 1e-6 * np.eye(q)
-            L_C = linalg.cholesky(C, lower=True)
-
-        XtWX = X.T @ W_diag @ X
-        XtWZ = X.T @ W_diag @ self.matrices.Z
-
-        if sparse.issparse(XtWZ):
-            XtWZ = XtWZ.toarray()
-
-        RZX = linalg.solve_triangular(L_C, XtWZ.T, lower=True)
-        XtVinvX = XtWX - RZX.T @ RZX
-
-        try:
-            L_XVX = linalg.cholesky(XtVinvX, lower=True)
-            XtVinvX_inv = linalg.cho_solve((L_XVX, True), np.eye(X.shape[1]))
-        except linalg.LinAlgError:
-            XtVinvX_inv = linalg.pinv(XtVinvX)
-
-        h_fixed = W * np.sum((X @ XtVinvX_inv) * X, axis=1)
-
-        ZLambda = Z @ Lambda
-        ZLambda_dense = ZLambda.toarray() if sparse.issparse(ZLambda) else ZLambda
-
-        C_inv = linalg.cho_solve((L_C, True), np.eye(q))
-        ZLambda_Cinv = ZLambda_dense @ C_inv
-        h_random = W * np.sum(ZLambda_Cinv * ZLambda_dense, axis=1)
-
-        h = h_fixed + h_random
-        h = np.clip(h, 0, 1 - 1e-10)
-
-        return h
+        return np.clip(W * diagonal, 0, 1 - 1e-10)
 
     def cooks_distance(self) -> NDArray[np.floating]:
         """Compute Cook's distance for each observation.
@@ -1047,8 +1013,10 @@ class GlmerResult(MerResultMixin):
         elif name == "nAGQ":
             return self.nAGQ
         elif name == "RX":
-            _, R = linalg.qr(self.matrices.X, mode="economic")
-            return R
+            return linalg.cholesky(
+                self._working_projection.fixed_information,
+                lower=False,
+            )
         elif name == "RZX":
             return self._compute_RZX()
         elif name == "Lind":
@@ -1091,35 +1059,7 @@ class GlmerResult(MerResultMixin):
 
     def _compute_RZX(self) -> NDArray[np.floating]:
         """Compute RZX, the cross-term in the mixed model equations."""
-        Z = self.matrices.Z
-        X = self.matrices.X
-        Lambda = _build_lambda(self.theta, self.matrices.random_structures)
-
-        if sparse.issparse(Z):
-            Zt = Z.T
-            ZtZ = Zt @ Z
-        else:
-            Zt = Z.T
-            ZtZ = Zt @ Z
-
-        LambdatLambda = Lambda.T @ Lambda
-        C = ZtZ + LambdatLambda
-
-        if sparse.issparse(C):
-            C = C.toarray()
-
-        try:
-            L_C = linalg.cholesky(C, lower=True)
-        except linalg.LinAlgError:
-            C = C + 1e-6 * np.eye(C.shape[0])
-            L_C = linalg.cholesky(C, lower=True)
-
-        XtZ = X.T @ Z
-        if sparse.issparse(XtZ):
-            XtZ = XtZ.toarray()
-
-        RZX = linalg.solve_triangular(L_C, XtZ.T, lower=True)
-        return RZX
+        return self._working_projection.RZX.copy()
 
     def _build_Lind(self) -> NDArray[np.int64]:
         """Build Lind, the index mapping from theta to Lambda entries."""
@@ -1598,25 +1538,13 @@ class GlmerResult(MerResultMixin):
         self,
         mu: NDArray[np.floating],
     ) -> NDArray[np.floating]:
-        if isinstance(self.family, Binomial):
-            mu = np.clip(mu, 1e-6, 1 - 1e-6)
-            return np.random.binomial(1, mu).astype(np.float64)
-        if isinstance(self.family, Poisson):
-            mu = np.clip(mu, 1e-6, 1e15)
-            return np.random.poisson(mu).astype(np.float64)
-        if isinstance(self.family, NegativeBinomial):
-            mu = np.clip(mu, 1e-6, 1e10)
-            theta = self.family.theta
-            return np.random.negative_binomial(theta, theta / (mu + theta)).astype(np.float64)
-        if isinstance(self.family, Gamma):
-            mu = np.clip(mu, 1e-6, 1e10)
-            return np.random.gamma(1.0, mu).astype(np.float64)
-        if isinstance(self.family, InverseGaussian):
-            mu = np.clip(mu, 1e-6, 1e10)
-            return np.random.wald(mu, 1.0).astype(np.float64)
-        if isinstance(self.family, Gaussian):
-            return np.random.normal(mu, 1.0).astype(np.float64)
-        return mu + np.random.randn(*mu.shape) * 0.1
+        if self.family.__class__.__name__ == "Binomial" and self.matrices.trials is not None:
+            mu = self.family.clamp_mu(mu, eps=1e-6)
+            trials = self.matrices.trials.astype(np.int64)
+            if mu.ndim > 1:
+                trials = trials[:, None]
+            return np.random.binomial(trials, mu).astype(np.float64)
+        return self.family.simulate(mu)
 
     def _refit_from_matrices(self, matrices: ModelMatrices, **kwargs) -> GlmerResult:
         optimizer = GLMMOptimizer(
@@ -1671,7 +1599,9 @@ class GlmerResult(MerResultMixin):
         ----------
         newresp : array-like, optional
             New response values. Must have the same length as the original
-            response. If None, refits with the original response.
+            response. For grouped binomial models, provide success counts;
+            the original trial counts are reused. If None, refits with the
+            original response.
         **kwargs
             Additional arguments passed to the optimizer (start, method, maxiter).
 
