@@ -40,9 +40,13 @@ Extract random effects (BLUPs).
 
 **Parameters:**
 
-- `condVar`: If True, include conditional variances.
+- `condVar`: If True, return a `RanefResult` containing the random effects and
+  their per-level conditional variances. The calculation uses sparse block
+  extraction, so it does not materialize the full random-effect covariance
+  matrix.
 
-**Returns:** Dictionary with group names as keys and DataFrames of random effects as values.
+**Returns:** A nested dictionary of random-effect arrays, or a `RanefResult`
+when `condVar=True`.
 
 #### VarCorr
 
@@ -53,6 +57,21 @@ result.VarCorr()
 Extract variance-covariance components of random effects.
 
 **Returns:** VarCorr object with variance, standard deviation, and correlation information.
+
+Compound-symmetry and AR(1) structures are reported on their exact fitted covariance scale.
+The same structured covariance is used by `rePCA()`, `isSingular()`, and the parameter bounds
+returned by `getME("lower")`:
+
+```python
+from mixedlm import lmer, set_cov_type
+
+formula = set_cov_type("y ~ time + (time | subject)", "ar1")
+result = lmer(formula, data)
+
+print(result.VarCorr())
+print(result.rePCA())
+print(result.isSingular())
+```
 
 #### coef
 

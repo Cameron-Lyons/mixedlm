@@ -225,10 +225,10 @@ model.predict(newdata=new_data, group_var="subject")
 For confidence intervals on nonlinear parameters:
 
 ```python
-boot_result = mlm.bootstrap_nlmer(model, data, nsim=500)
+boot_result = mlm.bootstrap_nlmer(model, n_boot=500, seed=42)
 
 # Bootstrap CIs
-boot_result.confint()
+mlm.bootCI(boot_result, component="all")
 ```
 
 ## Custom Nonlinear Functions
