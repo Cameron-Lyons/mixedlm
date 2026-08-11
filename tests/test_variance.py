@@ -44,6 +44,30 @@ class TestSdcor2cov:
         with pytest.raises(ValueError, match="corr must be"):
             sdcor2cov(sd, corr)
 
+    def test_rejects_invalid_standard_deviations(self):
+        with pytest.raises(ValueError, match="one-dimensional"):
+            sdcor2cov(np.ones((2, 1)))
+        with pytest.raises(ValueError, match="finite"):
+            sdcor2cov(np.array([1.0, np.inf]))
+        with pytest.raises(ValueError, match="non-negative"):
+            sdcor2cov(np.array([1.0, -0.5]))
+
+    def test_rejects_nonfinite_correlation(self):
+        corr = np.array([[1.0, np.nan], [np.nan, 1.0]])
+        with pytest.raises(ValueError, match="finite"):
+            sdcor2cov(np.ones(2), corr)
+
+    def test_does_not_mutate_inputs(self):
+        sd = np.array([1.0, 2.0])
+        corr = np.array([[1.0, 0.5], [0.5, 1.0]])
+        sd_before = sd.copy()
+        corr_before = corr.copy()
+
+        sdcor2cov(sd, corr)
+
+        assert_allclose(sd, sd_before)
+        assert_allclose(corr, corr_before)
+
 
 class TestCov2sdcor:
     def test_diagonal_case(self):
@@ -65,6 +89,43 @@ class TestCov2sdcor:
         sd, corr = cov2sdcor(cov)
         assert_allclose(sd, sd_orig)
         assert_allclose(corr, corr_orig)
+
+    def test_zero_variance_has_zero_off_diagonal_correlation(self):
+        cov = np.diag([1.0, 0.0, 4.0])
+        sd, corr = cov2sdcor(cov)
+
+        assert_allclose(sd, [1.0, 0.0, 2.0])
+        assert_allclose(corr, np.eye(3))
+
+    def test_tiny_negative_variance_is_clipped(self):
+        cov = np.diag([1.0, -np.finfo(float).eps])
+        sd, corr = cov2sdcor(cov)
+
+        assert_allclose(sd, [1.0, 0.0])
+        assert_allclose(corr, np.eye(2))
+
+    @pytest.mark.parametrize(
+        ("cov", "message"),
+        [
+            (np.ones(2), "square"),
+            (np.ones((2, 3)), "square"),
+            (np.array([[1.0, np.nan], [np.nan, 1.0]]), "finite"),
+            (np.array([[1.0, 0.5], [0.0, 1.0]]), "symmetric"),
+            (np.diag([1.0, -1.0]), "non-negative diagonal"),
+            (np.array([[1.0, 0.1], [0.1, 0.0]]), "zero-variance"),
+        ],
+    )
+    def test_rejects_invalid_covariance(self, cov, message):
+        with pytest.raises(ValueError, match=message):
+            cov2sdcor(cov)
+
+    def test_does_not_mutate_input(self):
+        cov = np.array([[1.0, 0.5], [0.5, 4.0]])
+        before = cov.copy()
+
+        cov2sdcor(cov)
+
+        assert_allclose(cov, before)
 
 
 class TestVvToCv:

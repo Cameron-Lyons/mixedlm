@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import warnings
+from collections.abc import Callable
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -60,37 +62,175 @@ class Drop1Result:
         return f"Drop1Result(n_terms={len(self.terms)})"
 
 
+Drop1WorkerResult = tuple[
+    str,
+    int | None,
+    float | None,
+    float | None,
+    float | None,
+    str | None,
+]
+
+
+def _normalize_test(test: str) -> str:
+    normalized = test.lower()
+    if normalized == "chisq":
+        return "Chisq"
+    if normalized == "none":
+        return "none"
+    raise ValueError("test must be 'Chisq' or 'none'")
+
+
+def _resolve_worker_count(n_jobs: int) -> int:
+    if n_jobs == -1:
+        return os.cpu_count() or 1
+    if n_jobs < 1:
+        raise ValueError("n_jobs must be a positive integer or -1")
+    return n_jobs
+
+
+def _droppable_fixed_terms(model: LmerResult | GlmerResult) -> list[str]:
+    """Return fixed terms whose deletion respects the marginality principle."""
+    from mixedlm.formula.terms import (
+        InteractionTerm,
+        PowerTerm,
+        VariableTerm,
+        format_term,
+    )
+
+    FactorKey = tuple[str, int | None]
+
+    def factor_key(factor: str | PowerTerm) -> FactorKey:
+        if isinstance(factor, PowerTerm):
+            return (factor.name, factor.exponent)
+        return (factor, None)
+
+    candidates: list[tuple[str, frozenset[FactorKey]]] = []
+    for term in model.formula.fixed.terms:
+        if isinstance(term, VariableTerm):
+            candidates.append((format_term(term), frozenset((factor_key(term.name),))))
+        elif isinstance(term, PowerTerm):
+            candidates.append((format_term(term), frozenset((factor_key(term),))))
+        elif isinstance(term, InteractionTerm):
+            candidates.append(
+                (
+                    format_term(term),
+                    frozenset(factor_key(factor) for factor in term.variables),
+                )
+            )
+
+    return [
+        label
+        for index, (label, variables) in enumerate(candidates)
+        if not any(
+            variables < other_variables
+            for other_index, (_, other_variables) in enumerate(candidates)
+            if other_index != index
+        )
+    ]
+
+
+def _likelihood_ratio(
+    full_n_params: int,
+    reduced_n_params: int,
+    full_loglik: float,
+    reduced_loglik: float,
+    test: str,
+) -> tuple[float | None, float | None]:
+    if test != "Chisq":
+        return None, None
+
+    df_diff = full_n_params - reduced_n_params
+    if df_diff <= 0:
+        return None, None
+
+    lrt = max(0.0, 2.0 * (full_loglik - reduced_loglik))
+    return lrt, float(stats.chi2.sf(lrt, df_diff))
+
+
+def _run_drop1_tasks(
+    worker: Callable[[tuple[Any, ...]], Drop1WorkerResult],
+    tasks: list[tuple[Any, ...]],
+    n_jobs: int,
+) -> list[Drop1WorkerResult]:
+    if not tasks:
+        return []
+
+    worker_count = min(n_jobs, len(tasks))
+    if worker_count == 1:
+        return [worker(task) for task in tasks]
+
+    results: list[Drop1WorkerResult] = []
+    with ProcessPoolExecutor(max_workers=worker_count) as executor:
+        futures = [executor.submit(worker, task) for task in tasks]
+        for future in as_completed(futures):
+            results.append(future.result())
+    return results
+
+
+def _assemble_drop1_result(
+    droppable_terms: list[str],
+    worker_results: list[Drop1WorkerResult],
+    full_aic: float,
+    full_n_params: int,
+) -> Drop1Result:
+    failures = [(term, error) for term, *_, error in worker_results if error is not None]
+    if failures:
+        details = "; ".join(f"{term}: {error}" for term, error in failures)
+        warnings.warn(
+            f"Single-term deletion failed for {len(failures)} term(s): {details}",
+            RuntimeWarning,
+            stacklevel=3,
+        )
+
+    successful = {
+        term: (n_params, aic, lrt, p_value)
+        for term, n_params, aic, lrt, p_value, error in worker_results
+        if error is None and n_params is not None and aic is not None
+    }
+
+    terms = [term for term in droppable_terms if term in successful]
+    return Drop1Result(
+        terms=terms,
+        df=[successful[term][0] for term in terms],
+        aic=[successful[term][1] for term in terms],
+        lrt=[successful[term][2] for term in terms],
+        p_value=[successful[term][3] for term in terms],
+        full_model_aic=full_aic,
+        full_model_df=full_n_params,
+    )
+
+
 def _drop1_lmer_worker(
     args: tuple[Any, ...],
-) -> tuple[str, int | None, float | None, float | None, float | None, str | None]:
+) -> Drop1WorkerResult:
     from mixedlm.estimation.reml import _count_theta
     from mixedlm.models.lmer import LmerMod
 
-    term, formula, data, REML, weights, offset, full_n_params, full_loglik, test = args
+    term, formula, data, weights, offset, start, full_n_params, full_loglik, test = args
 
     try:
         lmer_model = LmerMod(
             formula,
             data,
-            REML=REML,
+            REML=False,
             weights=weights,
             offset=offset,
         )
-        reduced_model = lmer_model.fit()
+        reduced_model = lmer_model.fit(start=start)
 
         reduced_n_theta = _count_theta(reduced_model.matrices.random_structures)
         reduced_n_params = reduced_model.matrices.n_fixed + reduced_n_theta + 1
         reduced_aic = reduced_model.AIC()
         reduced_loglik = reduced_model.logLik().value
 
-        lrt: float | None = None
-        p_val: float | None = None
-
-        if test == "Chisq":
-            df_diff = full_n_params - reduced_n_params
-            if df_diff > 0:
-                lrt = 2 * (full_loglik - reduced_loglik)
-                p_val = 1 - stats.chi2.cdf(lrt, df_diff)
+        lrt, p_val = _likelihood_ratio(
+            full_n_params,
+            reduced_n_params,
+            full_loglik,
+            reduced_loglik,
+            test,
+        )
 
         return (term, reduced_n_params, reduced_aic, lrt, p_val, None)
     except Exception as e:
@@ -99,11 +239,23 @@ def _drop1_lmer_worker(
 
 def _drop1_glmer_worker(
     args: tuple[Any, ...],
-) -> tuple[str, int | None, float | None, float | None, float | None, str | None]:
+) -> Drop1WorkerResult:
     from mixedlm.estimation.laplace import _count_theta
     from mixedlm.models.glmer import GlmerMod
 
-    term, formula, data, family, weights, offset, nAGQ, full_n_params, full_loglik, test = args
+    (
+        term,
+        formula,
+        data,
+        family,
+        weights,
+        offset,
+        nAGQ,
+        start,
+        full_n_params,
+        full_loglik,
+        test,
+    ) = args
 
     try:
         glmer_model = GlmerMod(
@@ -113,21 +265,20 @@ def _drop1_glmer_worker(
             weights=weights,
             offset=offset,
         )
-        reduced_model = glmer_model.fit(nAGQ=nAGQ)
+        reduced_model = glmer_model.fit(nAGQ=nAGQ, start=start)
 
         reduced_n_theta = _count_theta(reduced_model.matrices.random_structures)
         reduced_n_params = reduced_model.matrices.n_fixed + reduced_n_theta
         reduced_aic = reduced_model.AIC()
         reduced_loglik = reduced_model.logLik().value
 
-        lrt: float | None = None
-        p_val: float | None = None
-
-        if test == "Chisq":
-            df_diff = full_n_params - reduced_n_params
-            if df_diff > 0:
-                lrt = 2 * (full_loglik - reduced_loglik)
-                p_val = 1 - stats.chi2.cdf(lrt, df_diff)
+        lrt, p_val = _likelihood_ratio(
+            full_n_params,
+            reduced_n_params,
+            full_loglik,
+            reduced_loglik,
+            test,
+        )
 
         return (term, reduced_n_params, reduced_aic, lrt, p_val, None)
     except Exception as e:
@@ -140,125 +291,56 @@ def drop1_lmer(
     test: str = "Chisq",
     n_jobs: int = 1,
 ) -> Drop1Result:
+    """Compare valid single-term deletions from a fitted linear mixed model.
+
+    REML fits are automatically refitted with ML because likelihoods from
+    different fixed-effects specifications are not comparable under REML.
+    Terms contained in higher-order interactions are retained to respect the
+    marginality principle.
+    """
     from mixedlm.estimation.reml import _count_theta
-    from mixedlm.formula.terms import (
-        InteractionTerm,
-        PowerTerm,
-        VariableTerm,
-        format_term,
+    from mixedlm.formula.parser import update_formula
+
+    test = _normalize_test(test)
+    n_jobs = _resolve_worker_count(n_jobs)
+    comparison_model = model.refitML() if model.REML else model
+    droppable_terms = _droppable_fixed_terms(comparison_model)
+
+    n_theta = _count_theta(comparison_model.matrices.random_structures)
+    full_n_params = comparison_model.matrices.n_fixed + n_theta + 1
+    full_aic = comparison_model.AIC()
+    full_loglik = comparison_model.logLik().value
+    weights = (
+        comparison_model.matrices.weights
+        if np.any(comparison_model.matrices.weights != 1.0)
+        else None
+    )
+    offset = (
+        comparison_model.matrices.offset
+        if np.any(comparison_model.matrices.offset != 0.0)
+        else None
     )
 
-    droppable_terms: list[str] = []
-    for formula_term in model.formula.fixed.terms:
-        if isinstance(formula_term, VariableTerm):
-            droppable_terms.append(formula_term.name)
-        elif isinstance(formula_term, PowerTerm | InteractionTerm):
-            droppable_terms.append(format_term(formula_term))
-
-    n_theta = _count_theta(model.matrices.random_structures)
-    full_n_params = model.matrices.n_fixed + n_theta + 1
-    full_aic = model.AIC()
-    full_loglik = model.logLik().value
-
-    weights = model.matrices.weights if np.any(model.matrices.weights != 1.0) else None
-    offset = model.matrices.offset if np.any(model.matrices.offset != 0.0) else None
-
-    terms: list[str] = []
-    df_list: list[int] = []
-    aic_list: list[float] = []
-    lrt_list: list[float | None] = []
-    p_value_list: list[float | None] = []
-
-    from mixedlm.formula.parser import update_formula
-    from mixedlm.models.lmer import LmerMod
-
-    reduced_formulas = {
-        term: update_formula(model.formula, f". ~ . - {term}") for term in droppable_terms
-    }
-
-    if n_jobs == 1:
-        for term in droppable_terms:
-            try:
-                lmer_model = LmerMod(
-                    reduced_formulas[term],
-                    data,
-                    REML=model.REML,
-                    weights=weights,
-                    offset=offset,
-                )
-                reduced_model = lmer_model.fit()
-
-                reduced_n_theta = _count_theta(reduced_model.matrices.random_structures)
-                reduced_n_params = reduced_model.matrices.n_fixed + reduced_n_theta + 1
-                reduced_aic = reduced_model.AIC()
-                reduced_loglik = reduced_model.logLik().value
-
-                terms.append(term)
-                df_list.append(reduced_n_params)
-                aic_list.append(reduced_aic)
-
-                if test == "Chisq":
-                    df_diff = full_n_params - reduced_n_params
-                    if df_diff > 0:
-                        lrt = 2 * (full_loglik - reduced_loglik)
-                        p_val = 1 - stats.chi2.cdf(lrt, df_diff)
-                        lrt_list.append(float(lrt))
-                        p_value_list.append(float(p_val))
-                    else:
-                        lrt_list.append(None)
-                        p_value_list.append(None)
-                else:
-                    lrt_list.append(None)
-                    p_value_list.append(None)
-
-            except Exception:
-                continue
-    else:
-        if n_jobs == -1:
-            n_jobs = os.cpu_count() or 1
-
-        tasks = [
-            (
-                term,
-                reduced_formulas[term],
-                data,
-                model.REML,
-                weights,
-                offset,
-                full_n_params,
-                full_loglik,
-                test,
-            )
-            for term in droppable_terms
-        ]
-
-        results: dict[str, tuple[int, float, float | None, float | None]] = {}
-
-        with ProcessPoolExecutor(max_workers=n_jobs) as executor:
-            futures = {executor.submit(_drop1_lmer_worker, task): task[0] for task in tasks}
-
-            for future in as_completed(futures):
-                fut_term, fut_n_params, fut_aic, fut_lrt, fut_p_val, fut_error = future.result()
-                if fut_error is None and fut_n_params is not None and fut_aic is not None:
-                    results[fut_term] = (fut_n_params, fut_aic, fut_lrt, fut_p_val)
-
-        for term_name in droppable_terms:
-            if term_name in results:
-                res_n_params, res_aic, res_lrt, res_p_val = results[term_name]
-                terms.append(term_name)
-                df_list.append(res_n_params)
-                aic_list.append(res_aic)
-                lrt_list.append(res_lrt)
-                p_value_list.append(res_p_val)
-
-    return Drop1Result(
-        terms=terms,
-        df=df_list,
-        aic=aic_list,
-        lrt=lrt_list,
-        p_value=p_value_list,
-        full_model_aic=full_aic,
-        full_model_df=full_n_params,
+    tasks = [
+        (
+            term,
+            update_formula(comparison_model.formula, f". ~ . - {term}"),
+            data,
+            weights,
+            offset,
+            comparison_model.theta,
+            full_n_params,
+            full_loglik,
+            test,
+        )
+        for term in droppable_terms
+    ]
+    worker_results = _run_drop1_tasks(_drop1_lmer_worker, tasks, n_jobs)
+    return _assemble_drop1_result(
+        droppable_terms,
+        worker_results,
+        full_aic,
+        full_n_params,
     )
 
 
@@ -268,124 +350,44 @@ def drop1_glmer(
     test: str = "Chisq",
     n_jobs: int = 1,
 ) -> Drop1Result:
+    """Compare valid single-term deletions from a fitted generalized mixed model.
+
+    Terms contained in higher-order interactions are retained to respect the
+    marginality principle.
+    """
     from mixedlm.estimation.laplace import _count_theta
-    from mixedlm.formula.terms import (
-        InteractionTerm,
-        PowerTerm,
-        VariableTerm,
-        format_term,
-    )
+    from mixedlm.formula.parser import update_formula
 
-    droppable_terms: list[str] = []
-    for formula_term in model.formula.fixed.terms:
-        if isinstance(formula_term, VariableTerm):
-            droppable_terms.append(formula_term.name)
-        elif isinstance(formula_term, PowerTerm | InteractionTerm):
-            droppable_terms.append(format_term(formula_term))
-
+    test = _normalize_test(test)
+    n_jobs = _resolve_worker_count(n_jobs)
+    droppable_terms = _droppable_fixed_terms(model)
     n_theta = _count_theta(model.matrices.random_structures)
     full_n_params = model.matrices.n_fixed + n_theta
     full_aic = model.AIC()
     full_loglik = model.logLik().value
-
     weights = model.matrices.weights if np.any(model.matrices.weights != 1.0) else None
     offset = model.matrices.offset if np.any(model.matrices.offset != 0.0) else None
 
-    terms: list[str] = []
-    df_list: list[int] = []
-    aic_list: list[float] = []
-    lrt_list: list[float | None] = []
-    p_value_list: list[float | None] = []
-
-    from mixedlm.formula.parser import update_formula
-    from mixedlm.models.glmer import GlmerMod
-
-    reduced_formulas = {
-        term: update_formula(model.formula, f". ~ . - {term}") for term in droppable_terms
-    }
-
-    if n_jobs == 1:
-        for term in droppable_terms:
-            try:
-                glmer_model = GlmerMod(
-                    reduced_formulas[term],
-                    data,
-                    family=model.family,
-                    weights=weights,
-                    offset=offset,
-                )
-                reduced_model = glmer_model.fit(nAGQ=model.nAGQ)
-
-                reduced_n_theta = _count_theta(reduced_model.matrices.random_structures)
-                reduced_n_params = reduced_model.matrices.n_fixed + reduced_n_theta
-                reduced_aic = reduced_model.AIC()
-                reduced_loglik = reduced_model.logLik().value
-
-                terms.append(term)
-                df_list.append(reduced_n_params)
-                aic_list.append(reduced_aic)
-
-                if test == "Chisq":
-                    df_diff = full_n_params - reduced_n_params
-                    if df_diff > 0:
-                        lrt = 2 * (full_loglik - reduced_loglik)
-                        p_val = 1 - stats.chi2.cdf(lrt, df_diff)
-                        lrt_list.append(float(lrt))
-                        p_value_list.append(float(p_val))
-                    else:
-                        lrt_list.append(None)
-                        p_value_list.append(None)
-                else:
-                    lrt_list.append(None)
-                    p_value_list.append(None)
-
-            except Exception:
-                continue
-    else:
-        if n_jobs == -1:
-            n_jobs = os.cpu_count() or 1
-
-        tasks = [
-            (
-                term,
-                reduced_formulas[term],
-                data,
-                model.family,
-                weights,
-                offset,
-                model.nAGQ,
-                full_n_params,
-                full_loglik,
-                test,
-            )
-            for term in droppable_terms
-        ]
-
-        results: dict[str, tuple[int, float, float | None, float | None]] = {}
-
-        with ProcessPoolExecutor(max_workers=n_jobs) as executor:
-            futures = {executor.submit(_drop1_glmer_worker, task): task[0] for task in tasks}
-
-            for future in as_completed(futures):
-                fut_term, fut_n_params, fut_aic, fut_lrt, fut_p_val, fut_error = future.result()
-                if fut_error is None and fut_n_params is not None and fut_aic is not None:
-                    results[fut_term] = (fut_n_params, fut_aic, fut_lrt, fut_p_val)
-
-        for term_name in droppable_terms:
-            if term_name in results:
-                res_n_params, res_aic, res_lrt, res_p_val = results[term_name]
-                terms.append(term_name)
-                df_list.append(res_n_params)
-                aic_list.append(res_aic)
-                lrt_list.append(res_lrt)
-                p_value_list.append(res_p_val)
-
-    return Drop1Result(
-        terms=terms,
-        df=df_list,
-        aic=aic_list,
-        lrt=lrt_list,
-        p_value=p_value_list,
-        full_model_aic=full_aic,
-        full_model_df=full_n_params,
+    tasks = [
+        (
+            term,
+            update_formula(model.formula, f". ~ . - {term}"),
+            data,
+            model.family,
+            weights,
+            offset,
+            model.nAGQ,
+            model.theta,
+            full_n_params,
+            full_loglik,
+            test,
+        )
+        for term in droppable_terms
+    ]
+    worker_results = _run_drop1_tasks(_drop1_glmer_worker, tasks, n_jobs)
+    return _assemble_drop1_result(
+        droppable_terms,
+        worker_results,
+        full_aic,
+        full_n_params,
     )

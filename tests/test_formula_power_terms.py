@@ -1,4 +1,5 @@
 import warnings
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -12,6 +13,7 @@ from mixedlm.formula.parser import (
     update_formula,
 )
 from mixedlm.formula.terms import InteractionTerm, PowerTerm
+from mixedlm.inference.drop1 import _droppable_fixed_terms
 from mixedlm.matrices import build_model_matrices
 
 from tests._lmer_data import SLEEPSTUDY
@@ -92,6 +94,12 @@ def test_formula_helpers_preserve_power_terms() -> None:
     assert PowerTerm("x", 2) not in removed.fixed.terms
     restored = update_formula(removed, ". ~ . + I(x**2)")
     assert PowerTerm("x", 2) in restored.fixed.terms
+
+
+def test_drop1_marginality_distinguishes_power_factors() -> None:
+    model = SimpleNamespace(formula=parse_formula("y ~ x + I(x**2) * z"))
+
+    assert _droppable_fixed_terms(model) == ["x", "I(x**2):z"]
 
 
 @pytest.mark.parametrize(

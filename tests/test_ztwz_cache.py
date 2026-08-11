@@ -34,6 +34,39 @@ class TestZTWZCache:
             "Cached Z'WZ should match Python computation"
         )
 
+    def test_ztwz_crossed_slopes_weights_and_empty_column(self):
+        from mixedlm._rust import compute_ztwz
+        from scipy import sparse
+
+        n = 60
+        group_a = np.arange(n) % 6
+        group_b = np.arange(n) % 5
+        slope = np.linspace(-2.0, 2.0, n)
+        rows = np.repeat(np.arange(n), 3)
+        columns = np.empty(3 * n, dtype=np.int64)
+        columns[0::3] = group_a
+        columns[1::3] = 6 + group_a
+        columns[2::3] = 12 + group_b
+        values = np.empty(3 * n, dtype=np.float64)
+        values[0::3] = 1.0
+        values[1::3] = slope
+        values[2::3] = 1.0
+        z_csc = sparse.csc_matrix((values, (rows, columns)), shape=(n, 18))
+        weights = np.linspace(0.25, 2.0, n)
+
+        ztwz_rust = compute_ztwz(
+            np.ascontiguousarray(z_csc.data),
+            np.ascontiguousarray(z_csc.indices.astype(np.int64)),
+            np.ascontiguousarray(z_csc.indptr.astype(np.int64)),
+            z_csc.shape,
+            np.ascontiguousarray(weights),
+        ).reshape(z_csc.shape[1], z_csc.shape[1])
+        ztwz_python = (z_csc.T @ sparse.diags(weights) @ z_csc).toarray()
+
+        assert np.allclose(ztwz_rust, ztwz_python, rtol=1e-12, atol=1e-12)
+        assert np.all(ztwz_rust[-1] == 0.0)
+        assert np.all(ztwz_rust[:, -1] == 0.0)
+
     def test_ztwz_cache_with_lmer(self):
         """Test that lmer with caching produces valid results."""
         data = load_sleepstudy()
