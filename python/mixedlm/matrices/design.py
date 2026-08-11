@@ -27,6 +27,7 @@ from mixedlm.formula.terms import (
     Formula,
     InteractionTerm,
     InterceptTerm,
+    PowerTerm,
     RandomTerm,
     VariableTerm,
 )
@@ -204,6 +205,14 @@ def _encode_variable(
         return [arr], [name]
 
 
+def _encode_power(
+    term: PowerTerm,
+    data: Any,
+) -> tuple[list[NDArray[np.floating]], list[str]]:
+    arr = get_column_numpy(data, term.name, dtype=np.float64)
+    return [np.power(arr, term.exponent)], [f"I({term.name}**{term.exponent})"]
+
+
 def _encode_categorical(
     name: str,
     data: Any,
@@ -240,7 +249,7 @@ def _encode_categorical(
 
 
 def _encode_terms(
-    terms: tuple[InterceptTerm | VariableTerm | InteractionTerm, ...],
+    terms: tuple[InterceptTerm | VariableTerm | PowerTerm | InteractionTerm, ...],
     data: Any,
     has_intercept: bool,
     contrasts: dict[str, str | NDArray[np.floating]] | None = None,
@@ -268,6 +277,8 @@ def _encode_terms(
             )
             if full_rank:
                 use_full_rank_factor = False
+        elif isinstance(term, PowerTerm):
+            term_columns, term_names = _encode_power(term, data)
         else:
             term_columns, term_names = _encode_interaction(
                 term.variables,
@@ -283,14 +294,17 @@ def _encode_terms(
 
 
 def _encode_interaction(
-    variables: tuple[str, ...],
+    variables: tuple[str | PowerTerm, ...],
     data: Any,
     contrasts: dict[str, str | NDArray[np.floating]] | None = None,
     category_levels: dict[str, list[Any]] | None = None,
 ) -> tuple[list[NDArray[np.floating]], list[str]]:
     encoded_vars: list[tuple[list[NDArray[np.floating]], list[str]]] = []
     for var in variables:
-        cols, nms = _encode_variable(var, data, contrasts, category_levels)
+        if isinstance(var, PowerTerm):
+            cols, nms = _encode_power(var, data)
+        else:
+            cols, nms = _encode_variable(var, data, contrasts, category_levels)
         encoded_vars.append((cols, nms))
 
     result_cols: list[NDArray[np.floating]] = []
