@@ -122,6 +122,30 @@ class TestInference:
         assert result.p_value[1] is not None
         assert 0 <= result.p_value[1] <= 1
 
+    def test_anova_refits_reml_models_with_ml(self) -> None:
+        model1 = lmer("Reaction ~ 1 + (1 | Subject)", SLEEPSTUDY)
+        model2 = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+
+        expected = anova(model1.refitML(), model2.refitML(), refit=False)
+        result = anova(model1, model2)
+
+        assert model1.REML is True
+        assert model2.REML is True
+        assert result.loglik == pytest.approx(expected.loglik)
+        assert result.aic == pytest.approx(expected.aic)
+        assert result.bic == pytest.approx(expected.bic)
+        assert result.chi_sq[1] == pytest.approx(expected.chi_sq[1])
+        assert result.p_value[1] == pytest.approx(expected.p_value[1])
+
+    def test_anova_can_skip_ml_refit(self) -> None:
+        model1 = lmer("Reaction ~ 1 + (1 | Subject)", SLEEPSTUDY)
+        model2 = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+
+        with pytest.warns(UserWarning, match="refit=False"):
+            result = anova(model1, model2, refit=False)
+
+        assert result.loglik == pytest.approx([model1.logLik().value, model2.logLik().value])
+
     def test_anova_multiple_models(self) -> None:
         model1 = lmer("Reaction ~ 1 + (1 | Subject)", SLEEPSTUDY, REML=False)
         model2 = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY, REML=False)
