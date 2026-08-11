@@ -11,6 +11,7 @@ if TYPE_CHECKING:
     import pandas as pd
 
 from mixedlm.estimation.nlmm import NLMMOptimizer, _as_prior_weights, _build_psi_matrix
+from mixedlm.models.lmer_types import LogLik
 from mixedlm.nlme.models import NonlinearModel
 
 _COV_REGULARIZATION = 1e-8
@@ -123,12 +124,32 @@ class NlmerResult:
     def predict(
         self,
         newdata: pd.DataFrame | None = None,
-        x_var: str = "x",
+        x_var: str | None = None,
         group_var: str | None = None,
     ) -> NDArray[np.floating]:
+        """Predict responses for new observations.
+
+        Parameters
+        ----------
+        newdata : DataFrame, optional
+            New observations. If omitted, return fitted values for the
+            original data.
+        x_var : str, optional
+            Predictor column. Defaults to the column used when fitting.
+        group_var : str, optional
+            Grouping column used to add fitted random effects for known
+            levels. Unknown levels receive population-level predictions.
+
+        Returns
+        -------
+        NDArray
+            Predicted responses in the same row order as ``newdata``.
+        """
         if newdata is None:
             return self.fitted()
 
+        if x_var is None:
+            x_var = self._x_var
         x_new = newdata[x_var].to_numpy(dtype=np.float64)
         n_new = len(x_new)
 
@@ -136,17 +157,19 @@ class NlmerResult:
             pred = self.model.predict(self.phi, x_new)
         else:
             groups_new = newdata[group_var].astype(str).tolist()
-            pred = np.zeros(n_new, dtype=np.float64)
+            group_lookup = {group: index for index, group in enumerate(self.group_levels)}
+            rows_by_group: dict[int | None, list[int]] = {}
+            for row, group in enumerate(groups_new):
+                rows_by_group.setdefault(group_lookup.get(group), []).append(row)
 
-            for i, g in enumerate(groups_new):
-                if g in self.group_levels:
-                    g_idx = self.group_levels.index(g)
+            pred = np.empty(n_new, dtype=np.float64)
+            for group_index, rows in rows_by_group.items():
+                row_indices = np.asarray(rows, dtype=np.intp)
+                params = self.phi
+                if group_index is not None:
                     params = self.phi.copy()
-                    for j, p_idx in enumerate(self.random_params):
-                        params[p_idx] += self.b[g_idx, j]
-                    pred[i] = self.model.predict(params, np.array([x_new[i]]))[0]
-                else:
-                    pred[i] = self.model.predict(self.phi, np.array([x_new[i]]))[0]
+                    params[self.random_params] += self.b[group_index]
+                pred[row_indices] = self.model.predict(params, x_new[row_indices])
 
         return pred
 
@@ -164,17 +187,21 @@ class NlmerResult:
 
         return NlmerVarCorr(groups=groups, residual=self.sigma**2)
 
-    def logLik(self) -> float:
-        return -0.5 * self.deviance
+    def logLik(self) -> LogLik:
+        return LogLik(
+            value=-0.5 * self.deviance,
+            df=self.npar(),
+            nobs=self.nobs(),
+            REML=False,
+        )
 
     def AIC(self) -> float:
-        n_params = len(self.phi) + len(self.theta) + 1
-        return -2 * self.logLik() + 2 * n_params
+        ll = self.logLik()
+        return -2 * ll.value + 2 * ll.df
 
     def BIC(self) -> float:
-        n_params = len(self.phi) + len(self.theta) + 1
-        n = len(self.y)
-        return -2 * self.logLik() + n_params * np.log(n)
+        ll = self.logLik()
+        return -2 * ll.value + ll.df * np.log(ll.nobs)
 
     def extractAIC(self) -> tuple[float, float]:
         """Extract AIC with effective degrees of freedom.
@@ -187,9 +214,9 @@ class NlmerResult:
         tuple of (float, float)
             (edf, AIC) where edf is the effective degrees of freedom.
         """
-        n_params = len(self.phi) + len(self.theta) + 1
-        edf = float(n_params)
-        aic = float(-2 * self.logLik() + 2 * n_params)
+        ll = self.logLik()
+        edf = float(ll.df)
+        aic = float(-2 * ll.value + 2 * ll.df)
         return (edf, aic)
 
     def as_function(
@@ -836,6 +863,10 @@ class NlmerResult:
             True if any variance component is near zero.
         """
         return bool(np.any(np.abs(self.theta) < tol))
+
+    def is_singular(self, tol: float = _DEFAULT_SINGULAR_TOL) -> bool:
+        """Return whether any variance component is near its boundary."""
+        return self.isSingular(tol=tol)
 
     def summary(self) -> str:
         lines = []

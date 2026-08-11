@@ -59,7 +59,8 @@ c = mlm.coef(model)
 # Or: model.coef()
 ```
 
-**Returns:** Dictionary with combined fixed + random effects per group
+**Returns:** Nested dictionary mapping each grouping factor to all fixed and
+random-only coefficient names, with one combined value per grouping level.
 
 ### getME
 
@@ -113,7 +114,12 @@ Fit separate linear models for each group.
 lm_dict = mlm.lmList("y ~ x | group", data)
 ```
 
-**Returns:** Dictionary mapping group names to fitted OLS models
+This uses the built-in formula encoder and NumPy least squares, including
+categorical predictors, interactions, and multiple numeric predictors without
+an additional dependency.
+
+**Returns:** A dictionary containing per-group fits, a coefficient table, and
+an optional pooled fit
 
 ### isNested
 
@@ -308,9 +314,13 @@ print(fixed)  # 'y ~ x'
 # Fit separate models for each subject (no pooling)
 lm_list = mlm.lmList("Reaction ~ Days | Subject", data)
 
-# Compare to mixed model
-for subj, lm in lm_list.items():
-    print(f"{subj}: intercept={lm.params[0]:.1f}, slope={lm.params[1]:.2f}")
+# Inspect the per-subject coefficient table
+print(lm_list["coef"])
+
+# Access one fitted model's arrays and metadata
+subject_fit = lm_list["fits"]["308"]
+print(subject_fit["params"])
+print(subject_fit["residuals"])
 ```
 
 ### Checking Nesting
