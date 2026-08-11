@@ -454,6 +454,18 @@ class TestUpdateFormula:
         assert "subject" in str(new)
         assert new.response == "y"
 
+    def test_update_formula_adds_and_removes_quoted_names(self) -> None:
+        from mixedlm.formula.parser import parse_formula, update_formula
+        from mixedlm.formula.terms import VariableTerm
+
+        old = parse_formula("`response value` ~ x + (1 | `group id`)")
+        added = update_formula(old, ". ~ . + `new + value`")
+        removed = update_formula(added, ". ~ . - `new + value`")
+
+        assert VariableTerm("new + value") in added.fixed.terms
+        assert str(added) == ("`response value` ~ x + `new + value` + (1 | `group id`)")
+        assert removed == old
+
 
 class TestDrop1:
     def test_drop1_lmer_basic(self) -> None:
@@ -533,6 +545,7 @@ class TestIsSingular:
         result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
 
         assert isinstance(result.isSingular(), bool)
+        assert result.is_singular() == result.isSingular()
 
     def test_lmer_singular_with_high_tolerance(self) -> None:
         result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
@@ -576,6 +589,7 @@ class TestIsSingular:
         result = glmer("y ~ period + (1 | herd)", CBPP, family=families.Binomial())
 
         assert isinstance(result.isSingular(), bool)
+        assert result.is_singular() == result.isSingular()
 
     def test_glmer_singular_with_high_tolerance(self) -> None:
         result = glmer("y ~ period + (1 | herd)", CBPP, family=families.Binomial())
@@ -1039,6 +1053,15 @@ class TestTerms:
         assert "Days" in t.random_terms["Subject"]
         assert "Days" in t.random_variables
 
+    def test_lmer_terms_merge_split_group_terms(self):
+        result = lmer(
+            "Reaction ~ Days + (1 | Subject) + (0 + Days | Subject)",
+            SLEEPSTUDY,
+        )
+        t = result.terms()
+
+        assert t.random_terms["Subject"] == ["(Intercept)", "Days"]
+
     def test_lmer_terms_str(self):
         result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
         t = result.terms()
@@ -1179,7 +1202,9 @@ class TestCoef:
 
         assert "Subject" in coef
         assert "(Intercept)" in coef["Subject"]
+        assert "Days" in coef["Subject"]
         assert len(coef["Subject"]["(Intercept)"]) == 18
+        assert np.allclose(coef["Subject"]["Days"], result.fixef()["Days"])
 
     def test_lmer_coef_combines_fixed_and_random(self):
         result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
@@ -1206,12 +1231,44 @@ class TestCoef:
             expected_days = fixef["Days"] + ranef["Subject"]["Days"][i]
             assert np.isclose(coef["Subject"]["Days"][i], expected_days)
 
+    def test_lmer_coef_merges_split_terms_for_same_group(self):
+        result = lmer(
+            "Reaction ~ Days + (1 | Subject) + (0 + Days | Subject)",
+            SLEEPSTUDY,
+        )
+        ranef = result.ranef(condVar=True)
+        coef = result.coef()
+
+        assert set(ranef["Subject"]) == {"(Intercept)", "Days"}
+        assert set(ranef.condVar["Subject"]) == {"(Intercept)", "Days"}
+        assert set(coef["Subject"]) == {"(Intercept)", "Days"}
+        assert np.allclose(
+            coef["Subject"]["(Intercept)"],
+            result.fixef()["(Intercept)"] + ranef["Subject"]["(Intercept)"],
+        )
+        assert np.allclose(
+            coef["Subject"]["Days"],
+            result.fixef()["Days"] + ranef["Subject"]["Days"],
+        )
+
+    def test_lmer_coef_includes_random_only_term(self):
+        result = lmer("Reaction ~ 1 + (0 + Days | Subject)", SLEEPSTUDY)
+        ranef = result.ranef()
+        coef = result.coef()
+
+        assert list(coef["Subject"]) == ["Days", "(Intercept)"]
+        assert np.allclose(coef["Subject"]["Days"], ranef["Subject"]["Days"])
+        assert np.allclose(coef["Subject"]["(Intercept)"], result.fixef()["(Intercept)"])
+
     def test_glmer_coef_basic(self):
         result = glmer("y ~ period + (1 | herd)", CBPP, family=families.Binomial())
         coef = result.coef()
 
         assert "herd" in coef
         assert "(Intercept)" in coef["herd"]
+        assert set(coef["herd"]) == set(result.fixef())
+        for term_name in set(result.fixef()) - {"(Intercept)"}:
+            assert np.allclose(coef["herd"][term_name], result.fixef()[term_name])
 
     def test_glmer_coef_combines_fixed_and_random(self):
         result = glmer("y ~ period + (1 | herd)", CBPP, family=families.Binomial())
