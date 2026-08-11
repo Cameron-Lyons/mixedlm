@@ -41,6 +41,8 @@ EXTERNAL_OPTIMIZERS = NLOPT_OPTIMIZER_NAMES
 
 ALL_OPTIMIZERS = SCIPY_OPTIMIZERS | COMPATIBILITY_OPTIMIZERS | EXTERNAL_OPTIMIZERS
 
+_SCIPY_METHODS_WITHOUT_BOUNDS = {"BFGS"}
+
 
 def has_bobyqa() -> bool:
     """Return whether the legacy ``bobyqa`` compatibility alias is available."""
@@ -100,12 +102,12 @@ def _convert_bounds_to_arrays(
     return lower, upper
 
 
-def _move_legacy_cobyqa_option(options: dict[str, Any], legacy_name: str, scipy_name: str) -> None:
-    if legacy_name not in options:
+def _move_option_alias(options: dict[str, Any], alias: str, canonical_name: str) -> None:
+    if alias not in options:
         return
-    if scipy_name in options:
-        raise ValueError(f"Specify only one of '{legacy_name}' and '{scipy_name}'")
-    options[scipy_name] = options.pop(legacy_name)
+    if canonical_name in options:
+        raise ValueError(f"Specify only one of '{alias}' and '{canonical_name}'")
+    options[canonical_name] = options.pop(alias)
 
 
 def _optimize_cobyqa(
@@ -118,10 +120,10 @@ def _optimize_cobyqa(
     scipy_options = dict(options)
     lower, upper = _convert_bounds_to_arrays(bounds, len(x0))
 
-    _move_legacy_cobyqa_option(scipy_options, "maxfun", "maxfev")
-    _move_legacy_cobyqa_option(scipy_options, "rhobeg", "initial_tr_radius")
-    _move_legacy_cobyqa_option(scipy_options, "rhoend", "final_tr_radius")
-    _move_legacy_cobyqa_option(scipy_options, "scaling_within_bounds", "scale")
+    _move_option_alias(scipy_options, "maxfun", "maxfev")
+    _move_option_alias(scipy_options, "rhobeg", "initial_tr_radius")
+    _move_option_alias(scipy_options, "rhoend", "final_tr_radius")
+    _move_option_alias(scipy_options, "scaling_within_bounds", "scale")
 
     seek_global_minimum = scipy_options.pop("seek_global_minimum", False)
     if seek_global_minimum:
@@ -249,12 +251,21 @@ def _optimize_scipy(
     callback: Callable[[NDArray[np.floating]], None] | None = None,
     jac: Callable[[NDArray[np.floating]], NDArray[np.floating]] | None = None,
 ) -> OptimizeResult:
+    scipy_options = dict(options)
+    if method == "TNC" and "maxiter" in scipy_options:
+        scipy_options.setdefault("maxfun", scipy_options["maxiter"])
+        del scipy_options["maxiter"]
+    elif method == "Powell":
+        _move_option_alias(scipy_options, "xatol", "xtol")
+        _move_option_alias(scipy_options, "fatol", "ftol")
+
+    scipy_bounds = None if method in _SCIPY_METHODS_WITHOUT_BOUNDS else bounds
     result = minimize(
         fun,
         x0,
         method=method,
-        bounds=bounds,
-        options=options,
+        bounds=scipy_bounds,
+        options=scipy_options,
         callback=callback,
         jac=jac,
     )
