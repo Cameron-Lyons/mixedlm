@@ -27,6 +27,7 @@ from mixedlm.formula.terms import (
     Formula,
     InteractionTerm,
     InterceptTerm,
+    PowerTerm,
     RandomTerm,
     VariableTerm,
 )
@@ -41,6 +42,7 @@ class RandomEffectStructure:
     correlated: bool
     level_map: dict[str, int]
     cov_type: str = "us"
+    level_indices: NDArray[np.int32] | None = field(default=None, repr=False, compare=False)
 
 
 @dataclass
@@ -79,7 +81,7 @@ def build_model_matrices(
 ) -> ModelMatrices:
     from mixedlm.utils.na_action import handle_na
 
-    data = ensure_dataframe(data)
+    data = ensure_dataframe(data, columns=sorted(_get_formula_variables(formula)))
 
     if na_action is not None:
         clean_data, na_info, weights, offset = handle_na(data, formula, na_action, weights, offset)
@@ -203,6 +205,14 @@ def _encode_variable(
         return [arr], [name]
 
 
+def _encode_power(
+    term: PowerTerm,
+    data: Any,
+) -> tuple[list[NDArray[np.floating]], list[str]]:
+    arr = get_column_numpy(data, term.name, dtype=np.float64)
+    return [np.power(arr, term.exponent)], [f"I({term.name}**{term.exponent})"]
+
+
 def _encode_categorical(
     name: str,
     data: Any,
@@ -239,7 +249,7 @@ def _encode_categorical(
 
 
 def _encode_terms(
-    terms: tuple[InterceptTerm | VariableTerm | InteractionTerm, ...],
+    terms: tuple[InterceptTerm | VariableTerm | PowerTerm | InteractionTerm, ...],
     data: Any,
     has_intercept: bool,
     contrasts: dict[str, str | NDArray[np.floating]] | None = None,
@@ -267,6 +277,8 @@ def _encode_terms(
             )
             if full_rank:
                 use_full_rank_factor = False
+        elif isinstance(term, PowerTerm):
+            term_columns, term_names = _encode_power(term, data)
         else:
             term_columns, term_names = _encode_interaction(
                 term.variables,
@@ -282,14 +294,17 @@ def _encode_terms(
 
 
 def _encode_interaction(
-    variables: tuple[str, ...],
+    variables: tuple[str | PowerTerm, ...],
     data: Any,
     contrasts: dict[str, str | NDArray[np.floating]] | None = None,
     category_levels: dict[str, list[Any]] | None = None,
 ) -> tuple[list[NDArray[np.floating]], list[str]]:
     encoded_vars: list[tuple[list[NDArray[np.floating]], list[str]]] = []
     for var in variables:
-        cols, nms = _encode_variable(var, data, contrasts, category_levels)
+        if isinstance(var, PowerTerm):
+            cols, nms = _encode_power(var, data)
+        else:
+            cols, nms = _encode_variable(var, data, contrasts, category_levels)
         encoded_vars.append((cols, nms))
 
     result_cols: list[NDArray[np.floating]] = []
@@ -428,6 +443,7 @@ def _build_random_block(
         correlated=rterm.correlated,
         level_map=level_map,
         cov_type=rterm.cov_type,
+        level_indices=level_indices,
     )
 
     return Z_block, structure
@@ -472,6 +488,7 @@ def _build_nested_random_block(
         correlated=rterm.correlated,
         level_map=level_map,
         cov_type=rterm.cov_type,
+        level_indices=level_indices,
     )
 
     return Z_block, structure

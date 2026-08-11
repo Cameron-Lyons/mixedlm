@@ -10,7 +10,12 @@ from scipy import sparse
 from mixedlm.formula.terms import Formula
 from mixedlm.matrices.design import ModelMatrices, RandomEffectStructure
 from mixedlm.models.lmer_types import ModelTerms, RanefResult
-from mixedlm.utils.dataframe import concat_columns_as_string, get_column_numpy, get_columns
+from mixedlm.utils.dataframe import (
+    concat_columns_as_string,
+    copy_dataframe,
+    get_column_numpy,
+    get_columns,
+)
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -35,7 +40,9 @@ class MerResultMixin:
     def fixef(self) -> dict[str, float]:
         raise NotImplementedError
 
-    def _compute_condVar(self) -> dict[str, dict[str, NDArray[np.floating]]]:
+    def _compute_condVar(
+        self, include_cov: bool = False
+    ) -> dict[str, dict[str, NDArray[np.floating]]]:
         raise NotImplementedError
 
     def _fixef_dict(self, beta: NDArray[np.floating]) -> dict[str, float]:
@@ -131,11 +138,11 @@ class MerResultMixin:
             ) from None
         return X[:, fitted_indices]
 
-    def _model_frame(self) -> pd.DataFrame:
+    def _model_frame(self) -> Any:
         import pandas as pd
 
         if self.matrices.frame is not None:
-            return self.matrices.frame.copy()
+            return copy_dataframe(self.matrices.frame)
         return pd.DataFrame({"y": self.matrices.y})
 
     def _weights_array(self, copy: bool = True) -> NDArray[np.floating]:
@@ -154,7 +161,7 @@ class MerResultMixin:
         )
 
     def _build_model_terms(self, formula: Formula) -> ModelTerms:
-        from mixedlm.formula.terms import InteractionTerm, VariableTerm
+        from mixedlm.formula.terms import InteractionTerm, PowerTerm, VariableTerm
 
         fixed_terms = list(self.matrices.fixed_names)
 
@@ -167,18 +174,18 @@ class MerResultMixin:
 
         fixed_variables: set[str] = set()
         for term in formula.fixed.terms:
-            if isinstance(term, VariableTerm):
+            if isinstance(term, VariableTerm | PowerTerm):
                 fixed_variables.add(term.name)
             elif isinstance(term, InteractionTerm):
-                fixed_variables.update(term.variables)
+                fixed_variables.update(term.source_variables)
 
         random_variables: set[str] = set()
         for rterm in formula.random:
             for term in rterm.expr:
-                if isinstance(term, VariableTerm):
+                if isinstance(term, VariableTerm | PowerTerm):
                     random_variables.add(term.name)
                 elif isinstance(term, InteractionTerm):
-                    random_variables.update(term.variables)
+                    random_variables.update(term.source_variables)
 
         grouping_factors = {struct.grouping_factor for struct in self.matrices.random_structures}
 

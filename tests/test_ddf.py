@@ -209,6 +209,14 @@ class TestPvaluesWithDDF:
         with pytest.raises(ValueError, match="Unknown method"):
             pvalues_with_ddf(model, method="invalid")
 
+    @pytest.mark.parametrize("method", ["satt", "satterthwaite", "kr", "kenward_roger"])
+    def test_pvalues_method_aliases(self, method: str) -> None:
+        model = lmer("y ~ x + (1|group)", DDF_DATA)
+
+        results = pvalues_with_ddf(model, method=method)
+
+        assert set(results) == {"(Intercept)", "x"}
+
     def test_pvalues_t_values_consistent(self) -> None:
         model = lmer("y ~ x + (1|group)", DDF_DATA)
         results = pvalues_with_ddf(model, method="Satterthwaite")
@@ -219,6 +227,21 @@ class TestPvaluesWithDDF:
             se = np.sqrt(vcov[i, i])
             expected_t = estimate / se if se > 0 else 0.0
             assert np.isclose(t_val, expected_t, rtol=1e-5) or np.isnan(t_val)
+
+
+class TestDDFCache:
+    def test_cache_is_isolated_per_fitted_model(self) -> None:
+        first = lmer("y ~ x + (1|group)", DDF_DATA)
+        second = lmer("y ~ x + (1|group)", DDF_DATA)
+        ddf_module.clear_vcov_grad_cache()
+
+        try:
+            satterthwaite_df(first)
+            satterthwaite_df(second)
+
+            assert len(ddf_module._vcov_grad_cache) == 2
+        finally:
+            ddf_module.clear_vcov_grad_cache()
 
 
 class TestDDFWithDifferentModels:
