@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from types import SimpleNamespace
 
 import numpy as np
@@ -39,7 +40,7 @@ def _large_crossed_data(
     )
 
 
-def test_adaptive_start_uses_sparse_random_design_without_densifying(
+def test_adaptive_start_uses_retained_group_codes_without_sparse_slicing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     data = _large_crossed_data()
@@ -49,14 +50,61 @@ def test_adaptive_start_uses_sparse_random_design_without_densifying(
     beta, sigma = optimizer._fit_ols()
     residuals = optimizer._compute_ols_residuals(beta)
 
-    def fail_toarray(self):
-        raise AssertionError("adaptive start should not densify sparse random-design blocks")
+    for structure in matrices.random_structures:
+        assert structure.level_indices is not None
+        assert len(structure.level_indices) == len(data)
 
-    monkeypatch.setattr(sparse.csc_matrix, "toarray", fail_toarray)
+    def fail_getitem(self, key):
+        raise AssertionError("adaptive start should not slice sparse random-design blocks")
+
+    monkeypatch.setattr(sparse.csc_matrix, "__getitem__", fail_getitem)
 
     for structure in matrices.random_structures:
         theta = optimizer._get_adaptive_start_for_structure(structure, residuals, sigma)
         assert len(theta) == 1
+
+
+def test_adaptive_start_includes_zero_slope_observations() -> None:
+    data = pd.DataFrame(
+        {
+            "y": np.zeros(6),
+            "x": [0.0, 1.0, 0.0, 1.0, 0.0, 1.0],
+            "group": ["a", "a", "b", "b", "c", "c"],
+        }
+    )
+    formula = parse_formula("y ~ 1 + (0 + x | group)")
+    matrices = build_model_matrices(formula, data)
+    optimizer = LMMOptimizer(matrices, use_rust=False)
+    structure = matrices.random_structures[0]
+    residuals = np.array([0.2, 0.4, 0.4, 0.8, 0.2, 0.0])
+
+    theta = optimizer._get_adaptive_start_for_structure(structure, residuals, sigma_ols=1.0)
+
+    assert structure.level_indices is not None
+    assert structure.level_indices.tolist() == [0, 0, 1, 1, 2, 2]
+    expected_group_means = np.array([0.3, 0.6, 0.1])
+    expected = np.sqrt(np.var(expected_group_means, ddof=1))
+    assert theta == pytest.approx([expected])
+
+
+def test_adaptive_start_falls_back_without_retained_group_codes() -> None:
+    data = _large_crossed_data(n_obs=120, n_group1=12, n_group2=10)
+    formula = parse_formula("y ~ x + (1 | group1)")
+    matrices = build_model_matrices(formula, data)
+    optimizer = LMMOptimizer(matrices, use_rust=False)
+    beta, sigma = optimizer._fit_ols()
+    residuals = optimizer._compute_ols_residuals(beta)
+    expected = optimizer._get_adaptive_start_for_structure(
+        matrices.random_structures[0], residuals, sigma
+    )
+
+    structure = replace(matrices.random_structures[0], level_indices=None)
+    fallback_matrices = replace(matrices, random_structures=[structure])
+    fallback_optimizer = LMMOptimizer(fallback_matrices, use_rust=False)
+
+    actual = fallback_optimizer._get_adaptive_start_for_structure(structure, residuals, sigma)
+
+    assert actual == pytest.approx(expected)
 
 
 def test_rank_check_detects_saturated_sparse_random_design_without_densifying(

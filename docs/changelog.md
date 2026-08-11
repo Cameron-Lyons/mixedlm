@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - Arbitrary linear fixed-effect hypothesis tests with named or matrix constraints
+- Weighted VIF/GVIF, tolerance, severity, and condition diagnostics for all model types
 - Vectorized Pearson dispersion and observed-versus-expected zero diagnostics for GLMMs
 - Dependency-free case-level and grouped cross-validation for LMMs and GLMMs
 - EM-REML now supports multiple random effects and random slopes (correlated and uncorrelated)
@@ -37,6 +38,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Nonlinear mixed models now apply offsets consistently to responses, fitted values, simulations, refits, covariance estimates, and leverage diagnostics
 
 ### Fixed
+- Covariance tables, PCA diagnostics, singularity checks, and parameter bounds now honor compound-symmetry and AR(1) random-effect structures
 - Gamma GLMMs now minimize the non-negative unit deviance instead of its negative
 - Poisson and other unbounded GLMM families no longer clamp fitted means below one
 - Unsupported family and link combinations no longer route through the native fast path

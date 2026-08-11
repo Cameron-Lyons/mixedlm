@@ -22,7 +22,7 @@ A Python implementation of mixed-effects models inspired by R's [lme4](https://g
 - **Model comparison** - ANOVA (including Type III), drop1, allFit
 - **Model validation** - Case-level and whole-group cross-validation with weighted scoring
 - **Power analysis** - powerSim, powerCurve for sample size planning
-- **Diagnostics** - Dispersion and zero-inflation checks, influence measures, Cook's distance, leverage
+- **Diagnostics** - Dispersion and zero-inflation checks, influence measures, Cook's distance, leverage, VIF/GVIF, condition indices
 
 ## Installation
 
@@ -61,6 +61,7 @@ result.coef()       # Combined coefficients
 # Inference
 result.confint(method="profile")  # Profile confidence intervals
 result.confint(method="boot")     # Bootstrap confidence intervals
+mlm.check_collinearity(result)     # VIF/GVIF and condition diagnostics
 ```
 
 ### Using Polars
@@ -69,7 +70,7 @@ result.confint(method="boot")     # Bootstrap confidence intervals
 import polars as pl
 import mixedlm as mlm
 
-# Works directly with polars DataFrames
+# Works directly with eager or lazy polars frames
 data = pl.DataFrame({
     "y": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
     "x": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
@@ -78,6 +79,9 @@ data = pl.DataFrame({
 
 result = mlm.lmer("y ~ x + (1 | group)", data)
 print(result.summary())
+
+# LazyFrame plans are projected to model columns before one-time collection
+lazy_result = mlm.lmer("y ~ x + (1 | group)", data.lazy())
 ```
 
 ### Generalized Linear Mixed Model
@@ -178,6 +182,14 @@ mixedlm supports lme4-style formula syntax for specifying random effects:
 | `(1 \| group1/group2)` | Nested random effects |
 | `(1 \| group1) + (1 \| group2)` | Crossed random effects |
 
+Structured covariance models can use compound symmetry or AR(1) correlation:
+
+```python
+formula = mlm.set_cov_type("y ~ time + (time | subject)", "ar1")
+model = mlm.lmer(formula, data)
+print(model.VarCorr())
+```
+
 ## API Reference
 
 ### Model Fitting
@@ -212,7 +224,8 @@ mixedlm supports lme4-style formula syntax for specifying random effects:
 - `drop1(model, data)` - Single term deletions
 - `profile(model, data)` - 1D likelihood profiles
 - `slice2D(model, param1, param2)` - 2D profile likelihood
-- `bootMer(model, data, nsim)` - Parametric bootstrap
+- `bootMer(model, nsim)` - Parametric bootstrap
+- `bootCI(result, component, method)` - Tidy bootstrap confidence intervals
 - `satterthwaite_df(model)` - Satterthwaite denominator DF
 - `kenward_roger_df(model)` - Kenward-Roger denominator DF
 - `pvalues_with_ddf(model)` - P-values using denominator DF
