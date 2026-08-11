@@ -200,6 +200,20 @@ Deviance residuals for model diagnostics.
 dev_resid = fam.deviance_residuals(y, mu)
 ```
 
+### Distribution Diagnostics
+
+For fitted GLMMs, the diagnostics module can compare the observed conditional
+variance and zero count with the selected family:
+
+```python
+dispersion = mlm.diagnostics.check_overdispersion(model)
+zeros = mlm.diagnostics.check_zero_inflation(model)
+```
+
+The zero check supports Poisson, negative-binomial, and binomial families.
+Quasi-families define a variance function but not the zero probability required
+for that check.
+
 ## Link Functions
 
 ### Available Links

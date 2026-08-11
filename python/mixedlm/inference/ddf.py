@@ -2,12 +2,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
+from weakref import ReferenceType, ref
 
 import numpy as np
 from numpy.typing import NDArray
 from scipy import linalg, sparse
 
 if TYPE_CHECKING:
+    from mixedlm.matrices.design import ModelMatrices
     from mixedlm.models.lmer import LmerResult
 
 _NUMERICAL_EPS = 1e-6
@@ -15,8 +17,16 @@ _GRADIENT_ZERO_THRESHOLD = 1e-10
 _MIN_DF = 1.0
 _CHOLESKY_REGULARIZATION = 1e-6
 
-_vcov_grad_cache: dict[bytes, list[NDArray[np.floating]]] = {}
 _VCOV_GRAD_CACHE_MAX_SIZE = 4
+
+
+@dataclass(frozen=True)
+class _VcovGradientCacheEntry:
+    matrices_ref: ReferenceType[ModelMatrices]
+    gradients: list[NDArray[np.floating]]
+
+
+_vcov_grad_cache: dict[tuple[int, bytes, float], _VcovGradientCacheEntry] = {}
 
 
 def clear_vcov_grad_cache() -> None:
@@ -158,9 +168,10 @@ def satterthwaite_df(
 
         return _matrix_inverse(XtVinvX)
 
-    cache_key = theta.tobytes() + np.array([sigma]).tobytes()
-    if cache_key in _vcov_grad_cache:
-        vcov_grads = _vcov_grad_cache[cache_key]
+    cache_key = (id(result.matrices), theta.tobytes(), float(sigma))
+    cache_entry = _vcov_grad_cache.get(cache_key)
+    if cache_entry is not None and cache_entry.matrices_ref() is result.matrices:
+        vcov_grads = cache_entry.gradients
     else:
         vcov_grads = []
         for k in range(n_theta):
@@ -174,9 +185,14 @@ def satterthwaite_df(
 
             vcov_grads.append((vcov_plus - vcov_minus) / (2 * eps))
 
-        if len(_vcov_grad_cache) >= _VCOV_GRAD_CACHE_MAX_SIZE:
+        if cache_entry is not None:
+            del _vcov_grad_cache[cache_key]
+        elif len(_vcov_grad_cache) >= _VCOV_GRAD_CACHE_MAX_SIZE:
             _vcov_grad_cache.pop(next(iter(_vcov_grad_cache)))
-        _vcov_grad_cache[cache_key] = vcov_grads
+        _vcov_grad_cache[cache_key] = _VcovGradientCacheEntry(
+            matrices_ref=ref(result.matrices),
+            gradients=vcov_grads,
+        )
 
     df_values = np.zeros(p, dtype=np.float64)
 
