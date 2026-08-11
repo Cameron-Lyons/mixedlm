@@ -76,9 +76,7 @@ def test_grouped_response_supports_polars() -> None:
         ("size", 14.5, "successes and trials must be whole numbers"),
     ],
 )
-def test_grouped_response_rejects_invalid_counts(
-    column: str, value: float, message: str
-) -> None:
+def test_grouped_response_rejects_invalid_counts(column: str, value: float, message: str) -> None:
     data = load_cbpp()
     if isinstance(value, float) and not value.is_integer():
         data[column] = data[column].astype(np.float64)

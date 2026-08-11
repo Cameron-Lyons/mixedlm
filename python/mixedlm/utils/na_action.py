@@ -102,8 +102,16 @@ def _get_na_mask_polars(data: Any, variables: list[str]) -> NDArray[np.bool_]:
     if not available_vars:
         return np.zeros(dataframe_length(data), dtype=bool)
 
-    null_expr = pl.any_horizontal(*[pl.col(v).is_null() for v in available_vars])
-    mask_series = data.select(null_expr.alias("_na_mask")).get_column("_na_mask")
+    schema = data.schema
+    missing_exprs = []
+    for variable in available_vars:
+        missing = pl.col(variable).is_null()
+        if schema[variable] in (pl.Float32, pl.Float64):
+            missing = missing | pl.col(variable).is_nan()
+        missing_exprs.append(missing)
+
+    missing_expr = pl.any_horizontal(*missing_exprs)
+    mask_series = data.select(missing_expr.alias("_na_mask")).get_column("_na_mask")
     return mask_series.to_numpy()
 
 
@@ -133,7 +141,12 @@ def _filter_rows_pandas(data: Any, keep_mask: NDArray[np.bool_]) -> Any:
 
 def _check_column_has_na_polars(data: Any, var: str) -> bool:
     """Check if a column has NA values in polars."""
-    return data.get_column(var).null_count() > 0
+    import polars as pl
+
+    column = data.get_column(var)
+    if column.null_count() > 0:
+        return True
+    return column.dtype in (pl.Float32, pl.Float64) and bool(column.is_nan().any())
 
 
 def _check_column_has_na_pandas(data: Any, var: str) -> bool:

@@ -7,6 +7,8 @@ from mixedlm.families.base import Family, InverseLink, Link, LogLink
 
 
 class Gamma(Family):
+    mu_lower_bound = 0.0
+
     def __init__(self, link: Link | None = None) -> None:
         self.link = link if link is not None else LogLink()
 

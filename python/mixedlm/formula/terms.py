@@ -57,8 +57,10 @@ class Formula:
     @property
     def response_expression(self) -> str:
         if self.response_denominator is None:
-            return self.response
-        return f"{self.response} / {self.response_denominator}"
+            return _format_identifier(self.response)
+        return (
+            f"{_format_identifier(self.response)} / {_format_identifier(self.response_denominator)}"
+        )
 
     @property
     def fixed_variables(self) -> set[str]:
@@ -107,13 +109,23 @@ class Formula:
         return f"{self.response_expression} ~ {rhs}"
 
 
+def _format_identifier(name: str) -> str:
+    is_bare = bool(name) and name != "." and (name[0].isalpha() or name[0] in "_.")
+    is_bare = is_bare and all(ch.isalnum() or ch in "_." for ch in name[1:])
+    if is_bare:
+        return name
+
+    escaped = name.replace("\\", "\\\\").replace("`", "\\`")
+    return f"`{escaped}`"
+
+
 def _format_term(term: InterceptTerm | VariableTerm | InteractionTerm) -> str:
     if isinstance(term, InterceptTerm):
         return "1"
     elif isinstance(term, VariableTerm):
-        return term.name
+        return _format_identifier(term.name)
     else:
-        return ":".join(term.variables)
+        return ":".join(_format_identifier(variable) for variable in term.variables)
 
 
 def _format_fixed(fixed: FixedTerm) -> str:
@@ -126,12 +138,16 @@ def _format_fixed(fixed: FixedTerm) -> str:
 
 
 def _format_random(random: RandomTerm) -> str:
-    expr_parts = [_format_term(t) for t in random.expr]
-    if random.has_intercept and not any(isinstance(t, InterceptTerm) for t in random.expr):
-        expr_parts = ["1"] + expr_parts
-    expr_str = " + ".join(expr_parts) if expr_parts else "1"
+    expr_parts = [_format_term(t) for t in random.expr if not isinstance(t, InterceptTerm)]
+    intercept = "1" if random.has_intercept else "0"
+    expr_str = " + ".join([intercept, *expr_parts])
 
-    group_str = "/".join(random.grouping) if isinstance(random.grouping, tuple) else random.grouping
+    group_str = _format_grouping(random.grouping)
 
     bar = "|" if random.correlated else "||"
     return f"({expr_str} {bar} {group_str})"
+
+
+def _format_grouping(grouping: str | tuple[str, ...]) -> str:
+    groups = grouping if isinstance(grouping, tuple) else (grouping,)
+    return "/".join(_format_identifier(group) for group in groups)
