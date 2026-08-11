@@ -120,6 +120,44 @@ pvals = pvalues_with_ddf(model, method="Satterthwaite")
 | Satterthwaite | Default choice, fast, good for most cases |
 | Kenward-Roger | Small samples, complex random effects, more accurate but slower |
 
+## Custom Linear Hypotheses
+
+Use `linear_hypothesis` when the null cannot be expressed as a single formula
+term or nested-model comparison. It tests linear combinations of the fitted
+fixed effects without refitting the model.
+
+```python
+from mixedlm.inference import linear_hypothesis
+
+model = mlm.lmer("y ~ x + z + (1 | group)", data)
+
+# Test H0: beta_x - beta_z = 0
+equal_slopes = linear_hypothesis(model, {"x": 1, "z": -1})
+print(equal_slopes)
+```
+
+Non-zero null values and joint tests are supported:
+
+```python
+joint = linear_hypothesis(
+    model,
+    {
+        "equal slopes": {"x": 1, "z": -1},
+        "sum equals two": {"x": 1, "z": 1},
+    },
+    rhs=[0, 2],
+)
+
+print(joint.table)       # Individual restrictions
+print(joint.statistic)   # Joint F statistic
+print(joint.p_value)     # Joint p-value
+```
+
+For a numeric matrix, columns must follow `model.matrices.fixed_names`. Named
+weights are safer when coefficient order may change. LMMs use F tests by
+default; GLMMs use chi-square tests. Supply `denominator_df` when a specific
+small-sample denominator DF is required.
+
 ## Confidence Intervals
 
 ### Wald Intervals

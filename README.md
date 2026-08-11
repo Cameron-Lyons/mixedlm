@@ -18,7 +18,7 @@ A Python implementation of mixed-effects models inspired by R's [lme4](https://g
 - **Generalized Linear Mixed Models (GLMM)** via `glmer()` - Laplace approximation and adaptive Gauss-Hermite quadrature
 - **Nonlinear Mixed Models (NLMM)** via `nlmer()` - Self-starting models (SSasymp, SSlogis, SSmicmen)
 - **Formula interface** - lme4-style formulas with random effects syntax
-- **Inference tools** - Profile likelihood, parametric bootstrap, confidence intervals, Satterthwaite/Kenward-Roger degrees of freedom
+- **Inference tools** - Linear hypotheses, profile likelihood, bootstrap, confidence intervals, Satterthwaite/Kenward-Roger degrees of freedom
 - **Model comparison** - ANOVA (including Type III), drop1, allFit
 - **Model selection** - AIC/AICc/BIC rankings, normalized weights, and evidence sets
 - **Model validation** - Case-level and whole-group cross-validation with weighted scoring

@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Arbitrary linear fixed-effect hypothesis tests with named or matrix constraints
 - Grouped-binomial `successes / trials` responses with automatic trial weights and validation
 - Configurable named links and documented family/link helper APIs
 - Formula-driven simulation now supports every built-in response family
