@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Vectorized Pearson dispersion and observed-versus-expected zero diagnostics for GLMMs
 - Dependency-free case-level and grouped cross-validation for LMMs and GLMMs
 - EM-REML now supports multiple random effects and random slopes (correlated and uncorrelated)
 - Automatic convergence recommendations in `summary()` output for non-converged and singular fits
@@ -36,6 +37,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - Nonlinear mixed-model optimization now uses a deterministic profiled Laplace deviance with consistent relative covariance scaling
+- Covariance tables, PCA diagnostics, singularity checks, and parameter bounds now honor compound-symmetry and AR(1) random-effect structures
 - Gamma GLMMs now minimize the non-negative unit deviance instead of its negative
 - Poisson and other unbounded GLMM families no longer clamp fitted means below one
 - Unsupported family and link combinations no longer route through the native fast path

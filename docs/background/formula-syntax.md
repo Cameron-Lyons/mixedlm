@@ -97,7 +97,13 @@ Categorical variables are automatically dummy-coded:
 ```python
 # Treatment with 3 levels -> 2 dummy variables
 "y ~ treatment"
+
+# Without an intercept, estimate one coefficient for every level
+"y ~ 0 + treatment"
 ```
+
+The same rule applies to categorical random effects: `(0 + treatment | group)`
+creates one random-effect column per treatment level.
 
 ## Random Effects
 
