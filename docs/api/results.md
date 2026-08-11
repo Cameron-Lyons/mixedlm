@@ -146,7 +146,8 @@ result.logLik()
 
 Extract log-likelihood.
 
-**Returns:** LogLik object with value and degrees of freedom.
+**Returns:** Numeric `LogLik` value with `value`, `df`, `nobs`, and `REML`
+metadata. It can be used directly in arithmetic and NumPy operations.
 
 #### AIC / BIC
 
