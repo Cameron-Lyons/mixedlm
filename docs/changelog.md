@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - New-data LMM and GLMM predictions accept numeric, scalar, or column-based offsets
+- Vectorized AIC/AICc/BIC model rankings with normalized weights and evidence sets
 - Nakagawa marginal/conditional R² and adjusted/unadjusted ICC for all model families
 - Weighted VIF/GVIF, tolerance, severity, and condition diagnostics for all model types
 - Vectorized Pearson dispersion and observed-versus-expected zero diagnostics for GLMMs
