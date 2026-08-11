@@ -178,19 +178,9 @@ class Parser:
     def parse(self) -> Formula:
         response = self._parse_response()
         self.expect(TokenType.TILDE)
-        fixed_terms, random_terms = self._parse_rhs()
+        fixed_terms, random_terms, has_intercept = self._parse_rhs()
 
-        has_intercept = True
-        filtered_terms: list[ParsedTerm] = []
-        for term in fixed_terms:
-            if isinstance(term, tuple) and term[0] == "no_intercept":
-                has_intercept = False
-            elif isinstance(term, InterceptTerm | VariableTerm | InteractionTerm):
-                if term in filtered_terms:
-                    continue
-                filtered_terms.append(term)
-
-        fixed = FixedTerm(terms=tuple(filtered_terms), has_intercept=has_intercept)
+        fixed = FixedTerm(terms=tuple(fixed_terms), has_intercept=has_intercept)
         return Formula(response=response, fixed=fixed, random=tuple(random_terms))
 
     def _parse_response(self) -> str:
@@ -200,32 +190,68 @@ class Parser:
     def _parse_rhs(
         self,
     ) -> tuple[
-        list[ParsedTerm | NoInterceptMarker],
+        list[ParsedTerm],
         list[RandomTerm],
+        bool,
     ]:
-        fixed_terms: list[ParsedTerm | NoInterceptMarker] = []
+        fixed_terms: list[ParsedTerm] = []
         random_terms: list[RandomTerm] = []
+        has_intercept = True
 
         while self.peek().type != TokenType.EOF:
             if self.peek().type == TokenType.LPAREN:
                 random_terms.append(self._parse_random_term())
             elif self.peek().type in (TokenType.IDENTIFIER, TokenType.NUMBER):
                 terms = self._parse_term()
-                if isinstance(terms, tuple):
-                    fixed_terms.append(terms)
-                elif terms is not None:
-                    fixed_terms.extend(terms)
+                has_intercept = self._add_parsed_terms(fixed_terms, terms, has_intercept)
             elif self.peek().type == TokenType.MINUS:
                 self.advance()
-                next_term = self._parse_term()
-                if next_term == [InterceptTerm()]:
-                    fixed_terms.append(("no_intercept",))
+                if self.peek().type == TokenType.LPAREN:
+                    random_term = self._parse_random_term()
+                    random_terms = [term for term in random_terms if term != random_term]
+                else:
+                    terms = self._parse_term()
+                    has_intercept = self._subtract_parsed_terms(fixed_terms, terms, has_intercept)
             elif self.peek().type == TokenType.PLUS:
                 self.advance()
             else:
                 break
 
-        return fixed_terms, random_terms
+        return fixed_terms, random_terms, has_intercept
+
+    def _add_parsed_terms(
+        self,
+        target: list[ParsedTerm],
+        terms: list[ParsedTerm] | NoInterceptMarker | None,
+        has_intercept: bool,
+    ) -> bool:
+        if isinstance(terms, tuple):
+            return False
+        if terms is None:
+            return has_intercept
+        for term in terms:
+            if isinstance(term, InterceptTerm):
+                has_intercept = True
+            else:
+                self._append_unique(target, term)
+        return has_intercept
+
+    def _subtract_parsed_terms(
+        self,
+        target: list[ParsedTerm],
+        terms: list[ParsedTerm] | NoInterceptMarker | None,
+        has_intercept: bool,
+    ) -> bool:
+        if isinstance(terms, tuple):
+            return True
+        if terms is None:
+            return has_intercept
+        for term in terms:
+            if isinstance(term, InterceptTerm):
+                has_intercept = False
+            else:
+                target[:] = [existing for existing in target if existing != term]
+        return has_intercept
 
     def _parse_term(
         self,
@@ -307,32 +333,19 @@ class Parser:
     def _parse_random_term(self) -> RandomTerm:
         self.expect(TokenType.LPAREN)
 
-        expr_terms: list[InterceptTerm | VariableTerm | InteractionTerm] = []
+        expr_terms: list[ParsedTerm] = []
         has_intercept = True
 
         while self.peek().type not in (TokenType.PIPE, TokenType.DOUBLE_PIPE):
-            if self.peek().type == TokenType.NUMBER:
-                tok = self.advance()
-                if tok.value == "1":
-                    has_intercept = True
-                elif tok.value == "0":
-                    has_intercept = False
-            elif self.peek().type == TokenType.IDENTIFIER:
+            if self.peek().type in (TokenType.NUMBER, TokenType.IDENTIFIER):
                 terms = self._parse_term()
-                if terms is not None:
-                    if isinstance(terms, tuple):
-                        if terms == ("no_intercept",):
-                            has_intercept = False
-                    else:
-                        for term in terms:
-                            self._append_unique(expr_terms, term)
+                has_intercept = self._add_parsed_terms(expr_terms, terms, has_intercept)
             elif self.peek().type == TokenType.PLUS:
                 self.advance()
             elif self.peek().type == TokenType.MINUS:
                 self.advance()
-                if self.peek().type == TokenType.NUMBER and self.peek().value == "1":
-                    self.advance()
-                    has_intercept = False
+                terms = self._parse_term()
+                has_intercept = self._subtract_parsed_terms(expr_terms, terms, has_intercept)
             else:
                 break
 
