@@ -24,6 +24,7 @@ from mixedlm.models.lmer_types import (
     VarCorrGroup,
 )
 from mixedlm.models.result_mixin import MerResultMixin
+from mixedlm.models.shared_utils import symmetric_inverse
 from mixedlm.utils import _get_signif_code
 
 
@@ -67,6 +68,9 @@ class _GLMMProjection:
     random_cholesky: NDArray[np.floating]
     RZX: NDArray[np.floating]
     fixed_information: NDArray[np.floating]
+    weighted_X: NDArray[np.float64]
+    weighted_Z: sparse.csc_matrix
+    information_inv: NDArray[np.float64]
 
 
 @dataclass
@@ -240,6 +244,7 @@ class GlmerResult(MerResultMixin):
         )
         sqrt_weights = np.sqrt(weights)
         WX = sqrt_weights[:, None] * X
+        WZ = self.matrices.Z.multiply(sqrt_weights[:, None]).tocsc()
         XtWX = WX.T @ WX
         Lambda = _build_lambda(self.theta, self.matrices.random_structures)
 
@@ -250,9 +255,11 @@ class GlmerResult(MerResultMixin):
                 random_cholesky=np.empty((0, 0), dtype=np.float64),
                 RZX=np.empty((0, X.shape[1]), dtype=np.float64),
                 fixed_information=np.asarray(XtWX),
+                weighted_X=np.asarray(WX),
+                weighted_Z=WZ,
+                information_inv=symmetric_inverse(XtWX),
             )
 
-        WZ = self.matrices.Z.multiply(sqrt_weights[:, None]).tocsc()
         ZtWZ = WZ.T @ WZ
         random_information = Lambda.T @ ZtWZ @ Lambda + sparse.eye(q, format="csc")
         random_information_dense = random_information.toarray()
@@ -275,6 +282,9 @@ class GlmerResult(MerResultMixin):
             random_cholesky=random_cholesky,
             RZX=RZX,
             fixed_information=fixed_information,
+            weighted_X=np.asarray(WX),
+            weighted_Z=WZ,
+            information_inv=symmetric_inverse(fixed_information),
         )
 
     def linear_predictor(self, na_expand: bool = True) -> NDArray[np.floating]:
@@ -328,7 +338,7 @@ class GlmerResult(MerResultMixin):
             resid = self.matrices.y - mu
         elif type == "pearson":
             var = self.family.variance(mu)
-            resid = (self.matrices.y - mu) / np.sqrt(var)
+            resid = np.sqrt(self.matrices.weights) * (self.matrices.y - mu) / np.sqrt(var)
         elif type == "deviance":
             dev_resids = self.family.deviance_resids(self.matrices.y, mu, self.matrices.weights)
             signs = np.sign(self.matrices.y - mu)
@@ -465,16 +475,38 @@ class GlmerResult(MerResultMixin):
         return eta
 
     def vcov(self) -> NDArray[np.floating]:
-        information = self._working_projection.fixed_information
-        p = information.shape[0]
-        try:
-            L = linalg.cholesky(information, lower=True)
-            return linalg.cho_solve((L, True), np.eye(p))
-        except linalg.LinAlgError:
-            try:
-                return linalg.solve(information, np.eye(p))
-            except linalg.LinAlgError:
-                return linalg.pinv(information)
+        return self._working_projection.information_inv.copy()
+
+    @cached_property
+    def _hat_values(self) -> NDArray[np.float64]:
+        projection = self._working_projection
+        if self.matrices.n_random == 0:
+            diagonal = np.einsum(
+                "ij,ij->i",
+                projection.weighted_X @ projection.information_inv,
+                projection.weighted_X,
+            )
+            return np.clip(diagonal, 0, 1 - 1e-10)
+
+        weighted_z_lambda = (projection.weighted_Z @ projection.Lambda).toarray()
+        random_fixed_map = linalg.solve_triangular(
+            projection.random_cholesky.T,
+            projection.RZX,
+            lower=False,
+        )
+        adjusted_x = projection.weighted_X - weighted_z_lambda @ random_fixed_map
+        diagonal = np.einsum(
+            "ij,ij->i",
+            adjusted_x @ projection.information_inv,
+            adjusted_x,
+        )
+        solved = linalg.solve_triangular(
+            projection.random_cholesky,
+            weighted_z_lambda.T,
+            lower=True,
+        )
+        diagonal += np.sum(solved * solved, axis=0)
+        return np.clip(diagonal, 0, 1 - 1e-10)
 
     def hatvalues(self) -> NDArray[np.floating]:
         """Compute leverage values (diagonal of the hat matrix).
@@ -493,37 +525,7 @@ class GlmerResult(MerResultMixin):
         For generalized linear mixed models, the hat matrix incorporates
         both fixed and random effects, weighted by the variance function.
         """
-        q = self.matrices.n_random
-        X = self.matrices.X
-        projection = self._working_projection
-        W = projection.weights
-        vcov_beta = self.vcov()
-
-        if q == 0:
-            h = W * np.sum((X @ vcov_beta) * X, axis=1)
-            return np.clip(h, 0, 1 - 1e-10)
-
-        ZLambda = (self.matrices.Z @ projection.Lambda).tocsr()
-        random_fixed_map = linalg.solve_triangular(
-            projection.random_cholesky.T,
-            projection.RZX,
-            lower=False,
-        )
-        adjusted_X = X - np.asarray(ZLambda @ random_fixed_map)
-        diagonal = np.sum((adjusted_X @ vcov_beta) * adjusted_X, axis=1)
-
-        chunk_size = max(1, min(len(X), 1_000_000 // max(q, 1)))
-        for start in range(0, len(X), chunk_size):
-            stop = min(start + chunk_size, len(X))
-            block = ZLambda[start:stop].toarray()
-            solved = linalg.solve_triangular(
-                projection.random_cholesky,
-                block.T,
-                lower=True,
-            )
-            diagonal[start:stop] += np.sum(solved * solved, axis=0)
-
-        return np.clip(W * diagonal, 0, 1 - 1e-10)
+        return self._hat_values.copy()
 
     def cooks_distance(self) -> NDArray[np.floating]:
         """Compute Cook's distance for each observation.
@@ -1019,10 +1021,7 @@ class GlmerResult(MerResultMixin):
         elif name == "nAGQ":
             return self.nAGQ
         elif name == "RX":
-            return linalg.cholesky(
-                self._working_projection.fixed_information,
-                lower=False,
-            )
+            return self._compute_RX()
         elif name == "RZX":
             return self._compute_RZX()
         elif name == "Lind":
@@ -1066,6 +1065,10 @@ class GlmerResult(MerResultMixin):
     def _compute_RZX(self) -> NDArray[np.floating]:
         """Compute RZX, the cross-term in the mixed model equations."""
         return self._working_projection.RZX.copy()
+
+    def _compute_RX(self) -> NDArray[np.floating]:
+        """Compute the upper Cholesky factor of final fixed-effect information."""
+        return linalg.cholesky(self._working_projection.fixed_information, lower=False)
 
     def _build_Lind(self) -> NDArray[np.int64]:
         """Build Lind, the index mapping from theta to Lambda entries."""
@@ -1441,19 +1444,58 @@ class GlmerResult(MerResultMixin):
         use_re: bool = True,
         re_form: str | None = None,
     ) -> NDArray[np.floating]:
+        if nsim < 1:
+            raise ValueError("nsim must be at least 1")
+
         if seed is not None:
             np.random.seed(seed)
 
         n = self.matrices.n_obs
+        q = self.matrices.n_random
 
         if nsim == 1:
             return self._simulate_once(use_re, re_form)
+
+        include_re = use_re and q > 0 and re_form not in ("~0", "NA")
+
+        if not include_re:
+            fixed_eta = self.matrices.X @ self.beta + self.matrices.offset
+            eta = np.broadcast_to(fixed_eta[:, None], (n, nsim))
+            return self._simulate_response(self.family.link.inverse(eta))
+
+        try:
+            from mixedlm._rust import simulate_re_batch
+
+            return self._simulate_batch_rust(nsim, seed, simulate_re_batch)
+        except ImportError:
+            pass
 
         result = np.zeros((n, nsim), dtype=np.float64)
         for i in range(nsim):
             result[:, i] = self._simulate_once(use_re, re_form)
 
         return result
+
+    def _simulate_batch_rust(
+        self,
+        nsim: int,
+        seed: int | None,
+        simulate_re_batch: Any,
+    ) -> NDArray[np.floating]:
+        fixed_eta = self.matrices.X @ self.beta + self.matrices.offset
+        structures = self.matrices.random_structures
+        u_batch = simulate_re_batch(
+            self.theta,
+            1.0,
+            [structure.n_levels for structure in structures],
+            [structure.n_terms for structure in structures],
+            [structure.correlated for structure in structures],
+            nsim,
+            seed,
+        )
+        eta = np.asarray(self.matrices.Z @ u_batch.T, dtype=np.float64)
+        eta += fixed_eta[:, None]
+        return self._simulate_response(self.family.link.inverse(eta))
 
     def _simulate_once(
         self,
@@ -1462,9 +1504,9 @@ class GlmerResult(MerResultMixin):
     ) -> NDArray[np.floating]:
         q = self.matrices.n_random
 
-        if re_form == "~0" or re_form == "NA" or not use_re or q == 0:
-            eta = self.matrices.X @ self.beta + self.matrices.offset
-        else:
+        eta = self.matrices.X @ self.beta + self.matrices.offset
+
+        if re_form != "~0" and re_form != "NA" and use_re and q > 0:
             u_new = np.zeros(q, dtype=np.float64)
             u_idx = 0
             theta_start = 0
@@ -1497,12 +1539,19 @@ class GlmerResult(MerResultMixin):
                 u_idx += n_levels * n_terms
                 theta_start += n_theta
 
-            eta = self.matrices.X @ self.beta + self.matrices.Z @ u_new + self.matrices.offset
+            eta += self.matrices.Z @ u_new
 
-        mu = self.family.link.inverse(eta)
+        return self._simulate_response(self.family.link.inverse(eta))
+
+    def _simulate_response(
+        self,
+        mu: NDArray[np.floating],
+    ) -> NDArray[np.floating]:
         if self.family.__class__.__name__ == "Binomial" and self.matrices.trials is not None:
             mu = self.family.clamp_mu(mu, eps=1e-6)
             trials = self.matrices.trials.astype(np.int64)
+            if mu.ndim > 1:
+                trials = trials[:, None]
             return np.random.binomial(trials, mu).astype(np.float64)
         return self.family.simulate(mu)
 

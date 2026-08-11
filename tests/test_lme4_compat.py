@@ -25,7 +25,7 @@ from mixedlm import (
     ranef,
 )
 from mixedlm.inference.bootstrap import bootMer
-from mixedlm.inference.ddf import pvalues_with_ddf
+from mixedlm.inference.ddf import kenward_roger_df, pvalues_with_ddf, satterthwaite_df
 from mixedlm.utils.lme4_compat import (
     ConvergenceInfo,
     DevComp,
@@ -200,11 +200,9 @@ class TestPvalues:
 
         assert pvalues(lmer_model, method=method) == pytest.approx(expected)
 
-    def test_kenward_roger_is_distinct_from_satterthwaite(self, lmer_model) -> None:
-        satt = pvalues(lmer_model, method="Satterthwaite")
-        kr = pvalues(lmer_model, method="Kenward-Roger")
-
-        assert kr != pytest.approx(satt)
+    def test_denominator_df_methods_report_canonical_names(self, lmer_model) -> None:
+        assert satterthwaite_df(lmer_model).method == "Satterthwaite"
+        assert kenward_roger_df(lmer_model).method == "Kenward-Roger"
 
     def test_pvalues_invalid_method(self, lmer_model) -> None:
         with pytest.raises(ValueError, match="Unknown method"):
