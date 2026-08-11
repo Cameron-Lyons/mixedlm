@@ -311,9 +311,10 @@ def pvalues_with_ddf(
     """
     from scipy import stats
 
-    if method == "Satterthwaite":
+    normalized_method = method.strip().lower().replace("_", "-")
+    if normalized_method in ("satterthwaite", "satt"):
         ddf_result = satterthwaite_df(result)
-    elif method == "Kenward-Roger":
+    elif normalized_method in ("kenward-roger", "kr"):
         ddf_result = kenward_roger_df(result)
     else:
         raise ValueError(f"Unknown method: {method}. Use 'Satterthwaite' or 'Kenward-Roger'.")
@@ -327,7 +328,7 @@ def pvalues_with_ddf(
     for i, name in enumerate(result.matrices.fixed_names):
         t_val = beta[i] / se[i] if se[i] > 0 else np.nan
         df = ddf_result.df[i]
-        p_val = 2 * (1 - stats.t.cdf(np.abs(t_val), df))
+        p_val = 2 * stats.t.sf(np.abs(t_val), df)
         results[name] = (float(beta[i]), float(t_val), float(p_val))
 
     return results

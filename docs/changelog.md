@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - New-data LMM and GLMM predictions accept numeric, scalar, or column-based offsets
+- Weighted VIF/GVIF, tolerance, severity, and condition diagnostics for all model types
 - Vectorized Pearson dispersion and observed-versus-expected zero diagnostics for GLMMs
 - Dependency-free case-level and grouped cross-validation for LMMs and GLMMs
 - EM-REML now supports multiple random effects and random slopes (correlated and uncorrelated)

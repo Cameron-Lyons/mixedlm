@@ -40,9 +40,13 @@ Extract random effects (BLUPs).
 
 **Parameters:**
 
-- `condVar`: If True, include conditional variances.
+- `condVar`: If True, return a `RanefResult` containing the random effects and
+  their per-level conditional variances. The calculation uses sparse block
+  extraction, so it does not materialize the full random-effect covariance
+  matrix.
 
-**Returns:** Dictionary with group names as keys and DataFrames of random effects as values.
+**Returns:** A nested dictionary of random-effect arrays, or a `RanefResult`
+when `condVar=True`.
 
 #### VarCorr
 
