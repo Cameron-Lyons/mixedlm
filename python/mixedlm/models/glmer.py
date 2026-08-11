@@ -330,9 +330,10 @@ class GlmerResult(MerResultMixin):
         include_re = re_form != "NA" and re_form != "~0"
 
         if newdata is None:
-            if not se_fit and interval == "none":
-                return self.fitted(type=type)
-            eta = self._linear_predictor.copy()
+            if include_re:
+                eta = self._linear_predictor.copy()
+            else:
+                eta = self.matrices.X @ self.beta + self.matrices.offset
             X = self.matrices.X
         else:
             pred_matrices = build_model_matrices(self.formula, newdata)
