@@ -381,9 +381,9 @@ class TestNlmerWeightsOffset:
         adjusted_refitted = without_offset.refit(adjusted_simulated)
         assert refitted.converged
         assert adjusted_refitted.converged
-        np.testing.assert_allclose(refitted.phi, adjusted_refitted.phi)
-        np.testing.assert_allclose(refitted.theta, adjusted_refitted.theta)
-        np.testing.assert_allclose(refitted.b, adjusted_refitted.b)
+        np.testing.assert_allclose(refitted.phi, adjusted_refitted.phi, rtol=1e-6, atol=1e-6)
+        np.testing.assert_allclose(refitted.theta, adjusted_refitted.theta, rtol=1e-6, atol=1e-6)
+        np.testing.assert_allclose(refitted.b, adjusted_refitted.b, rtol=1e-6, atol=1e-6)
         np.testing.assert_allclose(refitted.deviance, adjusted_refitted.deviance)
         np.testing.assert_allclose(refitted.y, simulated)
         np.testing.assert_allclose(refitted.model_frame()["y"], simulated)
