@@ -115,9 +115,35 @@ model = mlm.glmer_nb(
 # Fit Poisson model
 pois_model = mlm.glmer("count ~ x + (1 | g)", data, family=mlm.families.Poisson())
 
-# Check residual deviance vs residual df
-# If ratio >> 1, consider negative binomial
+# Weighted Pearson chi-squared check
+dispersion = mlm.diagnostics.check_overdispersion(pois_model)
+print(dispersion)
+
+# Ratios above 1 indicate extra variation. If the result is significant,
+# consider a negative-binomial model or a missing model component.
+if dispersion.is_overdispersed:
+    nb_model = mlm.glmer_nb("count ~ x + (1 | g)", data)
 ```
+
+The Pearson check is an approximation conditional on the fitted random effects.
+It is most informative for Poisson and grouped-binomial models with moderate
+expected counts. Simulation-based residual diagnostics are preferable for small
+means, Bernoulli data, or complex variance structures.
+
+### Checking for Excess Zeros
+
+```python
+zeros = mlm.diagnostics.check_zero_inflation(pois_model)
+print(zeros)
+
+if zeros.is_zero_inflated:
+    print("The fitted count distribution underpredicts zeros")
+```
+
+The check compares the observed zero count with the sum of fitted zero
+probabilities. It supports Poisson, negative-binomial, and binomial models; for
+grouped binomial responses, integer model weights are interpreted as trial
+counts.
 
 ## Estimation Methods
 

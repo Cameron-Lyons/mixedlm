@@ -68,6 +68,80 @@ class TestControl:
         assert options["gtol"] == 1e-4
         assert options["ftol"] == 1e-7
 
+    def test_lmer_control_method_specific_options(self) -> None:
+        ctrl = LmerControl(maxiter=500, ftol=1e-7, gtol=1e-4, xtol=1e-6)
+
+        tnc_options = ctrl.get_scipy_options(optimizer="TNC", maxiter=250)
+        assert tnc_options == {
+            "maxfun": 250,
+            "ftol": 1e-7,
+            "gtol": 1e-4,
+            "xtol": 1e-6,
+        }
+
+        powell_options = ctrl.get_scipy_options(optimizer="Powell")
+        assert powell_options == {"maxiter": 500, "ftol": 1e-7, "xtol": 1e-6}
+
+    def test_lmer_fit_forwards_control_tolerances(self, monkeypatch) -> None:
+        from mixedlm.estimation import reml as reml_module
+
+        original_run_optimizer = reml_module.run_optimizer
+        captured_options = {}
+
+        def capture_options(*args, **kwargs):
+            captured_options.update(kwargs["options"])
+            return original_run_optimizer(*args, **kwargs)
+
+        monkeypatch.setattr(reml_module, "run_optimizer", capture_options)
+        ctrl = LmerControl(
+            optimizer="L-BFGS-B",
+            maxiter=321,
+            ftol=2e-7,
+            gtol=3e-6,
+            check_singular=False,
+        )
+
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY, control=ctrl)
+
+        assert result.converged
+        assert captured_options["maxiter"] == 321
+        assert captured_options["ftol"] == 2e-7
+        assert captured_options["gtol"] == 3e-6
+
+    def test_glmer_fit_forwards_control_tolerances(self, monkeypatch) -> None:
+        from mixedlm.estimation import laplace as laplace_module
+
+        original_run_optimizer = laplace_module.run_optimizer
+        captured_options = {}
+
+        def capture_options(*args, **kwargs):
+            captured_options.update(kwargs["options"])
+            return original_run_optimizer(*args, **kwargs)
+
+        monkeypatch.setattr(laplace_module, "run_optimizer", capture_options)
+        data = CBPP.copy()
+        data["y"] = data["incidence"] / data["size"]
+        ctrl = GlmerControl(
+            optimizer="L-BFGS-B",
+            maxiter=321,
+            ftol=2e-7,
+            gtol=3e-6,
+            check_singular=False,
+        )
+
+        result = glmer(
+            "y ~ period + (1 | herd)",
+            data,
+            family=families.Binomial(),
+            weights=data["size"].values,
+            control=ctrl,
+        )
+
+        assert result.converged
+        assert captured_options["maxiter"] == 321
+        assert captured_options["ftol"] == 2e-7
+        assert captured_options["gtol"] == 3e-6
+
     def test_lmer_with_control(self) -> None:
         ctrl = lmerControl(maxiter=100, check_singular=False)
         result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY, control=ctrl)
@@ -425,6 +499,83 @@ class TestSimulateFormula:
         )
 
         np.testing.assert_array_equal(result1["Reaction"].values, result2["Reaction"].values)
+
+    def test_simulate_formula_correlated_theta_order(self, monkeypatch) -> None:
+        from mixedlm.models.modular import simulate_formula
+
+        data = pd.DataFrame(
+            {
+                "y": np.zeros(6),
+                "x": [1, 0, 0, 1, 0, 0],
+                "z": [0, 1, 0, 0, 1, 0],
+                "w": [0, 0, 1, 0, 0, 1],
+                "group": ["A", "A", "A", "B", "B", "B"],
+            }
+        )
+        draws = iter([np.ones(6), np.zeros(6)])
+        monkeypatch.setattr(np.random, "randn", lambda *shape: next(draws))
+
+        result = simulate_formula(
+            "y ~ 0 + x + z + w + (0 + x + z + w | group)",
+            data,
+            beta=np.zeros(3),
+            theta=np.array([1, 2, 3, 4, 5, 6]),
+        )
+
+        np.testing.assert_allclose(result["y"], [1, 5, 15, 1, 5, 15])
+
+    def test_simulate_formula_uncorrelated_level_order(self, monkeypatch) -> None:
+        from mixedlm.models.modular import simulate_formula
+
+        data = pd.DataFrame(
+            {
+                "y": np.zeros(4),
+                "x": [1, 0, 1, 0],
+                "z": [0, 1, 0, 1],
+                "group": ["A", "A", "B", "B"],
+            }
+        )
+        draws = iter([np.array([1, 2, 3, 4]), np.zeros(4)])
+        monkeypatch.setattr(np.random, "randn", lambda *shape: next(draws))
+
+        result = simulate_formula(
+            "y ~ 0 + x + z + (0 + x + z || group)",
+            data,
+            beta=np.zeros(2),
+            theta=np.array([2, 3]),
+        )
+
+        np.testing.assert_allclose(result["y"], [2, 6, 6, 12])
+
+    def test_simulate_formula_structured_covariance(self, monkeypatch) -> None:
+        from mixedlm import set_cov_type
+        from mixedlm.models.modular import simulate_formula
+
+        data = pd.DataFrame(
+            {
+                "y": np.zeros(2),
+                "x": [1, 0],
+                "z": [0, 1],
+                "group": ["A", "A"],
+            }
+        )
+        formula = set_cov_type("y ~ 0 + x + z + (0 + x + z | group)", "cs")
+        draws = iter([np.array([1, 0]), np.zeros(2)])
+        monkeypatch.setattr(np.random, "randn", lambda *shape: next(draws))
+
+        result = simulate_formula(formula, data, beta=np.zeros(2), theta=np.array([2, 0.5]))
+
+        np.testing.assert_allclose(result["y"], [2, 1])
+
+    def test_simulate_formula_validates_theta_length(self) -> None:
+        from mixedlm.models.modular import simulate_formula
+
+        with pytest.raises(ValueError, match="theta must contain 3 parameters, got 2"):
+            simulate_formula(
+                "Reaction ~ Days + (Days | Subject)",
+                SLEEPSTUDY,
+                theta=np.ones(2),
+            )
 
 
 class TestDevfun2:
@@ -1244,6 +1395,22 @@ class TestModularInterface:
 
         assert parsed.REML is False
 
+    def test_lFormula_accepts_composed_formula(self) -> None:
+        from mixedlm import lFormula, mkLmerDevfun, mkLmerMod, optimizeLmer, set_cov_type
+
+        formula = set_cov_type("Reaction ~ Days + (Days | Subject)", "cs")
+        parsed = lFormula(formula, SLEEPSTUDY)
+
+        assert parsed.formula is formula
+        assert parsed.n_theta == 2
+        assert parsed.matrices.random_structures[0].cov_type == "cs"
+
+        devfun = mkLmerDevfun(parsed)
+        optimized = optimizeLmer(devfun)
+        result = mkLmerMod(devfun, optimized)
+        assert result.converged
+        assert len(result.theta) == 2
+
     def test_mkLmerDevfun_basic(self) -> None:
         from mixedlm import lFormula, mkLmerDevfun
 
@@ -1325,6 +1492,19 @@ class TestModularInterface:
         assert parsed.n_fixed == 4
         assert parsed.family is not None
         assert parsed.n_theta == 1
+
+    def test_glFormula_accepts_composed_formula(self) -> None:
+        from mixedlm import glFormula, set_cov_type
+
+        data = CBPP.copy()
+        data["y"] = data["incidence"] / data["size"]
+        formula = set_cov_type("y ~ period + (period | herd)", "cs")
+
+        parsed = glFormula(formula, data, family=families.Binomial())
+
+        assert parsed.formula is formula
+        assert parsed.n_theta == 2
+        assert parsed.matrices.random_structures[0].cov_type == "cs"
 
     def test_mkGlmerDevfun_basic(self) -> None:
         from mixedlm import glFormula, mkGlmerDevfun
