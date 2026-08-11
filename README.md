@@ -250,8 +250,8 @@ print(model.VarCorr())
 - `Gaussian()` - Normal distribution (identity link)
 - `Binomial()` - Binomial distribution (logit link)
 - `Poisson()` - Poisson distribution (log link)
-- `Gamma()` - Gamma distribution (inverse link)
-- `InverseGaussian()` - Inverse Gaussian (1/mu^2 link)
+- `Gamma()` - Gamma distribution (log link; configurable)
+- `InverseGaussian()` - Inverse Gaussian (log link; configurable)
 - `NegativeBinomial(theta)` - Negative binomial (log link)
 - `CustomFamily` - Base class for user-defined families
 

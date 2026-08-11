@@ -300,6 +300,7 @@ class TestProfile2D:
 
         assert np.isclose(profile2d.mle1, result.beta[idx1])
         assert np.isclose(profile2d.mle2, result.beta[idx2])
+        assert profile2d.zeta[2, 2] == pytest.approx(0.0, abs=1e-10)
 
     def test_slice2d_invalid_param(self):
         from mixedlm.inference.profile import slice2D

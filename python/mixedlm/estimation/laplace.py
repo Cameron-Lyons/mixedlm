@@ -152,7 +152,6 @@ def _pirls_state(
     maxiter: int = 25,
     tol: float = 1e-6,
 ) -> _PIRLSState:
-    p = matrices.n_fixed
     q = matrices.n_random
 
     prior_weights = matrices.weights
@@ -162,16 +161,17 @@ def _pirls_state(
 
     beta: NDArray[np.floating]
     if beta_start is None:
-        beta = np.zeros(p, dtype=np.float64)
-        eta = matrices.X @ beta + offset
-        mu = family.link.inverse(eta)
-        y_work = eta + family.link.deriv(mu) * (matrices.y - mu)
-        XtWX = matrices.X.T @ matrices.X
-        XtWy = matrices.X.T @ y_work
+        mu_start = family.initialize_mu(matrices.y)
+        eta_start = family.link(mu_start) - offset
+        sqrt_prior_weights = np.sqrt(np.maximum(prior_weights, _WEIGHT_CLIP_MIN))
+        weighted_X = sqrt_prior_weights[:, None] * matrices.X
+        weighted_eta = sqrt_prior_weights * eta_start
+        XtWX = weighted_X.T @ weighted_X
+        XtWeta = weighted_X.T @ weighted_eta
         try:
-            beta = linalg.solve(XtWX, XtWy, assume_a="pos")
+            beta = linalg.solve(XtWX, XtWeta, assume_a="pos")
         except linalg.LinAlgError:
-            beta = linalg.lstsq(matrices.X, y_work)[0]
+            beta = linalg.lstsq(weighted_X, weighted_eta)[0]
     else:
         beta = np.asarray(beta_start, dtype=np.float64).copy()
 
@@ -275,6 +275,8 @@ def _pirls_state(
         except (linalg.LinAlgError, ValueError):
             XtVinvX += _CHOLESKY_REGULARIZATION * np.eye(XtVinvX.shape[0])
             beta_new = linalg.lstsq(XtVinvX, XtVinvz)[0]
+        if not np.all(np.isfinite(beta_new)):
+            beta_new = beta.copy()
 
         if q > 0:
             spherical_rhs = ZtWz_spherical - ZtWX_spherical @ beta_new

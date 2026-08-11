@@ -8,7 +8,11 @@ from numpy.typing import ArrayLike, NDArray
 from scipy import sparse
 
 from mixedlm.formula.terms import Formula
-from mixedlm.matrices.design import ModelMatrices, RandomEffectStructure
+from mixedlm.matrices.design import (
+    ModelMatrices,
+    RandomEffectStructure,
+    _normalize_grouped_binomial_response,
+)
 from mixedlm.models.lmer_types import ModelTerms, RanefResult
 from mixedlm.utils.dataframe import (
     concat_columns_as_string,
@@ -385,6 +389,8 @@ class MerResultMixin:
         arr = np.asarray(newresp, dtype=np.float64)
         if len(arr) != self.matrices.n_obs:
             raise ValueError(f"newresp has length {len(arr)}, expected {self.matrices.n_obs}")
+        if self.matrices.trials is not None:
+            return _normalize_grouped_binomial_response(arr, self.matrices.trials)
         return arr
 
     def _clone_matrices_with_response_base(self, y: NDArray[np.floating]) -> ModelMatrices:
@@ -401,6 +407,7 @@ class MerResultMixin:
             offset=self.matrices.offset,
             frame=self.matrices.frame,
             na_info=self.matrices.na_info,
+            trials=self.matrices.trials,
             category_levels=self.matrices.category_levels,
             contrasts=self.matrices.contrasts,
         )

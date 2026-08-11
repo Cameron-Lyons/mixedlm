@@ -70,6 +70,15 @@ class Formula:
     response: str
     fixed: FixedTerm
     random: tuple[RandomTerm, ...] = field(default_factory=tuple)
+    response_denominator: str | None = None
+
+    @property
+    def response_expression(self) -> str:
+        if self.response_denominator is None:
+            return _format_identifier(self.response)
+        return (
+            f"{_format_identifier(self.response)} / {_format_identifier(self.response_denominator)}"
+        )
 
     @property
     def fixed_variables(self) -> set[str]:
@@ -101,15 +110,21 @@ class Formula:
 
     @property
     def all_variables(self) -> set[str]:
+        response_variables = {self.response}
+        if self.response_denominator is not None:
+            response_variables.add(self.response_denominator)
         return (
-            {self.response} | self.fixed_variables | self.random_variables | self.grouping_factors
+            response_variables
+            | self.fixed_variables
+            | self.random_variables
+            | self.grouping_factors
         )
 
     def __str__(self) -> str:
         fixed_str = _format_fixed(self.fixed)
         random_strs = [_format_random(r) for r in self.random]
         rhs = " + ".join([fixed_str] + random_strs)
-        return f"{_format_identifier(self.response)} ~ {rhs}"
+        return f"{self.response_expression} ~ {rhs}"
 
 
 def _format_identifier(name: str) -> str:

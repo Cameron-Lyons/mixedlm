@@ -55,6 +55,7 @@ class GlmerMod:
             offset=offset,
             na_action=na_action,
             contrasts=contrasts,
+            grouped_binomial=isinstance(self.family, Binomial),
         )
 
     def fit(
