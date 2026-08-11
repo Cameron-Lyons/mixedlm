@@ -76,6 +76,19 @@ def large_crossed_sparse_data():
     )
 
 
+@pytest.fixture
+def large_nested_sparse_data():
+    n_obs = 50_000
+    row_ids = np.arange(n_obs)
+    return pd.DataFrame(
+        {
+            "y": row_ids.astype(float),
+            "district": row_ids % 100,
+            "school": row_ids % 1_000,
+        }
+    )
+
+
 @pytest.mark.benchmark(group="lmer")
 def test_benchmark_lmer_simple(benchmark, sleepstudy_data):
     def fit_model():
@@ -130,3 +143,11 @@ def test_benchmark_large_crossed_sparse_adaptive_start(benchmark, large_crossed_
 
     theta = benchmark(optimizer.get_start_theta)
     assert theta.shape == (2,)
+
+
+@pytest.mark.benchmark(group="sparse-design")
+def test_benchmark_large_district_school_sparse_design_build(benchmark, large_nested_sparse_data):
+    formula = parse_formula("y ~ 1 + (1 | district/school)")
+
+    matrices = benchmark(build_model_matrices, formula, large_nested_sparse_data)
+    assert matrices.Z.nnz == len(large_nested_sparse_data)

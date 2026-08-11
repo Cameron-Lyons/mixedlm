@@ -128,9 +128,9 @@ def select_columns(data: Any, columns: list[str]) -> Any:
 
 def concat_columns_as_string(data: Any, columns: list[str], separator: str = "/") -> NDArray:
     """Concatenate multiple columns into a single string column."""
-    if not columns:
-        import numpy as np
+    import numpy as np
 
+    if not columns:
         return np.full(dataframe_length(data), "", dtype=object)
 
     if _is_polars(data):
@@ -140,10 +140,13 @@ def concat_columns_as_string(data: Any, columns: list[str], separator: str = "/"
         result = data.select(expr.alias("_combined")).get_column("_combined")
         return result.to_numpy()
 
-    combined = data[columns[0]].astype(str)
-    for name in columns[1:]:
-        combined = combined.str.cat(data[name].astype(str), sep=separator)
-    return combined.to_numpy()
+    values = data[list(columns)].to_numpy(dtype=object)
+    string_values = np.frompyfunc(str, 1, 1)(values)
+    combine = np.frompyfunc(lambda left, right: left + separator + right, 2, 1)
+    combined = string_values[:, 0]
+    for column_index in range(1, string_values.shape[1]):
+        combined = combine(combined, string_values[:, column_index])
+    return np.asarray(combined, dtype=object)
 
 
 def factorize_levels(values: NDArray) -> tuple[NDArray, dict[Any, int]]:

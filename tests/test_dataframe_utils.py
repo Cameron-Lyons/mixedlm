@@ -59,7 +59,7 @@ class TestConcatColumnsAsString:
     def test_preserves_string_representations_of_missing_values(self) -> None:
         data = pd.DataFrame(
             {
-                "left": ["a", None, "c"],
+                "left": pd.Series(["a", None, "c"], dtype=object),
                 "right": [1.0, 2.0, np.nan],
             }
         )
