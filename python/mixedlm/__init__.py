@@ -41,6 +41,7 @@ from mixedlm.formula.parser import (
     subbars,
 )
 from mixedlm.inference.anova import AnovaResult, AnovaType3Result, anova, anova_type3
+from mixedlm.inference.boot_ci import bootCI
 from mixedlm.inference.bootstrap import bootMer, bootstrap_nlmer
 from mixedlm.inference.cross_validation import (
     CrossValidationFold,
@@ -174,6 +175,7 @@ __all__ = [
     "ggpredict",
     "allEffects",
     "bootMer",
+    "bootCI",
     "bootstrap_nlmer",
     "cross_validate",
     "make_folds",
