@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Nakagawa marginal/conditional R² and adjusted/unadjusted ICC for all model families
+- Weighted VIF/GVIF, tolerance, severity, and condition diagnostics for all model types
 - Vectorized Pearson dispersion and observed-versus-expected zero diagnostics for GLMMs
 - Dependency-free case-level and grouped cross-validation for LMMs and GLMMs
 - EM-REML now supports multiple random effects and random slopes (correlated and uncorrelated)
@@ -39,6 +41,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - Canonical Gamma and inverse-Gaussian variants now simulate from their family distributions
 - LMM and GLMM simulations now preserve model offsets in generated responses
+- LMM prediction uncertainty now includes conditional random-effect covariance, fixed/random cross-covariance, correlated slopes, and unseen-group prior variance
 - Covariance tables, PCA diagnostics, singularity checks, and parameter bounds now honor compound-symmetry and AR(1) random-effect structures
 - Gamma GLMMs now minimize the non-negative unit deviance instead of its negative
 - Poisson and other unbounded GLMM families no longer clamp fitted means below one

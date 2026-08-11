@@ -12,6 +12,60 @@ from mixedlm import diagnostics
 mlm.diagnostics.plot_diagnostics(model)
 ```
 
+## Model Fit Metrics
+
+### r2_nakagawa
+
+Compute marginal R² (fixed effects) and conditional R² (fixed plus random effects):
+
+```python
+r2 = diagnostics.r2_nakagawa(model)
+print(r2.marginal, r2.conditional)
+print(r2.random_by_group)
+```
+
+Random-slope variance is evaluated at every observation, retaining covariance and predictor
+values. Linear and nonlinear Gaussian models use the fitted residual variance. Generalized
+models use a link-scale residual approximation: lognormal for log links, link-specific
+theoretical variance for binomial models, or the delta method when requested.
+
+### icc
+
+Compute adjusted and unadjusted intraclass correlation coefficients:
+
+```python
+correlation = diagnostics.icc(model)
+print(correlation.adjusted, correlation.unadjusted)
+print(correlation.by_group)
+```
+
+The adjusted ICC excludes fixed-effect variance from its denominator. The unadjusted ICC
+uses total fixed, random, and residual variance. Group-specific dictionaries partition each
+overall coefficient for crossed or nested random effects.
+
+## Collinearity Diagnostics
+
+### check_collinearity
+
+Compute weighted VIF, generalized VIF, tolerance, severity, and global condition indices:
+
+```python
+result = diagnostics.check_collinearity(model)
+print(result)
+print(result.to_dataframe())
+print(result.problematic(threshold=5.0))
+```
+
+One-column terms report the conventional VIF. Multi-column categorical or interaction terms
+also report raw GVIF, `GVIF^(1/(2*df))`, and a VIF-equivalent `GVIF^(1/df)` value so the same
+thresholds can be used across terms. By default, values from 5 to 10 are marked moderate and
+values of 10 or more are marked high; both thresholds are configurable.
+
+Linear fits use prior weights, generalized fits use prior times local working weights, and
+nonlinear fits use the locally weighted, uncentered parameter-gradient design so constant
+information directions are preserved. The calculation uses one correlation eigendecomposition
+and does not form the random-effect covariance matrix.
+
 ## Generalized-Model Diagnostics
 
 ### check_overdispersion

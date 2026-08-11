@@ -22,7 +22,8 @@ A Python implementation of mixed-effects models inspired by R's [lme4](https://g
 - **Model comparison** - ANOVA (including Type III), drop1, allFit
 - **Model validation** - Case-level and whole-group cross-validation with weighted scoring
 - **Power analysis** - powerSim, powerCurve for sample size planning
-- **Diagnostics** - Dispersion and zero-inflation checks, influence measures, Cook's distance, leverage
+- **Diagnostics** - Dispersion and zero-inflation checks, influence measures, Cook's distance, leverage, VIF/GVIF, condition indices
+- **Fit metrics** - Nakagawa marginal/conditional R² and adjusted/unadjusted ICC
 
 ## Installation
 
@@ -61,6 +62,9 @@ result.coef()       # Combined coefficients
 # Inference
 result.confint(method="profile")  # Profile confidence intervals
 result.confint(method="boot")     # Bootstrap confidence intervals
+mlm.r2_nakagawa(result)            # Marginal and conditional R²
+mlm.icc(result)                     # Adjusted and unadjusted ICC
+mlm.check_collinearity(result)     # VIF/GVIF and condition diagnostics
 ```
 
 ### Using Polars
@@ -69,7 +73,7 @@ result.confint(method="boot")     # Bootstrap confidence intervals
 import polars as pl
 import mixedlm as mlm
 
-# Works directly with polars DataFrames
+# Works directly with eager or lazy polars frames
 data = pl.DataFrame({
     "y": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
     "x": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
@@ -78,6 +82,9 @@ data = pl.DataFrame({
 
 result = mlm.lmer("y ~ x + (1 | group)", data)
 print(result.summary())
+
+# LazyFrame plans are projected to model columns before one-time collection
+lazy_result = mlm.lmer("y ~ x + (1 | group)", data.lazy())
 ```
 
 ### Generalized Linear Mixed Model

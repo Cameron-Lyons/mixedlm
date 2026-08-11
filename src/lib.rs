@@ -1,3 +1,4 @@
+use numpy::ndarray::Array2;
 use numpy::{PyArray1, PyArray2, PyArrayLike1, PyArrayLike2};
 use pyo3::prelude::*;
 
@@ -10,6 +11,16 @@ mod quadrature;
 mod reml_algorithms;
 mod simulation;
 mod sparse_chol;
+
+fn owned_array2<'py>(
+    py: Python<'py>,
+    values: Vec<f64>,
+    shape: (usize, usize),
+) -> PyResult<Py<PyArray2<f64>>> {
+    let array = Array2::from_shape_vec(shape, values)
+        .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
+    Ok(PyArray2::from_owned_array(py, array).into())
+}
 
 fn checked_i64_vec_to_usize(values: &[i64], field_name: &str) -> PyResult<Vec<usize>> {
     values
@@ -79,18 +90,25 @@ impl SparseCholeskyNumeric {
     ) -> PyResult<Py<PyArray2<f64>>> {
         let b_array = b.as_array();
         let (n, m) = (b_array.nrows(), b_array.ncols());
+        if n != self.inner.n() {
+            return Err(linalg::LinalgError::DimensionMismatch(format!(
+                "right-hand side has {n} rows, expected {}",
+                self.inner.n()
+            ))
+            .into());
+        }
 
-        let mut result = vec![vec![0.0; m]; n];
+        let mut result = vec![0.0; n * m];
 
         for j in 0..m {
             let col: Vec<f64> = b_array.column(j).to_vec();
-            let x = self.inner.solve(&col);
-            for (i, row) in result.iter_mut().enumerate() {
-                row[j] = x[i];
+            let x = self.inner.solve(&col)?;
+            for (i, value) in x.into_iter().enumerate() {
+                result[i * m + j] = value;
             }
         }
 
-        Ok(PyArray2::from_vec2(py, &result)?.into())
+        owned_array2(py, result, (n, m))
     }
 
     fn logdet(&self) -> f64 {
@@ -107,14 +125,14 @@ fn sparse_cholesky_solve<'py>(
     a_shape: (usize, usize),
     b: PyArrayLike2<'py, f64>,
 ) -> PyResult<Py<PyArray2<f64>>> {
-    let result = linalg::sparse_cholesky_solve(
+    let (result, n, m) = linalg::sparse_cholesky_solve(
         a_data.as_slice()?,
         a_indices.as_slice()?,
         a_indptr.as_slice()?,
         a_shape,
         b.as_array(),
     )?;
-    Ok(PyArray2::from_vec2(py, &result)?.into())
+    owned_array2(py, result, (n, m))
 }
 
 #[pyfunction]
