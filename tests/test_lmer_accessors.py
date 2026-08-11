@@ -1,7 +1,12 @@
+from copy import copy
+from pickle import dumps, loads
+
 import numpy as np
 import pandas as pd
 import pytest
 from mixedlm import (
+    AllFitResult,
+    allFit,
     families,
     findbars,
     glmer,
@@ -545,6 +550,7 @@ class TestIsSingular:
         result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
 
         assert isinstance(result.isSingular(), bool)
+        assert result.is_singular() == result.isSingular()
 
     def test_lmer_singular_with_high_tolerance(self) -> None:
         result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
@@ -588,6 +594,7 @@ class TestIsSingular:
         result = glmer("y ~ period + (1 | herd)", CBPP, family=families.Binomial())
 
         assert isinstance(result.isSingular(), bool)
+        assert result.is_singular() == result.isSingular()
 
     def test_glmer_singular_with_high_tolerance(self) -> None:
         result = glmer("y ~ period + (1 | herd)", CBPP, family=families.Binomial())
@@ -660,6 +667,7 @@ class TestAllFit:
         result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
         allfit_result = result.allFit(SLEEPSTUDY, optimizers=["L-BFGS-B", "Nelder-Mead"])
 
+        assert isinstance(allfit_result, AllFitResult)
         assert len(allfit_result.fits) == 2
         assert "L-BFGS-B" in allfit_result.fits
         assert "Nelder-Mead" in allfit_result.fits
@@ -739,6 +747,33 @@ class TestAllFit:
         repr_output = repr(allfit_result)
         assert "AllFitResult" in repr_output
         assert "successful" in repr_output
+
+    def test_function_and_method_share_result_interface(self):
+        from mixedlm.inference import AllFitResult as InferenceAllFitResult
+
+        formula_result = allFit(
+            "Reaction ~ Days + (1 | Subject)",
+            SLEEPSTUDY,
+            optimizers=["L-BFGS-B"],
+        )
+
+        assert AllFitResult is InferenceAllFitResult
+        assert isinstance(formula_result, AllFitResult)
+        assert formula_result.results["L-BFGS-B"] is formula_result.fits["L-BFGS-B"]
+        assert formula_result.best_optimizer == "L-BFGS-B"
+        assert list(formula_result.summary["optimizer"]) == ["L-BFGS-B"]
+
+    def test_legacy_result_interface_preserves_failures(self):
+        allfit_result = AllFitResult(
+            fits={"broken": None},
+            errors={"broken": "optimizer failed"},
+            warnings={"broken": []},
+        )
+
+        assert isinstance(allfit_result.results["broken"], RuntimeError)
+        assert str(allfit_result.results["broken"]) == "optimizer failed"
+        assert allfit_result.summary.loc[0, "error"] == "optimizer failed"
+        assert allfit_result.best_optimizer == "broken"
 
 
 class TestVarCorr:
@@ -879,6 +914,24 @@ class TestLogLik:
         ll = result.logLik()
 
         assert float(ll) == ll.value
+
+    def test_loglik_supports_numeric_operations(self):
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+        ll = result.logLik()
+
+        assert ll < 0
+        assert np.isfinite(ll)
+        assert -2 * ll == -2 * ll.value
+
+    def test_loglik_preserves_metadata_when_copied_or_pickled(self):
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+        ll = result.logLik()
+
+        for restored in (copy(ll), loads(dumps(ll))):
+            assert restored == ll
+            assert restored.df == ll.df
+            assert restored.nobs == ll.nobs
+            assert restored.REML == ll.REML
 
     def test_lmer_aic_bic_consistency(self):
         result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
@@ -1051,6 +1104,15 @@ class TestTerms:
         assert "Days" in t.random_terms["Subject"]
         assert "Days" in t.random_variables
 
+    def test_lmer_terms_merge_split_group_terms(self):
+        result = lmer(
+            "Reaction ~ Days + (1 | Subject) + (0 + Days | Subject)",
+            SLEEPSTUDY,
+        )
+        t = result.terms()
+
+        assert t.random_terms["Subject"] == ["(Intercept)", "Days"]
+
     def test_lmer_terms_str(self):
         result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
         t = result.terms()
@@ -1191,7 +1253,9 @@ class TestCoef:
 
         assert "Subject" in coef
         assert "(Intercept)" in coef["Subject"]
+        assert "Days" in coef["Subject"]
         assert len(coef["Subject"]["(Intercept)"]) == 18
+        assert np.allclose(coef["Subject"]["Days"], result.fixef()["Days"])
 
     def test_lmer_coef_combines_fixed_and_random(self):
         result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
@@ -1218,12 +1282,44 @@ class TestCoef:
             expected_days = fixef["Days"] + ranef["Subject"]["Days"][i]
             assert np.isclose(coef["Subject"]["Days"][i], expected_days)
 
+    def test_lmer_coef_merges_split_terms_for_same_group(self):
+        result = lmer(
+            "Reaction ~ Days + (1 | Subject) + (0 + Days | Subject)",
+            SLEEPSTUDY,
+        )
+        ranef = result.ranef(condVar=True)
+        coef = result.coef()
+
+        assert set(ranef["Subject"]) == {"(Intercept)", "Days"}
+        assert set(ranef.condVar["Subject"]) == {"(Intercept)", "Days"}
+        assert set(coef["Subject"]) == {"(Intercept)", "Days"}
+        assert np.allclose(
+            coef["Subject"]["(Intercept)"],
+            result.fixef()["(Intercept)"] + ranef["Subject"]["(Intercept)"],
+        )
+        assert np.allclose(
+            coef["Subject"]["Days"],
+            result.fixef()["Days"] + ranef["Subject"]["Days"],
+        )
+
+    def test_lmer_coef_includes_random_only_term(self):
+        result = lmer("Reaction ~ 1 + (0 + Days | Subject)", SLEEPSTUDY)
+        ranef = result.ranef()
+        coef = result.coef()
+
+        assert list(coef["Subject"]) == ["Days", "(Intercept)"]
+        assert np.allclose(coef["Subject"]["Days"], ranef["Subject"]["Days"])
+        assert np.allclose(coef["Subject"]["(Intercept)"], result.fixef()["(Intercept)"])
+
     def test_glmer_coef_basic(self):
         result = glmer("y ~ period + (1 | herd)", CBPP, family=families.Binomial())
         coef = result.coef()
 
         assert "herd" in coef
         assert "(Intercept)" in coef["herd"]
+        assert set(coef["herd"]) == set(result.fixef())
+        for term_name in set(result.fixef()) - {"(Intercept)"}:
+            assert np.allclose(coef["herd"][term_name], result.fixef()[term_name])
 
     def test_glmer_coef_combines_fixed_and_random(self):
         result = glmer("y ~ period + (1 | herd)", CBPP, family=families.Binomial())

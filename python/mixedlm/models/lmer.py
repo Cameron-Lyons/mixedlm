@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 
 from mixedlm.estimation.reml import LMMOptimizer, _build_lambda, _count_theta
 from mixedlm.formula.terms import Formula
-from mixedlm.matrices.design import ModelMatrices, build_model_matrices
+from mixedlm.matrices.design import ModelMatrices, build_random_matrix
 from mixedlm.models.lmer_types import (
     LogLik,
     ModelTerms,
@@ -351,15 +351,34 @@ class LmerResult(MerResultMixin):
                 return pred
             X = self.matrices.X
         else:
-            pred_matrices = build_model_matrices(self.formula, newdata)
-            X = self._align_fixed_matrix(pred_matrices)
+            X = self._prediction_fixed_matrix(newdata)
             pred = X @ self.beta
-
-            if pred_matrices.offset is not None:
-                pred = pred + pred_matrices.offset
 
             if include_re:
                 pred = self._add_random_effects_to_pred(pred, newdata, allow_new_levels)
+
+            if include_re and (se_fit or interval != "none"):
+                Z, random_structures = build_random_matrix(
+                    self.formula,
+                    newdata,
+                    contrasts=self.matrices.contrasts,
+                    category_levels=self.matrices.category_levels,
+                )
+                n_pred = X.shape[0]
+                pred_matrices = ModelMatrices(
+                    y=np.empty(n_pred, dtype=np.float64),
+                    X=X,
+                    Z=Z,
+                    fixed_names=self.matrices.fixed_names,
+                    random_structures=random_structures,
+                    n_obs=n_pred,
+                    n_fixed=X.shape[1],
+                    n_random=Z.shape[1],
+                    weights=np.ones(n_pred, dtype=np.float64),
+                    offset=np.zeros(n_pred, dtype=np.float64),
+                    category_levels=self.matrices.category_levels,
+                    contrasts=self.matrices.contrasts,
+                )
 
         if not se_fit and interval == "none":
             return pred
