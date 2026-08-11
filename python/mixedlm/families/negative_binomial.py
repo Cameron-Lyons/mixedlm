@@ -8,6 +8,8 @@ from mixedlm.families.base import Family, LogLink
 
 
 class NegativeBinomial(Family):
+    mu_lower_bound = 0.0
+
     def __init__(self, theta: float = 1.0) -> None:
         self.link = LogLink()
         self.theta = theta

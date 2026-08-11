@@ -200,6 +200,8 @@ class QuasiFamily(CustomFamily):
         self.base_family = base_family
         self.phi = phi
         self.link = base_family.link
+        self.mu_lower_bound = base_family.mu_lower_bound
+        self.mu_upper_bound = base_family.mu_upper_bound
 
     def variance(self, mu: NDArray[np.floating]) -> NDArray[np.floating]:
         return self.phi * self.base_family.variance(mu)
