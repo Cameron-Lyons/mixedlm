@@ -82,7 +82,11 @@ class GlmerResult(MerResultMixin):
     ) -> dict[str, dict[str, NDArray[np.floating]]] | RanefResult:
         return self._ranef_with_optional_condvar(self.u, condVar)
 
-    def _compute_condVar(self) -> dict[str, dict[str, NDArray[np.floating]]]:
+    def _compute_condVar(
+        self, include_cov: bool = False
+    ) -> dict[str, dict[str, NDArray[np.floating]]]:
+        from mixedlm.utils.variance import _conditional_variance_blocks
+
         q = self.matrices.n_random
         if q == 0:
             return {}
@@ -93,27 +97,18 @@ class GlmerResult(MerResultMixin):
         mu = self.family.link.inverse(eta)
         mu = self.family.clamp_mu(mu)
 
-        W = self.family.weights(mu)
+        W = self.family.weights(mu) * self.matrices.weights
         W = np.maximum(W, 1e-10)
-        W_diag = sparse.diags(W, format="csc")
+        weighted_z = self.matrices.Z.multiply(np.sqrt(W)[:, np.newaxis])
+        ztwz = weighted_z.T @ weighted_z
+        precision = Lambda.T @ ztwz @ Lambda + sparse.eye(q, format="csc")
 
-        Zt = self.matrices.Zt
-        ZtWZ = Zt @ W_diag @ self.matrices.Z
-        LambdatZtWZLambda = Lambda.T @ ZtWZ @ Lambda
-
-        I_q = sparse.eye(q, format="csc")
-        V = LambdatZtWZLambda + I_q
-
-        V_dense = V.toarray() if sparse.issparse(V) else V
-        Lambda_dense = Lambda.toarray() if sparse.issparse(Lambda) else Lambda
-
-        try:
-            V_inv_Lambda_t = linalg.solve(V_dense, Lambda_dense.T, assume_a="pos")
-        except linalg.LinAlgError:
-            V_inv_Lambda_t = linalg.lstsq(V_dense, Lambda_dense.T)[0]
-
-        cond_cov = Lambda_dense @ V_inv_Lambda_t
-        return self._condvar_from_cov(cond_cov)
+        return _conditional_variance_blocks(
+            precision,
+            Lambda,
+            self.matrices.random_structures,
+            include_cov=include_cov,
+        )
 
     def get_sigma(self) -> float:
         return 1.0
@@ -203,7 +198,7 @@ class GlmerResult(MerResultMixin):
         """
         return self._build_model_terms(self.formula)
 
-    def model_frame(self) -> pd.DataFrame:
+    def model_frame(self) -> Any:
         """Get the model frame.
 
         Returns the data frame containing only the variables used
@@ -211,9 +206,9 @@ class GlmerResult(MerResultMixin):
 
         Returns
         -------
-        pd.DataFrame
-            Data frame with the response variable, fixed effect
-            variables, and grouping factors.
+        DataFrame
+            Data frame with the response variable, fixed effect variables,
+            and grouping factors. The fitted input's backend is preserved.
 
         Examples
         --------
