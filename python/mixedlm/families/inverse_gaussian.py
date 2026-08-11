@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 import numpy as np
 from numpy.typing import NDArray
 
@@ -19,24 +21,28 @@ class InverseSquaredLink(Link):
 
 
 class InverseGaussian(Family):
-    mu_lower_bound = 0.0
+    mean_bounds = (0.0, None)
 
     def __init__(self, link: Link | None = None) -> None:
         self.link = link if link is not None else LogLink()
 
     def variance(self, mu: NDArray[np.floating]) -> NDArray[np.floating]:
-        eps = 1e-10
-        mu = np.maximum(mu, eps)
+        mu = self.clamp_mu(mu)
         return mu**3
 
     def deviance_resids(
         self, y: NDArray[np.floating], mu: NDArray[np.floating], wt: NDArray[np.floating]
     ) -> NDArray[np.floating]:
         eps = 1e-10
-        mu = np.maximum(mu, eps)
+        mu = self.clamp_mu(mu, eps=eps)
         y = np.maximum(y, eps)
 
         return wt * ((y - mu) ** 2) / (mu**2 * y)
+
+    def simulate(self, mu: NDArray[np.floating], rng: Any | None = None) -> NDArray[np.floating]:
+        rng = np.random if rng is None else rng
+        mu = np.minimum(self.clamp_mu(mu, eps=1e-6), 1e10)
+        return rng.wald(mu, 1.0)
 
 
 class InverseGaussianCanonical(InverseGaussian):

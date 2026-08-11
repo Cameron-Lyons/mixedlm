@@ -13,7 +13,6 @@ if TYPE_CHECKING:
 
 from mixedlm.estimation.laplace import GLMMOptimizer, _build_lambda, _count_theta
 from mixedlm.families.base import Family
-from mixedlm.families.negative_binomial import NegativeBinomial
 from mixedlm.formula.terms import Formula
 from mixedlm.matrices.design import ModelMatrices
 from mixedlm.models.lmer_types import (
@@ -62,18 +61,15 @@ class GlmerVarCorr:
         return self.groups[group].corr
 
 
-@dataclass
-class _WorkingProjection:
-    """Reusable final-IRLS projection factors for GLMM diagnostics."""
-
-    working_weights: NDArray[np.float64]
-    sqrt_working_weights: NDArray[np.float64]
+@dataclass(frozen=True)
+class _GLMMProjection:
+    weights: NDArray[np.floating]
+    Lambda: sparse.csc_matrix
+    random_cholesky: NDArray[np.floating]
+    RZX: NDArray[np.floating]
+    fixed_information: NDArray[np.floating]
     weighted_X: NDArray[np.float64]
     weighted_Z: sparse.csc_matrix
-    lambda_matrix: sparse.csc_matrix | None
-    L_C: NDArray[np.float64] | None
-    RZX: NDArray[np.float64]
-    XtVinvX: NDArray[np.float64]
     information_inv: NDArray[np.float64]
 
 
@@ -99,56 +95,6 @@ class GlmerResult(MerResultMixin):
     ) -> dict[str, dict[str, NDArray[np.floating]]] | RanefResult:
         return self._ranef_with_optional_condvar(self.u, condVar)
 
-    @cached_property
-    def _working_projection(self) -> _WorkingProjection:
-        mu = self.family.link.inverse(self._linear_predictor)
-        mu = np.clip(mu, 1e-10, 1 - 1e-10)
-        working_weights = self.family.weights(mu) * self.matrices.weights
-        working_weights = np.maximum(working_weights, 1e-10)
-        sqrt_working_weights = np.sqrt(working_weights)
-        weighted_X = sqrt_working_weights[:, None] * self.matrices.X
-        weighted_Z = self.matrices.Z.multiply(sqrt_working_weights[:, None]).tocsc()
-
-        q = self.matrices.n_random
-        if q == 0:
-            information = weighted_X.T @ weighted_X
-            return _WorkingProjection(
-                working_weights=np.asarray(working_weights, dtype=np.float64),
-                sqrt_working_weights=np.asarray(sqrt_working_weights, dtype=np.float64),
-                weighted_X=np.asarray(weighted_X, dtype=np.float64),
-                weighted_Z=weighted_Z,
-                lambda_matrix=None,
-                L_C=None,
-                RZX=np.zeros((0, self.matrices.n_fixed), dtype=np.float64),
-                XtVinvX=np.asarray(information, dtype=np.float64),
-                information_inv=symmetric_inverse(information),
-            )
-
-        lambda_matrix = _build_lambda(self.theta, self.matrices.random_structures)
-        C = weighted_Z.T @ weighted_Z + lambda_matrix.T @ lambda_matrix
-        C_dense = C.toarray() if sparse.issparse(C) else C
-        try:
-            L_C = linalg.cholesky(C_dense, lower=True)
-        except linalg.LinAlgError:
-            C_dense += 1e-6 * np.eye(q)
-            L_C = linalg.cholesky(C_dense, lower=True)
-
-        ZtWX = weighted_Z.T @ weighted_X
-        RZX = linalg.solve_triangular(L_C, ZtWX, lower=True)
-        information = weighted_X.T @ weighted_X - RZX.T @ RZX
-        information = (information + information.T) / 2.0
-        return _WorkingProjection(
-            working_weights=np.asarray(working_weights, dtype=np.float64),
-            sqrt_working_weights=np.asarray(sqrt_working_weights, dtype=np.float64),
-            weighted_X=np.asarray(weighted_X, dtype=np.float64),
-            weighted_Z=weighted_Z,
-            lambda_matrix=lambda_matrix,
-            L_C=L_C,
-            RZX=np.asarray(RZX, dtype=np.float64),
-            XtVinvX=np.asarray(information, dtype=np.float64),
-            information_inv=symmetric_inverse(information),
-        )
-
     def _compute_condVar(
         self, include_cov: bool = False
     ) -> dict[str, dict[str, NDArray[np.floating]]]:
@@ -158,24 +104,14 @@ class GlmerResult(MerResultMixin):
         if q == 0:
             return {}
 
-        Lambda = _build_lambda(self.theta, self.matrices.random_structures)
-
-        eta = self.linear_predictor()
-        mu = self.family.link.inverse(eta)
-        if hasattr(self.family, "clamp_mu"):
-            mu = self.family.clamp_mu(mu)
-        else:
-            mu = np.clip(mu, 1e-10, 1 - 1e-10)
-
-        W = self.family.weights(mu) * self.matrices.weights
-        W = np.maximum(W, 1e-10)
-        weighted_z = self.matrices.Z.multiply(np.sqrt(W)[:, np.newaxis])
+        projection = self._working_projection
+        weighted_z = self.matrices.Z.multiply(np.sqrt(projection.weights)[:, np.newaxis])
         ztwz = weighted_z.T @ weighted_z
-        precision = Lambda.T @ ztwz @ Lambda + sparse.eye(q, format="csc")
+        precision = projection.Lambda.T @ ztwz @ projection.Lambda + sparse.eye(q, format="csc")
 
         return _conditional_variance_blocks(
             precision,
-            Lambda,
+            projection.Lambda,
             self.matrices.random_structures,
             include_cov=include_cov,
         )
@@ -293,6 +229,63 @@ class GlmerResult(MerResultMixin):
         fixed_part = self.matrices.X @ self.beta
         random_part = self.matrices.Z @ self.u
         return fixed_part + random_part + self.matrices.offset
+
+    @cached_property
+    def _working_projection(self) -> _GLMMProjection:
+        """Final PIRLS projection in spherical random-effect coordinates."""
+        X = self.matrices.X
+        q = self.matrices.n_random
+        mu = self.family.link.inverse(self._linear_predictor)
+        mu = self.family.clamp_mu(mu)
+        weights = np.clip(
+            self.family.weights(mu) * self.matrices.weights,
+            1e-10,
+            1e10,
+        )
+        sqrt_weights = np.sqrt(weights)
+        WX = sqrt_weights[:, None] * X
+        WZ = self.matrices.Z.multiply(sqrt_weights[:, None]).tocsc()
+        XtWX = WX.T @ WX
+        Lambda = _build_lambda(self.theta, self.matrices.random_structures)
+
+        if q == 0:
+            return _GLMMProjection(
+                weights=weights,
+                Lambda=Lambda,
+                random_cholesky=np.empty((0, 0), dtype=np.float64),
+                RZX=np.empty((0, X.shape[1]), dtype=np.float64),
+                fixed_information=np.asarray(XtWX),
+                weighted_X=np.asarray(WX),
+                weighted_Z=WZ,
+                information_inv=symmetric_inverse(XtWX),
+            )
+
+        ZtWZ = WZ.T @ WZ
+        random_information = Lambda.T @ ZtWZ @ Lambda + sparse.eye(q, format="csc")
+        random_information_dense = random_information.toarray()
+        try:
+            random_cholesky = linalg.cholesky(random_information_dense, lower=True)
+        except linalg.LinAlgError:
+            random_information_dense += 1e-6 * np.eye(q)
+            random_cholesky = linalg.cholesky(random_information_dense, lower=True)
+
+        XtWZ = WX.T @ WZ
+        XtWZ_dense = XtWZ.toarray() if sparse.issparse(XtWZ) else np.asarray(XtWZ)
+        spherical_cross = np.asarray(Lambda.T @ XtWZ_dense.T)
+        RZX = linalg.solve_triangular(random_cholesky, spherical_cross, lower=True)
+        fixed_information = np.asarray(XtWX - RZX.T @ RZX)
+        fixed_information = 0.5 * (fixed_information + fixed_information.T)
+
+        return _GLMMProjection(
+            weights=weights,
+            Lambda=Lambda,
+            random_cholesky=random_cholesky,
+            RZX=RZX,
+            fixed_information=fixed_information,
+            weighted_X=np.asarray(WX),
+            weighted_Z=WZ,
+            information_inv=symmetric_inverse(fixed_information),
+        )
 
     def linear_predictor(self, na_expand: bool = True) -> NDArray[np.floating]:
         values = self._linear_predictor
@@ -481,25 +474,33 @@ class GlmerResult(MerResultMixin):
     @cached_property
     def _hat_values(self) -> NDArray[np.float64]:
         projection = self._working_projection
-        h_fixed = np.einsum(
-            "ij,ij->i",
-            projection.weighted_X @ projection.information_inv,
-            projection.weighted_X,
-        )
-
-        if projection.lambda_matrix is None:
-            h_random = np.zeros(self.matrices.n_obs, dtype=np.float64)
-        else:
-            assert projection.L_C is not None
-            weighted_ZLambda = projection.weighted_Z @ projection.lambda_matrix
-            weighted_ZLambda = weighted_ZLambda.toarray()
-            C_inv_ZLambda_t = linalg.cho_solve(
-                (projection.L_C, True),
-                weighted_ZLambda.T,
+        if self.matrices.n_random == 0:
+            diagonal = np.einsum(
+                "ij,ij->i",
+                projection.weighted_X @ projection.information_inv,
+                projection.weighted_X,
             )
-            h_random = np.einsum("ij,ji->i", weighted_ZLambda, C_inv_ZLambda_t)
+            return np.clip(diagonal, 0, 1 - 1e-10)
 
-        return np.clip(h_fixed + h_random, 0, 1 - 1e-10)
+        weighted_z_lambda = (projection.weighted_Z @ projection.Lambda).toarray()
+        random_fixed_map = linalg.solve_triangular(
+            projection.random_cholesky.T,
+            projection.RZX,
+            lower=False,
+        )
+        adjusted_x = projection.weighted_X - weighted_z_lambda @ random_fixed_map
+        diagonal = np.einsum(
+            "ij,ij->i",
+            adjusted_x @ projection.information_inv,
+            adjusted_x,
+        )
+        solved = linalg.solve_triangular(
+            projection.random_cholesky,
+            weighted_z_lambda.T,
+            lower=True,
+        )
+        diagonal += np.sum(solved * solved, axis=0)
+        return np.clip(diagonal, 0, 1 - 1e-10)
 
     def hatvalues(self) -> NDArray[np.floating]:
         """Compute leverage values (diagonal of the hat matrix).
@@ -1061,7 +1062,7 @@ class GlmerResult(MerResultMixin):
 
     def _compute_RX(self) -> NDArray[np.floating]:
         """Compute the upper Cholesky factor of final fixed-effect information."""
-        return linalg.cholesky(self._working_projection.XtVinvX, lower=False)
+        return linalg.cholesky(self._working_projection.fixed_information, lower=False)
 
     def _build_Lind(self) -> NDArray[np.int64]:
         """Build Lind, the index mapping from theta to Lambda entries."""
@@ -1456,11 +1457,10 @@ class GlmerResult(MerResultMixin):
         use_re: bool = True,
         re_form: str | None = None,
     ) -> NDArray[np.floating]:
-        n = self.matrices.n_obs
         q = self.matrices.n_random
 
         if re_form == "~0" or re_form == "NA" or not use_re or q == 0:
-            eta = self.matrices.X @ self.beta
+            eta = self.matrices.X @ self.beta + self.matrices.offset
         else:
             u_new = np.zeros(q, dtype=np.float64)
             u_idx = 0
@@ -1494,35 +1494,10 @@ class GlmerResult(MerResultMixin):
                 u_idx += n_levels * n_terms
                 theta_start += n_theta
 
-            eta = self.matrices.X @ self.beta + self.matrices.Z @ u_new
+            eta = self.matrices.X @ self.beta + self.matrices.Z @ u_new + self.matrices.offset
 
         mu = self.family.link.inverse(eta)
-
-        family_name = self.family.__class__.__name__
-
-        if family_name == "Binomial":
-            mu = np.clip(mu, 1e-6, 1 - 1e-6)
-            y_sim = np.random.binomial(1, mu).astype(np.float64)
-        elif family_name == "Poisson":
-            mu = np.clip(mu, 1e-6, 1e15)
-            y_sim = np.random.poisson(mu).astype(np.float64)
-        elif isinstance(self.family, NegativeBinomial):
-            mu = np.clip(mu, 1e-6, 1e10)
-            theta = self.family.theta
-            y_sim = np.random.negative_binomial(theta, theta / (mu + theta)).astype(np.float64)
-        elif family_name == "Gamma":
-            mu = np.clip(mu, 1e-6, 1e10)
-            shape = 1.0
-            y_sim = np.random.gamma(shape, mu / shape, n)
-        elif family_name == "InverseGaussian":
-            mu = np.clip(mu, 1e-6, 1e10)
-            y_sim = np.random.wald(mu, 1.0, n)
-        elif family_name == "Gaussian":
-            y_sim = np.random.normal(mu, 1.0)
-        else:
-            y_sim = mu + np.random.randn(n) * 0.1
-
-        return y_sim
+        return self.family.simulate(mu)
 
     def _refit_from_matrices(self, matrices: ModelMatrices, **kwargs) -> GlmerResult:
         optimizer = GLMMOptimizer(

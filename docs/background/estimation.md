@@ -189,6 +189,26 @@ For fitting GLMMs, mixedlm uses Penalized Iteratively Reweighted Least Squares (
 
 This is nested within the outer optimization over variance parameters.
 
+The random effects are solved in spherical coordinates,
+
+\[
+\mathbf{b} = \boldsymbol{\Lambda}_{\theta}\mathbf{u},
+\qquad \mathbf{u} \sim N(\mathbf{0}, \mathbf{I}),
+\]
+
+so the penalized random-effect system is
+
+\[
+\mathbf{C} = \mathbf{I} +
+\boldsymbol{\Lambda}_{\theta}^{T}\mathbf{Z}^{T}\mathbf{W}\mathbf{Z}
+\boldsymbol{\Lambda}_{\theta}.
+\]
+
+This parameterization makes the covariance scale explicit, keeps zero-variance boundaries
+well-defined, and uses the same system for the PIRLS mode, Laplace determinant, post-fit
+covariance, and leverage calculations. Adaptive quadrature uses the normalized standard-normal
+prior in these coordinates and evaluates each grouping level's likelihood contribution once.
+
 ## Nonlinear Mixed Models
 
 ### The Model
@@ -247,14 +267,15 @@ model = mlm.glmer("y ~ x + (1 | group)", data, family=mlm.families.Binomial(), c
 
 ### Supported Models
 
-EM-REML supports all random effect structures with unstructured covariance (`cov_type='us'`):
+EM-REML supports:
 
 - Random intercepts: `(1 | group)`
 - Correlated random slopes: `(x | group)`
 - Uncorrelated random slopes: `(x || group)`
 - Multiple random effects: `(1 | group1) + (1 | group2)`
+- Compound symmetry via `set_cov_type(formula, "cs")`
 
-Compound symmetry and AR(1) covariance types are not supported; EM initialization is silently skipped for these models.
+AR(1) covariance is not supported; EM initialization falls back to the direct optimizer for these models.
 
 ### Trade-offs
 

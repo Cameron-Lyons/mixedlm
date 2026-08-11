@@ -115,7 +115,14 @@ Extract residuals.
 #### predict
 
 ```python
-result.predict(newdata=None, re_form=None, type="response")
+result.predict(
+    newdata=None,
+    re_form=None,
+    allow_new_levels=False,
+    se_fit=False,
+    interval="none",
+    level=0.95,
+)
 ```
 
 Generate predictions.
@@ -124,9 +131,30 @@ Generate predictions.
 
 - `newdata`: New data for prediction. If None, uses original data.
 - `re_form`: Formula for random effects. Use `"~0"` to exclude random effects.
-- `type`: Type of prediction. Options: `"response"`, `"link"`.
+- `allow_new_levels`: Allow unseen grouping levels and center their random effects at zero.
+- `se_fit`: Return pointwise standard errors for the predicted mean.
+- `interval`: For LMMs, `"none"`, `"confidence"`, or `"prediction"`.
+- `level`: Interval coverage strictly between zero and one.
 
-**Returns:** Array of predictions.
+**Returns:** An array, or a `PredictResult` when standard errors or intervals are requested.
+
+For conditional LMM predictions, uncertainty is evaluated from the joint fixed- and
+random-effect covariance. This includes covariance between fixed and random estimates,
+covariance among correlated random slopes, and covariance across crossed structures. For an
+unseen group accepted with `allow_new_levels=True`, the fitted prior covariance is added while
+the predicted random effect remains zero. Prediction intervals add residual variance to the
+mean-prediction variance; `se_fit` continues to report the standard error of the mean.
+
+```python
+mean_ci = result.predict(newdata, interval="confidence", level=0.95)
+future_pi = result.predict(newdata, interval="prediction", level=0.95)
+
+new_groups = result.predict(
+    new_group_data,
+    allow_new_levels=True,
+    interval="prediction",
+)
+```
 
 #### simulate
 

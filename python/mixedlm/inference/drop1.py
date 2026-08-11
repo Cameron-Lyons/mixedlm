@@ -91,14 +91,33 @@ def _resolve_worker_count(n_jobs: int) -> int:
 
 def _droppable_fixed_terms(model: LmerResult | GlmerResult) -> list[str]:
     """Return fixed terms whose deletion respects the marginality principle."""
-    from mixedlm.formula.terms import InteractionTerm, VariableTerm
+    from mixedlm.formula.terms import (
+        InteractionTerm,
+        PowerTerm,
+        VariableTerm,
+        format_term,
+    )
 
-    candidates: list[tuple[str, frozenset[str]]] = []
+    FactorKey = tuple[str, int | None]
+
+    def factor_key(factor: str | PowerTerm) -> FactorKey:
+        if isinstance(factor, PowerTerm):
+            return (factor.name, factor.exponent)
+        return (factor, None)
+
+    candidates: list[tuple[str, frozenset[FactorKey]]] = []
     for term in model.formula.fixed.terms:
         if isinstance(term, VariableTerm):
-            candidates.append((term.name, frozenset((term.name,))))
+            candidates.append((format_term(term), frozenset((factor_key(term.name),))))
+        elif isinstance(term, PowerTerm):
+            candidates.append((format_term(term), frozenset((factor_key(term),))))
         elif isinstance(term, InteractionTerm):
-            candidates.append((":".join(term.variables), frozenset(term.variables)))
+            candidates.append(
+                (
+                    format_term(term),
+                    frozenset(factor_key(factor) for factor in term.variables),
+                )
+            )
 
     return [
         label

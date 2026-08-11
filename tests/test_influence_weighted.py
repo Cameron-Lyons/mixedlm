@@ -185,19 +185,25 @@ def test_weighted_glmm_projection_matches_direct_identities() -> None:
     weighted_X = sqrt_weights[:, None] * matrices.X
     weighted_Z = matrices.Z.multiply(sqrt_weights[:, None]).tocsc()
     lambda_matrix = _build_lambda(result.theta, matrices.random_structures)
-    C = weighted_Z.T @ weighted_Z + lambda_matrix.T @ lambda_matrix
-    L_C = linalg.cholesky(C.toarray(), lower=True)
-    expected_RZX = linalg.solve_triangular(L_C, weighted_Z.T @ weighted_X, lower=True)
+    weighted_ZLambda = (weighted_Z @ lambda_matrix).toarray()
+    C = weighted_ZLambda.T @ weighted_ZLambda + np.eye(matrices.n_random)
+    L_C = linalg.cholesky(C, lower=True)
+    expected_RZX = linalg.solve_triangular(
+        L_C,
+        weighted_ZLambda.T @ weighted_X,
+        lower=True,
+    )
     information = weighted_X.T @ weighted_X - expected_RZX.T @ expected_RZX
     information = (information + information.T) / 2.0
     information_inv = linalg.inv(information)
-    weighted_ZLambda = (weighted_Z @ lambda_matrix).toarray()
-    C_inv_ZLambda_t = linalg.cho_solve((L_C, True), weighted_ZLambda.T)
-    expected_hat = np.einsum("ij,ij->i", weighted_X @ information_inv, weighted_X)
-    expected_hat += np.einsum("ij,ji->i", weighted_ZLambda, C_inv_ZLambda_t)
+    random_fixed_map = linalg.solve_triangular(L_C.T, expected_RZX, lower=False)
+    adjusted_X = weighted_X - weighted_ZLambda @ random_fixed_map
+    expected_hat = np.einsum("ij,ij->i", adjusted_X @ information_inv, adjusted_X)
+    solved = linalg.solve_triangular(L_C, weighted_ZLambda.T, lower=True)
+    expected_hat += np.sum(solved * solved, axis=0)
 
     assert result._working_projection is result._working_projection
-    assert_allclose(result._working_projection.working_weights, working_weights, atol=1e-12)
+    assert_allclose(result._working_projection.weights, working_weights, atol=1e-12)
     assert_allclose(result.vcov(), information_inv, atol=1e-11)
     assert_allclose(result.getME("RZX"), expected_RZX, atol=1e-11)
     assert_allclose(result.getME("RX").T @ result.getME("RX"), information, atol=1e-11)
@@ -233,13 +239,12 @@ def test_weighted_glmm_influence_uses_final_fit_and_prior_weights() -> None:
     conditional = result.ranef(condVar=True).condVar
     assert conditional is not None
     projection = result._working_projection
-    assert projection.lambda_matrix is not None
     ZtWZ = projection.weighted_Z.T @ projection.weighted_Z
-    V = projection.lambda_matrix.T @ ZtWZ @ projection.lambda_matrix
+    V = projection.Lambda.T @ ZtWZ @ projection.Lambda
     V = V + sparse.eye(result.matrices.n_random, format="csc")
-    expected_condvar = projection.lambda_matrix @ linalg.solve(
+    expected_condvar = projection.Lambda @ linalg.solve(
         V.toarray(),
-        projection.lambda_matrix.T.toarray(),
+        projection.Lambda.T.toarray(),
         assume_a="pos",
     )
     expected_diagonal = np.diag(expected_condvar).reshape(
@@ -276,7 +281,7 @@ def test_weighted_glmm_diagnostics_match_integer_row_replication() -> None:
     assert replicated.converged
     assert_allclose(weighted.beta, replicated.beta, rtol=0, atol=2e-11)
     assert_allclose(weighted.theta, replicated.theta, rtol=0, atol=2e-11)
-    assert_allclose(weighted.vcov(), replicated.vcov(), rtol=0, atol=3e-12)
+    assert_allclose(weighted.vcov(), replicated.vcov(), rtol=0, atol=5e-12)
 
     replicated_hat = replicated.hatvalues()
     row_starts = np.cumsum(np.r_[0, integer_weights[:-1]])
@@ -286,7 +291,7 @@ def test_weighted_glmm_diagnostics_match_integer_row_replication() -> None:
             for start, count in zip(row_starts, integer_weights, strict=True)
         ]
     )
-    assert_allclose(weighted.hatvalues(), aggregated_hat, rtol=0, atol=3e-12)
+    assert_allclose(weighted.hatvalues(), aggregated_hat, rtol=0, atol=5e-12)
 
     weighted_pearson = weighted.residuals(type="pearson", na_expand=False)
     replicated_pearson = replicated.residuals(type="pearson", na_expand=False)

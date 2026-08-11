@@ -9,7 +9,7 @@ import pandas as pd
 from numpy.typing import NDArray
 from scipy import stats
 
-from mixedlm.formula.terms import InteractionTerm, VariableTerm
+from mixedlm.formula.terms import InteractionTerm, PowerTerm, VariableTerm
 from mixedlm.matrices.design import build_fixed_matrix
 
 if TYPE_CHECKING:
@@ -35,10 +35,10 @@ def _fixed_variable_order(model: LmerResult | GlmerResult) -> list[str]:
     variables: list[str] = []
     for term in model.formula.fixed.terms:
         candidates: tuple[str, ...]
-        if isinstance(term, VariableTerm):
+        if isinstance(term, VariableTerm | PowerTerm):
             candidates = (term.name,)
         elif isinstance(term, InteractionTerm):
-            candidates = term.variables
+            candidates = term.source_variables
         else:
             continue
         for name in candidates:

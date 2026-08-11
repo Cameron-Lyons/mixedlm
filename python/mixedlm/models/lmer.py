@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import cached_property
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 import numpy as np
 from numpy.typing import NDArray
@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 
 from mixedlm.estimation.reml import LMMOptimizer, _build_lambda, _count_theta
 from mixedlm.formula.terms import Formula
-from mixedlm.matrices.design import ModelMatrices
+from mixedlm.matrices.design import ModelMatrices, build_random_matrix
 from mixedlm.models.lmer_types import (
     LogLik,
     ModelTerms,
@@ -388,7 +388,16 @@ class LmerResult(MerResultMixin):
         NDArray or PredictResult
             Predictions. Returns PredictResult if se_fit=True or interval!="none".
         """
+        valid_intervals = ("none", "confidence", "prediction")
+        if interval not in valid_intervals:
+            raise ValueError(
+                f"Unknown interval type: {interval}. Use 'none', 'confidence', or 'prediction'."
+            )
+        if not np.isfinite(level) or not 0 < level < 1:
+            raise ValueError("level must be a finite number strictly between 0 and 1")
+
         include_re = re_form != "NA" and re_form != "~0"
+        pred_matrices: ModelMatrices | None = None
 
         if newdata is None:
             if include_re:
@@ -405,18 +414,38 @@ class LmerResult(MerResultMixin):
             if include_re:
                 pred = self._add_random_effects_to_pred(pred, newdata, allow_new_levels)
 
+            if include_re and (se_fit or interval != "none"):
+                Z, random_structures = build_random_matrix(
+                    self.formula,
+                    newdata,
+                    contrasts=self.matrices.contrasts,
+                    category_levels=self.matrices.category_levels,
+                )
+                n_pred = X.shape[0]
+                pred_matrices = ModelMatrices(
+                    y=np.empty(n_pred, dtype=np.float64),
+                    X=X,
+                    Z=Z,
+                    fixed_names=self.matrices.fixed_names,
+                    random_structures=random_structures,
+                    n_obs=n_pred,
+                    n_fixed=X.shape[1],
+                    n_random=Z.shape[1],
+                    weights=np.ones(n_pred, dtype=np.float64),
+                    offset=np.zeros(n_pred, dtype=np.float64),
+                    category_levels=self.matrices.category_levels,
+                    contrasts=self.matrices.contrasts,
+                )
+
         if not se_fit and interval == "none":
             return pred
 
-        vcov_beta = self.vcov()
-        var_fixed = np.sum((X @ vcov_beta) * X, axis=1)
-
-        if include_re and newdata is not None:
-            var_re = self._compute_re_prediction_variance(newdata, allow_new_levels)
-            var_fit = var_fixed + var_re
-        else:
-            var_fit = var_fixed
-
+        var_fit = self._compute_prediction_variance(
+            X,
+            pred_matrices,
+            include_re=include_re,
+            allow_new_levels=allow_new_levels,
+        )
         se = np.sqrt(var_fit)
 
         if interval == "none":
@@ -448,10 +477,7 @@ class LmerResult(MerResultMixin):
                 interval="prediction",
                 level=level,
             )
-        else:
-            raise ValueError(
-                f"Unknown interval type: {interval}. Use 'none', 'confidence', or 'prediction'."
-            )
+        raise AssertionError("interval validation should make this branch unreachable")
 
     def _add_random_effects_to_pred(
         self,
@@ -463,59 +489,184 @@ class LmerResult(MerResultMixin):
         pred += self._random_effect_prediction_contrib(newdata, allow_new_levels, self.u)
         return pred
 
-    def _compute_re_prediction_variance(
+    def _compute_prediction_variance(
         self,
-        newdata: pd.DataFrame,
+        X: NDArray[np.floating],
+        pred_matrices: ModelMatrices | None,
+        *,
+        include_re: bool,
         allow_new_levels: bool,
     ) -> NDArray[np.floating]:
-        """Compute variance contribution from random effects for predictions."""
-        n = len(newdata)
-        var_re = np.zeros(n, dtype=np.float64)
+        """Compute pointwise mixed-model mean-prediction variance."""
+        q = self.matrices.n_random
+        if not include_re or q == 0:
+            vcov_beta = self.vcov()
+            return np.maximum(np.sum((X @ vcov_beta) * X, axis=1), 0.0)
 
-        cond_var = self._compute_condVar()
-        prior_var = {
-            struct.grouping_factor: np.diag(cov)
-            for struct, cov in self._iter_random_cov_blocks(scale=self.sigma**2)
-        }
+        Z_pred: sparse.csr_matrix
+        prior_var: NDArray[np.floating]
+        if pred_matrices is None:
+            Z_pred = self.matrices.Z.tocsr()
+            prior_var = np.zeros(X.shape[0], dtype=np.float64)
+        else:
+            Z_pred, prior_var = self._align_prediction_random_matrix(
+                pred_matrices, allow_new_levels
+            )
 
-        for struct in self.matrices.random_structures:
-            group_col = struct.grouping_factor
+        Lambda = _build_lambda(self.theta, self.matrices.random_structures)
+        Zt = self.matrices.Zt
+        V = Lambda.T @ (Zt @ self.matrices.Z) @ Lambda
+        V = V + sparse.eye(q, format="csc")
+        V_dense = V.toarray() if sparse.issparse(V) else np.asarray(V)
+        L_V = linalg.cholesky(V_dense, lower=True)
 
-            if group_col not in newdata.columns:
-                continue
+        Lambdat_ZtX = Lambda.T @ (Zt @ self.matrices.X)
+        beta_adjustment = linalg.cho_solve((L_V, True), Lambdat_ZtX)
+        fixed_information = self.matrices.X.T @ self.matrices.X
+        fixed_information -= Lambdat_ZtX.T @ beta_adjustment
+        fixed_information = (fixed_information + fixed_information.T) / 2.0
+        try:
+            L_fixed = linalg.cholesky(fixed_information, lower=True)
+            vcov_beta = self.sigma**2 * linalg.cho_solve(
+                (L_fixed, True), np.eye(fixed_information.shape[0])
+            )
+        except linalg.LinAlgError:
+            vcov_beta = self.sigma**2 * linalg.solve(
+                fixed_information, np.eye(fixed_information.shape[0])
+            )
 
-            if group_col not in cond_var:
-                continue
+        transformed_Z = (Z_pred @ Lambda).tocsr()
+        adjusted_X = X - np.asarray(transformed_Z @ beta_adjustment)
+        var_fixed = np.sum((adjusted_X @ vcov_beta) * adjusted_X, axis=1)
+        var_random = self._conditional_random_prediction_variance(transformed_Z, L_V)
 
-            group_values = newdata[group_col].astype(str)
-            mapped_levels = group_values.map(struct.level_map)
-            known_mask = mapped_levels.notna().to_numpy()
-            unknown_mask = ~known_mask
-            if np.any(known_mask):
-                level_idx = mapped_levels[known_mask].astype(int).to_numpy()
-            else:
-                level_idx = np.array([], dtype=np.int64)
+        return np.maximum(var_fixed + var_random + prior_var, 0.0)
 
-            group_cond_var = cond_var[group_col]
-            group_prior_var = prior_var[group_col]
+    def _align_prediction_random_matrix(
+        self,
+        pred_matrices: ModelMatrices,
+        allow_new_levels: bool,
+    ) -> tuple[sparse.csr_matrix, NDArray[np.floating]]:
+        """Align new-data random-effect columns to the fitted coefficient order."""
+        fitted_structures = self.matrices.random_structures
+        new_structures = pred_matrices.random_structures
+        if len(new_structures) != len(fitted_structures):
+            raise ValueError("New data produced an incompatible random-effects structure")
 
-            for i, term_name in enumerate(struct.term_names):
-                if term_name == "(Intercept)":
-                    term_values = np.ones(n, dtype=np.float64)
-                elif term_name in newdata.columns:
-                    term_values = np.asarray(newdata[term_name], dtype=np.float64)
+        from mixedlm.utils.variance import getL
+
+        level_factors = cast(
+            list[NDArray[np.floating]],
+            getL(self.theta, fitted_structures, sigma=self.sigma, as_blocks=True),
+        )
+
+        known_rows: list[NDArray[np.integer]] = []
+        known_cols: list[NDArray[np.integer]] = []
+        known_values: list[NDArray[np.floating]] = []
+        prior_var = np.zeros(pred_matrices.n_obs, dtype=np.float64)
+        fitted_offset = 0
+        new_offset = 0
+
+        for fitted, new, level_factor in zip(
+            fitted_structures, new_structures, level_factors, strict=True
+        ):
+            if fitted.grouping_factor != new.grouping_factor:
+                raise ValueError("New data produced an incompatible random-effects structure")
+
+            term_indices = {name: index for index, name in enumerate(fitted.term_names)}
+            if set(new.term_names) != set(fitted.term_names):
+                raise ValueError(
+                    f"New data produced incompatible random-effect columns for "
+                    f"'{fitted.grouping_factor}'"
+                )
+            mapped_terms = np.asarray(
+                [term_indices[name] for name in new.term_names], dtype=np.int64
+            )
+
+            fitted_string_levels = {
+                str(fitted_level): index for fitted_level, index in fitted.level_map.items()
+            }
+            new_levels: list[Any | None] = [None] * new.n_levels
+            for stored_level, index in new.level_map.items():
+                new_levels[index] = stored_level
+
+            mapped_levels = np.full(new.n_levels, -1, dtype=np.int64)
+            unknown_levels: list[Any] = []
+            for index, candidate_level in enumerate(new_levels):
+                if candidate_level in fitted.level_map:
+                    mapped_levels[index] = fitted.level_map[candidate_level]
+                elif str(candidate_level) in fitted_string_levels:
+                    mapped_levels[index] = fitted_string_levels[str(candidate_level)]
                 else:
-                    continue
+                    unknown_levels.append(candidate_level)
 
-                term_sq = term_values**2
-                if term_name in group_cond_var and level_idx.size:
-                    term_var = group_cond_var[term_name]
-                    var_re[known_mask] += term_var[level_idx] * term_sq[known_mask]
+            if unknown_levels and not allow_new_levels:
+                raise ValueError(
+                    f"New level '{unknown_levels[0]}' in grouping factor "
+                    f"'{fitted.grouping_factor}'. Set allow_new_levels=True to predict "
+                    "with random effects = 0."
+                )
 
-                if allow_new_levels and np.any(unknown_mask):
-                    var_re[unknown_mask] += group_prior_var[i] * term_sq[unknown_mask]
+            new_width = new.n_levels * new.n_terms
+            block = pred_matrices.Z[:, new_offset : new_offset + new_width].tocoo()
+            entry_levels = block.col // new.n_terms
+            entry_terms = block.col % new.n_terms
+            target_levels = mapped_levels[entry_levels]
+            target_terms = mapped_terms[entry_terms]
+            known = target_levels >= 0
 
-        return var_re
+            if np.any(known):
+                known_rows.append(block.row[known])
+                known_cols.append(
+                    fitted_offset + target_levels[known] * fitted.n_terms + target_terms[known]
+                )
+                known_values.append(block.data[known])
+
+            unknown = ~known
+            if np.any(unknown):
+                unknown_design = sparse.coo_matrix(
+                    (block.data[unknown], (block.row[unknown], target_terms[unknown])),
+                    shape=(pred_matrices.n_obs, fitted.n_terms),
+                ).toarray()
+                prior_cov = level_factor @ level_factor.T
+                prior_var += np.sum((unknown_design @ prior_cov) * unknown_design, axis=1)
+
+            fitted_offset += fitted.n_levels * fitted.n_terms
+            new_offset += new_width
+
+        if known_values:
+            rows = np.concatenate(known_rows)
+            cols = np.concatenate(known_cols)
+            values = np.concatenate(known_values)
+        else:
+            rows = np.array([], dtype=np.int64)
+            cols = np.array([], dtype=np.int64)
+            values = np.array([], dtype=np.float64)
+
+        aligned = sparse.csr_matrix(
+            (values, (rows, cols)),
+            shape=(pred_matrices.n_obs, self.matrices.n_random),
+            dtype=np.float64,
+        )
+        return aligned, prior_var
+
+    def _conditional_random_prediction_variance(
+        self,
+        transformed_Z: sparse.csr_matrix,
+        L_V: NDArray[np.floating],
+    ) -> NDArray[np.floating]:
+        """Evaluate diagonal quadratic forms without materializing an n-by-q matrix."""
+        n_rows, q = transformed_Z.shape
+        result = np.empty(n_rows, dtype=np.float64)
+        chunk_size = max(1, 1_000_000 // max(q, 1))
+
+        for start in range(0, n_rows, chunk_size):
+            stop = min(start + chunk_size, n_rows)
+            chunk = transformed_Z[start:stop].toarray()
+            solved = linalg.solve_triangular(L_V, chunk.T, lower=True)
+            result[start:stop] = self.sigma**2 * np.sum(solved**2, axis=0)
+
+        return result
 
     def vcov(self) -> NDArray[np.floating]:
         information_inv = symmetric_inverse(self._weighted_projection.XtVinvX)
