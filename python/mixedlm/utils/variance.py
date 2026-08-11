@@ -58,25 +58,56 @@ def _conditional_variance_blocks(
         precision_dense = precision_csc.toarray()
         solver = _dense_condvar_solver(precision_dense)
 
-    result: dict[str, dict[str, NDArray[np.floating]]] = {}
+    grouped_structures: dict[str, list[tuple[RandomEffectStructure, int]]] = {}
     offset = 0
-
     for struct in structures:
-        n_levels = struct.n_levels
-        n_terms = struct.n_terms
+        grouped_structures.setdefault(struct.grouping_factor, []).append((struct, offset))
+        offset += struct.n_levels * struct.n_terms
+
+    result: dict[str, dict[str, NDArray[np.floating]]] = {}
+    for group_name, group_structures in grouped_structures.items():
+        n_levels = group_structures[0][0].n_levels
+        if any(struct.n_levels != n_levels for struct, _ in group_structures):
+            raise ValueError(f"Random-effect structures for '{group_name}' have unequal levels")
+
+        term_names = list(
+            dict.fromkeys(
+                term_name
+                for struct, _ in group_structures
+                for term_name in struct.term_names
+            )
+        )
+        raw_term_names = [
+            term_name
+            for struct, _ in group_structures
+            for term_name in struct.term_names
+        ]
+        n_terms = len(term_names)
+        n_raw_terms = len(raw_term_names)
+        aggregation = np.zeros((n_terms, n_raw_terms), dtype=np.float64)
+        term_positions = {name: index for index, name in enumerate(term_names)}
+        for raw_index, term_name in enumerate(raw_term_names):
+            aggregation[term_positions[term_name], raw_index] = 1.0
+
         term_variances = np.empty((n_levels, n_terms), dtype=np.float64)
         covariance_blocks = (
             np.empty((n_levels, n_terms, n_terms), dtype=np.float64)
             if include_cov and n_terms > 1
             else None
         )
-        levels_per_batch = max(1, _CONDVAR_BATCH_COLUMNS // n_terms)
+        levels_per_batch = max(1, _CONDVAR_BATCH_COLUMNS // n_raw_terms)
 
         for first_level in range(0, n_levels, levels_per_batch):
             last_level = min(first_level + levels_per_batch, n_levels)
-            first_index = offset + first_level * n_terms
-            last_index = offset + last_level * n_terms
-            indices = np.arange(first_index, last_index)
+            indices = np.asarray(
+                [
+                    struct_offset + level * struct.n_terms + term_index
+                    for level in range(first_level, last_level)
+                    for struct, struct_offset in group_structures
+                    for term_index in range(struct.n_terms)
+                ],
+                dtype=np.intp,
+            )
             lambda_rows = lambda_csc[indices, :]
             rhs = lambda_rows.T.toarray()
             solved = np.asarray(solver(rhs))
@@ -84,21 +115,21 @@ def _conditional_variance_blocks(
 
             for level in range(first_level, last_level):
                 local_level = level - first_level
-                block_start = local_level * n_terms
-                block_end = block_start + n_terms
-                block = batch_cov[block_start:block_end, block_start:block_end]
+                block_start = local_level * n_raw_terms
+                block_end = block_start + n_raw_terms
+                raw_block = batch_cov[block_start:block_end, block_start:block_end]
+                block = aggregation @ raw_block @ aggregation.T
                 block = (block + block.T) * 0.5
                 term_variances[level] = np.diag(block)
                 if covariance_blocks is not None:
                     covariance_blocks[level] = block
 
         group_result: dict[str, NDArray[np.floating]] = {}
-        for term_index, term_name in enumerate(struct.term_names):
+        for term_index, term_name in enumerate(term_names):
             group_result[term_name] = term_variances[:, term_index]
         if covariance_blocks is not None:
             group_result["_cov"] = covariance_blocks
-        result[struct.grouping_factor] = group_result
-        offset += n_levels * n_terms
+        result[group_name] = group_result
 
     return result
 

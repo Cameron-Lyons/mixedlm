@@ -63,6 +63,22 @@ class TestPolarsLmer:
         residuals = result.residuals()
         assert len(residuals) == len(sleepstudy_polars)
 
+    def test_response_free_categorical_subset_prediction(self):
+        data = pl.DataFrame(
+            {
+                "y": np.arange(12.0),
+                "treatment": ["A", "B"] * 6,
+                "group": np.repeat([f"G{i}" for i in range(6)], 2),
+            }
+        )
+        result = mlm.lmer("y ~ treatment + (1 | group)", data)
+        new_data = pl.DataFrame({"treatment": ["B", "B"]})
+
+        predicted = result.predict(new_data, re_form="NA")
+
+        assert predicted.shape == (2,)
+        assert np.all(np.isfinite(predicted))
+
     def test_lmer_summary(self, sleepstudy_polars):
         """Test summary output with polars."""
         result = mlm.lmer("Reaction ~ Days + (1 | Subject)", sleepstudy_polars)
