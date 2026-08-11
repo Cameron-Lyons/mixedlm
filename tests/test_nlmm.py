@@ -216,6 +216,115 @@ class TestNLMMOptimizer:
         assert np.isscalar(dev)
         assert np.isfinite(dev)
 
+    def test_objective_is_deterministic(self, simple_nlmm_data):
+        x, y, groups = simple_nlmm_data
+        optimizer = NLMMOptimizer(y, x, groups, SSasymp(), [0])
+        theta = optimizer.get_start_theta()
+        nearby_theta = theta.copy()
+        nearby_theta[0] *= 1.1
+
+        first = optimizer.objective(theta)
+        optimizer.objective(nearby_theta)
+        repeated = optimizer.objective(theta)
+
+        assert repeated == pytest.approx(first, rel=0.0, abs=1e-12)
+
+    def test_python_and_rust_objectives_match(self, simple_nlmm_data):
+        x, y, groups = simple_nlmm_data
+        python_optimizer = NLMMOptimizer(y, x, groups, SSasymp(), [0], use_rust=False)
+        rust_optimizer = NLMMOptimizer(y, x, groups, SSasymp(), [0], use_rust=True)
+        if not rust_optimizer.use_rust:
+            pytest.skip("Rust extension is unavailable")
+
+        theta = python_optimizer.get_start_theta()
+        assert rust_optimizer.objective(theta) == pytest.approx(
+            python_optimizer.objective(theta), rel=1e-10
+        )
+
+    def test_unit_weights_match_default(self, simple_nlmm_data):
+        x, y, groups = simple_nlmm_data
+        default = NLMMOptimizer(y, x, groups, SSasymp(), [0], use_rust=False)
+        weighted = NLMMOptimizer(
+            y,
+            x,
+            groups,
+            SSasymp(),
+            [0],
+            use_rust=False,
+            weights=np.ones(len(y)),
+        )
+
+        theta = default.get_start_theta()
+        assert weighted.objective(theta) == pytest.approx(default.objective(theta), abs=1e-12)
+
+    def test_python_and_rust_weighted_objectives_match(self, simple_nlmm_data):
+        x, y, groups = simple_nlmm_data
+        weights = np.linspace(0.25, 2.0, len(y))
+        python_optimizer = NLMMOptimizer(
+            y, x, groups, SSasymp(), [0], use_rust=False, weights=weights
+        )
+        rust_optimizer = NLMMOptimizer(y, x, groups, SSasymp(), [0], use_rust=True, weights=weights)
+        if not rust_optimizer.use_rust:
+            pytest.skip("Rust extension is unavailable")
+
+        theta = python_optimizer.get_start_theta()
+        assert rust_optimizer.objective(theta) == pytest.approx(
+            python_optimizer.objective(theta), rel=1e-10
+        )
+
+    def test_downweighting_outlier_recovers_clean_fit(self, simple_nlmm_data):
+        x, y, groups = simple_nlmm_data
+        clean = NLMMOptimizer(y, x, groups, SSasymp(), [0], use_rust=False).optimize(maxiter=100)
+
+        contaminated_y = y.copy()
+        contaminated_y[0] += 50.0
+        unweighted = NLMMOptimizer(
+            contaminated_y, x, groups, SSasymp(), [0], use_rust=False
+        ).optimize(maxiter=100)
+        weights = np.ones(len(y))
+        weights[0] = 1e-5
+        weighted = NLMMOptimizer(
+            contaminated_y,
+            x,
+            groups,
+            SSasymp(),
+            [0],
+            use_rust=False,
+            weights=weights,
+        ).optimize(maxiter=100)
+
+        weighted_error = np.linalg.norm(weighted.phi - clean.phi)
+        unweighted_error = np.linalg.norm(unweighted.phi - clean.phi)
+        assert clean.converged and unweighted.converged and weighted.converged
+        assert weighted_error < unweighted_error
+
+    @pytest.mark.parametrize(
+        ("weights", "message"),
+        [
+            (np.ones((2, 2)), "one-dimensional"),
+            (np.ones(3), "weights has length"),
+            (np.array([np.nan]), "finite values"),
+            (np.array([0.0]), "strictly positive"),
+            (np.array([-1.0]), "strictly positive"),
+        ],
+    )
+    def test_invalid_weights_raise(self, simple_nlmm_data, weights, message):
+        x, y, groups = simple_nlmm_data
+        if weights.shape == (1,):
+            weights = np.resize(weights, len(y))
+
+        with pytest.raises(ValueError, match=message):
+            NLMMOptimizer(y, x, groups, SSasymp(), [0], weights=weights)
+
+    def test_optimizer_copies_weights(self, simple_nlmm_data):
+        x, y, groups = simple_nlmm_data
+        weights = np.ones(len(y))
+        optimizer = NLMMOptimizer(y, x, groups, SSasymp(), [0], weights=weights)
+
+        weights[0] = 10.0
+
+        assert optimizer.weights[0] == 1.0
+
     def test_optimize_converges(self, simple_nlmm_data):
         x, y, groups = simple_nlmm_data
         model = SSasymp()
@@ -225,7 +334,9 @@ class TestNLMMOptimizer:
         result = optimizer.optimize(maxiter=50)
 
         assert isinstance(result, NLMMOptimizationResult)
+        assert result.converged
         assert result.deviance > 0
+        assert result.theta[0] > 1e-3
 
 
 class TestNLMMWithDifferentModels:

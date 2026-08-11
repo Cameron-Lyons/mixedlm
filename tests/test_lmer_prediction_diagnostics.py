@@ -199,6 +199,81 @@ class TestPredict:
 
         assert np.allclose(predicted, result.fitted())
 
+    def test_lmer_predict_accepts_array_and_scalar_offsets(self):
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+        new_data = SLEEPSTUDY.loc[:4, ["Days"]]
+        baseline = result.predict(new_data, re_form="NA")
+        offset = np.linspace(-0.5, 0.5, len(new_data))
+
+        predicted = result.predict(new_data, re_form="NA", offset=offset)
+        scalar_predicted = result.predict(new_data, re_form="NA", offset=1.25)
+
+        assert np.allclose(predicted, baseline + offset)
+        assert np.allclose(scalar_predicted, baseline + 1.25)
+
+    def test_glmer_predict_accepts_offset_column_on_link_scale(self):
+        result = glmer("y ~ period + (1 | herd)", CBPP, family=families.Binomial())
+        new_data = CBPP.loc[:4, ["period"]].copy()
+        offset = np.linspace(-0.4, 0.6, len(new_data))
+        new_data["log_exposure"] = offset
+
+        baseline = result.predict(
+            new_data,
+            type="link",
+            re_form="NA",
+            interval="confidence",
+        )
+        shifted = result.predict(
+            new_data,
+            type="link",
+            re_form="NA",
+            interval="confidence",
+            offset="log_exposure",
+        )
+        response = result.predict(
+            new_data,
+            type="response",
+            re_form="NA",
+            offset="log_exposure",
+        )
+
+        assert baseline.lower is not None and baseline.upper is not None
+        assert shifted.lower is not None and shifted.upper is not None
+        assert np.allclose(shifted.fit, baseline.fit + offset)
+        assert np.allclose(shifted.se_fit, baseline.se_fit)
+        assert np.allclose(shifted.lower, baseline.lower + offset)
+        assert np.allclose(shifted.upper, baseline.upper + offset)
+        assert np.allclose(response, result.family.link.inverse(shifted.fit))
+
+    @pytest.mark.parametrize(
+        ("offset", "message"),
+        [
+            ([1.0, 2.0], "length 2; expected 3"),
+            ([[1.0], [2.0], [3.0]], "scalar or one-dimensional"),
+            ([0.0, np.nan, 1.0], "only finite"),
+            (["low", "medium", "high"], "numeric values"),
+        ],
+    )
+    def test_predict_rejects_invalid_offsets(self, offset, message):
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+        new_data = SLEEPSTUDY.loc[:2, ["Days"]]
+
+        with pytest.raises(ValueError, match=message):
+            result.predict(new_data, re_form="NA", offset=offset)
+
+    def test_predict_rejects_missing_offset_column(self):
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+        new_data = SLEEPSTUDY.loc[:2, ["Days"]]
+
+        with pytest.raises(ValueError, match="missing offset column 'exposure'"):
+            result.predict(new_data, re_form="NA", offset="exposure")
+
+    def test_predict_rejects_offset_without_newdata(self):
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+
+        with pytest.raises(ValueError, match="only be supplied with newdata"):
+            result.predict(offset=1.0)
+
     def test_predict_categorical_subset_uses_fitted_levels(self):
         data = pd.DataFrame(
             {

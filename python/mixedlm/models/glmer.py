@@ -5,7 +5,7 @@ from functools import cached_property
 from typing import TYPE_CHECKING, Any, ClassVar
 
 import numpy as np
-from numpy.typing import NDArray
+from numpy.typing import ArrayLike, NDArray
 from scipy import linalg, sparse, stats
 
 if TYPE_CHECKING:
@@ -350,6 +350,7 @@ class GlmerResult(MerResultMixin):
         se_fit: bool = False,
         interval: str = "none",
         level: float = 0.95,
+        offset: ArrayLike | str | None = None,
     ) -> NDArray[np.floating] | PredictResult:
         """Generate predictions from the fitted model.
 
@@ -370,6 +371,9 @@ class GlmerResult(MerResultMixin):
             Note: prediction intervals not available for GLMMs.
         level : float, default 0.95
             Confidence level for intervals.
+        offset : array-like, scalar, or str, optional
+            Offset for new-data predictions on the link scale. A string selects
+            a column from ``newdata``. Scalars are broadcast to every row.
 
         Returns
         -------
@@ -379,6 +383,8 @@ class GlmerResult(MerResultMixin):
         include_re = re_form != "NA" and re_form != "~0"
 
         if newdata is None:
+            if offset is not None:
+                raise ValueError("Prediction offset can only be supplied with newdata.")
             if include_re:
                 eta = self._linear_predictor.copy()
             else:
@@ -386,7 +392,7 @@ class GlmerResult(MerResultMixin):
             X = self.matrices.X
         else:
             X = self._prediction_fixed_matrix(newdata)
-            eta = X @ self.beta
+            eta = X @ self.beta + self._prediction_offset(newdata, offset)
 
             if include_re:
                 eta = self._add_random_effects_to_eta(eta, newdata, allow_new_levels)
