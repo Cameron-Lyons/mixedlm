@@ -112,7 +112,9 @@ print(result)
 ```
 
 !!! important
-    Use `REML=False` for likelihood ratio tests comparing random effects structures.
+    `anova()` automatically refits REML linear mixed models with ML before
+    comparison. Pass `refit=False` only when you intentionally want to compare
+    the supplied REML fits directly, such as models with identical fixed effects.
 
 ### Type III ANOVA
 
