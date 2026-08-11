@@ -72,15 +72,11 @@ def _conditional_variance_blocks(
 
         term_names = list(
             dict.fromkeys(
-                term_name
-                for struct, _ in group_structures
-                for term_name in struct.term_names
+                term_name for struct, _ in group_structures for term_name in struct.term_names
             )
         )
         raw_term_names = [
-            term_name
-            for struct, _ in group_structures
-            for term_name in struct.term_names
+            term_name for struct, _ in group_structures for term_name in struct.term_names
         ]
         n_terms = len(term_names)
         n_raw_terms = len(raw_term_names)
