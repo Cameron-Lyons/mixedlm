@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 import numpy as np
 from numpy.typing import NDArray
+from scipy.special import expit
 
 
 @dataclass
@@ -91,20 +92,19 @@ class SSlogis(NonlinearModel):
         self, params: NDArray[np.floating], x: NDArray[np.floating]
     ) -> NDArray[np.floating]:
         Asym, xmid, scal = params[0], params[1], params[2]
-        return Asym / (1 + np.exp((xmid - x) / scal))
+        return Asym * expit((x - xmid) / scal)
 
     def gradient(
         self, params: NDArray[np.floating], x: NDArray[np.floating]
     ) -> NDArray[np.floating]:
         Asym, xmid, scal = params[0], params[1], params[2]
-        exp_term = np.exp((xmid - x) / scal)
-        denom = 1 + exp_term
-        denom_sq = denom**2
+        logistic = expit((x - xmid) / scal)
+        sensitivity = logistic * (1.0 - logistic)
 
         grad = np.zeros((len(x), 3), dtype=np.float64)
-        grad[:, 0] = 1 / denom
-        grad[:, 1] = -Asym * exp_term / (scal * denom_sq)
-        grad[:, 2] = Asym * (xmid - x) * exp_term / (scal**2 * denom_sq)
+        grad[:, 0] = logistic
+        grad[:, 1] = -Asym * sensitivity / scal
+        grad[:, 2] = Asym * (xmid - x) * sensitivity / scal**2
 
         return grad
 
@@ -166,21 +166,20 @@ class SSfpl(NonlinearModel):
         self, params: NDArray[np.floating], x: NDArray[np.floating]
     ) -> NDArray[np.floating]:
         A, B, xmid, scal = params[0], params[1], params[2], params[3]
-        return A + (B - A) / (1 + np.exp((xmid - x) / scal))
+        return A + (B - A) * expit((x - xmid) / scal)
 
     def gradient(
         self, params: NDArray[np.floating], x: NDArray[np.floating]
     ) -> NDArray[np.floating]:
         A, B, xmid, scal = params[0], params[1], params[2], params[3]
-        exp_term = np.exp((xmid - x) / scal)
-        denom = 1 + exp_term
-        denom_sq = denom**2
+        logistic = expit((x - xmid) / scal)
+        sensitivity = logistic * (1.0 - logistic)
 
         grad = np.zeros((len(x), 4), dtype=np.float64)
-        grad[:, 0] = 1 - 1 / denom
-        grad[:, 1] = 1 / denom
-        grad[:, 2] = -(B - A) * exp_term / (scal * denom_sq)
-        grad[:, 3] = (B - A) * (xmid - x) * exp_term / (scal**2 * denom_sq)
+        grad[:, 0] = 1.0 - logistic
+        grad[:, 1] = logistic
+        grad[:, 2] = -(B - A) * sensitivity / scal
+        grad[:, 3] = (B - A) * (xmid - x) * sensitivity / scal**2
 
         return grad
 
