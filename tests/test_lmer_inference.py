@@ -278,9 +278,9 @@ class TestInference:
             nsim,
             seed,
         )
-        eta = (
-            result.matrices.X @ result.beta + result.matrices.offset
-        )[:, None] + np.asarray(result.matrices.Z @ u_batch.T)
+        eta = (result.matrices.X @ result.beta + result.matrices.offset)[:, None] + np.asarray(
+            result.matrices.Z @ u_batch.T
+        )
         mu = np.clip(result.family.link.inverse(eta), 1e-6, 1 - 1e-6)
         np.random.seed(seed)
         expected = np.random.binomial(1, mu).astype(np.float64)
@@ -299,9 +299,7 @@ class TestInference:
         with pytest.raises(ValueError, match="nsim must be at least 1"):
             result.simulate(nsim=0)
 
-    def test_glmer_simulate_uses_family_subclasses(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_glmer_simulate_uses_family_subclasses(self, monkeypatch: pytest.MonkeyPatch) -> None:
         result = glmer("y ~ period + (1 | herd)", CBPP, family=families.Binomial())
         mu = np.full((result.matrices.n_obs, 3), 0.75)
         monkeypatch.setattr(np.random, "gamma", lambda shape, scale: np.asarray(scale))
