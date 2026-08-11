@@ -7,6 +7,7 @@ from mixedlm import glmer, lmer
 from mixedlm.families import Binomial
 from mixedlm.inference.bootstrap import (
     BootstrapResult,
+    NlmerBootstrapResult,
     _glmer_bootstrap_worker,
     _lmer_bootstrap_worker,
     _prepare_glmer_worker_data,
@@ -88,6 +89,21 @@ def glmer_result(simple_glmer_data):
 
 
 class TestBootstrapResult:
+    @staticmethod
+    def result_from_samples(samples: list[float], original: float = 1.5) -> BootstrapResult:
+        beta_samples = np.asarray(samples, dtype=np.float64)[:, None]
+        return BootstrapResult(
+            n_boot=len(samples),
+            beta_samples=beta_samples,
+            theta_samples=np.empty((len(samples), 0)),
+            sigma_samples=None,
+            fixed_names=["x"],
+            original_beta=np.array([original]),
+            original_theta=np.empty(0),
+            original_sigma=None,
+            n_failed=int(np.count_nonzero(~np.isfinite(beta_samples))),
+        )
+
     def test_ci_percentile(self, lmer_result, simple_lmer_data):
         boot = bootstrap_lmer(lmer_result, n_boot=20, seed=42)
         ci = boot.ci(level=0.95, method="percentile")
@@ -124,6 +140,56 @@ class TestBootstrapResult:
         summary = boot.summary()
         assert "Parametric bootstrap" in summary
         assert "Fixed effects" in summary
+
+    def test_se_uses_sample_standard_deviation(self):
+        boot = self.result_from_samples([1.0, 3.0])
+
+        assert boot.se()["x"] == pytest.approx(np.sqrt(2.0))
+        assert "1.4142" in boot.summary()
+
+    def test_statistics_ignore_all_nonfinite_samples(self):
+        boot = self.result_from_samples([1.0, np.nan, np.inf, 3.0])
+
+        assert boot.se()["x"] == pytest.approx(np.sqrt(2.0))
+        assert boot.ci(method="percentile")["x"] == pytest.approx((1.05, 2.95))
+
+    def test_normal_ci_corrects_bootstrap_bias(self):
+        boot = self.result_from_samples([1.0, 3.0], original=1.5)
+
+        lower, upper = boot.ci(level=0.95, method="normal")["x"]
+        expected_half_width = 1.959963984540054 * np.sqrt(2.0)
+        assert lower == pytest.approx(1.0 - expected_half_width)
+        assert upper == pytest.approx(1.0 + expected_half_width)
+
+    @pytest.mark.parametrize("level", [0.0, 1.0, -0.1, 1.1, np.nan, -np.inf, np.inf])
+    def test_ci_rejects_invalid_level(self, level):
+        boot = self.result_from_samples([1.0, 3.0])
+
+        with pytest.raises(ValueError, match="level must be strictly between"):
+            boot.ci(level=level)
+
+    def test_single_finite_sample_has_undefined_standard_error(self):
+        boot = self.result_from_samples([2.0, np.nan])
+
+        assert np.isnan(boot.se()["x"])
+        lower, upper = boot.ci(method="normal")["x"]
+        assert np.isnan(lower)
+        assert np.isnan(upper)
+
+    def test_nlmer_result_uses_same_statistics(self):
+        boot = NlmerBootstrapResult(
+            n_boot=2,
+            phi_samples=np.array([[1.0], [3.0]]),
+            theta_samples=np.empty((2, 0)),
+            sigma_samples=np.ones(2),
+            param_names=["Asym"],
+            original_phi=np.array([1.5]),
+            original_theta=np.empty(0),
+            original_sigma=1.0,
+            n_failed=0,
+        )
+
+        assert boot.se()["Asym"] == pytest.approx(np.sqrt(2.0))
 
 
 class TestBootstrapLmer:
@@ -285,3 +351,6 @@ class TestBootstrapEdgeCases:
         ci = boot.ci()
         assert np.isnan(ci["a"][0])
         assert np.isnan(ci["a"][1])
+
+        with pytest.raises(ValueError, match="Unknown method"):
+            boot.ci(method="invalid")

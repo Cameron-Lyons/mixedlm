@@ -60,6 +60,19 @@ def test_power_terms_build_fixed_and_interaction_columns(
     assert np.allclose(matrices.X[:, 4], x**2 * z)
 
 
+def test_power_term_preserves_full_rank_factor_without_intercept(
+    polynomial_data: pd.DataFrame,
+) -> None:
+    matrices = build_model_matrices(
+        parse_formula("y ~ 0 + I(x**2) + g + (1 | g)"),
+        polynomial_data,
+    )
+
+    assert matrices.fixed_names == ["I(x**2)", "g.a", "g.b"]
+    assert np.allclose(matrices.X[:, 0], polynomial_data["x"] ** 2)
+    assert np.array_equal(matrices.X[:, 1:], np.repeat(np.eye(2), 3, axis=0))
+
+
 def test_power_term_builds_random_slope(polynomial_data: pd.DataFrame) -> None:
     formula = parse_formula("y ~ x + (0 + I(x**2) | g)")
     matrices = build_model_matrices(formula, polynomial_data)
