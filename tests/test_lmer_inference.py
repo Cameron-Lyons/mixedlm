@@ -417,8 +417,9 @@ class TestWeightsOffset:
         expected = result.family.link.inverse(result.matrices.X @ result.beta + offset)
         np.testing.assert_allclose(captured["mu"], expected)
         worker_data = _prepare_glmer_worker_data(result)
-        np.testing.assert_allclose(worker_data["offset"], offset)
-        np.testing.assert_allclose(worker_data["weights"], result.matrices.weights)
+        worker_matrices = worker_data["matrices"]
+        np.testing.assert_allclose(worker_matrices.offset, offset)
+        np.testing.assert_allclose(worker_matrices.weights, result.matrices.weights)
 
     def test_lmer_weights_and_offset(self) -> None:
         np.random.seed(42)
