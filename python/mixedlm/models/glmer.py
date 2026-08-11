@@ -13,7 +13,12 @@ if TYPE_CHECKING:
 
 from mixedlm.estimation.laplace import GLMMOptimizer, _build_lambda, _count_theta
 from mixedlm.families.base import Family
+from mixedlm.families.binomial import Binomial
+from mixedlm.families.gamma import Gamma
+from mixedlm.families.gaussian import Gaussian
+from mixedlm.families.inverse_gaussian import InverseGaussian
 from mixedlm.families.negative_binomial import NegativeBinomial
+from mixedlm.families.poisson import Poisson
 from mixedlm.formula.terms import Formula
 from mixedlm.matrices.design import ModelMatrices, build_model_matrices
 from mixedlm.models.lmer_types import (
@@ -1530,13 +1535,31 @@ class GlmerResult(MerResultMixin):
         use_re: bool = True,
         re_form: str | None = None,
     ) -> NDArray[np.floating]:
+        if nsim < 1:
+            raise ValueError("nsim must be at least 1")
+
         if seed is not None:
             np.random.seed(seed)
 
         n = self.matrices.n_obs
+        q = self.matrices.n_random
 
         if nsim == 1:
             return self._simulate_once(use_re, re_form)
+
+        include_re = use_re and q > 0 and re_form not in ("~0", "NA")
+
+        if not include_re:
+            fixed_eta = self.matrices.X @ self.beta + self.matrices.offset
+            eta = np.broadcast_to(fixed_eta[:, None], (n, nsim))
+            return self._simulate_response(self.family.link.inverse(eta))
+
+        try:
+            from mixedlm._rust import simulate_re_batch
+
+            return self._simulate_batch_rust(nsim, seed, simulate_re_batch)
+        except ImportError:
+            pass
 
         result = np.zeros((n, nsim), dtype=np.float64)
         for i in range(nsim):
@@ -1544,12 +1567,32 @@ class GlmerResult(MerResultMixin):
 
         return result
 
+    def _simulate_batch_rust(
+        self,
+        nsim: int,
+        seed: int | None,
+        simulate_re_batch: Any,
+    ) -> NDArray[np.floating]:
+        fixed_eta = self.matrices.X @ self.beta + self.matrices.offset
+        structures = self.matrices.random_structures
+        u_batch = simulate_re_batch(
+            self.theta,
+            1.0,
+            [structure.n_levels for structure in structures],
+            [structure.n_terms for structure in structures],
+            [structure.correlated for structure in structures],
+            nsim,
+            seed,
+        )
+        eta = np.asarray(self.matrices.Z @ u_batch.T, dtype=np.float64)
+        eta += fixed_eta[:, None]
+        return self._simulate_response(self.family.link.inverse(eta))
+
     def _simulate_once(
         self,
         use_re: bool = True,
         re_form: str | None = None,
     ) -> NDArray[np.floating]:
-        n = self.matrices.n_obs
         q = self.matrices.n_random
 
         eta = self.matrices.X @ self.beta + self.matrices.offset
@@ -1589,33 +1632,31 @@ class GlmerResult(MerResultMixin):
 
             eta += self.matrices.Z @ u_new
 
-        mu = self.family.link.inverse(eta)
+        return self._simulate_response(self.family.link.inverse(eta))
 
-        family_name = self.family.__class__.__name__
-
-        if family_name == "Binomial":
+    def _simulate_response(
+        self,
+        mu: NDArray[np.floating],
+    ) -> NDArray[np.floating]:
+        if isinstance(self.family, Binomial):
             mu = np.clip(mu, 1e-6, 1 - 1e-6)
-            y_sim = np.random.binomial(1, mu).astype(np.float64)
-        elif family_name == "Poisson":
+            return np.random.binomial(1, mu).astype(np.float64)
+        if isinstance(self.family, Poisson):
             mu = np.clip(mu, 1e-6, 1e15)
-            y_sim = np.random.poisson(mu).astype(np.float64)
-        elif isinstance(self.family, NegativeBinomial):
+            return np.random.poisson(mu).astype(np.float64)
+        if isinstance(self.family, NegativeBinomial):
             mu = np.clip(mu, 1e-6, 1e10)
             theta = self.family.theta
-            y_sim = np.random.negative_binomial(theta, theta / (mu + theta)).astype(np.float64)
-        elif family_name == "Gamma":
+            return np.random.negative_binomial(theta, theta / (mu + theta)).astype(np.float64)
+        if isinstance(self.family, Gamma):
             mu = np.clip(mu, 1e-6, 1e10)
-            shape = 1.0
-            y_sim = np.random.gamma(shape, mu / shape, n)
-        elif family_name == "InverseGaussian":
+            return np.random.gamma(1.0, mu).astype(np.float64)
+        if isinstance(self.family, InverseGaussian):
             mu = np.clip(mu, 1e-6, 1e10)
-            y_sim = np.random.wald(mu, 1.0, n)
-        elif family_name == "Gaussian":
-            y_sim = np.random.normal(mu, 1.0)
-        else:
-            y_sim = mu + np.random.randn(n) * 0.1
-
-        return y_sim
+            return np.random.wald(mu, 1.0).astype(np.float64)
+        if isinstance(self.family, Gaussian):
+            return np.random.normal(mu, 1.0).astype(np.float64)
+        return mu + np.random.randn(*mu.shape) * 0.1
 
     def _refit_from_matrices(self, matrices: ModelMatrices, **kwargs) -> GlmerResult:
         optimizer = GLMMOptimizer(

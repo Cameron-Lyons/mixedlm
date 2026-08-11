@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Root-level CHANGELOG.md
 
 ### Changed
+- Multi-draw GLMM simulation now batches random effects and response generation
 - EM-REML algorithm generalized from single random intercept to arbitrary unstructured covariance models
 - Replaced the Py-BOBYQA dependency and default optimizer with SciPy COBYQA
 - Reduced unused and redundant Python and Rust dependencies
@@ -33,6 +34,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Nonlinear mixed models now apply offsets consistently to responses, fitted values, simulations, refits, covariance estimates, and leverage diagnostics
 
 ### Fixed
+- Canonical Gamma and inverse-Gaussian variants now simulate from their family distributions
 - LMM and GLMM simulations now preserve model offsets in generated responses
 
 ## [1.1.0] - 2026-01-27
