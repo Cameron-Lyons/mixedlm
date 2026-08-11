@@ -238,7 +238,6 @@ Control arguments are similar:
 
 These lme4/related functions are not yet implemented:
 
-- `bootCI` (boot package style)
 - `plot.merMod` (use `mlm.plot_diagnostics` instead)
 
 ## Getting Help
