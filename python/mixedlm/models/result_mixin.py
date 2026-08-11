@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator, Sequence
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, ClassVar, cast
 
 import numpy as np
 from numpy.typing import NDArray
@@ -13,6 +13,8 @@ from mixedlm.models.lmer_types import ModelTerms, RanefResult
 
 if TYPE_CHECKING:
     import pandas as pd
+
+    from mixedlm.inference.reporting import MixedModelResult
 
 
 class MerResultMixin:
@@ -111,7 +113,7 @@ class MerResultMixin:
         from mixedlm.inference.reporting import tidy
 
         return tidy(
-            self,
+            cast("MixedModelResult", self),
             effects=effects,
             conf_int=conf_int,
             conf_level=conf_level,
@@ -122,7 +124,7 @@ class MerResultMixin:
         """Return one row of model-level fit statistics."""
         from mixedlm.inference.reporting import glance
 
-        return glance(self)
+        return glance(cast("MixedModelResult", self))
 
     def _weights_array(self, copy: bool = True) -> NDArray[np.floating]:
         return self.matrices.weights.copy() if copy else self.matrices.weights
