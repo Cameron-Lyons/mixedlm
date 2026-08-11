@@ -85,6 +85,41 @@ class TestFormulaParser:
                 labels.append(":".join(term.variables))
         assert labels == ["x1", "x2", "x1:x2"]
 
+    def test_backticks_quote_names_and_formula_operators(self) -> None:
+        formula = parse_formula(
+            "`response value` ~ `fixed + value`:`second:value` + (`random slope` | `group/id`)"
+        )
+
+        assert formula.response == "response value"
+        assert formula.fixed.terms == (InteractionTerm(("fixed + value", "second:value")),)
+        assert formula.random[0].expr == (VariableTerm("random slope"),)
+        assert formula.random[0].grouping == "group/id"
+        assert parse_formula(str(formula)) == formula
+
+    def test_backticks_support_nested_grouping_factors(self) -> None:
+        formula = parse_formula("y ~ x + (1 | `school id`/`class/id`)")
+
+        assert formula.random[0].grouping == ("school id", "class/id")
+        assert str(formula) == "y ~ x + (1 | `school id`/`class/id`)"
+
+    def test_quoted_random_slope_without_intercept_round_trips(self) -> None:
+        formula = parse_formula("y ~ x + (0 + `random slope` | `group id`)")
+
+        assert not formula.random[0].has_intercept
+        assert str(formula) == "y ~ x + (0 + `random slope` | `group id`)"
+        assert parse_formula(str(formula)) == formula
+
+    def test_backticks_can_be_escaped(self) -> None:
+        formula = parse_formula(r"`response\`name` ~ `fixed\`name`")
+
+        assert formula.response == "response`name"
+        assert formula.fixed.terms == (VariableTerm("fixed`name"),)
+        assert parse_formula(str(formula)) == formula
+
+    def test_unterminated_backtick_name_is_rejected(self) -> None:
+        with np.testing.assert_raises_regex(ValueError, "Unterminated quoted identifier"):
+            parse_formula("`response ~ x")
+
 
 class TestModelMatrices:
     def test_fixed_matrix_with_intercept(self) -> None:
@@ -138,3 +173,19 @@ class TestModelMatrices:
 
         assert matrices.fixed_names == ["(Intercept)", "x1", "x2", "x1:x2"]
         assert np.allclose(matrices.X[:, 3], data["x1"].to_numpy() * data["x2"].to_numpy())
+
+    def test_quoted_names_build_model_matrices(self) -> None:
+        data = pd.DataFrame(
+            {
+                "response value": [1.0, 2.0, 3.0, 4.0],
+                "fixed + value": [0.0, 1.0, 2.0, 3.0],
+                "group/id": ["a", "a", "b", "b"],
+            }
+        )
+        formula = parse_formula("`response value` ~ `fixed + value` + (1 | `group/id`)")
+        matrices = build_model_matrices(formula, data)
+
+        assert np.array_equal(matrices.y, data["response value"].to_numpy())
+        assert matrices.fixed_names == ["(Intercept)", "fixed + value"]
+        assert matrices.random_structures[0].grouping_factor == "group/id"
+        assert matrices.Z.shape == (4, 2)
