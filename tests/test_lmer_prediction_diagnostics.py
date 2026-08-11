@@ -120,14 +120,24 @@ class TestPredict:
         assert np.allclose(pred, fitted)
 
     def test_glmer_predict_fixed_only(self):
-        result = glmer("y ~ period + (1 | herd)", CBPP, family=families.Binomial())
+        result = glmer(
+            "y ~ period + (1 | herd)",
+            CBPP,
+            family=families.Binomial(),
+            weights=CBPP["size"].to_numpy(dtype=float),
+        )
         pred_fixed = result.predict(newdata=CBPP, re_form="NA")
         pred_full = result.predict(newdata=CBPP)
 
         assert not np.allclose(pred_fixed, pred_full)
 
     def test_glmer_predict_fixed_only_without_newdata(self):
-        result = glmer("y ~ period + (1 | herd)", CBPP, family=families.Binomial())
+        result = glmer(
+            "y ~ period + (1 | herd)",
+            CBPP,
+            family=families.Binomial(),
+            weights=CBPP["size"].to_numpy(dtype=float),
+        )
         expected_link = result.matrices.X @ result.beta + result.matrices.offset
         expected_response = result.family.link.inverse(expected_link)
 

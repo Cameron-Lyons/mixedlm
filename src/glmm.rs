@@ -76,54 +76,51 @@ impl FamilyType {
         }
     }
 
-    fn deviance_resids(&self, y: &DVector<f64>, mu: &DVector<f64>, wt: &[f64]) -> f64 {
-        let n = y.len();
-        let mut sum = 0.0;
-
+    fn unit_deviance(&self, y: f64, mu: f64) -> f64 {
         match self {
-            FamilyType::Gaussian => {
-                for i in 0..n {
-                    let r = y[i] - mu[i];
-                    sum += wt[i] * r * r;
-                }
-            }
+            FamilyType::Gaussian => (y - mu).powi(2),
             FamilyType::Binomial => {
-                for i in 0..n {
-                    let yi = y[i];
-                    let mui = mu[i].clamp(1e-10, 1.0 - 1e-10);
-
-                    let term1 = if yi > 1e-10 {
-                        yi * (yi / mui).ln()
-                    } else {
-                        0.0
-                    };
-
-                    let term2 = if (1.0 - yi) > 1e-10 {
-                        (1.0 - yi) * ((1.0 - yi) / (1.0 - mui)).ln()
-                    } else {
-                        0.0
-                    };
-
-                    sum += 2.0 * wt[i] * (term1 + term2);
-                }
+                let bounded_mu = mu.clamp(1e-10, 1.0 - 1e-10);
+                let success = if y > 1e-10 {
+                    y * (y / bounded_mu).ln()
+                } else {
+                    0.0
+                };
+                let failure = if (1.0 - y) > 1e-10 {
+                    (1.0 - y) * ((1.0 - y) / (1.0 - bounded_mu)).ln()
+                } else {
+                    0.0
+                };
+                2.0 * (success + failure)
             }
             FamilyType::Poisson => {
-                for i in 0..n {
-                    let yi = y[i];
-                    let mui = mu[i].max(1e-10);
-
-                    let term = if yi > 1e-10 {
-                        yi * (yi / mui).ln()
-                    } else {
-                        0.0
-                    };
-
-                    sum += 2.0 * wt[i] * (term - (yi - mui));
-                }
+                let bounded_mu = mu.max(1e-10);
+                let log_term = if y > 1e-10 {
+                    y * (y / bounded_mu).ln()
+                } else {
+                    0.0
+                };
+                2.0 * (log_term - (y - bounded_mu))
             }
         }
+    }
 
-        sum
+    fn deviance_resids(&self, y: &DVector<f64>, mu: &DVector<f64>, wt: &[f64]) -> f64 {
+        (0..y.len())
+            .map(|i| wt[i] * self.unit_deviance(y[i], mu[i]))
+            .sum()
+    }
+
+    fn deviance_resids_rows(
+        &self,
+        y: &DVector<f64>,
+        mu: &DVector<f64>,
+        wt: &[f64],
+        rows: &[usize],
+    ) -> f64 {
+        rows.iter()
+            .map(|&i| wt[i] * self.unit_deviance(y[i], mu[i]))
+            .sum()
     }
 
     fn weights(&self, mu: &DVector<f64>, link: LinkFunction) -> DVector<f64> {
@@ -275,6 +272,7 @@ fn forward_solve_mat(l: &DMatrix<f64>, b: &DMatrix<f64>) -> DMatrix<f64> {
 #[derive(Debug)]
 pub struct PirlsResult {
     pub beta: DVector<f64>,
+    pub spherical: DVector<f64>,
     pub u: DVector<f64>,
     pub deviance: f64,
     pub converged: bool,
@@ -320,25 +318,29 @@ pub fn pirls_impl(
         }
     };
 
-    let mut u = if let Some(u_init) = u_start {
-        u_init.clone()
+    let lambda = build_lambda_dense(theta, structures);
+    let mut spherical = if let Some(u_init) = u_start {
+        lambda
+            .clone()
+            .qr()
+            .solve(u_init)
+            .unwrap_or_else(|| DVector::zeros(q))
     } else {
         DVector::zeros(q)
     };
-
-    let lambda = build_lambda_dense(theta, structures);
-    let lambda_t_lambda = lambda.transpose() * &lambda;
+    let lambda_t = lambda.transpose();
 
     let mut converged = false;
 
     for _iter in 0..maxiter {
+        let random_effects = &lambda * &spherical;
         let mut eta = x * &beta + offset;
         for j in 0..q {
             let col_start = z.col_offsets()[j];
             let col_end = z.col_offsets()[j + 1];
             for idx in col_start..col_end {
                 let i = z.row_indices()[idx];
-                eta[i] += z.values()[idx] * u[j];
+                eta[i] += z.values()[idx] * random_effects[j];
             }
         }
 
@@ -427,7 +429,7 @@ pub fn pirls_impl(
             ztwz_vec[j] = sum;
         }
 
-        let mut c = &ztwz + &lambda_t_lambda;
+        let mut c = &lambda_t * &ztwz * &lambda + DMatrix::identity(q, q);
         let chol_c = match Cholesky::new(c.clone()) {
             Some(ch) => ch,
             None => {
@@ -439,7 +441,8 @@ pub fn pirls_impl(
                     None => {
                         return PirlsResult {
                             beta,
-                            u,
+                            spherical,
+                            u: random_effects,
                             deviance: 1e10,
                             converged: false,
                         };
@@ -448,9 +451,11 @@ pub fn pirls_impl(
             }
         };
 
+        let spherical_ztwx = &lambda_t * &ztwx;
+        let spherical_ztwz = &lambda_t * &ztwz_vec;
         let l_c = chol_c.l();
-        let rzx = forward_solve_mat(&l_c, &ztwx);
-        let cu = forward_solve_vec(&l_c, &ztwz_vec);
+        let rzx = forward_solve_mat(&l_c, &spherical_ztwx);
+        let cu = forward_solve_vec(&l_c, &spherical_ztwz);
 
         let xtvinvx = &xtwx - &(rzx.transpose() * &rzx);
         let xtvinvz = &xtwz_vec - &(rzx.transpose() * &cu);
@@ -463,18 +468,18 @@ pub fn pirls_impl(
                 .map_or(beta.clone(), |inv| inv * &xtvinvz),
         };
 
-        let u_rhs = &ztwz_vec - &(&ztwx * &beta_new);
-        let u_new = chol_c.solve(&u_rhs);
+        let spherical_rhs = &spherical_ztwz - &(&spherical_ztwx * &beta_new);
+        let spherical_new = chol_c.solve(&spherical_rhs);
 
         let delta_beta = (&beta_new - &beta).abs().max();
         let delta_u = if q > 0 {
-            (&u_new - &u).abs().max()
+            (&spherical_new - &spherical).abs().max()
         } else {
             0.0
         };
 
         beta = beta_new;
-        u = u_new;
+        spherical = spherical_new;
 
         if delta_beta < tol && delta_u < tol {
             converged = true;
@@ -482,13 +487,14 @@ pub fn pirls_impl(
         }
     }
 
+    let random_effects = &lambda * &spherical;
     let mut eta_final = x * &beta + offset;
     for j in 0..q {
         let col_start = z.col_offsets()[j];
         let col_end = z.col_offsets()[j + 1];
         for idx in col_start..col_end {
             let i = z.row_indices()[idx];
-            eta_final[i] += z.values()[idx] * u[j];
+            eta_final[i] += z.values()[idx] * random_effects[j];
         }
     }
 
@@ -497,24 +503,12 @@ pub fn pirls_impl(
 
     let dev_resids = family.deviance_resids(y, &mu_final, weights);
 
-    let mut lambda_t_lambda_reg = lambda_t_lambda.clone();
-    for i in 0..q {
-        lambda_t_lambda_reg[(i, i)] += 1e-10;
-    }
-
-    let u_penalty = match Cholesky::new(lambda_t_lambda_reg) {
-        Some(chol) => {
-            let solved = chol.solve(&u);
-            u.dot(&solved)
-        }
-        None => 0.0,
-    };
-
-    let deviance = dev_resids + u_penalty;
+    let deviance = dev_resids + spherical.dot(&spherical);
 
     PirlsResult {
         beta,
-        u,
+        spherical,
+        u: random_effects,
         deviance,
         converged,
     }
@@ -574,9 +568,9 @@ pub fn laplace_deviance_impl(
 
     let beta = result.beta;
     let u = result.u;
+    let spherical = result.spherical;
 
     let lambda = build_lambda_dense(theta, structures);
-    let lambda_t_lambda = lambda.transpose() * &lambda;
 
     let mut eta = x * &beta + offset;
     for j in 0..q {
@@ -593,20 +587,7 @@ pub fn laplace_deviance_impl(
 
     let dev_resids = family.deviance_resids(y, &mu, weights);
 
-    let mut lambda_t_lambda_reg = lambda_t_lambda.clone();
-    for i in 0..q {
-        lambda_t_lambda_reg[(i, i)] += 1e-10;
-    }
-
-    let u_penalty = match Cholesky::new(lambda_t_lambda_reg.clone()) {
-        Some(chol) => {
-            let solved = chol.solve(&u);
-            u.dot(&solved)
-        }
-        None => 0.0,
-    };
-
-    let mut deviance = dev_resids + u_penalty;
+    let mut deviance = dev_resids + spherical.dot(&spherical);
 
     let mut w_vec = family.weights(&mu, link);
     for i in 0..n {
@@ -646,7 +627,7 @@ pub fn laplace_deviance_impl(
         }
     }
 
-    let h = &ztwz + &lambda_t_lambda_reg;
+    let h = lambda.transpose() * &ztwz * &lambda + DMatrix::identity(q, q);
 
     let logdet_h = match Cholesky::new(h.clone()) {
         Some(chol) => {
@@ -668,9 +649,9 @@ pub fn laplace_deviance_impl(
 fn compute_group_log_integral(
     g: usize,
     n_terms: usize,
-    u: &DVector<f64>,
+    spherical: &DVector<f64>,
     h: &DMatrix<f64>,
-    lambda_t_lambda: &DMatrix<f64>,
+    lambda: &DMatrix<f64>,
     nodes: &[f64],
     weights: &[f64],
     y: &DVector<f64>,
@@ -687,7 +668,7 @@ fn compute_group_log_integral(
 
     let idx_start = g * n_terms;
 
-    let u_mode = u.rows(idx_start, n_terms).clone_owned();
+    let spherical_mode = spherical.rows(idx_start, n_terms).clone_owned();
 
     let h_block = h.view((idx_start, idx_start), (n_terms, n_terms));
 
@@ -700,15 +681,20 @@ fn compute_group_log_integral(
         }
     };
 
-    let lambda_block = lambda_t_lambda.view((idx_start, idx_start), (n_terms, n_terms));
+    let col_start = z.col_offsets()[idx_start];
+    let col_end = z.col_offsets()[idx_start + 1];
+    let group_rows = &z.row_indices()[col_start..col_end];
+    if group_rows.is_empty() {
+        return 0.0;
+    }
 
-    let mut group_contrib = 0.0;
-
+    let mut log_terms = Vec::with_capacity(nodes.len());
     for (node, weight) in nodes.iter().zip(weights.iter()) {
-        let mut u_quad = u.clone();
+        let mut spherical_quad = spherical.clone();
         for i in 0..n_terms {
-            u_quad[idx_start + i] = u_mode[i] + sqrt2 * scale * node;
+            spherical_quad[idx_start + i] = spherical_mode[i] + sqrt2 * scale * node;
         }
+        let random_effects = lambda * &spherical_quad;
 
         let mut eta_quad = x * beta + offset;
         for j in 0..q {
@@ -716,42 +702,29 @@ fn compute_group_log_integral(
             let col_end = z.col_offsets()[j + 1];
             for idx in col_start..col_end {
                 let i = z.row_indices()[idx];
-                eta_quad[i] += z.values()[idx] * u_quad[j];
+                eta_quad[i] += z.values()[idx] * random_effects[j];
             }
         }
 
         let mut mu_quad = link.inverse(&eta_quad);
         family.clamp_mu(&mut mu_quad, 1e-10);
 
-        let dev_resids = family.deviance_resids(y, &mu_quad, prior_weights);
+        let dev_resids = family.deviance_resids_rows(y, &mu_quad, prior_weights, group_rows);
         let log_lik_y = -0.5 * dev_resids;
 
-        let u_block: DVector<f64> = u_quad.rows(idx_start, n_terms).into_owned();
-
-        let lambda_block_reg = if n_terms == 1 {
-            DMatrix::from_element(1, 1, lambda_block[(0, 0)] + 1e-10)
-        } else {
-            let mut reg = lambda_block.clone_owned();
-            for i in 0..n_terms {
-                reg[(i, i)] += 1e-10;
-            }
-            reg
-        };
-
-        let log_prior = match Cholesky::new(lambda_block_reg.clone()) {
-            Some(chol) => {
-                let solved = chol.solve(&u_block);
-                -0.5 * u_block.dot(&solved)
-            }
-            None => -0.5 * u_block.dot(&u_block) / (lambda_block[(0, 0)] + 1e-10),
-        };
-
-        let integrand = (log_lik_y + log_prior).exp();
-        group_contrib += weight * integrand;
+        let spherical_block: DVector<f64> = spherical_quad.rows(idx_start, n_terms).into_owned();
+        let log_prior = -0.5 * spherical_block.dot(&spherical_block);
+        log_terms.push(weight.ln() + log_lik_y + log_prior + node * node);
     }
 
-    group_contrib *= scale * std::f64::consts::PI.sqrt();
-    (group_contrib.max(1e-300)).ln()
+    let max_log = log_terms.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let log_sum = max_log
+        + log_terms
+            .iter()
+            .map(|value| (value - max_log).exp())
+            .sum::<f64>()
+            .ln();
+    scale.ln() - 0.5 * std::f64::consts::PI.ln() + log_sum
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -777,7 +750,7 @@ pub fn adaptive_gh_deviance_impl(
         );
     }
 
-    if structures.is_empty() {
+    if structures.len() != 1 {
         return laplace_deviance_impl(
             y, x, z, weights, offset, theta, structures, family, link, beta_start, u_start,
         );
@@ -811,10 +784,10 @@ pub fn adaptive_gh_deviance_impl(
 
     let beta = result.beta;
     let u = result.u;
+    let spherical = result.spherical;
 
     let n = y.len();
     let lambda = build_lambda_dense(theta, structures);
-    let lambda_t_lambda = lambda.transpose() * &lambda;
 
     let mut eta = x * &beta + offset;
     for j in 0..q {
@@ -867,12 +840,7 @@ pub fn adaptive_gh_deviance_impl(
         }
     }
 
-    let mut lambda_t_lambda_reg = lambda_t_lambda.clone();
-    for i in 0..q {
-        lambda_t_lambda_reg[(i, i)] += 1e-10;
-    }
-
-    let h = &ztwz + &lambda_t_lambda_reg;
+    let h = lambda.transpose() * &ztwz * &lambda + DMatrix::identity(q, q);
 
     let (nodes, gh_weights) = gauss_hermite_nodes_weights(n_agq);
 
@@ -885,9 +853,9 @@ pub fn adaptive_gh_deviance_impl(
             compute_group_log_integral(
                 g,
                 n_terms_first,
-                &u,
+                &spherical,
                 &h,
-                &lambda_t_lambda_reg,
+                &lambda,
                 &nodes,
                 &gh_weights,
                 y,
@@ -902,48 +870,7 @@ pub fn adaptive_gh_deviance_impl(
         })
         .sum();
 
-    let other_u_start = n_levels_first * n_terms_first;
-    let mut log_integral_total = log_integral;
-
-    if other_u_start < q {
-        let u_other: DVector<f64> = u.rows(other_u_start, q - other_u_start).into_owned();
-        let lambda_other = lambda_t_lambda_reg
-            .view(
-                (other_u_start, other_u_start),
-                (q - other_u_start, q - other_u_start),
-            )
-            .clone_owned();
-
-        let u_penalty_other = match Cholesky::new(lambda_other.clone()) {
-            Some(chol) => {
-                let solved = chol.solve(&u_other);
-                u_other.dot(&solved)
-            }
-            None => 0.0,
-        };
-
-        let h_other = h
-            .view(
-                (other_u_start, other_u_start),
-                (q - other_u_start, q - other_u_start),
-            )
-            .clone_owned();
-
-        let logdet_other = match Cholesky::new(h_other.clone()) {
-            Some(chol) => {
-                let l = chol.l();
-                2.0 * (0..q - other_u_start).map(|i| l[(i, i)].ln()).sum::<f64>()
-            }
-            None => {
-                let eigvals = h_other.symmetric_eigenvalues();
-                eigvals.iter().map(|&e| e.max(1e-10).ln()).sum::<f64>()
-            }
-        };
-
-        log_integral_total -= 0.5 * (u_penalty_other + logdet_other);
-    }
-
-    let deviance = -2.0 * log_integral_total;
+    let deviance = -2.0 * log_integral;
 
     (deviance, beta, u)
 }
