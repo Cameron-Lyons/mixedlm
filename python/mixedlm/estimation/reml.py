@@ -9,7 +9,7 @@ from numpy.typing import NDArray
 from scipy import linalg, sparse
 
 from mixedlm.estimation.optimizers import run_optimizer
-from mixedlm.matrices.design import ModelMatrices, RandomEffectStructure
+from mixedlm.matrices.design import ModelMatrices, RandomEffectStructure, validate_prior_weights
 
 try:
     from mixedlm import _rust as _rust
@@ -256,7 +256,8 @@ def _profiled_deviance_core(
     p = matrices.n_fixed
     q = matrices.n_random
 
-    w = matrices.weights
+    w = validate_prior_weights(matrices.weights, n)
+    logdet_w = float(np.sum(np.log(w)))
     y_adj = matrices.y - matrices.offset
     sqrt_w = np.sqrt(w)
 
@@ -276,9 +277,9 @@ def _profiled_deviance_core(
         sigma2 = wrss / denom
 
         ldRX2 = np.linalg.slogdet(XtWX)[1] if REML else 0.0
-        dev = n * np.log(2 * np.pi * sigma2) + wrss / sigma2
+        dev = denom * (1.0 + np.log(2.0 * np.pi * sigma2)) - logdet_w
         if REML:
-            dev += ldRX2 - p * np.log(sigma2)
+            dev += ldRX2
 
         return _DevianceCoreResult(
             deviance=float(dev),
@@ -340,24 +341,24 @@ def _profiled_deviance_core(
     Xty_adj = XtWy - cu_star_RZX_beta_term
     beta = linalg.cho_solve((L_XtVinvX, True), Xty_adj)
 
-    resid = y_adj - matrices.X @ beta
-    wrss = np.dot(w * resid, resid)
+    marginal_resid = y_adj - matrices.X @ beta
 
-    Zt_resid = Zt @ (w * resid)
+    Zt_resid = Zt @ (w * marginal_resid)
     Lambda_t_Zt_resid = Lambda.T @ Zt_resid
     u_star = linalg.cho_solve((L_V, True), Lambda_t_Zt_resid)
 
+    u = np.asarray(Lambda @ u_star).reshape(-1)
+    conditional_resid = marginal_resid - matrices.Z @ u
+    wrss = np.dot(w * conditional_resid, conditional_resid)
     ussq = np.dot(u_star, u_star)
     pwrss = wrss + ussq
 
     denom = n - p if REML else n
     sigma2 = pwrss / denom
 
-    dev = denom * (1.0 + np.log(2.0 * np.pi * sigma2)) + ldL2
+    dev = denom * (1.0 + np.log(2.0 * np.pi * sigma2)) + ldL2 - logdet_w
     if REML:
         dev += ldRX2
-
-    u = Lambda @ u_star
 
     return _DevianceCoreResult(
         deviance=float(dev),

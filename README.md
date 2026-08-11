@@ -18,13 +18,14 @@ A Python implementation of mixed-effects models inspired by R's [lme4](https://g
 - **Generalized Linear Mixed Models (GLMM)** via `glmer()` - Laplace approximation and adaptive Gauss-Hermite quadrature
 - **Nonlinear Mixed Models (NLMM)** via `nlmer()` - Self-starting models (SSasymp, SSlogis, SSmicmen)
 - **Formula interface** - lme4-style formulas with random effects syntax
-- **Inference tools** - Profile likelihood, parametric bootstrap, confidence intervals, Satterthwaite/Kenward-Roger degrees of freedom
 - **Tidy reporting** - Analysis-ready coefficient, random-effect, and model-fit tables
+- **Inference tools** - Linear hypotheses, profile likelihood, bootstrap, confidence intervals, Satterthwaite/Kenward-Roger degrees of freedom
 - **Model comparison** - ANOVA (including Type III), drop1, allFit
 - **Model selection** - AIC/AICc/BIC rankings, normalized weights, and evidence sets
 - **Model validation** - Case-level and whole-group cross-validation with weighted scoring
 - **Power analysis** - powerSim, powerCurve for sample size planning
 - **Diagnostics** - Dispersion and zero-inflation checks, influence measures, Cook's distance, leverage, VIF/GVIF, condition indices
+- **Fast startup** - Public objects are loaded on demand, so lightweight imports avoid the modeling stack
 - **Fit metrics** - Nakagawa marginal/conditional R² and adjusted/unadjusted ICC
 
 ## Installation
@@ -240,8 +241,7 @@ print(model.VarCorr())
 - `drop1(model, data)` - Single term deletions
 - `profile(model, data)` - 1D likelihood profiles
 - `slice2D(model, param1, param2)` - 2D profile likelihood
-- `bootMer(model, nsim)` - Parametric bootstrap
-- `bootCI(result, component, method)` - Tidy bootstrap confidence intervals
+- `bootMer(model, data, nsim)` - Parametric bootstrap
 - `satterthwaite_df(model)` - Satterthwaite denominator DF
 - `kenward_roger_df(model)` - Kenward-Roger denominator DF
 - `pvalues_with_ddf(model)` - P-values using denominator DF
@@ -257,8 +257,8 @@ print(model.VarCorr())
 - `Gaussian()` - Normal distribution (identity link)
 - `Binomial()` - Binomial distribution (logit link)
 - `Poisson()` - Poisson distribution (log link)
-- `Gamma()` - Gamma distribution (inverse link)
-- `InverseGaussian()` - Inverse Gaussian (1/mu^2 link)
+- `Gamma()` - Gamma distribution (log link; configurable)
+- `InverseGaussian()` - Inverse Gaussian (log link; configurable)
 - `NegativeBinomial(theta)` - Negative binomial (log link)
 - `CustomFamily` - Base class for user-defined families
 

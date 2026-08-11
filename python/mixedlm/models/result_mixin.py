@@ -4,11 +4,15 @@ from collections.abc import Iterator, Sequence
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 import numpy as np
-from numpy.typing import NDArray
+from numpy.typing import ArrayLike, NDArray
 from scipy import sparse
 
 from mixedlm.formula.terms import Formula
-from mixedlm.matrices.design import ModelMatrices, RandomEffectStructure
+from mixedlm.matrices.design import (
+    ModelMatrices,
+    RandomEffectStructure,
+    _normalize_grouped_binomial_response,
+)
 from mixedlm.models.lmer_types import ModelTerms, RanefResult
 from mixedlm.utils.dataframe import (
     concat_columns_as_string,
@@ -138,6 +142,49 @@ class MerResultMixin:
                 f"New data is missing fitted fixed-effect column '{exc.args[0]}'."
             ) from None
         return X[:, fitted_indices]
+
+    def _prediction_offset(
+        self,
+        newdata: pd.DataFrame,
+        offset: ArrayLike | str | None,
+    ) -> NDArray[np.floating]:
+        from mixedlm.utils.dataframe import (
+            dataframe_length,
+            ensure_dataframe,
+            get_column_numpy,
+            get_columns,
+        )
+
+        data = ensure_dataframe(newdata)
+        n_rows = dataframe_length(data)
+        if offset is None:
+            return np.zeros(n_rows, dtype=np.float64)
+
+        raw_offset: ArrayLike
+        if isinstance(offset, str):
+            if offset not in get_columns(data):
+                raise ValueError(f"New data is missing offset column '{offset}'.")
+            raw_offset = get_column_numpy(data, offset)
+        else:
+            raw_offset = offset
+
+        try:
+            values = np.asarray(raw_offset, dtype=np.float64)
+        except (TypeError, ValueError):
+            raise ValueError("Prediction offset must contain numeric values.") from None
+
+        if values.ndim == 0:
+            values = np.full(n_rows, float(values), dtype=np.float64)
+        elif values.ndim != 1:
+            raise ValueError("Prediction offset must be a scalar or one-dimensional array.")
+        elif len(values) != n_rows:
+            raise ValueError(
+                f"Prediction offset has length {len(values)}; expected {n_rows} for new data."
+            )
+
+        if not np.all(np.isfinite(values)):
+            raise ValueError("Prediction offset must contain only finite values.")
+        return values
 
     def _model_frame(self) -> Any:
         import pandas as pd
@@ -368,6 +415,8 @@ class MerResultMixin:
         arr = np.asarray(newresp, dtype=np.float64)
         if len(arr) != self.matrices.n_obs:
             raise ValueError(f"newresp has length {len(arr)}, expected {self.matrices.n_obs}")
+        if self.matrices.trials is not None:
+            return _normalize_grouped_binomial_response(arr, self.matrices.trials)
         return arr
 
     def _clone_matrices_with_response_base(self, y: NDArray[np.floating]) -> ModelMatrices:
@@ -384,6 +433,7 @@ class MerResultMixin:
             offset=self.matrices.offset,
             frame=self.matrices.frame,
             na_info=self.matrices.na_info,
+            trials=self.matrices.trials,
             category_levels=self.matrices.category_levels,
             contrasts=self.matrices.contrasts,
         )

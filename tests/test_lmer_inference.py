@@ -263,12 +263,55 @@ class TestInference:
         assert np.allclose(y_sim1, y_sim2)
 
     def test_glmer_simulate_binomial(self) -> None:
-        result = glmer("y ~ period + (1 | herd)", CBPP, family=families.Binomial())
+        from mixedlm._rust import simulate_re_batch
 
-        y_sim = result.simulate(nsim=5, seed=42)
+        result = glmer("y ~ period + (1 | herd)", CBPP, family=families.Binomial())
+        nsim = 5
+        seed = 42
+        structures = result.matrices.random_structures
+        u_batch = simulate_re_batch(
+            result.theta,
+            1.0,
+            [structure.n_levels for structure in structures],
+            [structure.n_terms for structure in structures],
+            [structure.correlated for structure in structures],
+            nsim,
+            seed,
+        )
+        eta = (result.matrices.X @ result.beta + result.matrices.offset)[:, None] + np.asarray(
+            result.matrices.Z @ u_batch.T
+        )
+        mu = np.clip(result.family.link.inverse(eta), 1e-6, 1 - 1e-6)
+        np.random.seed(seed)
+        expected = np.random.binomial(1, mu).astype(np.float64)
+
+        y_sim = result.simulate(nsim=nsim, seed=seed)
+        repeated = result.simulate(nsim=nsim, seed=seed)
 
         assert y_sim.shape == (56, 5)
         assert np.all((y_sim == 0) | (y_sim == 1))
+        assert_allclose(y_sim, expected)
+        assert_allclose(repeated, expected)
+
+    def test_glmer_simulate_rejects_nonpositive_nsim(self) -> None:
+        result = glmer("y ~ period + (1 | herd)", CBPP, family=families.Binomial())
+
+        with pytest.raises(ValueError, match="nsim must be at least 1"):
+            result.simulate(nsim=0)
+
+    def test_glmer_simulate_uses_family_subclasses(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        result = glmer("y ~ period + (1 | herd)", CBPP, family=families.Binomial())
+        mu = np.full((result.matrices.n_obs, 3), 0.75)
+        monkeypatch.setattr(np.random, "gamma", lambda shape, scale: np.asarray(scale))
+        monkeypatch.setattr(np.random, "wald", lambda mean, scale: np.asarray(mean))
+
+        result.family = families.GammaInverse()
+        gamma_draws = result._simulate_response(mu)
+        result.family = families.InverseGaussianCanonical()
+        inverse_gaussian_draws = result._simulate_response(mu)
+
+        assert_allclose(gamma_draws, mu)
+        assert_allclose(inverse_gaussian_draws, mu)
 
     def test_glmer_simulate_poisson(self) -> None:
         np.random.seed(42)
@@ -336,6 +379,24 @@ class TestWeightsOffset:
         fitted = result.fitted()
         assert len(fitted) == n
 
+    def test_lmer_simulate_preserves_offset(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        n_groups = 8
+        n_per_group = 10
+        n = n_groups * n_per_group
+        rng = np.random.default_rng(42)
+        group = np.repeat(np.arange(n_groups), n_per_group)
+        x = rng.normal(size=n)
+        offset = np.linspace(-0.4, 0.6, n)
+        y = 1.5 + 0.3 * x + offset + rng.normal(0.0, 0.2, n)
+        data = pd.DataFrame({"y": y, "x": x, "group": group.astype(str)})
+        result = lmer("y ~ x + (1 | group)", data, offset=offset)
+
+        monkeypatch.setattr(np.random, "randn", lambda *shape: np.zeros(shape))
+        simulated = result.simulate(nsim=3, use_re=False)
+
+        expected = result.matrices.X @ result.beta + offset
+        assert_allclose(simulated, np.broadcast_to(expected[:, None], (n, 3)))
+
     def test_glmer_weights(self) -> None:
         np.random.seed(42)
         n_groups = 10
@@ -385,6 +446,31 @@ class TestWeightsOffset:
         fitted = result.fitted()
         assert len(fitted) == n
         assert np.all(fitted > 0)
+
+    def test_glmer_simulate_preserves_offset(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        n_groups = 8
+        n_per_group = 10
+        n = n_groups * n_per_group
+        rng = np.random.default_rng(42)
+        group = np.repeat(np.arange(n_groups), n_per_group)
+        x = rng.normal(size=n)
+        offset = np.linspace(-0.3, 0.5, n)
+        mu = np.exp(-0.7 + 0.2 * x + offset)
+        y = rng.poisson(mu)
+        data = pd.DataFrame({"y": y, "x": x, "group": group.astype(str)})
+        result = glmer(
+            "y ~ x + (1 | group)",
+            data,
+            family=families.Poisson(),
+            offset=offset,
+        )
+
+        monkeypatch.setattr(np.random, "poisson", lambda lam: np.asarray(lam))
+        simulated = result.simulate(nsim=3, use_re=False)
+
+        eta = result.matrices.X @ result.beta + offset
+        expected = result.family.link.inverse(eta)
+        assert_allclose(simulated, np.broadcast_to(expected[:, None], (n, 3)))
 
     def test_glmer_simulation_and_bootstrap_preserve_offset(self, monkeypatch) -> None:
         from mixedlm.inference.bootstrap import _prepare_glmer_worker_data

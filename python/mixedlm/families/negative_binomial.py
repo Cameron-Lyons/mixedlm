@@ -6,15 +6,20 @@ import numpy as np
 from numpy.typing import NDArray
 from scipy.special import gammaln
 
-from mixedlm.families.base import Family, LogLink
+from mixedlm.families.base import Family, Link
 
 
 class NegativeBinomial(Family):
     mean_bounds = (0.0, None)
 
-    def __init__(self, theta: float = 1.0) -> None:
-        self.link = LogLink()
+    def __init__(self, theta: float = 1.0, link: str | Link | None = None) -> None:
+        if not np.isfinite(theta) or theta <= 0:
+            raise ValueError("theta must be finite and greater than zero")
+        super().__init__(link, default_link="log", allowed_links=("log",))
         self.theta = theta
+
+    def __repr__(self) -> str:
+        return f"NegativeBinomial(theta={self.theta}, link={self.link.name})"
 
     def variance(self, mu: NDArray[np.floating]) -> NDArray[np.floating]:
         mu = self.clamp_mu(mu)

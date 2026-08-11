@@ -5,7 +5,7 @@ from functools import cached_property
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 import numpy as np
-from numpy.typing import NDArray
+from numpy.typing import ArrayLike, NDArray
 from scipy import linalg, sparse, stats
 
 if TYPE_CHECKING:
@@ -24,7 +24,21 @@ from mixedlm.models.lmer_types import (
     VarCorrGroup,
 )
 from mixedlm.models.result_mixin import MerResultMixin
+from mixedlm.models.shared_utils import symmetric_inverse
 from mixedlm.utils import _format_pvalue, _get_signif_code
+
+
+@dataclass
+class _WeightedProjection:
+    """Reusable weighted mixed-model projection factors."""
+
+    sqrt_weights: NDArray[np.float64]
+    weighted_X: NDArray[np.float64]
+    weighted_Z: sparse.csc_matrix
+    lambda_matrix: sparse.csc_matrix | None
+    L_V: NDArray[np.float64] | None
+    RZX: NDArray[np.float64]
+    XtVinvX: NDArray[np.float64]
 
 
 @dataclass
@@ -109,6 +123,46 @@ class LmerResult(MerResultMixin):
     ) -> dict[str, dict[str, NDArray[np.floating]]] | RanefResult:
         return self._ranef_with_optional_condvar(self.u, condVar)
 
+    @cached_property
+    def _weighted_projection(self) -> _WeightedProjection:
+        """Factor the weighted penalized least-squares system once."""
+        sqrt_weights = np.sqrt(self.matrices.weights)
+        weighted_X = sqrt_weights[:, None] * self.matrices.X
+        weighted_Z = self.matrices.Z.multiply(sqrt_weights[:, None]).tocsc()
+        q = self.matrices.n_random
+
+        if q == 0:
+            information = weighted_X.T @ weighted_X
+            return _WeightedProjection(
+                sqrt_weights=sqrt_weights,
+                weighted_X=weighted_X,
+                weighted_Z=weighted_Z,
+                lambda_matrix=None,
+                L_V=None,
+                RZX=np.zeros((0, self.matrices.n_fixed), dtype=np.float64),
+                XtVinvX=np.asarray(information, dtype=np.float64),
+            )
+
+        lambda_matrix = _build_lambda(self.theta, self.matrices.random_structures)
+        ZtWZ = weighted_Z.T @ weighted_Z
+        V_factor = lambda_matrix.T @ ZtWZ @ lambda_matrix + sparse.eye(q, format="csc")
+        L_V = linalg.cholesky(V_factor.toarray(), lower=True)
+
+        ZtWX = weighted_Z.T @ weighted_X
+        RZX = linalg.solve_triangular(L_V, lambda_matrix.T @ ZtWX, lower=True)
+        information = weighted_X.T @ weighted_X - RZX.T @ RZX
+        information = (information + information.T) / 2.0
+
+        return _WeightedProjection(
+            sqrt_weights=sqrt_weights,
+            weighted_X=weighted_X,
+            weighted_Z=weighted_Z,
+            lambda_matrix=lambda_matrix,
+            L_V=L_V,
+            RZX=np.asarray(RZX, dtype=np.float64),
+            XtVinvX=np.asarray(information, dtype=np.float64),
+        )
+
     def _compute_condVar(
         self, include_cov: bool = False
     ) -> dict[str, dict[str, NDArray[np.floating]]]:
@@ -140,6 +194,7 @@ class LmerResult(MerResultMixin):
 
         Returns the prior weights used in model fitting.
         If no weights were specified, returns an array of ones.
+        The observation-level residual variance is ``sigma**2 / weight``.
 
         Parameters
         ----------
@@ -293,7 +348,7 @@ class LmerResult(MerResultMixin):
         if type == "response":
             resid = self.matrices.y - fitted
         elif type == "pearson":
-            resid = (self.matrices.y - fitted) / self.sigma
+            resid = np.sqrt(self.matrices.weights) * (self.matrices.y - fitted) / self.sigma
         else:
             raise ValueError(f"Unknown residual type: {type}")
 
@@ -310,6 +365,7 @@ class LmerResult(MerResultMixin):
         se_fit: bool = False,
         interval: str = "none",
         level: float = 0.95,
+        offset: ArrayLike | str | None = None,
     ) -> NDArray[np.floating] | PredictResult:
         """Generate predictions from the fitted model.
 
@@ -327,6 +383,9 @@ class LmerResult(MerResultMixin):
             Type of interval: "none", "confidence", or "prediction".
         level : float, default 0.95
             Confidence level for intervals.
+        offset : array-like, scalar, or str, optional
+            Offset for new-data predictions. A string selects a column from
+            ``newdata``. Scalars are broadcast to every row.
 
         Returns
         -------
@@ -345,6 +404,8 @@ class LmerResult(MerResultMixin):
         pred_matrices: ModelMatrices | None = None
 
         if newdata is None:
+            if offset is not None:
+                raise ValueError("Prediction offset can only be supplied with newdata.")
             if include_re:
                 pred = self._fitted_values.copy()
             else:
@@ -354,7 +415,7 @@ class LmerResult(MerResultMixin):
             X = self.matrices.X
         else:
             X = self._prediction_fixed_matrix(newdata)
-            pred = X @ self.beta
+            pred = X @ self.beta + self._prediction_offset(newdata, offset)
 
             if include_re:
                 pred = self._add_random_effects_to_pred(pred, newdata, allow_new_levels)
@@ -405,7 +466,12 @@ class LmerResult(MerResultMixin):
                 fit=pred, se_fit=se, lower=lower, upper=upper, interval="confidence", level=level
             )
         elif interval == "prediction":
-            var_pred = var_fit + self.sigma**2
+            residual_var: float | NDArray[np.floating]
+            if newdata is None:
+                residual_var = self.sigma**2 / self.matrices.weights
+            else:
+                residual_var = self.sigma**2
+            var_pred = var_fit + residual_var
             se_pred = np.sqrt(var_pred)
             lower = pred - z_crit * se_pred
             upper = pred + z_crit * se_pred
@@ -609,47 +675,30 @@ class LmerResult(MerResultMixin):
         return result
 
     def vcov(self) -> NDArray[np.floating]:
-        q = self.matrices.n_random
+        information_inv = symmetric_inverse(self._weighted_projection.XtVinvX)
+        return self.sigma**2 * information_inv
 
-        if q == 0:
-            XtX = self.matrices.X.T @ self.matrices.X
-            p = XtX.shape[0]
-            try:
-                L = linalg.cholesky(XtX, lower=True)
-                XtX_inv = linalg.cho_solve((L, True), np.eye(p))
-            except linalg.LinAlgError:
-                XtX_inv = linalg.solve(XtX, np.eye(p))
-            return self.sigma**2 * XtX_inv
+    @cached_property
+    def _hat_values(self) -> NDArray[np.float64]:
+        projection = self._weighted_projection
+        information_inv = symmetric_inverse(projection.XtVinvX)
 
-        Lambda = _build_lambda(self.theta, self.matrices.random_structures)
+        if projection.lambda_matrix is None:
+            projected_X = projection.weighted_X
+            h_random = np.zeros(self.matrices.n_obs, dtype=np.float64)
+        else:
+            assert projection.L_V is not None
+            B = (projection.weighted_Z @ projection.lambda_matrix).toarray()
+            B_Vinv = linalg.cho_solve((projection.L_V, True), B.T).T
+            h_random = np.einsum("ij,ij->i", B_Vinv, B)
+            V_inv_BtX = linalg.cho_solve((projection.L_V, True), B.T @ projection.weighted_X)
+            projected_X = projection.weighted_X - B @ V_inv_BtX
 
-        Zt = self.matrices.Zt
-        ZtZ = Zt @ Zt.T
-        LambdatZtZLambda = Lambda.T @ ZtZ @ Lambda
-
-        I_q = sparse.eye(q, format="csc")
-        V_factor = LambdatZtZLambda + I_q
-        V_factor_dense = V_factor.toarray()
-        L_V = linalg.cholesky(V_factor_dense, lower=True)
-
-        ZtX = Zt @ self.matrices.X
-        Lambdat_ZtX = Lambda.T @ ZtX
-        RZX = linalg.solve_triangular(L_V, Lambdat_ZtX, lower=True)
-
-        XtX = self.matrices.X.T @ self.matrices.X
-        RZX_tRZX = RZX.T @ RZX
-        XtVinvX = XtX - RZX_tRZX
-
-        p = XtVinvX.shape[0]
-        try:
-            L = linalg.cholesky(XtVinvX, lower=True)
-            XtVinvX_inv = linalg.cho_solve((L, True), np.eye(p))
-        except linalg.LinAlgError:
-            XtVinvX_inv = linalg.solve(XtVinvX, np.eye(p))
-        return self.sigma**2 * XtVinvX_inv
+        h_fixed = np.einsum("ij,ij->i", projected_X @ information_inv, projected_X)
+        return np.clip(h_fixed + h_random, 0, 1 - 1e-10)
 
     def hatvalues(self) -> NDArray[np.floating]:
-        """Compute leverage values (diagonal of the hat matrix).
+        """Return leverage values (the diagonal of the mixed-model hat matrix).
 
         For mixed models, the hat matrix projects the response onto fitted values.
         The leverage h_i measures how much observation i influences its own
@@ -667,61 +716,7 @@ class LmerResult(MerResultMixin):
         random effects. High leverage observations can have undue influence
         on model estimates.
         """
-        q = self.matrices.n_random
-        X = self.matrices.X
-
-        if q == 0:
-            XtX = X.T @ X
-            try:
-                L = linalg.cholesky(XtX, lower=True)
-                XtX_inv = linalg.cho_solve((L, True), np.eye(X.shape[1]))
-            except linalg.LinAlgError:
-                XtX_inv = linalg.pinv(XtX)
-            return np.sum((X @ XtX_inv) * X, axis=1)
-
-        Lambda = _build_lambda(self.theta, self.matrices.random_structures)
-        Z = self.matrices.Z
-        Zt = self.matrices.Zt
-
-        ZtZ = Zt @ Zt.T
-        LambdatZtZLambda = Lambda.T @ ZtZ @ Lambda
-        I_q = sparse.eye(q, format="csc")
-        V_factor = LambdatZtZLambda + I_q
-        V_factor_dense = V_factor.toarray()
-
-        try:
-            L_V = linalg.cholesky(V_factor_dense, lower=True)
-        except linalg.LinAlgError:
-            V_factor_dense += 1e-6 * np.eye(q)
-            L_V = linalg.cholesky(V_factor_dense, lower=True)
-
-        ZtX = Zt @ X
-        Lambdat_ZtX = Lambda.T @ ZtX
-        RZX = linalg.solve_triangular(L_V, Lambdat_ZtX, lower=True)
-
-        XtX = X.T @ X
-        XtVinvX = XtX - RZX.T @ RZX
-
-        try:
-            L_XVX = linalg.cholesky(XtVinvX, lower=True)
-            XtVinvX_inv = linalg.cho_solve((L_XVX, True), np.eye(X.shape[1]))
-        except linalg.LinAlgError:
-            XtVinvX_inv = linalg.pinv(XtVinvX)
-
-        h_fixed = np.sum((X @ XtVinvX_inv) * X, axis=1)
-
-        ZLambda = Z @ Lambda
-        ZLambda_dense = ZLambda.toarray() if sparse.issparse(ZLambda) else ZLambda
-
-        V_inv = linalg.cho_solve((L_V, True), np.eye(q))
-        ZLambda_Vinv = ZLambda_dense @ V_inv
-        h_random = np.sum(ZLambda_Vinv * ZLambda_dense, axis=1)
-
-        h = h_fixed + h_random
-
-        h = np.clip(h, 0, 1 - 1e-10)
-
-        return h
+        return self._hat_values.copy()
 
     def cooks_distance(self) -> NDArray[np.floating]:
         """Compute Cook's distance for each observation.
@@ -747,12 +742,13 @@ class LmerResult(MerResultMixin):
         may be influential and warrant further investigation.
         """
         h = self.hatvalues()
-        resid = self.residuals(type="response")
+        resid = self.residuals(type="response", na_expand=False)
+        weighted_resid = np.sqrt(self.matrices.weights) * resid
         p = self.matrices.n_fixed
 
         h = np.clip(h, 0, 1 - 1e-10)
 
-        cooks_d = (resid**2 / (p * self.sigma**2)) * (h / (1 - h) ** 2)
+        cooks_d = (weighted_resid**2 / (p * self.sigma**2)) * (h / (1 - h) ** 2)
 
         return cooks_d
 
@@ -780,19 +776,20 @@ class LmerResult(MerResultMixin):
         - Influential points (large Cook's distance)
         """
         h = self.hatvalues()
-        resid = self.residuals(type="response")
+        resid = self.residuals(type="response", na_expand=False)
+        weighted_resid = np.sqrt(self.matrices.weights) * resid
 
         h_safe = np.clip(h, 0, 1 - 1e-10)
-        std_resid = resid / (self.sigma * np.sqrt(1 - h_safe))
+        std_resid = weighted_resid / (self.sigma * np.sqrt(1 - h_safe))
 
         n = self.matrices.n_obs
         p = self.matrices.n_fixed
         df = n - p
 
-        mse = np.sum(resid**2) / df
-        loo_var = ((df * mse) - (resid**2 / (1 - h_safe))) / (df - 1)
+        mse = np.sum(weighted_resid**2) / df
+        loo_var = ((df * mse) - (weighted_resid**2 / (1 - h_safe))) / (df - 1)
         loo_var = np.maximum(loo_var, 1e-10)
-        student_resid = resid / np.sqrt(loo_var * (1 - h_safe))
+        student_resid = weighted_resid / np.sqrt(loo_var * (1 - h_safe))
 
         return {
             "hat": h,
@@ -1262,8 +1259,7 @@ class LmerResult(MerResultMixin):
                 gp.append(gp[-1] + s.n_levels * s.n_terms)
             return np.array(gp)
         elif name == "RX":
-            _, R = linalg.qr(self.matrices.X, mode="economic")
-            return R
+            return self._compute_RX()
         elif name == "RZX":
             return self._compute_RZX()
         elif name == "Lind":
@@ -1307,36 +1303,11 @@ class LmerResult(MerResultMixin):
 
     def _compute_RZX(self) -> NDArray[np.floating]:
         """Compute RZX, the cross-term in the mixed model equations."""
-        Z = self.matrices.Z
-        X = self.matrices.X
-        sigma = self.sigma
-        Lambda = _build_lambda(self.theta, self.matrices.random_structures)
+        return self._weighted_projection.RZX.copy()
 
-        if sparse.issparse(Z):
-            Zt = Z.T
-            ZtZ = Zt @ Z
-        else:
-            Zt = Z.T
-            ZtZ = Zt @ Z
-
-        LambdatLambda = Lambda.T @ Lambda
-        C = ZtZ + LambdatLambda / sigma**2
-
-        if sparse.issparse(C):
-            C = C.toarray()
-
-        try:
-            L_C = linalg.cholesky(C, lower=True)
-        except linalg.LinAlgError:
-            C = C + 1e-6 * np.eye(C.shape[0])
-            L_C = linalg.cholesky(C, lower=True)
-
-        XtZ = X.T @ Z
-        if sparse.issparse(XtZ):
-            XtZ = XtZ.toarray()
-
-        RZX = linalg.solve_triangular(L_C, XtZ.T, lower=True)
-        return RZX
+    def _compute_RX(self) -> NDArray[np.floating]:
+        """Compute the upper Cholesky factor of the fixed-effect information."""
+        return linalg.cholesky(self._weighted_projection.XtVinvX, lower=False)
 
     def _build_Lind(self) -> NDArray[np.int64]:
         """Build Lind, the index mapping from theta to Lambda entries."""
@@ -1568,10 +1539,7 @@ class LmerResult(MerResultMixin):
         n_theta = _count_theta(self.matrices.random_structures)
         df = p + n_theta + 1
 
-        if self.REML:
-            value = -0.5 * (self.deviance + (n - p) * np.log(2 * np.pi))
-        else:
-            value = -0.5 * (self.deviance + n * np.log(2 * np.pi))
+        value = -0.5 * self.deviance
 
         return LogLik(value=value, df=df, nobs=n, REML=self.REML)
 
@@ -1805,7 +1773,7 @@ class LmerResult(MerResultMixin):
         include_re = use_re and q > 0 and re_form not in ("~0", "NA")
 
         if not include_re:
-            fixed_part = self.matrices.X @ self.beta
+            fixed_part = self.matrices.X @ self.beta + self.matrices.offset
             result = np.random.randn(nsim, n).T
             result *= self.sigma
             result += fixed_part[:, None]
@@ -1832,7 +1800,7 @@ class LmerResult(MerResultMixin):
     ) -> NDArray[np.floating]:
         n = self.matrices.n_obs
 
-        fixed_part = self.matrices.X @ self.beta
+        fixed_part = self.matrices.X @ self.beta + self.matrices.offset
 
         n_levels = [s.n_levels for s in self.matrices.random_structures]
         n_terms = [s.n_terms for s in self.matrices.random_structures]
@@ -1865,7 +1833,7 @@ class LmerResult(MerResultMixin):
         n = self.matrices.n_obs
         q = self.matrices.n_random
 
-        fixed_part = self.matrices.X @ self.beta
+        fixed_part = self.matrices.X @ self.beta + self.matrices.offset
 
         if re_form == "~0" or re_form == "NA" or not use_re or q == 0:
             random_part = np.zeros(n)
