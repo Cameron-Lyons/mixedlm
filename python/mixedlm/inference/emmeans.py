@@ -297,6 +297,9 @@ def emmeans(
 ) -> Emmeans:
     from mixedlm.matrices.design import build_fixed_matrix
 
+    if type not in {"link", "response"}:
+        raise ValueError("type must be 'link' or 'response'")
+
     if isinstance(specs, str):
         specs = [specs]
 
@@ -385,20 +388,29 @@ def emmeans(
     se_em = np.sqrt(np.maximum(var_em, 0))
 
     family = getattr(model, "family", None)
+    alpha = 1 - level
+
+    if family is not None:
+        critical_value = stats.norm.ppf(1 - alpha / 2)
+    else:
+        critical_value = stats.t.ppf(1 - alpha / 2, df_resid)
+
+    lower = em_values - critical_value * se_em
+    upper = em_values + critical_value * se_em
 
     if family is not None and type == "response":
         eta = em_values
         mu = family.link.inverse(eta)
-        deriv = family.link.deriv(mu)
-        se_response = se_em * np.abs(deriv)
-        em_values = mu
-        se_em = se_response
-        t_crit = stats.norm.ppf(1 - (1 - level) / 2)
-    else:
-        t_crit = stats.t.ppf(1 - (1 - level) / 2, df_resid)
+        link_derivative = family.link.deriv(mu)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            response_derivative = 1.0 / link_derivative
 
-    lower = em_values - t_crit * se_em
-    upper = em_values + t_crit * se_em
+        se_em = se_em * np.abs(response_derivative)
+        lower_response = family.link.inverse(lower)
+        upper_response = family.link.inverse(upper)
+        em_values = mu
+        lower = np.minimum(lower_response, upper_response)
+        upper = np.maximum(lower_response, upper_response)
 
     result_grid_data: dict[str, list[Any]] = {spec: [] for spec in specs}
     for spec_combo in spec_combinations:

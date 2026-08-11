@@ -3,7 +3,8 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import pytest
-from mixedlm import lmer
+from mixedlm import glmer, lmer
+from mixedlm.families import Binomial
 from mixedlm.inference.emmeans import (
     ContrastResult,
     EmmeanResult,
@@ -13,6 +14,9 @@ from mixedlm.inference.emmeans import (
     emmeans,
 )
 from numpy.testing import assert_allclose
+from scipy import stats
+
+from tests._lmer_data import CBPP
 
 
 @pytest.fixture
@@ -64,6 +68,11 @@ def _synthetic_emmeans(n_levels: int = 12, n_beta: int = 5) -> Emmeans:
         _specs=["treatment"],
         _levels=[list(range(n_levels))],
     )
+
+
+@pytest.fixture(scope="module")
+def glmer_result():
+    return glmer("y ~ period + (1 | herd)", CBPP, family=Binomial())
 
 
 class TestAdjustPvalues:
@@ -310,3 +319,50 @@ class TestEmmeansEdgeCases:
         result = lmer("y ~ treatment * factor2 + (1|group)", simple_data)
         em = emmeans(result, "treatment", at={"factor2": "X"})
         assert len(em.result.emmean) == 2
+
+    def test_invalid_type_raises(self, lmer_result):
+        with pytest.raises(ValueError, match="type must be 'link' or 'response'"):
+            emmeans(lmer_result, "treatment", type="invalid")
+
+
+class TestGlmerResponseScale:
+    def test_response_standard_errors_use_inverse_link_derivative(self, glmer_result):
+        link = emmeans(glmer_result, "period", type="link")
+        response = emmeans(glmer_result, "period", type="response")
+
+        expected_mean = glmer_result.family.link.inverse(link.result.emmean)
+        expected_se = link.result.se / np.abs(glmer_result.family.link.deriv(expected_mean))
+
+        assert_allclose(response.result.emmean, expected_mean)
+        assert_allclose(response.result.se, expected_se)
+
+    def test_response_intervals_are_back_transformed_from_link_scale(self, glmer_result):
+        level = 0.95
+        link = emmeans(glmer_result, "period", type="link", level=level)
+        response = emmeans(glmer_result, "period", type="response", level=level)
+        critical_value = stats.norm.ppf(1 - (1 - level) / 2)
+
+        expected_lower = glmer_result.family.link.inverse(
+            link.result.emmean - critical_value * link.result.se
+        )
+        expected_upper = glmer_result.family.link.inverse(
+            link.result.emmean + critical_value * link.result.se
+        )
+
+        assert_allclose(response.result.lower, expected_lower)
+        assert_allclose(response.result.upper, expected_upper)
+        assert np.all((response.result.lower >= 0) & (response.result.upper <= 1))
+
+    def test_link_scale_intervals_use_normal_critical_value(self, glmer_result):
+        level = 0.9
+        link = emmeans(glmer_result, "period", type="link", level=level)
+        critical_value = stats.norm.ppf(1 - (1 - level) / 2)
+
+        assert_allclose(
+            link.result.lower,
+            link.result.emmean - critical_value * link.result.se,
+        )
+        assert_allclose(
+            link.result.upper,
+            link.result.emmean + critical_value * link.result.se,
+        )
