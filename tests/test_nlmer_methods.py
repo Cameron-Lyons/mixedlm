@@ -114,6 +114,24 @@ class TestNlmerSimulate:
         sim = result.simulate(nsim=1, seed=123, re_form="NA")
         assert sim.shape == (len(NLME_DATA),)
 
+    def test_simulate_uses_inverse_weight_residual_variance(self) -> None:
+        model = nlme.SSasymp()
+        weights = np.ones(len(NLME_DATA))
+        weights[1] = 4.0
+        result = nlmer(
+            model,
+            NLME_DATA,
+            x_var="time",
+            y_var="y",
+            group_var="subject",
+            weights=weights,
+        )
+
+        simulations = result.simulate(nsim=1500, seed=123, use_re=False)
+        empirical_scale = np.std(simulations, axis=1)
+
+        assert empirical_scale[0] / empirical_scale[1] == pytest.approx(2.0, rel=0.1)
+
 
 class TestNlmerRefit:
     def test_refit_same_response(self) -> None:
@@ -378,6 +396,9 @@ class TestNlmerWeightsOffset:
         w = result.weights()
         assert np.allclose(w, weights)
 
+        expected_pearson = np.sqrt(weights) * result.residuals("response") / result.sigma
+        assert np.allclose(result.residuals("pearson"), expected_pearson)
+
     def test_offset_default(self) -> None:
         model = nlme.SSasymp()
         result = nlmer(model, NLME_DATA, x_var="time", y_var="y", group_var="subject")
@@ -447,6 +468,25 @@ class TestNlmerWeightsOffset:
                 y_var="y",
                 group_var="subject",
                 weights=np.array([1, 2, 3]),
+            )
+
+    @pytest.mark.parametrize(
+        ("weights", "message"),
+        [
+            (np.zeros(len(NLME_DATA)), "strictly positive"),
+            (np.full(len(NLME_DATA), np.inf), "finite values"),
+            (np.ones((len(NLME_DATA), 1)), "one-dimensional"),
+        ],
+    )
+    def test_invalid_weights_raise(self, weights, message) -> None:
+        with pytest.raises(ValueError, match=message):
+            nlmer(
+                nlme.SSasymp(),
+                NLME_DATA,
+                x_var="time",
+                y_var="y",
+                group_var="subject",
+                weights=weights,
             )
 
     def test_offset_wrong_length_raises(self) -> None:
