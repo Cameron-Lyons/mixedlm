@@ -59,12 +59,33 @@ class ModelMatrices:
     offset: NDArray[np.floating]
     frame: Any | None = field(default=None)
     na_info: NAInfo | None = field(default=None)
+    trials: NDArray[np.floating] | None = field(default=None)
     category_levels: dict[str, list[Any]] = field(default_factory=dict)
     contrasts: dict[str, str | NDArray[np.floating]] | None = field(default=None)
 
     @cached_property
     def Zt(self) -> sparse.csc_matrix:
         return self.Z.T.tocsc()
+
+
+def validate_prior_weights(
+    weights: NDArray[np.floating],
+    n: int,
+    *,
+    allow_missing: bool = False,
+) -> NDArray[np.float64]:
+    """Return validated, contiguous prior weights."""
+    weights_array = np.asarray(weights, dtype=np.float64)
+    if weights_array.ndim != 1:
+        raise ValueError("weights must be one-dimensional")
+    if len(weights_array) != n:
+        raise ValueError(f"weights has length {len(weights_array)}, expected {n}")
+    finite = ~np.isinf(weights_array) if allow_missing else np.isfinite(weights_array)
+    if not np.all(finite):
+        raise ValueError("weights must contain only finite values")
+    if np.any(weights_array <= 0.0):
+        raise ValueError("weights must be strictly positive")
+    return np.ascontiguousarray(weights_array)
 
 
 def _get_formula_variables(formula: Formula) -> set[str]:
@@ -78,10 +99,17 @@ def build_model_matrices(
     offset: NDArray[np.floating] | None = None,
     na_action: str | None = None,
     contrasts: dict[str, str | NDArray[np.floating]] | None = None,
+    grouped_binomial: bool = False,
 ) -> ModelMatrices:
     from mixedlm.utils.na_action import handle_na
 
     data = ensure_dataframe(data, columns=sorted(_get_formula_variables(formula)))
+    if weights is not None:
+        weights = validate_prior_weights(
+            weights,
+            dataframe_length(data),
+            allow_missing=True,
+        )
 
     if na_action is not None:
         clean_data, na_info, weights, offset = handle_na(data, formula, na_action, weights, offset)
@@ -106,7 +134,7 @@ def build_model_matrices(
         }
     )
 
-    y = _build_response(formula, clean_data)
+    y, trials = _build_response(formula, clean_data, grouped_binomial=grouped_binomial)
     X, fixed_names = build_fixed_matrix(
         formula,
         clean_data,
@@ -124,8 +152,12 @@ def build_model_matrices(
     model_frame = select_columns(clean_data, available_vars)
 
     n = len(y)
-    if weights is None:
+    if trials is not None:
+        weights = trials.copy() if weights is None else np.asarray(weights) * trials
+    elif weights is None:
         weights = np.ones(n, dtype=np.float64)
+    else:
+        weights = validate_prior_weights(weights, n)
     if offset is None:
         offset = np.zeros(n, dtype=np.float64)
 
@@ -142,14 +174,46 @@ def build_model_matrices(
         offset=offset,
         frame=model_frame,
         na_info=na_info,
+        trials=trials,
         category_levels=category_levels,
         contrasts=stored_contrasts,
     )
 
 
-def _build_response(formula: Formula, data: Any) -> NDArray[np.floating]:
-    arr = get_column_numpy(data, formula.response, dtype=np.float64)
-    return arr
+def _build_response(
+    formula: Formula,
+    data: Any,
+    *,
+    grouped_binomial: bool,
+) -> tuple[NDArray[np.floating], NDArray[np.floating] | None]:
+    successes = get_column_numpy(data, formula.response, dtype=np.float64)
+    denominator = formula.response_denominator
+    if denominator is None:
+        return successes, None
+
+    if not grouped_binomial:
+        raise ValueError(
+            "The 'successes / trials' response syntax is only supported for binomial GLMMs"
+        )
+
+    trials = get_column_numpy(data, denominator, dtype=np.float64)
+    return _normalize_grouped_binomial_response(successes, trials), trials
+
+
+def _normalize_grouped_binomial_response(
+    successes: NDArray[np.floating],
+    trials: NDArray[np.floating],
+) -> NDArray[np.floating]:
+    if not np.all(np.isfinite(successes)) or not np.all(np.isfinite(trials)):
+        raise ValueError("Grouped binomial successes and trials must be finite")
+    if np.any(trials <= 0):
+        raise ValueError("Grouped binomial trials must be greater than zero")
+    if np.any(successes < 0) or np.any(successes > trials):
+        raise ValueError("Grouped binomial successes must be between zero and trials")
+    if np.any(successes != np.floor(successes)) or np.any(trials != np.floor(trials)):
+        raise ValueError("Grouped binomial successes and trials must be whole numbers")
+
+    return successes / trials
 
 
 def build_fixed_matrix(

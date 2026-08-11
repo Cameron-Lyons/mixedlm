@@ -165,7 +165,8 @@ def lmer(
     verbose : int, default 0
         Verbosity level for optimization output.
     weights : array-like, optional
-        Prior weights for observations.
+        Strictly positive prior weights for observations. The residual variance
+        for observation ``i`` is ``sigma**2 / weights[i]``.
     offset : array-like, optional
         Offset term for the linear predictor.
     na_action : str, optional

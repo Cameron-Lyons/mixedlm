@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Grouped-binomial `successes / trials` responses with automatic trial weights and validation
 - Configurable named links and documented family/link helper APIs
 - Formula-driven simulation now supports every built-in response family
 - New-data LMM and GLMM predictions accept numeric, scalar, or column-based offsets
@@ -24,6 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Root-level CHANGELOG.md
 
 ### Changed
+- Multi-draw GLMM simulation now batches random effects and response generation
 - Vectorized grouping-level factorization and nested-key construction for sparse designs
 - EM-REML algorithm generalized from single random intercept to arbitrary unstructured covariance models
 - Replaced the Py-BOBYQA dependency and default optimizer with SciPy COBYQA
@@ -36,13 +38,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Poisson and other unbounded GLMM families no longer clamp fitted means below one
 - Unsupported family and link combinations no longer route through the native fast path
 
-### Fixed
+- LMM profiling now applies fitted random effects before computing the penalized residual sum of squares, preventing variance estimates from being biased toward zero
+- LMM likelihood reporting and fixed-effect profiles now use the corrected profiled criterion consistently
 - Synthetic dataset loaders no longer reset NumPy's global random state
-
-### Fixed
 - Nonlinear mixed models now apply offsets consistently to responses, fitted values, simulations, refits, covariance estimates, and leverage diagnostics
 
 ### Fixed
+- Canonical Gamma and inverse-Gaussian variants now simulate from their family distributions
+- LMM and GLMM simulations now preserve model offsets in generated responses
 - Formula simulation now preserves global random state and random-effect coefficient ordering
 - Nonlinear mixed-model optimization now uses a deterministic profiled Laplace deviance with consistent relative covariance scaling
 - GLMM PIRLS, Laplace, and adaptive-quadrature calculations now use the covariance factor

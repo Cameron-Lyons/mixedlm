@@ -4,6 +4,7 @@ use nalgebra_sparse::csc::CscMatrix;
 use numpy::PyArray1;
 use numpy::ndarray::{ArrayView1, ArrayView2};
 use pyo3::PyResult;
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
 use crate::blocked_chol::{BlockedCholesky, BlockedMatrix};
@@ -14,6 +15,31 @@ pub struct RandomEffectStructure {
     pub n_levels: usize,
     pub n_terms: usize,
     pub correlated: bool,
+}
+
+fn validate_prior_weights(weights: ArrayView1<'_, f64>, n: usize) -> PyResult<(Vec<f64>, f64)> {
+    if weights.len() != n {
+        return Err(PyValueError::new_err(format!(
+            "weights has length {}, expected {n}",
+            weights.len()
+        )));
+    }
+
+    let mut values = Vec::with_capacity(n);
+    let mut logdet = 0.0;
+    for &weight in weights {
+        if !weight.is_finite() {
+            return Err(PyValueError::new_err(
+                "weights must contain only finite values",
+            ));
+        }
+        if weight <= 0.0 {
+            return Err(PyValueError::new_err("weights must be strictly positive"));
+        }
+        values.push(weight);
+        logdet += weight.ln();
+    }
+    Ok((values, logdet))
 }
 
 fn csc_from_scipy(
@@ -391,8 +417,8 @@ pub fn profiled_deviance_impl(
         .zip(offset.iter())
         .map(|(yi, oi)| yi - oi)
         .collect();
-    let w: Vec<f64> = weights.iter().copied().collect();
-    let sqrt_w: Vec<f64> = weights.iter().map(|wi| wi.sqrt()).collect();
+    let (w, logdet_w) = validate_prior_weights(weights, n)?;
+    let sqrt_w: Vec<f64> = w.iter().map(|wi| wi.sqrt()).collect();
 
     let x = Mat::from_fn(n, p, |i, j| x_data[[i, j]]);
 
@@ -430,9 +456,9 @@ pub fn profiled_deviance_impl(
             0.0
         };
 
-        let mut dev = (n as f64) * (2.0 * std::f64::consts::PI * sigma2).ln() + wrss / sigma2;
+        let mut dev = denom * (1.0 + (2.0 * std::f64::consts::PI * sigma2).ln()) - logdet_w;
         if reml {
-            dev += logdet_xtwx - (p as f64) * sigma2.ln();
+            dev += logdet_xtwx;
         }
 
         return Ok(dev);
@@ -457,13 +483,13 @@ pub fn profiled_deviance_impl(
 
     let ztwy = compute_ztwy_sparse(&z, &w, &y_adj, q);
     let cu = apply_lambda_transpose_vector(&ztwy, &lambda_blocks, structures);
-    let cu_star = chol_v.solve(&cu);
+    let cu_star = chol_v.solve_lower(&cu);
 
     let wx = Mat::from_fn(n, p, |i, j| sqrt_w[i] * x[(i, j)]);
 
     let ztwx = compute_ztwx_sparse(&z, &w, &x, q, p);
     let lambdat_ztwx = apply_lambda_transpose_vector(&ztwx, &lambda_blocks, structures);
-    let rzx = chol_v.solve(&lambdat_ztwx);
+    let rzx = chol_v.solve_lower(&lambdat_ztwx);
 
     let xtwx = wx.transpose() * &wx;
     let mut xtwy = Mat::zeros(p, 1);
@@ -504,13 +530,15 @@ pub fn profiled_deviance_impl(
     let u_star = chol_v.solve(&lambda_t_zt_resid);
 
     let w_resid_sq: f64 = (0..n).map(|i| w[i] * resid[i] * resid[i]).sum();
-    let u_star_sq: f64 = (0..q).map(|i| u_star[(i, 0)].powi(2)).sum();
-    let pwrss = w_resid_sq + u_star_sq;
+    let random_reduction: f64 = (0..q)
+        .map(|i| lambda_t_zt_resid[(i, 0)] * u_star[(i, 0)])
+        .sum();
+    let pwrss = w_resid_sq - random_reduction;
 
     let denom = if reml { n - p } else { n } as f64;
     let sigma2 = pwrss / denom;
 
-    let mut dev = denom * (1.0 + (2.0 * std::f64::consts::PI * sigma2).ln()) + logdet_v;
+    let mut dev = denom * (1.0 + (2.0 * std::f64::consts::PI * sigma2).ln()) + logdet_v - logdet_w;
     if reml {
         dev += logdet_xtvinvx;
     }
@@ -543,8 +571,8 @@ pub fn profiled_deviance_with_gradient_impl(
         .zip(offset.iter())
         .map(|(yi, oi)| yi - oi)
         .collect();
-    let w: Vec<f64> = weights.iter().copied().collect();
-    let sqrt_w: Vec<f64> = weights.iter().map(|wi| wi.sqrt()).collect();
+    let (w, logdet_w) = validate_prior_weights(weights, n)?;
+    let sqrt_w: Vec<f64> = w.iter().map(|wi| wi.sqrt()).collect();
 
     let x = Mat::from_fn(n, p, |i, j| x_data[[i, j]]);
 
@@ -582,9 +610,9 @@ pub fn profiled_deviance_with_gradient_impl(
             0.0
         };
 
-        let mut dev = (n as f64) * (2.0 * std::f64::consts::PI * sigma2).ln() + wrss / sigma2;
+        let mut dev = denom * (1.0 + (2.0 * std::f64::consts::PI * sigma2).ln()) - logdet_w;
         if reml {
-            dev += logdet_xtwx - (p as f64) * sigma2.ln();
+            dev += logdet_xtwx;
         }
 
         return Ok((dev, vec![0.0; n_theta]));
@@ -610,13 +638,13 @@ pub fn profiled_deviance_with_gradient_impl(
 
     let ztwy = compute_ztwy_sparse(&z, &w, &y_adj, q);
     let cu = apply_lambda_transpose_vector(&ztwy, &lambda_blocks, structures);
-    let cu_star = chol_v.solve(&cu);
+    let cu_star = chol_v.solve_lower(&cu);
 
     let wx = Mat::from_fn(n, p, |i, j| sqrt_w[i] * x[(i, j)]);
 
     let ztwx = compute_ztwx_sparse(&z, &w, &x, q, p);
     let lambdat_ztwx = apply_lambda_transpose_vector(&ztwx, &lambda_blocks, structures);
-    let rzx = chol_v.solve(&lambdat_ztwx);
+    let rzx = chol_v.solve_lower(&lambdat_ztwx);
 
     let xtwx = wx.transpose() * &wx;
     let mut xtwy = Mat::zeros(p, 1);
@@ -657,18 +685,26 @@ pub fn profiled_deviance_with_gradient_impl(
     let u_star = chol_v.solve(&lambda_t_zt_resid);
 
     let w_resid_sq: f64 = (0..n).map(|i| w[i] * resid[i] * resid[i]).sum();
-    let u_star_sq: f64 = (0..q).map(|i| u_star[(i, 0)].powi(2)).sum();
-    let pwrss = w_resid_sq + u_star_sq;
+    let random_reduction: f64 = (0..q)
+        .map(|i| lambda_t_zt_resid[(i, 0)] * u_star[(i, 0)])
+        .sum();
+    let pwrss = w_resid_sq - random_reduction;
 
     let denom = if reml { n - p } else { n } as f64;
     let sigma2 = pwrss / denom;
 
-    let mut dev = denom * (1.0 + (2.0 * std::f64::consts::PI * sigma2).ln()) + logdet_v;
+    let mut dev = denom * (1.0 + (2.0 * std::f64::consts::PI * sigma2).ln()) + logdet_v - logdet_w;
     if reml {
         dev += logdet_xtvinvx;
     }
 
     let v_inv = chol_v.solve(&Mat::<f64>::identity(q, q));
+    let v_inv_b = chol_v.solve(&lambdat_ztwx);
+    let xtvinvx_inv = if reml {
+        Some(chol_xtvinvx.solve(&Mat::<f64>::identity(p, p)))
+    } else {
+        None
+    };
 
     let mut gradient = Vec::with_capacity(n_theta);
 
@@ -691,94 +727,33 @@ pub fn profiled_deviance_with_gradient_impl(
                 }
             }
 
-            let dlambdat_zt_w_resid =
-                apply_dlambda_transpose_vector(&zt_w_resid, dlambda, block_idx, structures);
-            let dlambdat_ztwx =
-                apply_dlambda_transpose_vector(&ztwx, dlambda, block_idx, structures);
-            let dlambdat_ztwy =
-                apply_dlambda_transpose_vector(&ztwy, dlambda, block_idx, structures);
-
-            let v_inv_dv_rzx = chol_v.solve(&(&dv * &rzx));
-            let v_inv_dlambdat_ztwx = chol_v.solve(&dlambdat_ztwx);
-
-            let mut d_rzx_t_rzx = Mat::zeros(p, p);
-            for i in 0..p {
-                for j in 0..p {
-                    let mut sum = 0.0;
-                    for r in 0..q {
-                        sum -=
-                            v_inv_dv_rzx[(r, i)] * rzx[(r, j)] + rzx[(r, i)] * v_inv_dv_rzx[(r, j)];
-                        sum += v_inv_dlambdat_ztwx[(r, i)] * rzx[(r, j)]
-                            + rzx[(r, i)] * v_inv_dlambdat_ztwx[(r, j)];
-                    }
-                    d_rzx_t_rzx[(i, j)] = sum;
-                }
-            }
-
-            let v_inv_dv_cu_star = chol_v.solve(&(&dv * &cu_star));
-            let v_inv_dlambdat_ztwy = chol_v.solve(&dlambdat_ztwy);
-
-            let mut d_rzx_t_cu_star = Mat::zeros(p, 1);
-            for i in 0..p {
-                let mut sum = 0.0;
-                for r in 0..q {
-                    sum -= v_inv_dv_rzx[(r, i)] * cu_star[(r, 0)]
-                        + rzx[(r, i)] * v_inv_dv_cu_star[(r, 0)];
-                    sum += v_inv_dlambdat_ztwx[(r, i)] * cu_star[(r, 0)]
-                        + rzx[(r, i)] * v_inv_dlambdat_ztwy[(r, 0)];
-                }
-                d_rzx_t_cu_star[(i, 0)] = sum;
-            }
-
-            let xtvinvx_inv = chol_xtvinvx.solve(&Mat::<f64>::identity(p, p));
-            let d_xtvinvx_beta = &d_rzx_t_rzx * &beta;
-            let d_beta = &xtvinvx_inv * &(&d_xtvinvx_beta - &d_rzx_t_cu_star);
-
-            let mut resid_w_x_dbeta = 0.0;
-            for i in 0..n {
-                let mut x_dbeta = 0.0;
-                for j in 0..p {
-                    x_dbeta += x[(i, j)] * d_beta[(j, 0)];
-                }
-                resid_w_x_dbeta += w[i] * resid[i] * x_dbeta;
-            }
-            let d_w_resid_sq = -2.0 * resid_w_x_dbeta;
-
-            let v_inv_dv_u = chol_v.solve(&(&dv * &u_star));
-            let mut u_star_v_inv_dv_u = 0.0;
+            let dc = apply_dlambda_transpose_vector(&zt_w_resid, dlambda, block_idx, structures);
+            let dv_u = &dv * &u_star;
+            let mut d_pwrss = 0.0;
             for i in 0..q {
-                u_star_v_inv_dv_u += u_star[(i, 0)] * v_inv_dv_u[(i, 0)];
+                d_pwrss += u_star[(i, 0)] * dv_u[(i, 0)];
+                d_pwrss -= 2.0 * dc[(i, 0)] * u_star[(i, 0)];
             }
-
-            let v_inv_dlambdat = chol_v.solve(&dlambdat_zt_w_resid);
-            let mut u_star_v_inv_dlambdat = 0.0;
-            for i in 0..q {
-                u_star_v_inv_dlambdat += u_star[(i, 0)] * v_inv_dlambdat[(i, 0)];
-            }
-
-            let lambdat_ztwx_dbeta =
-                apply_lambda_transpose_vector(&ztwx, &lambda_blocks, structures) * &d_beta;
-            let v_inv_lambdat_ztwx_dbeta = chol_v.solve(&lambdat_ztwx_dbeta);
-            let mut u_star_v_inv_lambdat_ztwx_dbeta = 0.0;
-            for i in 0..q {
-                u_star_v_inv_lambdat_ztwx_dbeta +=
-                    u_star[(i, 0)] * v_inv_lambdat_ztwx_dbeta[(i, 0)];
-            }
-
-            let d_u_star_sq = -2.0 * u_star_v_inv_dv_u + 2.0 * u_star_v_inv_dlambdat
-                - 2.0 * u_star_v_inv_lambdat_ztwx_dbeta;
-
-            let d_pwrss = d_w_resid_sq + d_u_star_sq;
 
             let mut grad_k = d_logdet_v + denom / pwrss * d_pwrss;
 
-            if reml {
+            if let Some(xtvinvx_inv) = &xtvinvx_inv {
+                let db = apply_dlambda_transpose_vector(&ztwx, dlambda, block_idx, structures);
+                let dv_v_inv_b = &dv * &v_inv_b;
                 let mut d_logdet_xtvinvx = 0.0;
+
                 for i in 0..p {
                     for j in 0..p {
-                        d_logdet_xtvinvx += xtvinvx_inv[(i, j)] * d_rzx_t_rzx[(j, i)];
+                        let mut dm_ji = 0.0;
+                        for r in 0..q {
+                            dm_ji -= db[(r, j)] * v_inv_b[(r, i)];
+                            dm_ji -= v_inv_b[(r, j)] * db[(r, i)];
+                            dm_ji += v_inv_b[(r, j)] * dv_v_inv_b[(r, i)];
+                        }
+                        d_logdet_xtvinvx += xtvinvx_inv[(i, j)] * dm_ji;
                     }
                 }
+
                 grad_k += d_logdet_xtvinvx;
             }
 
@@ -804,7 +779,7 @@ pub fn compute_ztwz<'py>(
         z_indptr.as_slice()?,
         z_shape,
     )?;
-    let w: Vec<f64> = weights.as_array().iter().copied().collect();
+    let (w, _) = validate_prior_weights(weights.as_array(), z_shape.0)?;
     let q = z_shape.1;
 
     let ztwz = compute_ztwz_sparse(&z, &w);

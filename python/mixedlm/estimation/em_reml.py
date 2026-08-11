@@ -414,6 +414,7 @@ def em_reml_simple(
             + wrss / sigma2_e_new
             + _positive_definite_logdet(ZtWZ + D_inv)
             + _positive_definite_logdet(XtWX)
+            - np.sum(np.log(weights))
         )
 
         if not np.isfinite(loglik):

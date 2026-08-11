@@ -168,7 +168,7 @@ class AllFitResult:
             return True
 
         deviances = [f.deviance for f in successful_fits]
-        return (max(deviances) - min(deviances)) < tol
+        return bool((max(deviances) - min(deviances)) < tol)
 
 
 def _allfit_lmer_worker(
