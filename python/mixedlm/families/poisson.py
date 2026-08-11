@@ -8,6 +8,8 @@ from mixedlm.families.base import Family, LogLink
 
 
 class Poisson(Family):
+    mu_lower_bound = 0.0
+
     def __init__(self) -> None:
         self.link = LogLink()
 
