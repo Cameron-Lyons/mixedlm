@@ -24,17 +24,8 @@ from mixedlm.models.lmer_types import (
     VarCorrGroup,
 )
 from mixedlm.models.result_mixin import MerResultMixin
-from mixedlm.models.shared_utils import is_singular_theta
+from mixedlm.models.shared_utils import is_singular_theta, symmetric_inverse
 from mixedlm.utils import _format_pvalue, _get_signif_code
-
-
-def _symmetric_inverse(matrix: NDArray[np.floating]) -> NDArray[np.float64]:
-    """Invert a symmetric information matrix with a rank-deficient fallback."""
-    try:
-        factor = linalg.cholesky(matrix, lower=True)
-        return linalg.cho_solve((factor, True), np.eye(matrix.shape[0]))
-    except linalg.LinAlgError:
-        return linalg.pinvh(matrix)
 
 
 @dataclass
@@ -517,11 +508,30 @@ class LmerResult(MerResultMixin):
         return var_re
 
     def vcov(self) -> NDArray[np.floating]:
-        information_inv = _symmetric_inverse(self._weighted_projection.XtVinvX)
+        information_inv = symmetric_inverse(self._weighted_projection.XtVinvX)
         return self.sigma**2 * information_inv
 
+    @cached_property
+    def _hat_values(self) -> NDArray[np.float64]:
+        projection = self._weighted_projection
+        information_inv = symmetric_inverse(projection.XtVinvX)
+
+        if projection.lambda_matrix is None:
+            projected_X = projection.weighted_X
+            h_random = np.zeros(self.matrices.n_obs, dtype=np.float64)
+        else:
+            assert projection.L_V is not None
+            B = (projection.weighted_Z @ projection.lambda_matrix).toarray()
+            B_Vinv = linalg.cho_solve((projection.L_V, True), B.T).T
+            h_random = np.einsum("ij,ij->i", B_Vinv, B)
+            V_inv_BtX = linalg.cho_solve((projection.L_V, True), B.T @ projection.weighted_X)
+            projected_X = projection.weighted_X - B @ V_inv_BtX
+
+        h_fixed = np.einsum("ij,ij->i", projected_X @ information_inv, projected_X)
+        return np.clip(h_fixed + h_random, 0, 1 - 1e-10)
+
     def hatvalues(self) -> NDArray[np.floating]:
-        """Compute leverage values (diagonal of the hat matrix).
+        """Return leverage values (the diagonal of the mixed-model hat matrix).
 
         For mixed models, the hat matrix projects the response onto fitted values.
         The leverage h_i measures how much observation i influences its own
@@ -539,22 +549,7 @@ class LmerResult(MerResultMixin):
         random effects. High leverage observations can have undue influence
         on model estimates.
         """
-        projection = self._weighted_projection
-        information_inv = _symmetric_inverse(projection.XtVinvX)
-
-        if projection.lambda_matrix is None:
-            projected_X = projection.weighted_X
-            h_random = np.zeros(self.matrices.n_obs, dtype=np.float64)
-        else:
-            assert projection.L_V is not None
-            B = (projection.weighted_Z @ projection.lambda_matrix).toarray()
-            B_Vinv = linalg.cho_solve((projection.L_V, True), B.T).T
-            h_random = np.einsum("ij,ij->i", B_Vinv, B)
-            V_inv_BtX = linalg.cho_solve((projection.L_V, True), B.T @ projection.weighted_X)
-            projected_X = projection.weighted_X - B @ V_inv_BtX
-
-        h_fixed = np.einsum("ij,ij->i", projected_X @ information_inv, projected_X)
-        return np.clip(h_fixed + h_random, 0, 1 - 1e-10)
+        return self._hat_values.copy()
 
     def cooks_distance(self) -> NDArray[np.floating]:
         """Compute Cook's distance for each observation.
