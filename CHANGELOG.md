@@ -22,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - EM-REML algorithm generalized from single random intercept to arbitrary unstructured covariance models
 - Replaced the Py-BOBYQA dependency and default optimizer with SciPy COBYQA
 - Reduced unused and redundant Python and Rust dependencies
+- Top-level public exports now load on demand to reduce startup time and memory use
 - Vectorized pandas nested-group construction for faster large model setup
 - Consolidated duplicate CI and security checks while preserving coverage
 
@@ -37,6 +38,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - Formula simulation now preserves global random state and random-effect coefficient ordering
+- Nonlinear mixed-model optimization now uses a deterministic profiled Laplace deviance with consistent relative covariance scaling
+- GLMM PIRLS, Laplace, and adaptive-quadrature calculations now use the covariance factor
+  in spherical random-effect coordinates, with consistent likelihood normalization and
+  deterministic outer optimization
 - LMM prediction uncertainty now includes conditional random-effect covariance, fixed/random cross-covariance, correlated slopes, and unseen-group prior variance
 - Covariance tables, PCA diagnostics, singularity checks, and parameter bounds now honor compound-symmetry and AR(1) random-effect structures
 - Gamma GLMMs now minimize the non-negative unit deviance instead of its negative
