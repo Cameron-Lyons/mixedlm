@@ -5,6 +5,7 @@ from mixedlm import lmer
 from mixedlm.estimation.reml import LMMOptimizer
 from mixedlm.formula.parser import parse_formula
 from mixedlm.matrices.design import build_model_matrices
+from mixedlm.utils.variance import cov2sdcor, sdcor2cov
 
 
 @pytest.fixture
@@ -77,6 +78,17 @@ def large_crossed_sparse_data():
 
 
 @pytest.fixture
+def covariance_data():
+    rng = np.random.default_rng(321)
+    q = 400
+    sd = rng.uniform(0.5, 2.0, size=q)
+    corr = np.full((q, q), 0.01)
+    np.fill_diagonal(corr, 1.0)
+    cov = corr * sd[:, np.newaxis] * sd[np.newaxis, :]
+    return sd, corr, cov
+
+
+@pytest.fixture
 def large_nested_sparse_data():
     n_obs = 50_000
     row_ids = np.arange(n_obs)
@@ -125,6 +137,17 @@ def test_benchmark_large_crossed_sparse_design_build(benchmark, large_crossed_sp
 
 
 @pytest.mark.benchmark(group="sparse-design")
+def test_benchmark_large_nested_sparse_design_build(benchmark, large_crossed_sparse_data):
+    formula = parse_formula("y ~ x + (1 | group1/group2)")
+
+    def build_design():
+        return build_model_matrices(formula, large_crossed_sparse_data)
+
+    matrices = benchmark(build_design)
+    assert matrices.Z.nnz == len(large_crossed_sparse_data)
+
+
+@pytest.mark.benchmark(group="sparse-design")
 def test_benchmark_large_crossed_sparse_adaptive_start(benchmark, large_crossed_sparse_data):
     formula = parse_formula("y ~ x + (1 | group1) + (1 | group2)")
     matrices = build_model_matrices(formula, large_crossed_sparse_data)
@@ -134,8 +157,27 @@ def test_benchmark_large_crossed_sparse_adaptive_start(benchmark, large_crossed_
     assert theta.shape == (2,)
 
 
+@pytest.mark.benchmark(group="covariance-conversion")
+def test_benchmark_sdcor2cov(benchmark, covariance_data):
+    sd, corr, expected = covariance_data
+
+    cov = benchmark(sdcor2cov, sd, corr)
+
+    np.testing.assert_allclose(cov, expected)
+
+
+@pytest.mark.benchmark(group="covariance-conversion")
+def test_benchmark_cov2sdcor(benchmark, covariance_data):
+    expected_sd, expected_corr, cov = covariance_data
+
+    sd, corr = benchmark(cov2sdcor, cov)
+
+    np.testing.assert_allclose(sd, expected_sd)
+    np.testing.assert_allclose(corr, expected_corr)
+
+
 @pytest.mark.benchmark(group="sparse-design")
-def test_benchmark_large_nested_sparse_design_build(benchmark, large_nested_sparse_data):
+def test_benchmark_large_district_school_sparse_design_build(benchmark, large_nested_sparse_data):
     formula = parse_formula("y ~ 1 + (1 | district/school)")
 
     matrices = benchmark(build_model_matrices, formula, large_nested_sparse_data)

@@ -74,6 +74,22 @@ names also work with formula utilities and model updates.
 "y ~ x - 1"
 ```
 
+### Removing Terms
+
+Use `-` to remove individual terms or terms introduced by `*`. Operations are
+applied from left to right, so a later `+` can add a term back:
+
+```python
+# Main effects without their interaction
+"y ~ x1 * x2 - x1:x2"
+
+# Remove one random slope from an expanded random-effects expression
+"y ~ x1 + (x1 * x2 - x1:x2 | group)"
+
+# Re-enable an intercept after removing it
+"y ~ 0 + x + 1"
+```
+
 ### Categorical Variables
 
 Categorical variables are automatically dummy-coded:
@@ -81,7 +97,13 @@ Categorical variables are automatically dummy-coded:
 ```python
 # Treatment with 3 levels -> 2 dummy variables
 "y ~ treatment"
+
+# Without an intercept, estimate one coefficient for every level
+"y ~ 0 + treatment"
 ```
+
+The same rule applies to categorical random effects: `(0 + treatment | group)`
+creates one random-effect column per treatment level.
 
 ## Random Effects
 
