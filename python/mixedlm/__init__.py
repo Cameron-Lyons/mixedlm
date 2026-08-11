@@ -48,6 +48,16 @@ if TYPE_CHECKING:
     )
     from mixedlm.inference.anova import AnovaResult, AnovaType3Result, anova, anova_type3
     from mixedlm.inference.bootstrap import bootMer, bootstrap_nlmer
+    from mixedlm.inference.cross_validation import (
+        CrossValidationFold,
+        CrossValidationResult,
+        cross_validate,
+        make_folds,
+        weighted_mae,
+        weighted_mse,
+        weighted_r2,
+        weighted_rmse,
+    )
     from mixedlm.inference.ddf import (
         DenomDFResult,
         kenward_roger_df,
@@ -167,6 +177,14 @@ __all__ = [
     "allEffects",
     "bootMer",
     "bootstrap_nlmer",
+    "cross_validate",
+    "make_folds",
+    "weighted_mse",
+    "weighted_rmse",
+    "weighted_mae",
+    "weighted_r2",
+    "CrossValidationFold",
+    "CrossValidationResult",
     "satterthwaite_df",
     "kenward_roger_df",
     "pvalues_with_ddf",
@@ -347,6 +365,17 @@ _LAZY_EXPORTS: dict[str, tuple[str, str | None]] = {
         "mixedlm.inference.anova", "AnovaResult", "AnovaType3Result", "anova", "anova_type3"
     ),
     **_module_exports("mixedlm.inference.bootstrap", "bootMer", "bootstrap_nlmer"),
+    **_module_exports(
+        "mixedlm.inference.cross_validation",
+        "CrossValidationFold",
+        "CrossValidationResult",
+        "cross_validate",
+        "make_folds",
+        "weighted_mae",
+        "weighted_mse",
+        "weighted_r2",
+        "weighted_rmse",
+    ),
     **_module_exports(
         "mixedlm.inference.ddf",
         "DenomDFResult",
