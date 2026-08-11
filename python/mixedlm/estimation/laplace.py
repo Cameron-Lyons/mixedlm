@@ -227,11 +227,15 @@ def pirls(
         except (linalg.LinAlgError, ValueError):
             XtVinvX += _CHOLESKY_REGULARIZATION * np.eye(XtVinvX.shape[0])
             beta_new = linalg.lstsq(XtVinvX, XtVinvz)[0]
+        if not np.all(np.isfinite(beta_new)):
+            beta_new = beta.copy()
 
         u_rhs = ZtWz - ZtWX_dense @ beta_new
         if not np.all(np.isfinite(u_rhs)):
             u_rhs = np.nan_to_num(u_rhs, nan=0.0, posinf=_WEIGHT_CLIP_MAX, neginf=-_WEIGHT_CLIP_MAX)
         u_new = linalg.cho_solve((L_C, True), u_rhs)
+        if not np.all(np.isfinite(u_new)):
+            u_new = u.copy()
 
         delta_beta = np.max(np.abs(beta_new - beta))
         delta_u = np.max(np.abs(u_new - u)) if q > 0 else 0.0
@@ -707,9 +711,11 @@ class GLMMOptimizer:
             dev, beta, u = laplace_deviance_fast(
                 theta, self.matrices, self.family, self._beta_cache, self._u_cache
             )
-        self._beta_cache = beta
-        self._u_cache = u
-        return dev
+        if np.isfinite(dev) and np.all(np.isfinite(beta)) and np.all(np.isfinite(u)):
+            self._beta_cache = beta
+            self._u_cache = u
+            return dev
+        return np.inf
 
     def optimize(
         self,
