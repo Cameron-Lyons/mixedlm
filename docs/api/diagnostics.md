@@ -69,12 +69,16 @@ diagnostics.plot_resid_group(model, group, ax=None)
 
 ## Influence Diagnostics
 
+The convenience functions below accept either a fitted model directly or an
+`InfluenceResult` returned by `influence()`. Calculations use the final mixed-model
+projection, including random effects, offsets, prior weights, and GLMM working weights.
+
 ### influence
 
 Compute influence diagnostics for all observations.
 
 ```python
-inf = diagnostics.influence(model, data)
+inf = diagnostics.influence(model)
 ```
 
 **Returns:** InfluenceResult object with:
@@ -90,7 +94,7 @@ inf = diagnostics.influence(model, data)
 Compute Cook's distance for each observation.
 
 ```python
-cd = diagnostics.cooks_distance(model, data)
+cd = diagnostics.cooks_distance(model)
 ```
 
 **Returns:** Array of Cook's distance values.
@@ -105,20 +109,20 @@ cd = diagnostics.cooks_distance(model, data)
 Compute DFBETA for each observation.
 
 ```python
-dfb = diagnostics.dfbeta(model, data)
+dfb = diagnostics.dfbeta(model)
 ```
 
-**Returns:** DataFrame with DFBETA for each coefficient.
+**Returns:** Array with one row per observation and one column per fixed-effect coefficient.
 
 ### dfbetas
 
 Compute standardized DFBETAS.
 
 ```python
-dfbs = diagnostics.dfbetas(model, data)
+dfbs = diagnostics.dfbetas(model)
 ```
 
-**Returns:** DataFrame with standardized DFBETAS.
+**Returns:** Array with standardized DFBETAS.
 
 **Interpretation:**
 
@@ -129,7 +133,7 @@ dfbs = diagnostics.dfbetas(model, data)
 Compute DFFITS for each observation.
 
 ```python
-dff = diagnostics.dffits(model, data)
+dff = diagnostics.dffits(model)
 ```
 
 **Returns:** Array of DFFITS values.
@@ -139,7 +143,7 @@ dff = diagnostics.dffits(model, data)
 Compute leverage (hat values) for each observation.
 
 ```python
-lev = diagnostics.leverage(model, data)
+lev = diagnostics.leverage(model)
 ```
 
 **Returns:** Array of leverage values.
@@ -151,10 +155,10 @@ lev = diagnostics.leverage(model, data)
 
 ### influence_plot
 
-Create an influence plot showing leverage vs residuals, sized by Cook's distance.
+Plot Cook's distance, maximum absolute DFBETAS, leverage, or DFFITS.
 
 ```python
-diagnostics.influence_plot(model, data, ax=None)
+diagnostics.influence_plot(model, which="cooks", ax=None)
 ```
 
 ### influence_summary
@@ -162,7 +166,7 @@ diagnostics.influence_plot(model, data, ax=None)
 Print a summary of influential observations.
 
 ```python
-diagnostics.influence_summary(model, data)
+summary = diagnostics.influence_summary(model)
 ```
 
 ### influential_obs
@@ -170,7 +174,7 @@ diagnostics.influence_summary(model, data)
 Identify influential observations based on multiple criteria.
 
 ```python
-idx = diagnostics.influential_obs(model, data, threshold="default")
+idx = diagnostics.influential_obs(model, threshold="cooks")
 ```
 
 **Returns:** Indices of influential observations.
@@ -240,37 +244,38 @@ plt.show()
 from mixedlm import diagnostics
 
 # Compute influence measures
-inf = diagnostics.influence(model, data)
+inf = diagnostics.influence(model)
 
 # Cook's distance
-cd = diagnostics.cooks_distance(model, data)
+cd = diagnostics.cooks_distance(model)
 print(f"Max Cook's D: {cd.max():.4f}")
 
 # Identify influential observations
-influential = diagnostics.influential_obs(model, data)
+influential = diagnostics.influential_obs(model)
 print(f"Influential observations: {influential}")
 
 # Summary of influential points
-diagnostics.influence_summary(model, data)
+print(diagnostics.influence_summary(model))
 ```
 
 ### Influence Plot
 
 ```python
-# Plot leverage vs residuals, sized by Cook's D
-diagnostics.influence_plot(model, data)
+# Plot Cook's distance
+diagnostics.influence_plot(model, which="cooks")
 ```
 
 ### Checking Specific Observations
 
 ```python
 # DFBETAS for effect on each coefficient
-dfb = diagnostics.dfbetas(model, data)
+dfb = diagnostics.dfbetas(model)
 print(dfb)
 
 # Observations with large influence on Days coefficient
 import numpy as np
-large_influence = np.abs(dfb['Days']) > 2 / np.sqrt(len(data))
+days_index = model.matrices.fixed_names.index("Days")
+large_influence = np.abs(dfb[:, days_index]) > 2 / np.sqrt(len(data))
 print(f"High influence on Days: {data.index[large_influence].tolist()}")
 ```
 
