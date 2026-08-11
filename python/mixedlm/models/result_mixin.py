@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import numpy as np
 from numpy.typing import NDArray
@@ -14,12 +14,14 @@ from mixedlm.matrices.design import (
     _normalize_grouped_binomial_response,
 )
 from mixedlm.models.lmer_types import ModelTerms, RanefResult
+from mixedlm.utils.dataframe import concat_columns_as_string, get_column_numpy, get_columns
 
 if TYPE_CHECKING:
     import pandas as pd
 
 
 class MerResultMixin:
+    formula: Formula
     matrices: ModelMatrices
     beta: NDArray[np.floating]
     theta: NDArray[np.floating]
@@ -85,16 +87,46 @@ class MerResultMixin:
             return (self.matrices.X, self.matrices.Z)
         raise ValueError(f"Unknown type '{type}'. Use 'fixed', 'random', 'X', 'Z', or 'both'.")
 
-    def _align_fixed_matrix(self, matrices: ModelMatrices) -> NDArray[np.floating]:
-        """Align a newly built fixed-effects matrix to the fitted columns."""
-        column_indices = {name: index for index, name in enumerate(matrices.fixed_names)}
+    def _prediction_fixed_matrix(self, newdata: pd.DataFrame) -> NDArray[np.floating]:
+        """Build a fixed-effects matrix using the fitted encoding schema."""
+        import pandas as pd
+
+        from mixedlm.matrices.design import build_fixed_matrix
+        from mixedlm.utils.dataframe import ensure_dataframe, get_column_numpy, get_columns
+
+        data = ensure_dataframe(newdata)
+        columns = set(get_columns(data))
+        missing = sorted(self.formula.fixed_variables - columns)
+        if missing:
+            names = ", ".join(repr(name) for name in missing)
+            raise ValueError(f"New data is missing fixed-effect variable(s): {names}.")
+
+        for name, fitted_levels in self.matrices.category_levels.items():
+            if name not in self.formula.fixed_variables or name not in columns:
+                continue
+            unknown_levels: list[object] = []
+            for value in get_column_numpy(data, name):
+                if pd.isna(value) or value in fitted_levels or value in unknown_levels:
+                    continue
+                unknown_levels.append(value)
+            if unknown_levels:
+                levels = ", ".join(repr(value) for value in unknown_levels)
+                raise ValueError(f"New level(s) {levels} in fixed-effect factor '{name}'.")
+
+        X, fixed_names = build_fixed_matrix(
+            self.formula,
+            data,
+            contrasts=self.matrices.contrasts,
+            category_levels=self.matrices.category_levels,
+        )
+        column_indices = {name: index for index, name in enumerate(fixed_names)}
         try:
             fitted_indices = [column_indices[name] for name in self.matrices.fixed_names]
         except KeyError as exc:
             raise ValueError(
                 f"New data is missing fitted fixed-effect column '{exc.args[0]}'."
             ) from None
-        return matrices.X[:, fitted_indices]
+        return X[:, fitted_indices]
 
     def _model_frame(self) -> pd.DataFrame:
         import pandas as pd
@@ -207,13 +239,16 @@ class MerResultMixin:
 
     def _random_effect_prediction_contrib(
         self,
-        newdata: pd.DataFrame,
+        newdata: Any,
         allow_new_levels: bool,
         u: NDArray[np.floating],
     ) -> NDArray[np.floating]:
+        import pandas as pd
+
         n = len(newdata)
         contrib = np.zeros(n, dtype=np.float64)
         u_idx = 0
+        columns = set(get_columns(newdata))
 
         for struct in self.matrices.random_structures:
             group_col = struct.grouping_factor
@@ -221,16 +256,25 @@ class MerResultMixin:
             n_levels = struct.n_levels
             n_u = n_levels * n_terms
 
-            if group_col not in newdata.columns:
-                u_idx += n_u
-                continue
+            if group_col in columns:
+                group_values = get_column_numpy(newdata, group_col)
+            else:
+                nested_cols = group_col.split("/")
+                if len(nested_cols) < 2 or not all(col in columns for col in nested_cols):
+                    u_idx += n_u
+                    continue
+                group_values = concat_columns_as_string(newdata, nested_cols)
 
-            group_values = newdata[group_col].astype(str)
-            mapped_levels = group_values.map(struct.level_map)
-            known_mask = mapped_levels.notna().to_numpy()
+            string_level_map = {str(level): idx for level, idx in struct.level_map.items()}
+            group_series = pd.Series(group_values, copy=False)
+            mapped = group_series.map(struct.level_map)
+            if mapped.isna().any():
+                mapped = mapped.fillna(group_series.astype(str).map(string_level_map))
+            mapped_levels = mapped.fillna(-1).to_numpy(dtype=np.int64)
+            known_mask = mapped_levels >= 0
 
             if not allow_new_levels and not np.all(known_mask):
-                unknown_level = str(group_values[~known_mask].iloc[0])
+                unknown_level = str(group_values[np.flatnonzero(~known_mask)[0]])
                 raise ValueError(
                     f"New level '{unknown_level}' in grouping factor '{group_col}'. "
                     "Set allow_new_levels=True to predict with random effects = 0."
@@ -240,7 +284,7 @@ class MerResultMixin:
                 u_idx += n_u
                 continue
 
-            level_idx = mapped_levels[known_mask].astype(int).to_numpy()
+            level_idx = mapped_levels[known_mask]
             u_block = u[u_idx : u_idx + n_u].reshape(n_levels, n_terms)
             u_idx += n_u
 
@@ -248,8 +292,8 @@ class MerResultMixin:
             for i, term_name in enumerate(struct.term_names):
                 if term_name == "(Intercept)":
                     term_values = np.ones(n, dtype=np.float64)
-                elif term_name in newdata.columns:
-                    term_values = np.asarray(newdata[term_name], dtype=np.float64)
+                elif term_name in columns:
+                    term_values = get_column_numpy(newdata, term_name, dtype=np.float64)
                 else:
                     continue
 
@@ -285,6 +329,8 @@ class MerResultMixin:
             frame=self.matrices.frame,
             na_info=self.matrices.na_info,
             trials=self.matrices.trials,
+            category_levels=self.matrices.category_levels,
+            contrasts=self.matrices.contrasts,
         )
 
     def coef(self) -> dict[str, dict[str, NDArray[np.floating]]]:

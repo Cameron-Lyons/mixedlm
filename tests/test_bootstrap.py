@@ -7,6 +7,10 @@ from mixedlm import glmer, lmer
 from mixedlm.families import Binomial
 from mixedlm.inference.bootstrap import (
     BootstrapResult,
+    _glmer_bootstrap_worker,
+    _lmer_bootstrap_worker,
+    _prepare_glmer_worker_data,
+    _prepare_lmer_worker_data,
     bootMer,
     bootstrap_glmer,
     bootstrap_lmer,
@@ -44,6 +48,33 @@ def simple_glmer_data():
     y = np.random.binomial(1, prob)
 
     return pd.DataFrame({"y": y, "x": x, "group": groups})
+
+
+@pytest.fixture
+def categorical_lmer_data():
+    rng = np.random.default_rng(47)
+    n_groups = 8
+    n_per_group = 12
+    groups = np.repeat([f"G{i}" for i in range(n_groups)], n_per_group)
+    treatment = np.tile(np.repeat(["control", "treated"], n_per_group // 2), n_groups)
+    group_effects = np.repeat(rng.normal(0, 0.7, n_groups), n_per_group)
+    y = 2.0 + 1.5 * (treatment == "treated") + group_effects + rng.normal(0, 0.5, len(groups))
+
+    return pd.DataFrame({"y": y, "treatment": treatment, "group": groups})
+
+
+@pytest.fixture
+def categorical_glmer_data():
+    rng = np.random.default_rng(53)
+    n_groups = 8
+    n_per_group = 16
+    groups = np.repeat([f"G{i}" for i in range(n_groups)], n_per_group)
+    treatment = np.tile(np.repeat(["control", "treated"], n_per_group // 2), n_groups)
+    group_effects = np.repeat(rng.normal(0, 0.5, n_groups), n_per_group)
+    eta = -0.5 + 1.0 * (treatment == "treated") + group_effects
+    y = rng.binomial(1, 1 / (1 + np.exp(-eta)))
+
+    return pd.DataFrame({"y": y, "treatment": treatment, "group": groups})
 
 
 @pytest.fixture
@@ -118,6 +149,48 @@ class TestBootstrapLmer:
         assert_allclose(boot.original_theta, lmer_result.theta)
         assert boot.original_sigma == pytest.approx(lmer_result.sigma)
 
+    def test_categorical_predictor_uses_original_model_frame(self, categorical_lmer_data):
+        result = lmer("y ~ treatment + (1 | group)", categorical_lmer_data)
+
+        boot = bootstrap_lmer(result, n_boot=5, seed=42)
+
+        assert boot.n_failed == 0
+        assert np.isfinite(boot.beta_samples).all()
+
+    def test_parallel_worker_uses_original_model_frame(self, categorical_lmer_data):
+        result = lmer("y ~ treatment + (1 | group)", categorical_lmer_data)
+        worker_data = _prepare_lmer_worker_data(result)
+        task = (
+            0,
+            42,
+            worker_data["formula"],
+            worker_data["X"],
+            worker_data["Z"],
+            worker_data["model_frame"],
+            worker_data["random_structures_data"],
+            worker_data["response_name"],
+            worker_data["beta"],
+            worker_data["theta"],
+            worker_data["sigma"],
+            worker_data["REML"],
+        )
+
+        _, beta, theta, sigma = _lmer_bootstrap_worker(task)
+
+        assert beta is not None
+        assert theta is not None
+        assert sigma is not None
+
+    def test_polars_categorical_predictor(self, categorical_lmer_data):
+        pl = pytest.importorskip("polars")
+        data = pl.DataFrame(categorical_lmer_data.to_dict(orient="list"))
+        result = lmer("y ~ treatment + (1 | group)", data)
+
+        boot = bootstrap_lmer(result, n_boot=3, seed=42)
+
+        assert boot.n_failed == 0
+        assert np.isfinite(boot.beta_samples).all()
+
 
 class TestBootstrapGlmer:
     def test_basic_bootstrap(self, glmer_result, simple_glmer_data):
@@ -130,6 +203,38 @@ class TestBootstrapGlmer:
         boot1 = bootstrap_glmer(glmer_result, n_boot=10, seed=42)
         boot2 = bootstrap_glmer(glmer_result, n_boot=10, seed=42)
         assert_allclose(boot1.beta_samples, boot2.beta_samples, rtol=1e-10)
+
+    def test_categorical_predictor_uses_original_model_frame(self, categorical_glmer_data):
+        result = glmer("y ~ treatment + (1 | group)", categorical_glmer_data, family=Binomial())
+
+        boot = bootstrap_glmer(result, n_boot=3, seed=42)
+
+        assert boot.n_failed == 0
+        assert np.isfinite(boot.beta_samples).all()
+
+    def test_parallel_worker_uses_original_model_frame(self, categorical_glmer_data):
+        result = glmer("y ~ treatment + (1 | group)", categorical_glmer_data, family=Binomial())
+        worker_data = _prepare_glmer_worker_data(result)
+        task = (
+            0,
+            42,
+            worker_data["formula"],
+            worker_data["X"],
+            worker_data["Z"],
+            worker_data["model_frame"],
+            worker_data["random_structures_data"],
+            worker_data["response_name"],
+            worker_data["response_denominator"],
+            worker_data["trials"],
+            worker_data["beta"],
+            worker_data["theta"],
+            worker_data["family"],
+        )
+
+        _, beta, theta = _glmer_bootstrap_worker(task)
+
+        assert beta is not None
+        assert theta is not None
 
 
 class TestBootMer:
