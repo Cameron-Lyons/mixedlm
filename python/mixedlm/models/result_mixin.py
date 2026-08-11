@@ -186,9 +186,7 @@ class MerResultMixin:
                 stacked_indices = np.vstack(index_parts)
                 variances = np.empty(stacked_indices.shape[1], dtype=np.float64)
                 for level_index, level_indices in enumerate(stacked_indices.T):
-                    variances[level_index] = np.sum(
-                        cond_cov[np.ix_(level_indices, level_indices)]
-                    )
+                    variances[level_index] = np.sum(cond_cov[np.ix_(level_indices, level_indices)])
                 term_vars[term_name] = variances
             result[group_name] = term_vars
 
@@ -319,8 +317,7 @@ class MerResultMixin:
         for group, terms in ranefs.items():
             n_levels = n_levels_by_group[group]
             group_coef: dict[str, NDArray[np.floating]] = {
-                term_name: np.zeros(n_levels, dtype=np.float64)
-                for term_name in random_only_terms
+                term_name: np.zeros(n_levels, dtype=np.float64) for term_name in random_only_terms
             }
             group_coef.update(
                 {
