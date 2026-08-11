@@ -1,3 +1,6 @@
+from copy import copy
+from pickle import dumps, loads
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -911,6 +914,24 @@ class TestLogLik:
         ll = result.logLik()
 
         assert float(ll) == ll.value
+
+    def test_loglik_supports_numeric_operations(self):
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+        ll = result.logLik()
+
+        assert ll < 0
+        assert np.isfinite(ll)
+        assert -2 * ll == -2 * ll.value
+
+    def test_loglik_preserves_metadata_when_copied_or_pickled(self):
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+        ll = result.logLik()
+
+        for restored in (copy(ll), loads(dumps(ll))):
+            assert restored == ll
+            assert restored.df == ll.df
+            assert restored.nobs == ll.nobs
+            assert restored.REML == ll.REML
 
     def test_lmer_aic_bic_consistency(self):
         result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)

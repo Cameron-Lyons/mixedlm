@@ -11,6 +11,7 @@ if TYPE_CHECKING:
     import pandas as pd
 
 from mixedlm.estimation.nlmm import NLMMOptimizer, _build_psi_matrix
+from mixedlm.models.lmer_types import LogLik
 from mixedlm.nlme.models import NonlinearModel
 
 _COV_REGULARIZATION = 1e-8
@@ -164,17 +165,21 @@ class NlmerResult:
 
         return NlmerVarCorr(groups=groups, residual=self.sigma**2)
 
-    def logLik(self) -> float:
-        return -0.5 * self.deviance
+    def logLik(self) -> LogLik:
+        return LogLik(
+            value=-0.5 * self.deviance,
+            df=self.npar(),
+            nobs=self.nobs(),
+            REML=False,
+        )
 
     def AIC(self) -> float:
-        n_params = len(self.phi) + len(self.theta) + 1
-        return -2 * self.logLik() + 2 * n_params
+        ll = self.logLik()
+        return -2 * ll.value + 2 * ll.df
 
     def BIC(self) -> float:
-        n_params = len(self.phi) + len(self.theta) + 1
-        n = len(self.y)
-        return -2 * self.logLik() + n_params * np.log(n)
+        ll = self.logLik()
+        return -2 * ll.value + ll.df * np.log(ll.nobs)
 
     def extractAIC(self) -> tuple[float, float]:
         """Extract AIC with effective degrees of freedom.
@@ -187,9 +192,9 @@ class NlmerResult:
         tuple of (float, float)
             (edf, AIC) where edf is the effective degrees of freedom.
         """
-        n_params = len(self.phi) + len(self.theta) + 1
-        edf = float(n_params)
-        aic = float(-2 * self.logLik() + 2 * n_params)
+        ll = self.logLik()
+        edf = float(ll.df)
+        aic = float(-2 * ll.value + 2 * ll.df)
         return (edf, aic)
 
     def as_function(
