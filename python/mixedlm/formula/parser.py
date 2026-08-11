@@ -9,6 +9,7 @@ from mixedlm.formula.terms import (
     Formula,
     InteractionTerm,
     InterceptTerm,
+    PowerTerm,
     RandomTerm,
     VariableTerm,
     _format_fixed,
@@ -18,7 +19,7 @@ from mixedlm.formula.terms import (
     _format_term,
 )
 
-ParsedTerm = InterceptTerm | VariableTerm | InteractionTerm
+ParsedTerm = InterceptTerm | VariableTerm | PowerTerm | InteractionTerm
 NoInterceptMarker = tuple[str]
 
 
@@ -27,6 +28,7 @@ class TokenType(Enum):
     PLUS = auto()
     MINUS = auto()
     STAR = auto()
+    POWER = auto()
     COLON = auto()
     SLASH = auto()
     PIPE = auto()
@@ -87,7 +89,11 @@ class Lexer:
                 yield Token(TokenType.MINUS, "-", start_pos)
             elif ch == "*":
                 self.advance()
-                yield Token(TokenType.STAR, "*", start_pos)
+                if self.peek() == "*":
+                    self.advance()
+                    yield Token(TokenType.POWER, "**", start_pos)
+                else:
+                    yield Token(TokenType.STAR, "*", start_pos)
             elif ch == ":":
                 self.advance()
                 yield Token(TokenType.COLON, ":", start_pos)
@@ -286,17 +292,26 @@ class Parser:
         if self.peek().type != TokenType.IDENTIFIER:
             return None
         tok = self.advance()
+        if tok.value == "I" and self.peek().type == TokenType.LPAREN:
+            self.advance()
+            variable = self.expect(TokenType.IDENTIFIER).value
+            self.expect(TokenType.POWER)
+            exponent_token = self.expect(TokenType.NUMBER)
+            self.expect(TokenType.RPAREN)
+            return [PowerTerm(variable, int(exponent_token.value))]
         return [VariableTerm(tok.value)]
 
     def _append_unique(self, terms: list[ParsedTerm], term: ParsedTerm) -> None:
         if term not in terms:
             terms.append(term)
 
-    def _term_variables(self, term: ParsedTerm) -> tuple[str, ...]:
+    def _term_variables(self, term: ParsedTerm) -> tuple[str | PowerTerm, ...]:
         if isinstance(term, InterceptTerm):
             return ()
         if isinstance(term, VariableTerm):
             return (term.name,)
+        if isinstance(term, PowerTerm):
+            return (term,)
         return term.variables
 
     def _combine_interaction(
