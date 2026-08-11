@@ -640,9 +640,7 @@ class _ProfileProjection:
             return 1e10
 
         deviance = (
-            denom * (1.0 + np.log(2.0 * np.pi * sigma2))
-            + self.logdet_V
-            - self.logdet_weights
+            denom * (1.0 + np.log(2.0 * np.pi * sigma2)) + self.logdet_V - self.logdet_weights
         )
         if self.REML:
             deviance += self.logdet_XtVinvX

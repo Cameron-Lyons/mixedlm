@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Vectorized Pearson dispersion and observed-versus-expected zero diagnostics for GLMMs
+- Dependency-free case-level and grouped cross-validation for LMMs and GLMMs
 - EM-REML now supports multiple random effects and random slopes (correlated and uncorrelated)
 - Automatic convergence recommendations in `summary()` output for non-converged and singular fits
 - `em_init` control parameter is now wired up in `lmer()` and `glmer()` model fitting
@@ -16,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Root-level CHANGELOG.md
 
 ### Changed
+- Vectorized grouping-level factorization and nested-key construction for sparse designs
 - EM-REML algorithm generalized from single random intercept to arbitrary unstructured covariance models
 - Replaced the Py-BOBYQA dependency and default optimizer with SciPy COBYQA
 - Reduced unused and redundant Python and Rust dependencies
@@ -30,6 +33,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - LMM likelihood reporting and fixed-effect profiles now use the corrected profiled criterion consistently
 - Synthetic dataset loaders no longer reset NumPy's global random state
 - Nonlinear mixed models now apply offsets consistently to responses, fitted values, simulations, refits, covariance estimates, and leverage diagnostics
+
+### Fixed
+- Gamma GLMMs now minimize the non-negative unit deviance instead of its negative
+- Poisson and other unbounded GLMM families no longer clamp fitted means below one
+- Unsupported family and link combinations no longer route through the native fast path
 
 ## [1.1.0] - 2026-01-27
 

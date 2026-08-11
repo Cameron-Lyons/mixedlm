@@ -65,6 +65,17 @@ class TestFormulaParser:
         labels = self._fixed_term_labels("y ~ x1 * x2 * x3 + (1 | g)")
         assert labels == ["x1", "x2", "x1:x2", "x3", "x1:x3", "x2:x3", "x1:x2:x3"]
 
+    def test_fixed_term_subtraction_is_sequential(self) -> None:
+        labels = self._fixed_term_labels("y ~ x1 * x2 - x1:x2 - x1 + x1 + (1 | g)")
+        assert labels == ["x2", "x1"]
+
+    def test_fixed_intercept_can_be_reenabled(self) -> None:
+        formula = parse_formula("y ~ 0 + x1 + 1 + (1 | g)")
+        assert formula.fixed.has_intercept
+
+        formula = parse_formula("y ~ x1 - 1 - 0 + (1 | g)")
+        assert formula.fixed.has_intercept
+
     def test_random_effect_star_expands_to_terms(self) -> None:
         formula = parse_formula("y ~ x1 + (x1 * x2 | g)")
         labels = []
@@ -84,6 +95,26 @@ class TestFormulaParser:
             elif isinstance(term, InteractionTerm):
                 labels.append(":".join(term.variables))
         assert labels == ["x1", "x2", "x1:x2"]
+
+    def test_random_effect_term_subtraction(self) -> None:
+        formula = parse_formula("y ~ x1 + (x1 * x2 - x1:x2 - x1 | g)")
+        labels = []
+        for term in formula.random[0].expr:
+            if isinstance(term, VariableTerm):
+                labels.append(term.name)
+            elif isinstance(term, InteractionTerm):
+                labels.append(":".join(term.variables))
+        assert labels == ["x2"]
+
+    def test_random_effect_intercept_subtraction_roundtrips(self) -> None:
+        formula = parse_formula("y ~ x1 + (x2 - 1 | g)")
+        assert not formula.random[0].has_intercept
+        assert str(formula) == "y ~ x1 + (0 + x2 | g)"
+        assert not parse_formula(str(formula)).random[0].has_intercept
+
+    def test_random_term_subtraction(self) -> None:
+        formula = parse_formula("y ~ x1 + (1 | g) + (1 | h) - (1 | g)")
+        assert [term.grouping for term in formula.random] == ["h"]
 
     def test_backticks_quote_names_and_formula_operators(self) -> None:
         formula = parse_formula(
@@ -147,6 +178,64 @@ class TestModelMatrices:
         assert len(matrices.random_structures) == 1
         assert matrices.random_structures[0].n_terms == 2
 
+    def test_no_intercept_categorical_fixed_effect_uses_all_levels(self) -> None:
+        data = pd.DataFrame(
+            {
+                "y": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+                "treatment": ["a", "b", "c", "a", "b", "c"],
+                "group": ["g1", "g1", "g1", "g2", "g2", "g2"],
+            }
+        )
+
+        for formula in (
+            "y ~ 0 + treatment + (1 | group)",
+            "y ~ treatment - 1 + (1 | group)",
+        ):
+            matrices = build_model_matrices(parse_formula(formula), data)
+
+            assert matrices.fixed_names == ["treatment.a", "treatment.b", "treatment.c"]
+            assert np.array_equal(matrices.X, np.tile(np.eye(3), (2, 1)))
+
+    def test_no_intercept_categorical_random_effect_uses_all_levels(self) -> None:
+        data = pd.DataFrame(
+            {
+                "y": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+                "treatment": ["a", "b", "c", "a", "b", "c"],
+                "group": ["g1", "g1", "g1", "g2", "g2", "g2"],
+            }
+        )
+
+        matrices = build_model_matrices(
+            parse_formula("y ~ 1 + (0 + treatment | group)"),
+            data,
+        )
+
+        structure = matrices.random_structures[0]
+        assert structure.term_names == ["treatment.a", "treatment.b", "treatment.c"]
+        assert structure.n_terms == 3
+        assert np.array_equal(matrices.Z.toarray(), np.eye(6))
+
+    def test_categorical_effect_with_intercept_remains_reduced_rank(self) -> None:
+        data = pd.DataFrame(
+            {
+                "y": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+                "treatment": ["a", "b", "c", "a", "b", "c"],
+                "group": ["g1", "g1", "g1", "g2", "g2", "g2"],
+            }
+        )
+
+        matrices = build_model_matrices(
+            parse_formula("y ~ treatment + (1 + treatment | group)"),
+            data,
+        )
+
+        assert matrices.fixed_names == ["(Intercept)", "treatment.1", "treatment.2"]
+        assert matrices.random_structures[0].term_names == [
+            "(Intercept)",
+            "treatment.1",
+            "treatment.2",
+        ]
+
     def test_nested_group_labels_preserve_mixed_values(self) -> None:
         data = pd.DataFrame(
             {
@@ -173,6 +262,21 @@ class TestModelMatrices:
 
         assert matrices.fixed_names == ["(Intercept)", "x1", "x2", "x1:x2"]
         assert np.allclose(matrices.X[:, 3], data["x1"].to_numpy() * data["x2"].to_numpy())
+
+    def test_subtracted_interaction_is_absent_from_fixed_matrix(self) -> None:
+        data = pd.DataFrame(
+            {
+                "y": [1.0, 2.0, 3.0, 4.0],
+                "x1": [1.0, 2.0, 3.0, 4.0],
+                "x2": [2.0, 3.0, 4.0, 5.0],
+                "g": ["a", "a", "b", "b"],
+            }
+        )
+        formula = parse_formula("y ~ x1 * x2 - x1:x2 + (1 | g)")
+        matrices = build_model_matrices(formula, data)
+
+        assert matrices.fixed_names == ["(Intercept)", "x1", "x2"]
+        assert matrices.X.shape == (4, 3)
 
     def test_quoted_names_build_model_matrices(self) -> None:
         data = pd.DataFrame(

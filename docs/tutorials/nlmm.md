@@ -212,8 +212,12 @@ model.VarCorr()
 # Fitted values
 model.fitted()
 
-# Predictions for new data
+# Population-level predictions for new data. The predictor column used during
+# fitting is remembered automatically.
 model.predict(newdata=new_data)
+
+# Add fitted random effects for known groups; unseen groups use population values.
+model.predict(newdata=new_data, group_var="subject")
 ```
 
 ## Bootstrap Inference
@@ -221,10 +225,10 @@ model.predict(newdata=new_data)
 For confidence intervals on nonlinear parameters:
 
 ```python
-boot_result = mlm.bootstrap_nlmer(model, data, nsim=500)
+boot_result = mlm.bootstrap_nlmer(model, n_boot=500, seed=42)
 
 # Bootstrap CIs
-boot_result.confint()
+mlm.bootCI(boot_result, component="all")
 ```
 
 ## Custom Nonlinear Functions

@@ -10,8 +10,9 @@ A Python implementation of mixed-effects models inspired by R's [lme4](https://g
 - **lme4-style formula interface** - `(1 | group)`, `(x | group)`, `(x || group)`, nested and crossed effects
 - **Inference tools** - Profile likelihood, parametric bootstrap, Satterthwaite/Kenward-Roger degrees of freedom
 - **Model comparison** - ANOVA (including Type III), drop1, allFit
+- **Model validation** - Case-level and whole-group cross-validation with weighted scoring
 - **Power analysis** - powerSim, powerCurve for sample size planning
-- **Diagnostics** - Influence measures, Cook's distance, leverage, residual plots
+- **Diagnostics** - Dispersion and zero-inflation checks, influence measures, leverage, residual plots
 
 ## Quick Example
 
@@ -82,9 +83,9 @@ Complete documentation of all functions and classes:
 
 - [Models](api/models.md) - `lmer`, `glmer`, `nlmer`, control classes
 - [Results](api/results.md) - Result objects and their methods
-- [Inference](api/inference.md) - `anova`, `emmeans`, `bootMer`, profile likelihood
+- [Inference](api/inference.md) - Cross-validation, `anova`, `emmeans`, `bootMer`, profile likelihood
 - [Families](api/families.md) - Distribution families for GLMMs
-- [Diagnostics](api/diagnostics.md) - Influence measures and plots
+- [Diagnostics](api/diagnostics.md) - Dispersion, zero-inflation, influence measures, and plots
 - [Power](api/power.md) - `powerSim`, `powerCurve`, `extend`
 - [Datasets](api/datasets.md) - Built-in example datasets
 - [Utilities](api/utilities.md) - Helper functions and lme4 compatibility

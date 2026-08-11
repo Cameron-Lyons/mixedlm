@@ -15,6 +15,8 @@ from mixedlm.utils.dataframe import concat_columns_as_string, get_column_numpy, 
 if TYPE_CHECKING:
     import pandas as pd
 
+    from mixedlm.inference.profile_types import ProfileResult
+
 
 class MerResultMixin:
     formula: Formula
@@ -57,7 +59,12 @@ class MerResultMixin:
             for j, term_name in enumerate(struct.term_names):
                 term_ranefs[term_name] = u_block[:, j]
 
-            result[struct.grouping_factor] = term_ranefs
+            group_ranefs = result.setdefault(struct.grouping_factor, {})
+            for term_name, values in term_ranefs.items():
+                if term_name in group_ranefs:
+                    group_ranefs[term_name] = group_ranefs[term_name] + values
+                else:
+                    group_ranefs[term_name] = values
 
         return result
 
@@ -153,7 +160,10 @@ class MerResultMixin:
 
         random_terms: dict[str, list[str]] = {}
         for struct in self.matrices.random_structures:
-            random_terms[struct.grouping_factor] = list(struct.term_names)
+            group_terms = random_terms.setdefault(struct.grouping_factor, [])
+            for term_name in struct.term_names:
+                if term_name not in group_terms:
+                    group_terms.append(term_name)
 
         fixed_variables: set[str] = set()
         for term in formula.fixed.terms:
@@ -185,23 +195,34 @@ class MerResultMixin:
     def _condvar_from_cov(
         self, cond_cov: NDArray[np.floating]
     ) -> dict[str, dict[str, NDArray[np.floating]]]:
-        result: dict[str, dict[str, NDArray[np.floating]]] = {}
+        term_indices: dict[str, dict[str, list[NDArray[np.integer]]]] = {}
         u_idx = 0
 
         for struct in self.matrices.random_structures:
             n_levels = struct.n_levels
             n_terms = struct.n_terms
             n_u = n_levels * n_terms
-
-            block_cov = cond_cov[u_idx : u_idx + n_u, u_idx : u_idx + n_u]
-            block_diag = np.diag(block_cov).reshape(n_levels, n_terms)
-
-            term_vars: dict[str, NDArray[np.floating]] = {}
             for j, term_name in enumerate(struct.term_names):
-                term_vars[term_name] = block_diag[:, j]
-
-            result[struct.grouping_factor] = term_vars
+                indices = u_idx + np.arange(n_levels) * n_terms + j
+                group_indices = term_indices.setdefault(struct.grouping_factor, {})
+                group_indices.setdefault(term_name, []).append(indices)
             u_idx += n_u
+
+        result: dict[str, dict[str, NDArray[np.floating]]] = {}
+        for group_name, group_terms in term_indices.items():
+            term_vars: dict[str, NDArray[np.floating]] = {}
+            for term_name, index_parts in group_terms.items():
+                if len(index_parts) == 1:
+                    single_indices = np.asarray(index_parts[0], dtype=np.intp)
+                    term_vars[term_name] = cond_cov[single_indices, single_indices]
+                    continue
+
+                stacked_indices = np.vstack(index_parts)
+                variances = np.empty(stacked_indices.shape[1], dtype=np.float64)
+                for level_index, level_indices in enumerate(stacked_indices.T):
+                    variances[level_index] = np.sum(cond_cov[np.ix_(level_indices, level_indices)])
+                term_vars[term_name] = variances
+            result[group_name] = term_vars
 
         return result
 
@@ -327,17 +348,33 @@ class MerResultMixin:
         )
 
     def coef(self) -> dict[str, dict[str, NDArray[np.floating]]]:
-        ranefs = self.ranef()
+        ranef_result = self.ranef()
+        ranefs = ranef_result.values if isinstance(ranef_result, RanefResult) else ranef_result
         fixefs = self.fixef()
         result: dict[str, dict[str, NDArray[np.floating]]] = {}
 
+        random_only_terms: list[str] = []
+        for terms in ranefs.values():
+            for term_name in terms:
+                if term_name not in fixefs and term_name not in random_only_terms:
+                    random_only_terms.append(term_name)
+
+        n_levels_by_group = {
+            struct.grouping_factor: struct.n_levels for struct in self.matrices.random_structures
+        }
         for group, terms in ranefs.items():
-            group_coef: dict[str, NDArray[np.floating]] = {}
+            n_levels = n_levels_by_group[group]
+            group_coef: dict[str, NDArray[np.floating]] = {
+                term_name: np.zeros(n_levels, dtype=np.float64) for term_name in random_only_terms
+            }
+            group_coef.update(
+                {
+                    term_name: np.full(n_levels, value, dtype=np.float64)
+                    for term_name, value in fixefs.items()
+                }
+            )
             for term_name, ranef_vals in terms.items():
-                if term_name in fixefs:
-                    group_coef[term_name] = ranef_vals + fixefs[term_name]
-                else:
-                    group_coef[term_name] = ranef_vals
+                group_coef[term_name] += ranef_vals
             result[group] = group_coef
 
         return result
@@ -366,6 +403,39 @@ class MerResultMixin:
 
     def isNLMM(self) -> bool:
         return self._IS_NLMM
+
+    def isSingular(self, tol: float = 1e-4) -> bool:
+        raise NotImplementedError
+
+    def is_singular(self, tol: float = 1e-4) -> bool:
+        """Return whether any variance component is near its boundary."""
+        return self.isSingular(tol=tol)
+
+    def profile(
+        self,
+        which: str | list[str] | None = None,
+        n_points: int = 20,
+        level: float = 0.95,
+        n_jobs: int = 1,
+    ) -> dict[str, ProfileResult]:
+        """Compute fixed-effect likelihood profiles for this fitted model."""
+        from mixedlm.inference.profile import profile_glmer, profile_lmer
+        from mixedlm.models.glmer import GlmerResult
+        from mixedlm.models.lmer import LmerResult
+
+        if isinstance(self, LmerResult):
+            return profile_lmer(
+                self,
+                which=which,
+                n_points=n_points,
+                level=level,
+                n_jobs=n_jobs,
+            )
+        if isinstance(self, GlmerResult):
+            if n_jobs != 1:
+                raise ValueError("Parallel profiling is currently supported only for LmerResult")
+            return profile_glmer(self, which=which, n_points=n_points, level=level)
+        raise TypeError(f"Profiling is not supported for {type(self).__name__}")
 
     def _npar_count(self, include_sigma: bool = False) -> int:
         n = len(self.beta) + len(self.theta)

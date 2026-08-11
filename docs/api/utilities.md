@@ -59,7 +59,8 @@ c = mlm.coef(model)
 # Or: model.coef()
 ```
 
-**Returns:** Dictionary with combined fixed + random effects per group
+**Returns:** Nested dictionary mapping each grouping factor to all fixed and
+random-only coefficient names, with one combined value per grouping level.
 
 ### getME
 
@@ -200,6 +201,22 @@ Parse a model formula.
 
 ```python
 parsed = mlm.parse_formula("y ~ x + (x | g)")
+```
+
+### simulate_formula
+
+Simulate responses before fitting, using the same variance-parameter ordering
+and covariance structures as the model optimizers.
+
+```python
+formula = mlm.set_cov_type("y ~ x + (x | g)", "cs")
+simulated = mlm.simulate_formula(
+    formula,
+    data,
+    beta={"(Intercept)": 1.0, "x": 0.5},
+    theta=[0.8, 0.25],
+    seed=42,
+)
 ```
 
 ### findbars

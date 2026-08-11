@@ -6,7 +6,6 @@ use numpy::ndarray::{ArrayView1, ArrayView2};
 use pyo3::PyResult;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use rayon::prelude::*;
 
 use crate::blocked_chol::{BlockedCholesky, BlockedMatrix};
 use crate::linalg::LinalgError;
@@ -258,64 +257,51 @@ fn apply_dlambda_transpose_vector(
     result
 }
 
-fn compute_ztwz_entry(z: &CscMatrix<f64>, weights: &[f64], j: usize, k: usize) -> f64 {
-    let col_j_start = z.col_offsets()[j];
-    let col_j_end = z.col_offsets()[j + 1];
-    let col_k_start = z.col_offsets()[k];
-    let col_k_end = z.col_offsets()[k + 1];
+fn compute_ztwz_sparse(z: &CscMatrix<f64>, weights: &[f64]) -> Mat<f64> {
+    let n = z.nrows();
+    let q = z.ncols();
+    let nnz = z.values().len();
+    let mut row_offsets = vec![0_usize; n + 1];
 
-    let mut sum = 0.0;
-    let mut idx_j = col_j_start;
-    let mut idx_k = col_k_start;
+    for &row in z.row_indices() {
+        row_offsets[row + 1] += 1;
+    }
+    for row in 0..n {
+        row_offsets[row + 1] += row_offsets[row];
+    }
 
-    while idx_j < col_j_end && idx_k < col_k_end {
-        let row_j = z.row_indices()[idx_j];
-        let row_k = z.row_indices()[idx_k];
+    let mut next_position = row_offsets[..n].to_vec();
+    let mut row_columns = vec![0_usize; nnz];
+    let mut row_values = vec![0.0; nnz];
 
-        if row_j == row_k {
-            sum += z.values()[idx_j] * weights[row_j] * z.values()[idx_k];
-            idx_j += 1;
-            idx_k += 1;
-        } else if row_j < row_k {
-            idx_j += 1;
-        } else {
-            idx_k += 1;
+    for column in 0..q {
+        for index in z.col_offsets()[column]..z.col_offsets()[column + 1] {
+            let row = z.row_indices()[index];
+            let position = next_position[row];
+            row_columns[position] = column;
+            row_values[position] = z.values()[index];
+            next_position[row] += 1;
         }
     }
 
-    sum
-}
-
-fn compute_ztwz_sparse(z: &CscMatrix<f64>, weights: &[f64], q: usize) -> Mat<f64> {
     let mut ztwz = Mat::zeros(q, q);
 
-    if q <= 50 {
-        for j in 0..q {
-            for k in j..q {
-                let val = compute_ztwz_entry(z, weights, j, k);
-                ztwz[(j, k)] = val;
-                if j != k {
-                    ztwz[(k, j)] = val;
-                }
-            }
-        }
-    } else {
-        #[cfg(miri)]
-        let iter = (0..q).into_iter();
-        #[cfg(not(miri))]
-        let iter = (0..q).into_par_iter();
-        let entries: Vec<(usize, usize, f64)> = iter
-            .flat_map(|j| {
-                (j..q)
-                    .map(|k| (j, k, compute_ztwz_entry(z, weights, j, k)))
-                    .collect::<Vec<_>>()
-            })
-            .collect();
+    for row in 0..n {
+        let start = row_offsets[row];
+        let end = row_offsets[row + 1];
+        let weight = weights[row];
 
-        for (j, k, val) in entries {
-            ztwz[(j, k)] = val;
-            if j != k {
-                ztwz[(k, j)] = val;
+        for left in start..end {
+            let left_column = row_columns[left];
+            let weighted_left = weight * row_values[left];
+
+            for right in left..end {
+                let right_column = row_columns[right];
+                let value = weighted_left * row_values[right];
+                ztwz[(left_column, right_column)] += value;
+                if left_column != right_column {
+                    ztwz[(right_column, left_column)] += value;
+                }
             }
         }
     }
@@ -484,7 +470,7 @@ pub fn profiled_deviance_impl(
     let ztwz = if let Some(cached_data) = ztwz_cache {
         mat_from_flat_array(cached_data, q)
     } else {
-        compute_ztwz_sparse(&z, &w, q)
+        compute_ztwz_sparse(&z, &w)
     };
 
     let blocked_v = BlockedMatrix::from_lambda_ztwz(&ztwz, &lambda_blocks, structures, true);
@@ -639,7 +625,7 @@ pub fn profiled_deviance_with_gradient_impl(
     let ztwz = if let Some(cached_data) = ztwz_cache {
         mat_from_flat_array(cached_data, q)
     } else {
-        compute_ztwz_sparse(&z, &w, q)
+        compute_ztwz_sparse(&z, &w)
     };
 
     let blocked_v = BlockedMatrix::from_lambda_ztwz(&ztwz, &lambda_blocks, structures, true);
@@ -796,7 +782,7 @@ pub fn compute_ztwz<'py>(
     let (w, _) = validate_prior_weights(weights.as_array(), z_shape.0)?;
     let q = z_shape.1;
 
-    let ztwz = compute_ztwz_sparse(&z, &w, q);
+    let ztwz = compute_ztwz_sparse(&z, &w);
 
     let mut flat_data = Vec::with_capacity(q * q);
     for i in 0..q {

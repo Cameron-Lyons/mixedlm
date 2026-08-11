@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+import mixedlm.inference.ddf as ddf_module
 import numpy as np
 import pandas as pd
 import pytest
@@ -140,6 +141,34 @@ class TestSatterthwaiteDF:
         result = satterthwaite_df(model)
 
         assert_allclose(result.df, [17.0, 17.0], rtol=0, atol=1e-3)
+
+    def test_gradient_cache_is_scoped_to_fitted_result(self) -> None:
+        other_data = DDF_DATA.copy()
+        other_data["x"] = np.linspace(-2.0, 2.0, len(other_data))
+
+        model = replace(
+            lmer("y ~ x + (1|group)", DDF_DATA),
+            theta=np.array([0.8]),
+            sigma=1.0,
+        )
+        other_model = replace(
+            lmer("y ~ x + (1|group)", other_data),
+            theta=model.theta.copy(),
+            sigma=model.sigma,
+        )
+
+        clear_vcov_grad_cache()
+        satterthwaite_df(model)
+        cached_entry = next(iter(ddf_module._vcov_grad_cache.values()))
+
+        satterthwaite_df(model)
+        assert len(ddf_module._vcov_grad_cache) == 1
+        assert next(iter(ddf_module._vcov_grad_cache.values())) is cached_entry
+
+        satterthwaite_df(other_model)
+        assert len(ddf_module._vcov_grad_cache) == 2
+        assert set(ddf_module._vcov_grad_cache) == {id(model), id(other_model)}
+        clear_vcov_grad_cache()
 
 
 class TestKenwardRogerDF:
