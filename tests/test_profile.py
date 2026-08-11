@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import pytest
-from mixedlm import lmer
+from mixedlm import families, glmer, lmer
 from mixedlm.inference.profile import (
     ProfileResult,
     as_dataframe,
@@ -14,6 +14,8 @@ from mixedlm.inference.profile import (
     varianceProf,
 )
 from numpy.testing import assert_allclose
+
+from tests._lmer_data import CBPP
 
 
 @pytest.fixture
@@ -71,6 +73,12 @@ class TestProfileResult:
 
 
 class TestProfileLmer:
+    def test_result_profile_method(self, lmer_result):
+        profiles = lmer_result.profile(which="Days", n_points=10)
+
+        assert set(profiles) == {"Days"}
+        assert len(profiles["Days"].values) == 10
+
     def test_profile_single_param(self, lmer_result):
         profiles = profile_lmer(lmer_result, which=["Days"], n_points=10)
         assert "Days" in profiles
@@ -96,6 +104,21 @@ class TestProfileLmer:
     def test_profile_level(self, lmer_result):
         profiles = profile_lmer(lmer_result, which=["Days"], level=0.90, n_points=10)
         assert profiles["Days"].level == 0.90
+
+    def test_glmer_result_profile_method(self):
+        result = glmer("y ~ period + (1 | herd)", CBPP, family=families.Binomial())
+        parameter = result.matrices.fixed_names[0]
+
+        profiles = result.profile(which=parameter, n_points=8)
+
+        assert set(profiles) == {parameter}
+        assert len(profiles[parameter].values) == 8
+
+    def test_glmer_result_profile_rejects_parallel_jobs(self):
+        result = glmer("y ~ period + (1 | herd)", CBPP, family=families.Binomial())
+
+        with pytest.raises(ValueError, match="only for LmerResult"):
+            result.profile(n_jobs=2)
 
 
 class TestLogProf:
