@@ -92,10 +92,14 @@ class TestSleepstudyGolden:
 
         normal = pvalues(model, method="normal")
         satterthwaite = pvalues(model, method="Satterthwaite")
-        assert normal["(Intercept)"] == pytest.approx(0.0, abs=0.0)
-        assert normal["Days"] == pytest.approx(9.118483745851336e-12, rel=1e-10)
-        assert satterthwaite["(Intercept)"] == pytest.approx(0.0, abs=0.0)
-        assert satterthwaite["Days"] == pytest.approx(1.744924205127063e-10, rel=1e-10)
+        kenward_roger = pvalues(model, method="Kenward-Roger")
+
+        assert normal["(Intercept)"] == pytest.approx(4.409011734024056e-300, rel=1e-10)
+        assert normal["Days"] == pytest.approx(9.118459226341482e-12, rel=1e-10)
+        assert satterthwaite["(Intercept)"] == pytest.approx(1.0751823526652316e-17, rel=1e-10)
+        assert satterthwaite["Days"] == pytest.approx(2.982985321028681e-06, rel=1e-10)
+        assert kenward_roger["(Intercept)"] == pytest.approx(1.0751823526652316e-17, rel=1e-10)
+        assert kenward_roger["Days"] == pytest.approx(2.982985321028681e-06, rel=1e-10)
 
 
 @pytest.mark.filterwarnings("ignore:Model is singular")

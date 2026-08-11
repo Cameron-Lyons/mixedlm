@@ -149,26 +149,36 @@ class GlmerResult(MerResultMixin):
             information_inv=symmetric_inverse(information),
         )
 
-    def _compute_condVar(self) -> dict[str, dict[str, NDArray[np.floating]]]:
-        projection = self._working_projection
-        if projection.lambda_matrix is None:
+    def _compute_condVar(
+        self, include_cov: bool = False
+    ) -> dict[str, dict[str, NDArray[np.floating]]]:
+        from mixedlm.utils.variance import _conditional_variance_blocks
+
+        q = self.matrices.n_random
+        if q == 0:
             return {}
 
-        lambda_matrix = projection.lambda_matrix
-        ZtWZ = projection.weighted_Z.T @ projection.weighted_Z
-        V = lambda_matrix.T @ ZtWZ @ lambda_matrix
-        V = V + sparse.eye(self.matrices.n_random, format="csc")
+        Lambda = _build_lambda(self.theta, self.matrices.random_structures)
 
-        V_dense = V.toarray() if sparse.issparse(V) else V
-        Lambda_dense = lambda_matrix.toarray()
+        eta = self.linear_predictor()
+        mu = self.family.link.inverse(eta)
+        if hasattr(self.family, "clamp_mu"):
+            mu = self.family.clamp_mu(mu)
+        else:
+            mu = np.clip(mu, 1e-10, 1 - 1e-10)
 
-        try:
-            V_inv_Lambda_t = linalg.solve(V_dense, Lambda_dense.T, assume_a="pos")
-        except linalg.LinAlgError:
-            V_inv_Lambda_t = linalg.lstsq(V_dense, Lambda_dense.T)[0]
+        W = self.family.weights(mu) * self.matrices.weights
+        W = np.maximum(W, 1e-10)
+        weighted_z = self.matrices.Z.multiply(np.sqrt(W)[:, np.newaxis])
+        ztwz = weighted_z.T @ weighted_z
+        precision = Lambda.T @ ztwz @ Lambda + sparse.eye(q, format="csc")
 
-        cond_cov = Lambda_dense @ V_inv_Lambda_t
-        return self._condvar_from_cov(cond_cov)
+        return _conditional_variance_blocks(
+            precision,
+            Lambda,
+            self.matrices.random_structures,
+            include_cov=include_cov,
+        )
 
     def get_sigma(self) -> float:
         return 1.0

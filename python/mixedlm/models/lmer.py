@@ -163,18 +163,28 @@ class LmerResult(MerResultMixin):
             XtVinvX=np.asarray(information, dtype=np.float64),
         )
 
-    def _compute_condVar(self) -> dict[str, dict[str, NDArray[np.floating]]]:
+    def _compute_condVar(
+        self, include_cov: bool = False
+    ) -> dict[str, dict[str, NDArray[np.floating]]]:
+        from mixedlm.utils.variance import _conditional_variance_blocks
+
         q = self.matrices.n_random
         if q == 0:
             return {}
 
-        projection = self._weighted_projection
-        assert projection.lambda_matrix is not None
-        assert projection.L_V is not None
-        Lambda_dense = projection.lambda_matrix.toarray()
-        V_inv_Lambda_t = linalg.cho_solve((projection.L_V, True), Lambda_dense.T)
-        cond_cov = self.sigma**2 * Lambda_dense @ V_inv_Lambda_t
-        return self._condvar_from_cov(cond_cov)
+        Lambda = _build_lambda(self.theta, self.matrices.random_structures)
+        sqrt_weights = np.sqrt(self.matrices.weights)
+        weighted_z = self.matrices.Z.multiply(sqrt_weights[:, np.newaxis])
+        ztwz = weighted_z.T @ weighted_z
+        precision = Lambda.T @ ztwz @ Lambda + sparse.eye(q, format="csc")
+
+        return _conditional_variance_blocks(
+            precision,
+            Lambda,
+            self.matrices.random_structures,
+            scale=self.sigma**2,
+            include_cov=include_cov,
+        )
 
     def get_sigma(self) -> float:
         return self.sigma
