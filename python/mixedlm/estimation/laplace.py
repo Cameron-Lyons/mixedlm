@@ -718,8 +718,6 @@ class GLMMOptimizer:
         self.verbose = verbose
         self.nAGQ = nAGQ
         self.n_theta = _count_theta(matrices.random_structures)
-        self._beta_cache: NDArray[np.floating] | None = None
-        self._u_cache: NDArray[np.floating] | None = None
 
     def get_start_theta(self) -> NDArray[np.floating]:
         theta_list: list[float] = []
@@ -740,23 +738,15 @@ class GLMMOptimizer:
 
     def objective(self, theta: NDArray[np.floating]) -> float:
         if self.nAGQ > 1:
-            dev, beta, u = adaptive_gh_deviance_fast(
+            dev, _, _ = adaptive_gh_deviance_fast(
                 theta,
                 self.matrices,
                 self.family,
                 nAGQ=self.nAGQ,
-                beta_start=self._beta_cache,
-                u_start=self._u_cache,
             )
         else:
-            dev, beta, u = laplace_deviance_fast(
-                theta, self.matrices, self.family, self._beta_cache, self._u_cache
-            )
-        if np.isfinite(dev) and np.all(np.isfinite(beta)) and np.all(np.isfinite(u)):
-            self._beta_cache = beta
-            self._u_cache = u
-            return dev
-        return np.inf
+            dev, _, _ = laplace_deviance_fast(theta, self.matrices, self.family)
+        return dev
 
     def optimize(
         self,
@@ -767,9 +757,6 @@ class GLMMOptimizer:
     ) -> GLMMOptimizationResult:
         if start is None:
             start = self.get_start_theta()
-
-        self._beta_cache = None
-        self._u_cache = None
 
         bounds = _build_theta_bounds(
             self.matrices.random_structures, len(start), eps=_CHOLESKY_REGULARIZATION
@@ -803,13 +790,9 @@ class GLMMOptimizer:
                 self.matrices,
                 self.family,
                 nAGQ=self.nAGQ,
-                beta_start=self._beta_cache,
-                u_start=self._u_cache,
             )
         else:
-            final_dev, beta, u = laplace_deviance_fast(
-                theta_opt, self.matrices, self.family, self._beta_cache, self._u_cache
-            )
+            final_dev, beta, u = laplace_deviance_fast(theta_opt, self.matrices, self.family)
 
         return GLMMOptimizationResult(
             theta=theta_opt,

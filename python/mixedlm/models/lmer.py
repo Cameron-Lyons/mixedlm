@@ -5,7 +5,7 @@ from functools import cached_property
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 import numpy as np
-from numpy.typing import NDArray
+from numpy.typing import ArrayLike, NDArray
 from scipy import linalg, sparse, stats
 
 if TYPE_CHECKING:
@@ -310,6 +310,7 @@ class LmerResult(MerResultMixin):
         se_fit: bool = False,
         interval: str = "none",
         level: float = 0.95,
+        offset: ArrayLike | str | None = None,
     ) -> NDArray[np.floating] | PredictResult:
         """Generate predictions from the fitted model.
 
@@ -327,6 +328,9 @@ class LmerResult(MerResultMixin):
             Type of interval: "none", "confidence", or "prediction".
         level : float, default 0.95
             Confidence level for intervals.
+        offset : array-like, scalar, or str, optional
+            Offset for new-data predictions. A string selects a column from
+            ``newdata``. Scalars are broadcast to every row.
 
         Returns
         -------
@@ -345,6 +349,8 @@ class LmerResult(MerResultMixin):
         pred_matrices: ModelMatrices | None = None
 
         if newdata is None:
+            if offset is not None:
+                raise ValueError("Prediction offset can only be supplied with newdata.")
             if include_re:
                 pred = self._fitted_values.copy()
             else:
@@ -354,7 +360,7 @@ class LmerResult(MerResultMixin):
             X = self.matrices.X
         else:
             X = self._prediction_fixed_matrix(newdata)
-            pred = X @ self.beta
+            pred = X @ self.beta + self._prediction_offset(newdata, offset)
 
             if include_re:
                 pred = self._add_random_effects_to_pred(pred, newdata, allow_new_levels)

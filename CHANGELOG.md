@@ -10,6 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - Grouped-binomial `successes / trials` responses with automatic trial weights and validation
 - Configurable named links and documented family/link helper APIs
+- Formula-driven simulation now supports every built-in response family
+- New-data LMM and GLMM predictions accept numeric, scalar, or column-based offsets
 - Backtick quoting for column names with spaces or formula operators
 - EM-REML now supports multiple random effects and random slopes (correlated and uncorrelated)
 - Automatic convergence recommendations in `summary()` output for non-converged and singular fits
@@ -23,6 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - EM-REML algorithm generalized from single random intercept to arbitrary unstructured covariance models
 - Replaced the Py-BOBYQA dependency and default optimizer with SciPy COBYQA
 - Reduced unused and redundant Python and Rust dependencies
+- Top-level public exports now load on demand to reduce startup time and memory use
 - Vectorized pandas nested-group construction for faster large model setup
 - Consolidated duplicate CI and security checks while preserving coverage
 
@@ -39,6 +42,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - Canonical Gamma and inverse-Gaussian variants now simulate from their family distributions
 - LMM and GLMM simulations now preserve model offsets in generated responses
+- Formula simulation now preserves global random state and random-effect coefficient ordering
+- Nonlinear mixed-model optimization now uses a deterministic profiled Laplace deviance with consistent relative covariance scaling
 - GLMM PIRLS, Laplace, and adaptive-quadrature calculations now use the covariance factor
   in spherical random-effect coordinates, with consistent likelihood normalization and
   deterministic outer optimization
