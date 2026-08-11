@@ -40,6 +40,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Nonlinear mixed models now apply offsets consistently to responses, fitted values, simulations, refits, covariance estimates, and leverage diagnostics
 
 ### Fixed
+- Nonlinear mixed-model optimization now uses a deterministic profiled Laplace deviance with consistent relative covariance scaling
 - GLMM PIRLS, Laplace, and adaptive-quadrature calculations now use the covariance factor
   in spherical random-effect coordinates, with consistent likelihood normalization and
   deterministic outer optimization
