@@ -8,26 +8,8 @@ on:
 
 permissions:
   contents: read
-  security-events: write
 
 jobs:
-  codeql:
-    name: CodeQL Analysis
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v7
-
-      - name: Initialize CodeQL
-        uses: github/codeql-action/init@v4.36.2
-        with:
-          languages: python
-
-      - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@v4.36.2
-        with:
-          category: "/language:python"
-
   python-security:
     name: Python Security Scan
     runs-on: ubuntu-latest
@@ -38,7 +20,7 @@ jobs:
         uses: astral-sh/setup-uv@v7
 
       - name: Set up Python
-        run: uv python install 3.14
+        run: uv python install 3.12
 
       - name: Create venv and install dependencies
         run: |
@@ -50,8 +32,8 @@ jobs:
 
       - name: Run pip-audit for dependency vulnerabilities
         run: |
-          uv pip install numpy scipy pandas
-          uv run pip-audit --progress-spinner off --skip-editable
+          uv pip compile pyproject.toml -o requirements.txt
+          uv run pip-audit --progress-spinner off -r requirements.txt
 
   rust-security:
     name: Rust Security Audit

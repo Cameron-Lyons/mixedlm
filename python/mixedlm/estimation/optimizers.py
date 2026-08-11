@@ -52,24 +52,18 @@ def has_cobyqa() -> bool:
     return True
 
 
-def has_nlopt() -> bool:
-    if not _HAS_NLOPT:
-        return False
-    try:
-        _load_nlopt()
-    except ImportError:
-        return False
-    return True
-
-
-def _load_nlopt() -> Any:
+def _load_nlopt() -> Any | None:
     try:
         import nlopt
     except ImportError:
-        raise ImportError(
-            "nlopt is required for nloptwrap optimizers. Install it with: pip install nlopt"
-        ) from None
+        return None
     return nlopt
+
+
+def has_nlopt() -> bool:
+    if not _HAS_NLOPT:
+        return False
+    return _load_nlopt() is not None
 
 
 def available_optimizers() -> list[str]:
@@ -170,6 +164,10 @@ def _optimize_nlopt(
     algorithm: str,
 ) -> OptimizeResult:
     nlopt = _load_nlopt()
+    if nlopt is None:
+        raise ImportError(
+            "nlopt is required for nloptwrap optimizers. Install it with: pip install nlopt"
+        )
 
     n = len(x0)
     lower, upper = _convert_bounds_to_arrays(bounds, n)
