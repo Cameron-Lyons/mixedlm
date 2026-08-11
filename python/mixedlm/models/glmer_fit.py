@@ -13,6 +13,7 @@ from mixedlm.formula.terms import Formula
 from mixedlm.matrices.design import build_model_matrices
 from mixedlm.models.glmer import GlmerResult
 from mixedlm.models.shared_utils import resolve_optional_vector
+from mixedlm.utils.dataframe import ensure_dataframe
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -54,6 +55,7 @@ class GlmerMod:
             offset=offset,
             na_action=na_action,
             contrasts=contrasts,
+            grouped_binomial=isinstance(self.family, Binomial),
         )
 
     def fit(
@@ -139,7 +141,7 @@ class GlmerMod:
 
 
 def glmer_nb(
-    formula: str,
+    formula: Formula | str,
     data: pd.DataFrame,
     verbose: int = 0,
     nAGQ: int = 1,
@@ -159,8 +161,8 @@ def glmer_nb(
 
     Parameters
     ----------
-    formula : str
-        Model formula in lme4 syntax (e.g., "y ~ x + (1|group)").
+    formula : Formula or str
+        Parsed formula or model formula in lme4 syntax (e.g., "y ~ x + (1|group)").
     data : DataFrame
         Data containing the variables in the formula.
     verbose : int, default 0
@@ -225,7 +227,7 @@ def glmer_nb(
 
 
 def glmer(
-    formula: str,
+    formula: Formula | str,
     data: pd.DataFrame,
     family: Family | None = None,
     verbose: int = 0,
@@ -241,8 +243,8 @@ def glmer(
 
     Parameters
     ----------
-    formula : str
-        Model formula in lme4 syntax (e.g., "y ~ x + (1|group)").
+    formula : Formula or str
+        Parsed formula or model formula in lme4 syntax (e.g., "y ~ x + (1|group)").
     data : DataFrame
         Data containing the variables in the formula.
     family : Family, optional
@@ -287,11 +289,19 @@ def glmer(
     >>> ctrl = glmerControl(optimizer="Nelder-Mead", maxiter=2000)
     >>> result = glmer("y ~ x + (1|group)", data, family=Binomial(), control=ctrl)
     """
+    parsed_formula = parse_formula(formula) if isinstance(formula, str) else formula
+    required_columns = set(parsed_formula.all_variables)
+    if isinstance(weights, str):
+        required_columns.add(weights)
+    if isinstance(offset, str):
+        required_columns.add(offset)
+    data = ensure_dataframe(data, columns=sorted(required_columns))
+
     weights_arr = resolve_optional_vector(data, weights, "weights")
     offset_arr = resolve_optional_vector(data, offset, "offset")
 
     model = GlmerMod(
-        formula,
+        parsed_formula,
         data,
         family=family,
         verbose=verbose,

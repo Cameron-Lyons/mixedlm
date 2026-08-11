@@ -58,12 +58,20 @@ names also work with formula utilities and model updates.
 
 ### Polynomial Terms
 
+Use `I()` with a non-negative integer exponent to include raw polynomial columns:
+
 ```python
 # Quadratic
 "y ~ x + I(x**2)"
 
-# Using poly() equivalent
+# Quadratic and cubic
 "y ~ x + I(x**2) + I(x**3)"
+
+# Raw polynomial interaction
+"y ~ I(x**2) * z"
+
+# Polynomial random slope
+"y ~ x + (I(x**2) | group)"
 ```
 
 ### Removing the Intercept
@@ -97,7 +105,13 @@ Categorical variables are automatically dummy-coded:
 ```python
 # Treatment with 3 levels -> 2 dummy variables
 "y ~ treatment"
+
+# Without an intercept, estimate one coefficient for every level
+"y ~ 0 + treatment"
 ```
+
+The same rule applies to categorical random effects: `(0 + treatment | group)`
+creates one random-effect column per treatment level.
 
 ## Random Effects
 

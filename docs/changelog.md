@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `tidy()` and `glance()` analysis-ready reports for linear, generalized, and nonlinear fits
+- Arbitrary linear fixed-effect hypothesis tests with named or matrix constraints
+- Grouped-binomial `successes / trials` responses with automatic trial weights and validation
+- Configurable named links and documented family/link helper APIs
+- Formula-driven simulation now supports every built-in response family
+- New-data LMM and GLMM predictions accept numeric, scalar, or column-based offsets
+- Vectorized AIC/AICc/BIC model rankings with normalized weights and evidence sets
+- Nakagawa marginal/conditional R² and adjusted/unadjusted ICC for all model families
+- Weighted VIF/GVIF, tolerance, severity, and condition diagnostics for all model types
+- Vectorized Pearson dispersion and observed-versus-expected zero diagnostics for GLMMs
 - Dependency-free case-level and grouped cross-validation for LMMs and GLMMs
 - EM-REML now supports multiple random effects and random slopes (correlated and uncorrelated)
 - Automatic convergence recommendations in `summary()` output for non-converged and singular fits
@@ -17,10 +27,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Root-level CHANGELOG.md
 
 ### Changed
+- Multi-draw GLMM simulation now batches random effects and response generation
 - Vectorized grouping-level factorization and nested-key construction for sparse designs
 - EM-REML algorithm generalized from single random intercept to arbitrary unstructured covariance models
 - Replaced the Py-BOBYQA dependency and default optimizer with SciPy COBYQA
 - Reduced unused and redundant Python and Rust dependencies
+- Top-level public exports now load on demand to reduce startup time and memory use
 - Vectorized pandas nested-group construction for faster large model setup
 - Consolidated duplicate CI and security checks while preserving coverage
 
@@ -28,13 +40,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Poisson and other unbounded GLMM families no longer clamp fitted means below one
 - Unsupported family and link combinations no longer route through the native fast path
 
-### Fixed
+- LMM profiling now applies fitted random effects before computing the penalized residual sum of squares, preventing variance estimates from being biased toward zero
+- LMM likelihood reporting and fixed-effect profiles now use the corrected profiled criterion consistently
 - Synthetic dataset loaders no longer reset NumPy's global random state
-
-### Fixed
 - Nonlinear mixed models now apply offsets consistently to responses, fitted values, simulations, refits, covariance estimates, and leverage diagnostics
 
 ### Fixed
+- Canonical Gamma and inverse-Gaussian variants now simulate from their family distributions
+- LMM and GLMM simulations now preserve model offsets in generated responses
+- Formula simulation now preserves global random state and random-effect coefficient ordering
+- Nonlinear mixed-model optimization now uses a deterministic profiled Laplace deviance with consistent relative covariance scaling
+- GLMM PIRLS, Laplace, and adaptive-quadrature calculations now use the covariance factor
+  in spherical random-effect coordinates, with consistent likelihood normalization and
+  deterministic outer optimization
+- LMM prediction uncertainty now includes conditional random-effect covariance, fixed/random cross-covariance, correlated slopes, and unseen-group prior variance
+- Covariance tables, PCA diagnostics, singularity checks, and parameter bounds now honor compound-symmetry and AR(1) random-effect structures
 - Gamma GLMMs now minimize the non-negative unit deviance instead of its negative
 - Poisson and other unbounded GLMM families no longer clamp fitted means below one
 - Unsupported family and link combinations no longer route through the native fast path

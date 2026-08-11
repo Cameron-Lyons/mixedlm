@@ -18,11 +18,15 @@ A Python implementation of mixed-effects models inspired by R's [lme4](https://g
 - **Generalized Linear Mixed Models (GLMM)** via `glmer()` - Laplace approximation and adaptive Gauss-Hermite quadrature
 - **Nonlinear Mixed Models (NLMM)** via `nlmer()` - Self-starting models (SSasymp, SSlogis, SSmicmen)
 - **Formula interface** - lme4-style formulas with random effects syntax
-- **Inference tools** - Profile likelihood, parametric bootstrap, confidence intervals, Satterthwaite/Kenward-Roger degrees of freedom
+- **Tidy reporting** - Analysis-ready coefficient, random-effect, and model-fit tables
+- **Inference tools** - Linear hypotheses, profile likelihood, bootstrap, confidence intervals, Satterthwaite/Kenward-Roger degrees of freedom
 - **Model comparison** - ANOVA (including Type III), drop1, allFit
+- **Model selection** - AIC/AICc/BIC rankings, normalized weights, and evidence sets
 - **Model validation** - Case-level and whole-group cross-validation with weighted scoring
 - **Power analysis** - powerSim, powerCurve for sample size planning
-- **Diagnostics** - Influence measures, Cook's distance, leverage
+- **Diagnostics** - Dispersion and zero-inflation checks, influence measures, Cook's distance, leverage, VIF/GVIF, condition indices
+- **Fast startup** - Public objects are loaded on demand, so lightweight imports avoid the modeling stack
+- **Fit metrics** - Nakagawa marginal/conditional R² and adjusted/unadjusted ICC
 
 ## Installation
 
@@ -61,6 +65,13 @@ result.coef()       # Combined coefficients
 # Inference
 result.confint(method="profile")  # Profile confidence intervals
 result.confint(method="boot")     # Bootstrap confidence intervals
+# Analysis-ready pandas tables
+result.tidy(conf_int=True)          # Fixed effects, uncertainty, tests
+result.tidy(effects="all")         # Fixed, random parameters, random values
+result.glance()                     # One-row model fit summary
+mlm.r2_nakagawa(result)            # Marginal and conditional R²
+mlm.icc(result)                     # Adjusted and unadjusted ICC
+mlm.check_collinearity(result)     # VIF/GVIF and condition diagnostics
 ```
 
 ### Using Polars
@@ -69,7 +80,7 @@ result.confint(method="boot")     # Bootstrap confidence intervals
 import polars as pl
 import mixedlm as mlm
 
-# Works directly with polars DataFrames
+# Works directly with eager or lazy polars frames
 data = pl.DataFrame({
     "y": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
     "x": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
@@ -78,6 +89,9 @@ data = pl.DataFrame({
 
 result = mlm.lmer("y ~ x + (1 | group)", data)
 print(result.summary())
+
+# LazyFrame plans are projected to model columns before one-time collection
+lazy_result = mlm.lmer("y ~ x + (1 | group)", data.lazy())
 ```
 
 ### Generalized Linear Mixed Model
@@ -120,12 +134,17 @@ pvals = pvalues_with_ddf(result)
 ### Model Comparison
 
 ```python
-# Fit nested models
-model1 = mlm.lmer("y ~ x + (1 | group)", data)
-model2 = mlm.lmer("y ~ x + z + (1 | group)", data)
+# Fit nested models with maximum likelihood for valid comparison
+model1 = mlm.lmer("y ~ x + (1 | group)", data, REML=False)
+model2 = mlm.lmer("y ~ x + z + (1 | group)", data, REML=False)
 
 # Likelihood ratio test
 mlm.anova(model1, model2)
+
+# Rank candidate models with small-sample correction and normalized weights
+ranking = mlm.model_selection(model1, model2, criterion="AICc")
+print(ranking.to_dataframe())
+best_model = ranking.best_model
 
 # Type III ANOVA for a single model
 mlm.anova_type3(model1)
@@ -178,6 +197,14 @@ mixedlm supports lme4-style formula syntax for specifying random effects:
 | `(1 \| group1/group2)` | Nested random effects |
 | `(1 \| group1) + (1 \| group2)` | Crossed random effects |
 
+Structured covariance models can use compound symmetry or AR(1) correlation:
+
+```python
+formula = mlm.set_cov_type("y ~ time + (time | subject)", "ar1")
+model = mlm.lmer(formula, data)
+print(model.VarCorr())
+```
+
 ## API Reference
 
 ### Model Fitting
@@ -202,6 +229,8 @@ mixedlm supports lme4-style formula syntax for specifying random effects:
 | `logLik()` | Log-likelihood with df |
 | `AIC()` / `BIC()` | Information criteria |
 | `summary(ddf_method)` | Model summary with optional p-values |
+| `tidy(effects, conf_int)` | Analysis-ready parameter table |
+| `glance()` | One-row model fit summary |
 | `getME(name)` | Extract model components (X, Z, theta, Lambda, etc.) |
 | `get_deviance_components()` | Breakdown of deviance into components |
 
@@ -228,8 +257,8 @@ mixedlm supports lme4-style formula syntax for specifying random effects:
 - `Gaussian()` - Normal distribution (identity link)
 - `Binomial()` - Binomial distribution (logit link)
 - `Poisson()` - Poisson distribution (log link)
-- `Gamma()` - Gamma distribution (inverse link)
-- `InverseGaussian()` - Inverse Gaussian (1/mu^2 link)
+- `Gamma()` - Gamma distribution (log link; configurable)
+- `InverseGaussian()` - Inverse Gaussian (log link; configurable)
 - `NegativeBinomial(theta)` - Negative binomial (log link)
 - `CustomFamily` - Base class for user-defined families
 

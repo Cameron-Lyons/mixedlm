@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+from mixedlm.nlme.models import SSasymp
 from numpy.testing import assert_allclose
 from scipy import sparse
 
 try:
     from mixedlm._rust import (
+        adaptive_gauss_hermite_1d,
         adaptive_gh_deviance,
         compute_zu,
         gauss_hermite,
@@ -18,6 +20,9 @@ try:
         sparse_cholesky_logdet,
         sparse_cholesky_solve,
         update_cholesky_factor,
+    )
+    from mixedlm._rust import (
+        nlmm_deviance as rust_nlmm_deviance,
     )
 
     _HAS_RUST = True
@@ -56,6 +61,27 @@ class TestPyArrayLikeInputs:
             "n_terms": [1],
             "correlated": [False],
         }
+
+    def test_nlmm_weights_are_optional_and_effective(self):
+        groups = np.repeat(np.arange(4), 8)
+        x = np.tile(np.linspace(0.0, 5.0, 8), 4)
+        phi = np.array([10.0, 0.5, -0.5])
+        b = np.zeros((4, 1))
+        theta = np.array([1.0])
+        model = SSasymp()
+        y = np.concatenate(
+            [model.predict(phi + np.array([effect, 0.0, 0.0]), x[:8]) for effect in (-1, 0, 1, 2)]
+        )
+
+        default = rust_nlmm_deviance(theta, y, x, groups, "ssasymp", phi, b, [0], 0.3)
+        unit_weighted = rust_nlmm_deviance(
+            theta, y, x, groups, "ssasymp", phi, b, [0], 0.3, np.ones(len(y))
+        )
+        weights = np.linspace(0.25, 2.0, len(y))
+        weighted = rust_nlmm_deviance(theta, y, x, groups, "ssasymp", phi, b, [0], 0.3, weights)
+
+        assert default[0] == pytest.approx(unit_weighted[0], abs=1e-12)
+        assert weighted[0] != pytest.approx(default[0])
 
     def test_profiled_deviance_with_numpy_arrays(self, simple_lmm_data):
         d = simple_lmm_data
@@ -221,6 +247,29 @@ class TestDirectRustFunctions:
         assert len(nodes) == 50
         assert all(np.isfinite(nodes))
         assert all(np.isfinite(weights))
+        assert_allclose(sum(weights), np.sqrt(np.pi), rtol=1e-12)
+
+    def test_gauss_hermite_high_order_moments(self):
+        nodes, weights = map(np.asarray, gauss_hermite(200))
+        assert_allclose(weights.sum(), np.sqrt(np.pi), rtol=1e-12)
+        assert_allclose((weights * nodes**2).sum(), np.sqrt(np.pi) / 2, rtol=1e-12)
+
+    def test_adaptive_gauss_hermite_rejects_mismatched_lengths(self):
+        with pytest.raises(ValueError, match="same length"):
+            adaptive_gauss_hermite_1d([0.0, 1.0], [1.0], 0.0, 1.0)
+
+    @pytest.mark.parametrize("scale", [0.0, -1.0, np.nan, np.inf])
+    def test_adaptive_gauss_hermite_rejects_invalid_scale(self, scale):
+        with pytest.raises(ValueError, match="scale"):
+            adaptive_gauss_hermite_1d([0.0], [1.0], 0.0, scale)
+
+    @pytest.mark.parametrize(
+        ("nodes", "weights", "mode"),
+        [([np.nan], [1.0], 0.0), ([0.0], [np.inf], 0.0), ([0.0], [1.0], np.inf)],
+    )
+    def test_adaptive_gauss_hermite_rejects_nonfinite_inputs(self, nodes, weights, mode):
+        with pytest.raises(ValueError, match="finite"):
+            adaptive_gauss_hermite_1d(nodes, weights, mode, 1.0)
 
     def test_sparse_cholesky_solve_basic(self):
         A = sparse.csc_matrix(np.array([[4.0, 1.0], [1.0, 3.0]]))
@@ -544,6 +593,34 @@ class TestGLMMFunctions:
         assert converged
         assert np.isfinite(deviance)
         assert_allclose(fitted, 5.0, rtol=1e-6)
+
+    def test_pirls_poisson_preserves_large_means(self, simple_glmm_data):
+        d = simple_glmm_data
+        rng = np.random.default_rng(123)
+        eta = 3.0 + 0.3 * d["x"][:, 1]
+        d["y"] = rng.poisson(np.exp(eta)).astype(float)
+
+        beta, u, deviance, converged = pirls(
+            d["y"],
+            d["x"],
+            d["z_data"],
+            d["z_indices"],
+            d["z_indptr"],
+            d["z_shape"],
+            d["weights"],
+            d["offset"],
+            d["theta"],
+            d["n_levels"],
+            d["n_terms"],
+            d["correlated"],
+            "poisson",
+            "log",
+        )
+
+        assert converged
+        assert np.isfinite(deviance)
+        assert 2.5 < beta[0] < 3.5
+        assert np.max(np.exp(d["x"] @ beta)) > 10
 
     def test_pirls_gaussian(self, simple_glmm_data):
         d = simple_glmm_data
@@ -1031,7 +1108,7 @@ class TestProfiledDevianceGradient:
             )
             grad_fd[i] = (dev_plus - dev_minus) / (2 * eps)
 
-        assert_allclose(grad, grad_fd, rtol=0.15)
+        assert_allclose(grad, grad_fd, rtol=1e-5, atol=1e-7)
 
     def test_gradient_multiple_theta(self):
         np.random.seed(42)
@@ -1107,7 +1184,7 @@ class TestProfiledDevianceGradient:
             )
             grad_fd[i] = (dev_plus - dev_minus) / (2 * eps)
 
-        assert_allclose(grad, grad_fd, rtol=0.15)
+        assert_allclose(grad, grad_fd, rtol=1e-5, atol=1e-7)
 
     def test_gradient_ml_vs_reml(self, simple_lmm_data):
         d = simple_lmm_data

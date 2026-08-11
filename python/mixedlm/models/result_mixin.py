@@ -1,21 +1,31 @@
 from __future__ import annotations
 
-from collections.abc import Iterator
-from typing import TYPE_CHECKING, Any, ClassVar
+from collections.abc import Iterator, Sequence
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 import numpy as np
-from numpy.typing import NDArray
+from numpy.typing import ArrayLike, NDArray
 from scipy import sparse
 
 from mixedlm.formula.terms import Formula
-from mixedlm.matrices.design import ModelMatrices, RandomEffectStructure
+from mixedlm.matrices.design import (
+    ModelMatrices,
+    RandomEffectStructure,
+    _normalize_grouped_binomial_response,
+)
 from mixedlm.models.lmer_types import ModelTerms, RanefResult
-from mixedlm.utils.dataframe import concat_columns_as_string, get_column_numpy, get_columns
+from mixedlm.utils.dataframe import (
+    concat_columns_as_string,
+    copy_dataframe,
+    get_column_numpy,
+    get_columns,
+)
 
 if TYPE_CHECKING:
     import pandas as pd
 
     from mixedlm.inference.profile_types import ProfileResult
+    from mixedlm.inference.reporting import MixedModelResult
 
 
 class MerResultMixin:
@@ -35,7 +45,9 @@ class MerResultMixin:
     def fixef(self) -> dict[str, float]:
         raise NotImplementedError
 
-    def _compute_condVar(self) -> dict[str, dict[str, NDArray[np.floating]]]:
+    def _compute_condVar(
+        self, include_cov: bool = False
+    ) -> dict[str, dict[str, NDArray[np.floating]]]:
         raise NotImplementedError
 
     def _fixef_dict(self, beta: NDArray[np.floating]) -> dict[str, float]:
@@ -131,12 +143,80 @@ class MerResultMixin:
             ) from None
         return X[:, fitted_indices]
 
-    def _model_frame(self) -> pd.DataFrame:
+    def _prediction_offset(
+        self,
+        newdata: pd.DataFrame,
+        offset: ArrayLike | str | None,
+    ) -> NDArray[np.floating]:
+        from mixedlm.utils.dataframe import (
+            dataframe_length,
+            ensure_dataframe,
+            get_column_numpy,
+            get_columns,
+        )
+
+        data = ensure_dataframe(newdata)
+        n_rows = dataframe_length(data)
+        if offset is None:
+            return np.zeros(n_rows, dtype=np.float64)
+
+        raw_offset: ArrayLike
+        if isinstance(offset, str):
+            if offset not in get_columns(data):
+                raise ValueError(f"New data is missing offset column '{offset}'.")
+            raw_offset = get_column_numpy(data, offset)
+        else:
+            raw_offset = offset
+
+        try:
+            values = np.asarray(raw_offset, dtype=np.float64)
+        except (TypeError, ValueError):
+            raise ValueError("Prediction offset must contain numeric values.") from None
+
+        if values.ndim == 0:
+            values = np.full(n_rows, float(values), dtype=np.float64)
+        elif values.ndim != 1:
+            raise ValueError("Prediction offset must be a scalar or one-dimensional array.")
+        elif len(values) != n_rows:
+            raise ValueError(
+                f"Prediction offset has length {len(values)}; expected {n_rows} for new data."
+            )
+
+        if not np.all(np.isfinite(values)):
+            raise ValueError("Prediction offset must contain only finite values.")
+        return values
+
+    def _model_frame(self) -> Any:
         import pandas as pd
 
         if self.matrices.frame is not None:
-            return self.matrices.frame.copy()
+            return copy_dataframe(self.matrices.frame)
         return pd.DataFrame({"y": self.matrices.y})
+
+    def tidy(
+        self,
+        effects: str | Sequence[str] = "fixed",
+        *,
+        conf_int: bool = False,
+        conf_level: float = 0.95,
+        ddf_method: str | None = "Satterthwaite",
+    ) -> pd.DataFrame:
+        """Return model components in an analysis-ready table."""
+        from mixedlm.inference.reporting import tidy
+
+        return tidy(
+            cast("MixedModelResult", self),
+            effects=effects,
+            conf_int=conf_int,
+            conf_level=conf_level,
+            ddf_method=ddf_method,
+        )
+
+    def glance(self) -> pd.DataFrame:
+        """Return one row of model-level fit statistics."""
+        from mixedlm.inference.reporting import glance
+
+        return glance(cast("MixedModelResult", self))
 
     def _weights_array(self, copy: bool = True) -> NDArray[np.floating]:
         return self.matrices.weights.copy() if copy else self.matrices.weights
@@ -154,7 +234,7 @@ class MerResultMixin:
         )
 
     def _build_model_terms(self, formula: Formula) -> ModelTerms:
-        from mixedlm.formula.terms import InteractionTerm, VariableTerm
+        from mixedlm.formula.terms import InteractionTerm, PowerTerm, VariableTerm
 
         fixed_terms = list(self.matrices.fixed_names)
 
@@ -167,18 +247,18 @@ class MerResultMixin:
 
         fixed_variables: set[str] = set()
         for term in formula.fixed.terms:
-            if isinstance(term, VariableTerm):
+            if isinstance(term, VariableTerm | PowerTerm):
                 fixed_variables.add(term.name)
             elif isinstance(term, InteractionTerm):
-                fixed_variables.update(term.variables)
+                fixed_variables.update(term.source_variables)
 
         random_variables: set[str] = set()
         for rterm in formula.random:
             for term in rterm.expr:
-                if isinstance(term, VariableTerm):
+                if isinstance(term, VariableTerm | PowerTerm):
                     random_variables.add(term.name)
                 elif isinstance(term, InteractionTerm):
-                    random_variables.update(term.variables)
+                    random_variables.update(term.source_variables)
 
         grouping_factors = {struct.grouping_factor for struct in self.matrices.random_structures}
 
@@ -229,30 +309,38 @@ class MerResultMixin:
     def _iter_random_cov_blocks(
         self, scale: float = 1.0
     ) -> Iterator[tuple[RandomEffectStructure, NDArray[np.floating]]]:
-        theta_idx = 0
+        from mixedlm.utils.variance import getL
 
-        for struct in self.matrices.random_structures:
-            q = struct.n_terms
+        level_factors = cast(
+            list[NDArray[np.floating]],
+            getL(self.theta, self.matrices.random_structures, as_blocks=True),
+        )
 
-            if struct.correlated:
-                n_theta = q * (q + 1) // 2
-                theta_block = self.theta[theta_idx : theta_idx + n_theta]
-                theta_idx += n_theta
-
-                L_block = np.zeros((q, q), dtype=np.float64)
-                idx = 0
-                for i in range(q):
-                    row_size = i + 1
-                    L_block[i, :row_size] = theta_block[idx : idx + row_size]
-                    idx += row_size
-
-                cov = L_block @ L_block.T
-            else:
-                theta_block = self.theta[theta_idx : theta_idx + q]
-                theta_idx += q
-                cov = np.diag(theta_block**2)
+        for struct, level_factor in zip(
+            self.matrices.random_structures, level_factors, strict=True
+        ):
+            cov = level_factor @ level_factor.T
 
             yield struct, cov * scale
+
+    def _is_singular_covariance(self, tol: float = 1e-4) -> bool:
+        if not np.isfinite(tol) or tol < 0:
+            raise ValueError("tol must be a finite, non-negative number")
+
+        threshold = tol**2
+        for _struct, cov in self._iter_random_cov_blocks():
+            if float(np.min(np.linalg.eigvalsh(cov), initial=np.inf)) < threshold:
+                return True
+        return False
+
+    def _theta_lower_bounds(self) -> NDArray[np.floating]:
+        from mixedlm.estimation.reml import _build_theta_bounds
+
+        bounds = _build_theta_bounds(self.matrices.random_structures, len(self.theta))
+        return np.asarray(
+            [lower if lower is not None else -np.inf for lower, _upper in bounds],
+            dtype=np.float64,
+        )
 
     def _random_effect_prediction_contrib(
         self,
@@ -327,6 +415,8 @@ class MerResultMixin:
         arr = np.asarray(newresp, dtype=np.float64)
         if len(arr) != self.matrices.n_obs:
             raise ValueError(f"newresp has length {len(arr)}, expected {self.matrices.n_obs}")
+        if self.matrices.trials is not None:
+            return _normalize_grouped_binomial_response(arr, self.matrices.trials)
         return arr
 
     def _clone_matrices_with_response_base(self, y: NDArray[np.floating]) -> ModelMatrices:
@@ -343,6 +433,7 @@ class MerResultMixin:
             offset=self.matrices.offset,
             frame=self.matrices.frame,
             na_info=self.matrices.na_info,
+            trials=self.matrices.trials,
             category_levels=self.matrices.category_levels,
             contrasts=self.matrices.contrasts,
         )

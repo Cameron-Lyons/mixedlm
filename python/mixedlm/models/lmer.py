@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import cached_property
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 import numpy as np
-from numpy.typing import NDArray
+from numpy.typing import ArrayLike, NDArray
 from scipy import linalg, sparse, stats
 
 if TYPE_CHECKING:
@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 
 from mixedlm.estimation.reml import LMMOptimizer, _build_lambda, _count_theta
 from mixedlm.formula.terms import Formula
-from mixedlm.matrices.design import ModelMatrices
+from mixedlm.matrices.design import ModelMatrices, build_random_matrix
 from mixedlm.models.lmer_types import (
     LogLik,
     ModelTerms,
@@ -24,7 +24,21 @@ from mixedlm.models.lmer_types import (
     VarCorrGroup,
 )
 from mixedlm.models.result_mixin import MerResultMixin
+from mixedlm.models.shared_utils import symmetric_inverse
 from mixedlm.utils import _format_pvalue, _get_signif_code
+
+
+@dataclass
+class _WeightedProjection:
+    """Reusable weighted mixed-model projection factors."""
+
+    sqrt_weights: NDArray[np.float64]
+    weighted_X: NDArray[np.float64]
+    weighted_Z: sparse.csc_matrix
+    lambda_matrix: sparse.csc_matrix | None
+    L_V: NDArray[np.float64] | None
+    RZX: NDArray[np.float64]
+    XtVinvX: NDArray[np.float64]
 
 
 @dataclass
@@ -109,26 +123,68 @@ class LmerResult(MerResultMixin):
     ) -> dict[str, dict[str, NDArray[np.floating]]] | RanefResult:
         return self._ranef_with_optional_condvar(self.u, condVar)
 
-    def _compute_condVar(self) -> dict[str, dict[str, NDArray[np.floating]]]:
+    @cached_property
+    def _weighted_projection(self) -> _WeightedProjection:
+        """Factor the weighted penalized least-squares system once."""
+        sqrt_weights = np.sqrt(self.matrices.weights)
+        weighted_X = sqrt_weights[:, None] * self.matrices.X
+        weighted_Z = self.matrices.Z.multiply(sqrt_weights[:, None]).tocsc()
+        q = self.matrices.n_random
+
+        if q == 0:
+            information = weighted_X.T @ weighted_X
+            return _WeightedProjection(
+                sqrt_weights=sqrt_weights,
+                weighted_X=weighted_X,
+                weighted_Z=weighted_Z,
+                lambda_matrix=None,
+                L_V=None,
+                RZX=np.zeros((0, self.matrices.n_fixed), dtype=np.float64),
+                XtVinvX=np.asarray(information, dtype=np.float64),
+            )
+
+        lambda_matrix = _build_lambda(self.theta, self.matrices.random_structures)
+        ZtWZ = weighted_Z.T @ weighted_Z
+        V_factor = lambda_matrix.T @ ZtWZ @ lambda_matrix + sparse.eye(q, format="csc")
+        L_V = linalg.cholesky(V_factor.toarray(), lower=True)
+
+        ZtWX = weighted_Z.T @ weighted_X
+        RZX = linalg.solve_triangular(L_V, lambda_matrix.T @ ZtWX, lower=True)
+        information = weighted_X.T @ weighted_X - RZX.T @ RZX
+        information = (information + information.T) / 2.0
+
+        return _WeightedProjection(
+            sqrt_weights=sqrt_weights,
+            weighted_X=weighted_X,
+            weighted_Z=weighted_Z,
+            lambda_matrix=lambda_matrix,
+            L_V=L_V,
+            RZX=np.asarray(RZX, dtype=np.float64),
+            XtVinvX=np.asarray(information, dtype=np.float64),
+        )
+
+    def _compute_condVar(
+        self, include_cov: bool = False
+    ) -> dict[str, dict[str, NDArray[np.floating]]]:
+        from mixedlm.utils.variance import _conditional_variance_blocks
+
         q = self.matrices.n_random
         if q == 0:
             return {}
 
         Lambda = _build_lambda(self.theta, self.matrices.random_structures)
+        sqrt_weights = np.sqrt(self.matrices.weights)
+        weighted_z = self.matrices.Z.multiply(sqrt_weights[:, np.newaxis])
+        ztwz = weighted_z.T @ weighted_z
+        precision = Lambda.T @ ztwz @ Lambda + sparse.eye(q, format="csc")
 
-        Zt = self.matrices.Zt
-        ZtZ = Zt @ Zt.T
-        LambdatZtZLambda = Lambda.T @ ZtZ @ Lambda
-
-        I_q = sparse.eye(q, format="csc")
-        V = LambdatZtZLambda + I_q
-
-        V_dense = V.toarray()
-
-        Lambda_dense = Lambda.toarray() if sparse.issparse(Lambda) else Lambda
-        V_inv_Lambda_t = linalg.solve(V_dense, Lambda_dense.T, assume_a="pos")
-        cond_cov = self.sigma**2 * Lambda_dense @ V_inv_Lambda_t
-        return self._condvar_from_cov(cond_cov)
+        return _conditional_variance_blocks(
+            precision,
+            Lambda,
+            self.matrices.random_structures,
+            scale=self.sigma**2,
+            include_cov=include_cov,
+        )
 
     def get_sigma(self) -> float:
         return self.sigma
@@ -138,6 +194,7 @@ class LmerResult(MerResultMixin):
 
         Returns the prior weights used in model fitting.
         If no weights were specified, returns an array of ones.
+        The observation-level residual variance is ``sigma**2 / weight``.
 
         Parameters
         ----------
@@ -227,7 +284,7 @@ class LmerResult(MerResultMixin):
         """
         return self._build_model_terms(self.formula)
 
-    def model_frame(self) -> pd.DataFrame:
+    def model_frame(self) -> Any:
         """Get the model frame.
 
         Returns the data frame containing only the variables used
@@ -235,9 +292,9 @@ class LmerResult(MerResultMixin):
 
         Returns
         -------
-        pd.DataFrame
-            Data frame with the response variable, fixed effect
-            variables, and grouping factors.
+        DataFrame
+            Data frame with the response variable, fixed effect variables,
+            and grouping factors. The fitted input's backend is preserved.
 
         Examples
         --------
@@ -291,7 +348,7 @@ class LmerResult(MerResultMixin):
         if type == "response":
             resid = self.matrices.y - fitted
         elif type == "pearson":
-            resid = (self.matrices.y - fitted) / self.sigma
+            resid = np.sqrt(self.matrices.weights) * (self.matrices.y - fitted) / self.sigma
         else:
             raise ValueError(f"Unknown residual type: {type}")
 
@@ -308,6 +365,7 @@ class LmerResult(MerResultMixin):
         se_fit: bool = False,
         interval: str = "none",
         level: float = 0.95,
+        offset: ArrayLike | str | None = None,
     ) -> NDArray[np.floating] | PredictResult:
         """Generate predictions from the fitted model.
 
@@ -325,15 +383,29 @@ class LmerResult(MerResultMixin):
             Type of interval: "none", "confidence", or "prediction".
         level : float, default 0.95
             Confidence level for intervals.
+        offset : array-like, scalar, or str, optional
+            Offset for new-data predictions. A string selects a column from
+            ``newdata``. Scalars are broadcast to every row.
 
         Returns
         -------
         NDArray or PredictResult
             Predictions. Returns PredictResult if se_fit=True or interval!="none".
         """
+        valid_intervals = ("none", "confidence", "prediction")
+        if interval not in valid_intervals:
+            raise ValueError(
+                f"Unknown interval type: {interval}. Use 'none', 'confidence', or 'prediction'."
+            )
+        if not np.isfinite(level) or not 0 < level < 1:
+            raise ValueError("level must be a finite number strictly between 0 and 1")
+
         include_re = re_form != "NA" and re_form != "~0"
+        pred_matrices: ModelMatrices | None = None
 
         if newdata is None:
+            if offset is not None:
+                raise ValueError("Prediction offset can only be supplied with newdata.")
             if include_re:
                 pred = self._fitted_values.copy()
             else:
@@ -343,23 +415,43 @@ class LmerResult(MerResultMixin):
             X = self.matrices.X
         else:
             X = self._prediction_fixed_matrix(newdata)
-            pred = X @ self.beta
+            pred = X @ self.beta + self._prediction_offset(newdata, offset)
 
             if include_re:
                 pred = self._add_random_effects_to_pred(pred, newdata, allow_new_levels)
 
+            if include_re and (se_fit or interval != "none"):
+                Z, random_structures = build_random_matrix(
+                    self.formula,
+                    newdata,
+                    contrasts=self.matrices.contrasts,
+                    category_levels=self.matrices.category_levels,
+                )
+                n_pred = X.shape[0]
+                pred_matrices = ModelMatrices(
+                    y=np.empty(n_pred, dtype=np.float64),
+                    X=X,
+                    Z=Z,
+                    fixed_names=self.matrices.fixed_names,
+                    random_structures=random_structures,
+                    n_obs=n_pred,
+                    n_fixed=X.shape[1],
+                    n_random=Z.shape[1],
+                    weights=np.ones(n_pred, dtype=np.float64),
+                    offset=np.zeros(n_pred, dtype=np.float64),
+                    category_levels=self.matrices.category_levels,
+                    contrasts=self.matrices.contrasts,
+                )
+
         if not se_fit and interval == "none":
             return pred
 
-        vcov_beta = self.vcov()
-        var_fixed = np.sum((X @ vcov_beta) * X, axis=1)
-
-        if include_re and newdata is not None:
-            var_re = self._compute_re_prediction_variance(newdata, allow_new_levels)
-            var_fit = var_fixed + var_re
-        else:
-            var_fit = var_fixed
-
+        var_fit = self._compute_prediction_variance(
+            X,
+            pred_matrices,
+            include_re=include_re,
+            allow_new_levels=allow_new_levels,
+        )
         se = np.sqrt(var_fit)
 
         if interval == "none":
@@ -374,7 +466,12 @@ class LmerResult(MerResultMixin):
                 fit=pred, se_fit=se, lower=lower, upper=upper, interval="confidence", level=level
             )
         elif interval == "prediction":
-            var_pred = var_fit + self.sigma**2
+            residual_var: float | NDArray[np.floating]
+            if newdata is None:
+                residual_var = self.sigma**2 / self.matrices.weights
+            else:
+                residual_var = self.sigma**2
+            var_pred = var_fit + residual_var
             se_pred = np.sqrt(var_pred)
             lower = pred - z_crit * se_pred
             upper = pred + z_crit * se_pred
@@ -386,10 +483,7 @@ class LmerResult(MerResultMixin):
                 interval="prediction",
                 level=level,
             )
-        else:
-            raise ValueError(
-                f"Unknown interval type: {interval}. Use 'none', 'confidence', or 'prediction'."
-            )
+        raise AssertionError("interval validation should make this branch unreachable")
 
     def _add_random_effects_to_pred(
         self,
@@ -401,102 +495,210 @@ class LmerResult(MerResultMixin):
         pred += self._random_effect_prediction_contrib(newdata, allow_new_levels, self.u)
         return pred
 
-    def _compute_re_prediction_variance(
+    def _compute_prediction_variance(
         self,
-        newdata: pd.DataFrame,
+        X: NDArray[np.floating],
+        pred_matrices: ModelMatrices | None,
+        *,
+        include_re: bool,
         allow_new_levels: bool,
     ) -> NDArray[np.floating]:
-        """Compute variance contribution from random effects for predictions."""
-        n = len(newdata)
-        var_re = np.zeros(n, dtype=np.float64)
-
-        cond_var = self._compute_condVar()
-        prior_var = {
-            struct.grouping_factor: np.diag(cov)
-            for struct, cov in self._iter_random_cov_blocks(scale=self.sigma**2)
-        }
-
-        for struct in self.matrices.random_structures:
-            group_col = struct.grouping_factor
-
-            if group_col not in newdata.columns:
-                continue
-
-            if group_col not in cond_var:
-                continue
-
-            group_values = newdata[group_col].astype(str)
-            mapped_levels = group_values.map(struct.level_map)
-            known_mask = mapped_levels.notna().to_numpy()
-            unknown_mask = ~known_mask
-            if np.any(known_mask):
-                level_idx = mapped_levels[known_mask].astype(int).to_numpy()
-            else:
-                level_idx = np.array([], dtype=np.int64)
-
-            group_cond_var = cond_var[group_col]
-            group_prior_var = prior_var[group_col]
-
-            for i, term_name in enumerate(struct.term_names):
-                if term_name == "(Intercept)":
-                    term_values = np.ones(n, dtype=np.float64)
-                elif term_name in newdata.columns:
-                    term_values = np.asarray(newdata[term_name], dtype=np.float64)
-                else:
-                    continue
-
-                term_sq = term_values**2
-                if term_name in group_cond_var and level_idx.size:
-                    term_var = group_cond_var[term_name]
-                    var_re[known_mask] += term_var[level_idx] * term_sq[known_mask]
-
-                if allow_new_levels and np.any(unknown_mask):
-                    var_re[unknown_mask] += group_prior_var[i] * term_sq[unknown_mask]
-
-        return var_re
-
-    def vcov(self) -> NDArray[np.floating]:
+        """Compute pointwise mixed-model mean-prediction variance."""
         q = self.matrices.n_random
+        if not include_re or q == 0:
+            vcov_beta = self.vcov()
+            return np.maximum(np.sum((X @ vcov_beta) * X, axis=1), 0.0)
 
-        if q == 0:
-            XtX = self.matrices.X.T @ self.matrices.X
-            p = XtX.shape[0]
-            try:
-                L = linalg.cholesky(XtX, lower=True)
-                XtX_inv = linalg.cho_solve((L, True), np.eye(p))
-            except linalg.LinAlgError:
-                XtX_inv = linalg.solve(XtX, np.eye(p))
-            return self.sigma**2 * XtX_inv
+        Z_pred: sparse.csr_matrix
+        prior_var: NDArray[np.floating]
+        if pred_matrices is None:
+            Z_pred = self.matrices.Z.tocsr()
+            prior_var = np.zeros(X.shape[0], dtype=np.float64)
+        else:
+            Z_pred, prior_var = self._align_prediction_random_matrix(
+                pred_matrices, allow_new_levels
+            )
 
         Lambda = _build_lambda(self.theta, self.matrices.random_structures)
-
         Zt = self.matrices.Zt
-        ZtZ = Zt @ Zt.T
-        LambdatZtZLambda = Lambda.T @ ZtZ @ Lambda
+        V = Lambda.T @ (Zt @ self.matrices.Z) @ Lambda
+        V = V + sparse.eye(q, format="csc")
+        V_dense = V.toarray() if sparse.issparse(V) else np.asarray(V)
+        L_V = linalg.cholesky(V_dense, lower=True)
 
-        I_q = sparse.eye(q, format="csc")
-        V_factor = LambdatZtZLambda + I_q
-        V_factor_dense = V_factor.toarray()
-        L_V = linalg.cholesky(V_factor_dense, lower=True)
-
-        ZtX = Zt @ self.matrices.X
-        Lambdat_ZtX = Lambda.T @ ZtX
-        RZX = linalg.solve_triangular(L_V, Lambdat_ZtX, lower=True)
-
-        XtX = self.matrices.X.T @ self.matrices.X
-        RZX_tRZX = RZX.T @ RZX
-        XtVinvX = XtX - RZX_tRZX
-
-        p = XtVinvX.shape[0]
+        Lambdat_ZtX = Lambda.T @ (Zt @ self.matrices.X)
+        beta_adjustment = linalg.cho_solve((L_V, True), Lambdat_ZtX)
+        fixed_information = self.matrices.X.T @ self.matrices.X
+        fixed_information -= Lambdat_ZtX.T @ beta_adjustment
+        fixed_information = (fixed_information + fixed_information.T) / 2.0
         try:
-            L = linalg.cholesky(XtVinvX, lower=True)
-            XtVinvX_inv = linalg.cho_solve((L, True), np.eye(p))
+            L_fixed = linalg.cholesky(fixed_information, lower=True)
+            vcov_beta = self.sigma**2 * linalg.cho_solve(
+                (L_fixed, True), np.eye(fixed_information.shape[0])
+            )
         except linalg.LinAlgError:
-            XtVinvX_inv = linalg.solve(XtVinvX, np.eye(p))
-        return self.sigma**2 * XtVinvX_inv
+            vcov_beta = self.sigma**2 * linalg.solve(
+                fixed_information, np.eye(fixed_information.shape[0])
+            )
+
+        transformed_Z = (Z_pred @ Lambda).tocsr()
+        adjusted_X = X - np.asarray(transformed_Z @ beta_adjustment)
+        var_fixed = np.sum((adjusted_X @ vcov_beta) * adjusted_X, axis=1)
+        var_random = self._conditional_random_prediction_variance(transformed_Z, L_V)
+
+        return np.maximum(var_fixed + var_random + prior_var, 0.0)
+
+    def _align_prediction_random_matrix(
+        self,
+        pred_matrices: ModelMatrices,
+        allow_new_levels: bool,
+    ) -> tuple[sparse.csr_matrix, NDArray[np.floating]]:
+        """Align new-data random-effect columns to the fitted coefficient order."""
+        fitted_structures = self.matrices.random_structures
+        new_structures = pred_matrices.random_structures
+        if len(new_structures) != len(fitted_structures):
+            raise ValueError("New data produced an incompatible random-effects structure")
+
+        from mixedlm.utils.variance import getL
+
+        level_factors = cast(
+            list[NDArray[np.floating]],
+            getL(self.theta, fitted_structures, sigma=self.sigma, as_blocks=True),
+        )
+
+        known_rows: list[NDArray[np.integer]] = []
+        known_cols: list[NDArray[np.integer]] = []
+        known_values: list[NDArray[np.floating]] = []
+        prior_var = np.zeros(pred_matrices.n_obs, dtype=np.float64)
+        fitted_offset = 0
+        new_offset = 0
+
+        for fitted, new, level_factor in zip(
+            fitted_structures, new_structures, level_factors, strict=True
+        ):
+            if fitted.grouping_factor != new.grouping_factor:
+                raise ValueError("New data produced an incompatible random-effects structure")
+
+            term_indices = {name: index for index, name in enumerate(fitted.term_names)}
+            if set(new.term_names) != set(fitted.term_names):
+                raise ValueError(
+                    f"New data produced incompatible random-effect columns for "
+                    f"'{fitted.grouping_factor}'"
+                )
+            mapped_terms = np.asarray(
+                [term_indices[name] for name in new.term_names], dtype=np.int64
+            )
+
+            fitted_string_levels = {
+                str(fitted_level): index for fitted_level, index in fitted.level_map.items()
+            }
+            new_levels: list[Any | None] = [None] * new.n_levels
+            for stored_level, index in new.level_map.items():
+                new_levels[index] = stored_level
+
+            mapped_levels = np.full(new.n_levels, -1, dtype=np.int64)
+            unknown_levels: list[Any] = []
+            for index, candidate_level in enumerate(new_levels):
+                if candidate_level in fitted.level_map:
+                    mapped_levels[index] = fitted.level_map[candidate_level]
+                elif str(candidate_level) in fitted_string_levels:
+                    mapped_levels[index] = fitted_string_levels[str(candidate_level)]
+                else:
+                    unknown_levels.append(candidate_level)
+
+            if unknown_levels and not allow_new_levels:
+                raise ValueError(
+                    f"New level '{unknown_levels[0]}' in grouping factor "
+                    f"'{fitted.grouping_factor}'. Set allow_new_levels=True to predict "
+                    "with random effects = 0."
+                )
+
+            new_width = new.n_levels * new.n_terms
+            block = pred_matrices.Z[:, new_offset : new_offset + new_width].tocoo()
+            entry_levels = block.col // new.n_terms
+            entry_terms = block.col % new.n_terms
+            target_levels = mapped_levels[entry_levels]
+            target_terms = mapped_terms[entry_terms]
+            known = target_levels >= 0
+
+            if np.any(known):
+                known_rows.append(block.row[known])
+                known_cols.append(
+                    fitted_offset + target_levels[known] * fitted.n_terms + target_terms[known]
+                )
+                known_values.append(block.data[known])
+
+            unknown = ~known
+            if np.any(unknown):
+                unknown_design = sparse.coo_matrix(
+                    (block.data[unknown], (block.row[unknown], target_terms[unknown])),
+                    shape=(pred_matrices.n_obs, fitted.n_terms),
+                ).toarray()
+                prior_cov = level_factor @ level_factor.T
+                prior_var += np.sum((unknown_design @ prior_cov) * unknown_design, axis=1)
+
+            fitted_offset += fitted.n_levels * fitted.n_terms
+            new_offset += new_width
+
+        if known_values:
+            rows = np.concatenate(known_rows)
+            cols = np.concatenate(known_cols)
+            values = np.concatenate(known_values)
+        else:
+            rows = np.array([], dtype=np.int64)
+            cols = np.array([], dtype=np.int64)
+            values = np.array([], dtype=np.float64)
+
+        aligned = sparse.csr_matrix(
+            (values, (rows, cols)),
+            shape=(pred_matrices.n_obs, self.matrices.n_random),
+            dtype=np.float64,
+        )
+        return aligned, prior_var
+
+    def _conditional_random_prediction_variance(
+        self,
+        transformed_Z: sparse.csr_matrix,
+        L_V: NDArray[np.floating],
+    ) -> NDArray[np.floating]:
+        """Evaluate diagonal quadratic forms without materializing an n-by-q matrix."""
+        n_rows, q = transformed_Z.shape
+        result = np.empty(n_rows, dtype=np.float64)
+        chunk_size = max(1, 1_000_000 // max(q, 1))
+
+        for start in range(0, n_rows, chunk_size):
+            stop = min(start + chunk_size, n_rows)
+            chunk = transformed_Z[start:stop].toarray()
+            solved = linalg.solve_triangular(L_V, chunk.T, lower=True)
+            result[start:stop] = self.sigma**2 * np.sum(solved**2, axis=0)
+
+        return result
+
+    def vcov(self) -> NDArray[np.floating]:
+        information_inv = symmetric_inverse(self._weighted_projection.XtVinvX)
+        return self.sigma**2 * information_inv
+
+    @cached_property
+    def _hat_values(self) -> NDArray[np.float64]:
+        projection = self._weighted_projection
+        information_inv = symmetric_inverse(projection.XtVinvX)
+
+        if projection.lambda_matrix is None:
+            projected_X = projection.weighted_X
+            h_random = np.zeros(self.matrices.n_obs, dtype=np.float64)
+        else:
+            assert projection.L_V is not None
+            B = (projection.weighted_Z @ projection.lambda_matrix).toarray()
+            B_Vinv = linalg.cho_solve((projection.L_V, True), B.T).T
+            h_random = np.einsum("ij,ij->i", B_Vinv, B)
+            V_inv_BtX = linalg.cho_solve((projection.L_V, True), B.T @ projection.weighted_X)
+            projected_X = projection.weighted_X - B @ V_inv_BtX
+
+        h_fixed = np.einsum("ij,ij->i", projected_X @ information_inv, projected_X)
+        return np.clip(h_fixed + h_random, 0, 1 - 1e-10)
 
     def hatvalues(self) -> NDArray[np.floating]:
-        """Compute leverage values (diagonal of the hat matrix).
+        """Return leverage values (the diagonal of the mixed-model hat matrix).
 
         For mixed models, the hat matrix projects the response onto fitted values.
         The leverage h_i measures how much observation i influences its own
@@ -514,61 +716,7 @@ class LmerResult(MerResultMixin):
         random effects. High leverage observations can have undue influence
         on model estimates.
         """
-        q = self.matrices.n_random
-        X = self.matrices.X
-
-        if q == 0:
-            XtX = X.T @ X
-            try:
-                L = linalg.cholesky(XtX, lower=True)
-                XtX_inv = linalg.cho_solve((L, True), np.eye(X.shape[1]))
-            except linalg.LinAlgError:
-                XtX_inv = linalg.pinv(XtX)
-            return np.sum((X @ XtX_inv) * X, axis=1)
-
-        Lambda = _build_lambda(self.theta, self.matrices.random_structures)
-        Z = self.matrices.Z
-        Zt = self.matrices.Zt
-
-        ZtZ = Zt @ Zt.T
-        LambdatZtZLambda = Lambda.T @ ZtZ @ Lambda
-        I_q = sparse.eye(q, format="csc")
-        V_factor = LambdatZtZLambda + I_q
-        V_factor_dense = V_factor.toarray()
-
-        try:
-            L_V = linalg.cholesky(V_factor_dense, lower=True)
-        except linalg.LinAlgError:
-            V_factor_dense += 1e-6 * np.eye(q)
-            L_V = linalg.cholesky(V_factor_dense, lower=True)
-
-        ZtX = Zt @ X
-        Lambdat_ZtX = Lambda.T @ ZtX
-        RZX = linalg.solve_triangular(L_V, Lambdat_ZtX, lower=True)
-
-        XtX = X.T @ X
-        XtVinvX = XtX - RZX.T @ RZX
-
-        try:
-            L_XVX = linalg.cholesky(XtVinvX, lower=True)
-            XtVinvX_inv = linalg.cho_solve((L_XVX, True), np.eye(X.shape[1]))
-        except linalg.LinAlgError:
-            XtVinvX_inv = linalg.pinv(XtVinvX)
-
-        h_fixed = np.sum((X @ XtVinvX_inv) * X, axis=1)
-
-        ZLambda = Z @ Lambda
-        ZLambda_dense = ZLambda.toarray() if sparse.issparse(ZLambda) else ZLambda
-
-        V_inv = linalg.cho_solve((L_V, True), np.eye(q))
-        ZLambda_Vinv = ZLambda_dense @ V_inv
-        h_random = np.sum(ZLambda_Vinv * ZLambda_dense, axis=1)
-
-        h = h_fixed + h_random
-
-        h = np.clip(h, 0, 1 - 1e-10)
-
-        return h
+        return self._hat_values.copy()
 
     def cooks_distance(self) -> NDArray[np.floating]:
         """Compute Cook's distance for each observation.
@@ -594,12 +742,13 @@ class LmerResult(MerResultMixin):
         may be influential and warrant further investigation.
         """
         h = self.hatvalues()
-        resid = self.residuals(type="response")
+        resid = self.residuals(type="response", na_expand=False)
+        weighted_resid = np.sqrt(self.matrices.weights) * resid
         p = self.matrices.n_fixed
 
         h = np.clip(h, 0, 1 - 1e-10)
 
-        cooks_d = (resid**2 / (p * self.sigma**2)) * (h / (1 - h) ** 2)
+        cooks_d = (weighted_resid**2 / (p * self.sigma**2)) * (h / (1 - h) ** 2)
 
         return cooks_d
 
@@ -627,19 +776,20 @@ class LmerResult(MerResultMixin):
         - Influential points (large Cook's distance)
         """
         h = self.hatvalues()
-        resid = self.residuals(type="response")
+        resid = self.residuals(type="response", na_expand=False)
+        weighted_resid = np.sqrt(self.matrices.weights) * resid
 
         h_safe = np.clip(h, 0, 1 - 1e-10)
-        std_resid = resid / (self.sigma * np.sqrt(1 - h_safe))
+        std_resid = weighted_resid / (self.sigma * np.sqrt(1 - h_safe))
 
         n = self.matrices.n_obs
         p = self.matrices.n_fixed
         df = n - p
 
-        mse = np.sum(resid**2) / df
-        loo_var = ((df * mse) - (resid**2 / (1 - h_safe))) / (df - 1)
+        mse = np.sum(weighted_resid**2) / df
+        loo_var = ((df * mse) - (weighted_resid**2 / (1 - h_safe))) / (df - 1)
         loo_var = np.maximum(loo_var, 1e-10)
-        student_resid = resid / np.sqrt(loo_var * (1 - h_safe))
+        student_resid = weighted_resid / np.sqrt(loo_var * (1 - h_safe))
 
         return {
             "hat": h,
@@ -652,7 +802,7 @@ class LmerResult(MerResultMixin):
         groups: dict[str, VarCorrGroup] = {}
 
         for struct, cov in self._iter_random_cov_blocks(scale=self.sigma**2):
-            if struct.correlated:
+            if struct.correlated or struct.cov_type in ("cs", "ar1"):
                 stddevs = np.sqrt(np.diag(cov))
                 with np.errstate(divide="ignore", invalid="ignore"):
                     corr = cov / np.outer(stddevs, stddevs)
@@ -1008,29 +1158,7 @@ class LmerResult(MerResultMixin):
         return plot_diagnostics(self, which=which, figsize=figsize)
 
     def isSingular(self, tol: float = 1e-4) -> bool:
-        theta_idx = 0
-
-        for struct in self.matrices.random_structures:
-            q = struct.n_terms
-
-            if struct.correlated:
-                n_theta = q * (q + 1) // 2
-                theta_block = self.theta[theta_idx : theta_idx + n_theta]
-                theta_idx += n_theta
-
-                diag_idx = 0
-                for i in range(q):
-                    if abs(theta_block[diag_idx]) < tol:
-                        return True
-                    diag_idx += i + 2
-            else:
-                theta_block = self.theta[theta_idx : theta_idx + q]
-                theta_idx += q
-
-                if np.any(np.abs(theta_block) < tol):
-                    return True
-
-        return False
+        return self._is_singular_covariance(tol)
 
     def getME(self, name: str):
         """Extract model components by name.
@@ -1110,19 +1238,7 @@ class LmerResult(MerResultMixin):
         elif name in ("q", "n_random"):
             return self.matrices.n_random
         elif name == "lower":
-            bounds = []
-            for struct in self.matrices.random_structures:
-                q = struct.n_terms
-                if struct.correlated:
-                    for i in range(q):
-                        for j in range(i + 1):
-                            if i == j:
-                                bounds.append(0.0)
-                            else:
-                                bounds.append(-np.inf)
-                else:
-                    bounds.extend([0.0] * q)
-            return np.array(bounds)
+            return self._theta_lower_bounds()
         elif name == "weights":
             return self.matrices.weights.copy()
         elif name == "offset":
@@ -1143,8 +1259,7 @@ class LmerResult(MerResultMixin):
                 gp.append(gp[-1] + s.n_levels * s.n_terms)
             return np.array(gp)
         elif name == "RX":
-            _, R = linalg.qr(self.matrices.X, mode="economic")
-            return R
+            return self._compute_RX()
         elif name == "RZX":
             return self._compute_RZX()
         elif name == "Lind":
@@ -1188,36 +1303,11 @@ class LmerResult(MerResultMixin):
 
     def _compute_RZX(self) -> NDArray[np.floating]:
         """Compute RZX, the cross-term in the mixed model equations."""
-        Z = self.matrices.Z
-        X = self.matrices.X
-        sigma = self.sigma
-        Lambda = _build_lambda(self.theta, self.matrices.random_structures)
+        return self._weighted_projection.RZX.copy()
 
-        if sparse.issparse(Z):
-            Zt = Z.T
-            ZtZ = Zt @ Z
-        else:
-            Zt = Z.T
-            ZtZ = Zt @ Z
-
-        LambdatLambda = Lambda.T @ Lambda
-        C = ZtZ + LambdatLambda / sigma**2
-
-        if sparse.issparse(C):
-            C = C.toarray()
-
-        try:
-            L_C = linalg.cholesky(C, lower=True)
-        except linalg.LinAlgError:
-            C = C + 1e-6 * np.eye(C.shape[0])
-            L_C = linalg.cholesky(C, lower=True)
-
-        XtZ = X.T @ Z
-        if sparse.issparse(XtZ):
-            XtZ = XtZ.toarray()
-
-        RZX = linalg.solve_triangular(L_C, XtZ.T, lower=True)
-        return RZX
+    def _compute_RX(self) -> NDArray[np.floating]:
+        """Compute the upper Cholesky factor of the fixed-effect information."""
+        return linalg.cholesky(self._weighted_projection.XtVinvX, lower=False)
 
     def _build_Lind(self) -> NDArray[np.int64]:
         """Build Lind, the index mapping from theta to Lambda entries."""
@@ -1449,10 +1539,7 @@ class LmerResult(MerResultMixin):
         n_theta = _count_theta(self.matrices.random_structures)
         df = p + n_theta + 1
 
-        if self.REML:
-            value = -0.5 * (self.deviance + (n - p) * np.log(2 * np.pi))
-        else:
-            value = -0.5 * (self.deviance + n * np.log(2 * np.pi))
+        value = -0.5 * self.deviance
 
         return LogLik(value=value, df=df, nobs=n, REML=self.REML)
 
@@ -1686,7 +1773,7 @@ class LmerResult(MerResultMixin):
         include_re = use_re and q > 0 and re_form not in ("~0", "NA")
 
         if not include_re:
-            fixed_part = self.matrices.X @ self.beta
+            fixed_part = self.matrices.X @ self.beta + self.matrices.offset
             result = np.random.randn(nsim, n).T
             result *= self.sigma
             result += fixed_part[:, None]
@@ -1713,7 +1800,7 @@ class LmerResult(MerResultMixin):
     ) -> NDArray[np.floating]:
         n = self.matrices.n_obs
 
-        fixed_part = self.matrices.X @ self.beta
+        fixed_part = self.matrices.X @ self.beta + self.matrices.offset
 
         n_levels = [s.n_levels for s in self.matrices.random_structures]
         n_terms = [s.n_terms for s in self.matrices.random_structures]
@@ -1746,7 +1833,7 @@ class LmerResult(MerResultMixin):
         n = self.matrices.n_obs
         q = self.matrices.n_random
 
-        fixed_part = self.matrices.X @ self.beta
+        fixed_part = self.matrices.X @ self.beta + self.matrices.offset
 
         if re_form == "~0" or re_form == "NA" or not use_re or q == 0:
             random_part = np.zeros(n)

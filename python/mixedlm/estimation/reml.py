@@ -9,7 +9,7 @@ from numpy.typing import NDArray
 from scipy import linalg, sparse
 
 from mixedlm.estimation.optimizers import run_optimizer
-from mixedlm.matrices.design import ModelMatrices, RandomEffectStructure
+from mixedlm.matrices.design import ModelMatrices, RandomEffectStructure, validate_prior_weights
 
 try:
     from mixedlm import _rust as _rust
@@ -256,7 +256,8 @@ def _profiled_deviance_core(
     p = matrices.n_fixed
     q = matrices.n_random
 
-    w = matrices.weights
+    w = validate_prior_weights(matrices.weights, n)
+    logdet_w = float(np.sum(np.log(w)))
     y_adj = matrices.y - matrices.offset
     sqrt_w = np.sqrt(w)
 
@@ -276,9 +277,9 @@ def _profiled_deviance_core(
         sigma2 = wrss / denom
 
         ldRX2 = np.linalg.slogdet(XtWX)[1] if REML else 0.0
-        dev = n * np.log(2 * np.pi * sigma2) + wrss / sigma2
+        dev = denom * (1.0 + np.log(2.0 * np.pi * sigma2)) - logdet_w
         if REML:
-            dev += ldRX2 - p * np.log(sigma2)
+            dev += ldRX2
 
         return _DevianceCoreResult(
             deviance=float(dev),
@@ -340,24 +341,24 @@ def _profiled_deviance_core(
     Xty_adj = XtWy - cu_star_RZX_beta_term
     beta = linalg.cho_solve((L_XtVinvX, True), Xty_adj)
 
-    resid = y_adj - matrices.X @ beta
-    wrss = np.dot(w * resid, resid)
+    marginal_resid = y_adj - matrices.X @ beta
 
-    Zt_resid = Zt @ (w * resid)
+    Zt_resid = Zt @ (w * marginal_resid)
     Lambda_t_Zt_resid = Lambda.T @ Zt_resid
     u_star = linalg.cho_solve((L_V, True), Lambda_t_Zt_resid)
 
+    u = np.asarray(Lambda @ u_star).reshape(-1)
+    conditional_resid = marginal_resid - matrices.Z @ u
+    wrss = np.dot(w * conditional_resid, conditional_resid)
     ussq = np.dot(u_star, u_star)
     pwrss = wrss + ussq
 
     denom = n - p if REML else n
     sigma2 = pwrss / denom
 
-    dev = denom * (1.0 + np.log(2.0 * np.pi * sigma2)) + ldL2
+    dev = denom * (1.0 + np.log(2.0 * np.pi * sigma2)) + ldL2 - logdet_w
     if REML:
         dev += ldRX2
-
-    u = Lambda @ u_star
 
     return _DevianceCoreResult(
         deviance=float(dev),
@@ -632,29 +633,42 @@ class LMMOptimizer:
             sigma_start = max(0.5 * sigma_ols, 0.1)
             return [sigma_start] * q
 
-        Z_block_start = 0
-        for s in self.matrices.random_structures:
-            if s is struct:
-                break
-            Z_block_start += s.n_levels * s.n_terms
+        level_indices = getattr(struct, "level_indices", None)
+        if level_indices is not None and len(level_indices) == len(residuals):
+            valid = (level_indices >= 0) & (level_indices < struct.n_levels)
+            counts = np.bincount(level_indices[valid], minlength=struct.n_levels)
+            sums = np.bincount(
+                level_indices[valid],
+                weights=residuals[valid],
+                minlength=struct.n_levels,
+            )
+            populated = counts > 0
+            group_residual_means = sums[populated] / counts[populated]
+        else:
+            Z_block_start = 0
+            for s in self.matrices.random_structures:
+                if s is struct:
+                    break
+                Z_block_start += s.n_levels * s.n_terms
 
-        Z_block_end = Z_block_start + struct.n_levels * struct.n_terms
-        Z_block = self.matrices.Z[:, Z_block_start:Z_block_end]
+            Z_block_end = Z_block_start + struct.n_levels * struct.n_terms
+            Z_block = self.matrices.Z[:, Z_block_start:Z_block_end]
 
-        group_residuals = []
-        for level_idx in range(struct.n_levels):
-            level_cols = range(level_idx * q, (level_idx + 1) * q)
-            level_block = Z_block[:, level_cols]
-            if sparse.issparse(level_block):
-                level_mask = level_block.getnnz(axis=1) > 0
-            else:
-                level_mask = np.asarray(level_block != 0).any(axis=1)
-            if np.any(level_mask):
-                level_resid_mean = residuals[level_mask].mean()
-                group_residuals.append(level_resid_mean)
+            residual_means: list[float] = []
+            for level_idx in range(struct.n_levels):
+                level_cols = range(level_idx * q, (level_idx + 1) * q)
+                level_block = Z_block[:, level_cols]
+                if sparse.issparse(level_block):
+                    level_mask = level_block.getnnz(axis=1) > 0
+                else:
+                    level_mask = np.asarray(level_block != 0).any(axis=1)
+                if np.any(level_mask):
+                    level_resid_mean = residuals[level_mask].mean()
+                    residual_means.append(float(level_resid_mean))
+            group_residual_means = np.asarray(residual_means)
 
-        if len(group_residuals) > 1:
-            group_var = max(np.var(group_residuals, ddof=1), 0.01)
+        if len(group_residual_means) > 1:
+            group_var = max(float(np.var(group_residual_means, ddof=1)), 0.01)
             relative_sd = np.sqrt(group_var) / max(sigma_ols, 0.1)
             theta_diag = max(min(relative_sd, 3.0), 0.2)
         else:

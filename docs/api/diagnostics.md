@@ -12,6 +12,134 @@ from mixedlm import diagnostics
 mlm.diagnostics.plot_diagnostics(model)
 ```
 
+## Model Fit Metrics
+
+### r2_nakagawa
+
+Compute marginal R² (fixed effects) and conditional R² (fixed plus random effects):
+
+```python
+r2 = diagnostics.r2_nakagawa(model)
+print(r2.marginal, r2.conditional)
+print(r2.random_by_group)
+```
+
+Random-slope variance is evaluated at every observation, retaining covariance and predictor
+values. Linear and nonlinear Gaussian models use the fitted residual variance. Generalized
+models use a link-scale residual approximation: lognormal for log links, link-specific
+theoretical variance for binomial models, or the delta method when requested.
+
+### icc
+
+Compute adjusted and unadjusted intraclass correlation coefficients:
+
+```python
+correlation = diagnostics.icc(model)
+print(correlation.adjusted, correlation.unadjusted)
+print(correlation.by_group)
+```
+
+The adjusted ICC excludes fixed-effect variance from its denominator. The unadjusted ICC
+uses total fixed, random, and residual variance. Group-specific dictionaries partition each
+overall coefficient for crossed or nested random effects.
+
+## Collinearity Diagnostics
+
+### check_collinearity
+
+Compute weighted VIF, generalized VIF, tolerance, severity, and global condition indices:
+
+```python
+result = diagnostics.check_collinearity(model)
+print(result)
+print(result.to_dataframe())
+print(result.problematic(threshold=5.0))
+```
+
+One-column terms report the conventional VIF. Multi-column categorical or interaction terms
+also report raw GVIF, `GVIF^(1/(2*df))`, and a VIF-equivalent `GVIF^(1/df)` value so the same
+thresholds can be used across terms. By default, values from 5 to 10 are marked moderate and
+values of 10 or more are marked high; both thresholds are configurable.
+
+Linear fits use prior weights, generalized fits use prior times local working weights, and
+nonlinear fits use the locally weighted, uncentered parameter-gradient design so constant
+information directions are preserved. The calculation uses one correlation eigendecomposition
+and does not form the random-effect covariance matrix.
+
+## Generalized-Model Diagnostics
+
+### check_overdispersion
+
+Compute a weighted Pearson chi-squared dispersion diagnostic for a fitted GLMM.
+
+```python
+result = diagnostics.check_overdispersion(
+    model,
+    alpha=0.05,
+    alternative="two-sided",
+)
+
+print(result.dispersion_ratio)
+print(result.p_value)
+print(result.ci_low, result.ci_high)
+```
+
+The statistic is
+
+\[
+X^2 = \sum_i w_i \frac{(y_i - \hat{\mu}_i)^2}{V(\hat{\mu}_i)},
+\]
+
+and the dispersion ratio is \(X^2\) divided by the residual degrees of
+freedom. Residual degrees of freedom subtract both fixed-effect and estimated
+random-effect covariance parameters. The result exposes:
+
+- `pearson_chi_square`: weighted Pearson statistic
+- `residual_df`: residual degrees of freedom
+- `dispersion_ratio`: estimated conditional dispersion
+- `ci_low`, `ci_high`: chi-squared confidence interval for the ratio
+- `p_value`: p-value for the requested alternative
+- `status`: `"overdispersed"`, `"underdispersed"`, or `"ok"`
+- `is_overdispersed`, `is_underdispersed`: convenience flags
+
+Set `alternative="greater"` to test only for overdispersion or `"less"` to
+test only for underdispersion. This is an analytic approximation conditional on
+the fitted random effects. It is most useful for Poisson and grouped-binomial
+models with moderate expected counts.
+
+### check_zero_inflation
+
+Compare the observed number of zeros with the fitted distribution's expected
+number of zeros.
+
+```python
+result = diagnostics.check_zero_inflation(model)
+
+print(result.observed_zeros)
+print(result.expected_zeros)
+print(result.observed_to_expected)
+print(result.p_value)
+```
+
+The function computes each observation's probability of zero directly for
+Poisson, negative-binomial, or binomial families. For grouped-binomial models,
+integer model weights are interpreted as trial counts. It then uses the exact
+Poisson-binomial mean and variance with a continuity-corrected normal
+approximation for the zero-count p-value.
+
+The default `alternative="greater"` tests for excess zeros. Use
+`"two-sided"` to detect either excess or fewer-than-expected zeros. The result
+exposes:
+
+- `observed_zeros`, `expected_zeros`, and `observed_to_expected`
+- `variance` and `z_score` for the zero-count approximation
+- `p_value` and `status` (`"excess"`, `"deficit"`, or `"ok"`)
+- `is_zero_inflated`: convenience flag for a significant excess
+
+`check_zeroinflation()` is an alias. Quasi-families are unsupported because
+they specify a mean-variance relationship without a complete probability
+distribution.
+
 ## Diagnostic Plots
 
 ### plot_diagnostics
@@ -69,12 +197,16 @@ diagnostics.plot_resid_group(model, group, ax=None)
 
 ## Influence Diagnostics
 
+The convenience functions below accept either a fitted model directly or an
+`InfluenceResult` returned by `influence()`. Calculations use the final mixed-model
+projection, including random effects, offsets, prior weights, and GLMM working weights.
+
 ### influence
 
 Compute influence diagnostics for all observations.
 
 ```python
-inf = diagnostics.influence(model, data)
+inf = diagnostics.influence(model)
 ```
 
 **Returns:** InfluenceResult object with:
@@ -90,7 +222,7 @@ inf = diagnostics.influence(model, data)
 Compute Cook's distance for each observation.
 
 ```python
-cd = diagnostics.cooks_distance(model, data)
+cd = diagnostics.cooks_distance(model)
 ```
 
 **Returns:** Array of Cook's distance values.
@@ -105,20 +237,20 @@ cd = diagnostics.cooks_distance(model, data)
 Compute DFBETA for each observation.
 
 ```python
-dfb = diagnostics.dfbeta(model, data)
+dfb = diagnostics.dfbeta(model)
 ```
 
-**Returns:** DataFrame with DFBETA for each coefficient.
+**Returns:** Array with one row per observation and one column per fixed-effect coefficient.
 
 ### dfbetas
 
 Compute standardized DFBETAS.
 
 ```python
-dfbs = diagnostics.dfbetas(model, data)
+dfbs = diagnostics.dfbetas(model)
 ```
 
-**Returns:** DataFrame with standardized DFBETAS.
+**Returns:** Array with standardized DFBETAS.
 
 **Interpretation:**
 
@@ -129,7 +261,7 @@ dfbs = diagnostics.dfbetas(model, data)
 Compute DFFITS for each observation.
 
 ```python
-dff = diagnostics.dffits(model, data)
+dff = diagnostics.dffits(model)
 ```
 
 **Returns:** Array of DFFITS values.
@@ -139,7 +271,7 @@ dff = diagnostics.dffits(model, data)
 Compute leverage (hat values) for each observation.
 
 ```python
-lev = diagnostics.leverage(model, data)
+lev = diagnostics.leverage(model)
 ```
 
 **Returns:** Array of leverage values.
@@ -151,10 +283,10 @@ lev = diagnostics.leverage(model, data)
 
 ### influence_plot
 
-Create an influence plot showing leverage vs residuals, sized by Cook's distance.
+Plot Cook's distance, maximum absolute DFBETAS, leverage, or DFFITS.
 
 ```python
-diagnostics.influence_plot(model, data, ax=None)
+diagnostics.influence_plot(model, which="cooks", ax=None)
 ```
 
 ### influence_summary
@@ -162,7 +294,7 @@ diagnostics.influence_plot(model, data, ax=None)
 Print a summary of influential observations.
 
 ```python
-diagnostics.influence_summary(model, data)
+summary = diagnostics.influence_summary(model)
 ```
 
 ### influential_obs
@@ -170,7 +302,7 @@ diagnostics.influence_summary(model, data)
 Identify influential observations based on multiple criteria.
 
 ```python
-idx = diagnostics.influential_obs(model, data, threshold="default")
+idx = diagnostics.influential_obs(model, threshold="cooks")
 ```
 
 **Returns:** Indices of influential observations.
@@ -240,37 +372,38 @@ plt.show()
 from mixedlm import diagnostics
 
 # Compute influence measures
-inf = diagnostics.influence(model, data)
+inf = diagnostics.influence(model)
 
 # Cook's distance
-cd = diagnostics.cooks_distance(model, data)
+cd = diagnostics.cooks_distance(model)
 print(f"Max Cook's D: {cd.max():.4f}")
 
 # Identify influential observations
-influential = diagnostics.influential_obs(model, data)
+influential = diagnostics.influential_obs(model)
 print(f"Influential observations: {influential}")
 
 # Summary of influential points
-diagnostics.influence_summary(model, data)
+print(diagnostics.influence_summary(model))
 ```
 
 ### Influence Plot
 
 ```python
-# Plot leverage vs residuals, sized by Cook's D
-diagnostics.influence_plot(model, data)
+# Plot Cook's distance
+diagnostics.influence_plot(model, which="cooks")
 ```
 
 ### Checking Specific Observations
 
 ```python
 # DFBETAS for effect on each coefficient
-dfb = diagnostics.dfbetas(model, data)
+dfb = diagnostics.dfbetas(model)
 print(dfb)
 
 # Observations with large influence on Days coefficient
 import numpy as np
-large_influence = np.abs(dfb['Days']) > 2 / np.sqrt(len(data))
+days_index = model.matrices.fixed_names.index("Days")
+large_influence = np.abs(dfb[:, days_index]) > 2 / np.sqrt(len(data))
 print(f"High influence on Days: {data.index[large_influence].tolist()}")
 ```
 

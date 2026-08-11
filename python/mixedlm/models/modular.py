@@ -19,11 +19,17 @@ if TYPE_CHECKING:
 
 from mixedlm.estimation.reml import (
     LMMOptimizer,
+    _build_lambda,
     _build_theta_bounds,
     _count_theta,
 )
 from mixedlm.formula.parser import parse_formula
 from mixedlm.matrices.design import ModelMatrices, build_model_matrices
+
+
+def _coerce_formula(formula: Formula | str) -> Formula:
+    """Return an existing Formula or parse its string representation."""
+    return parse_formula(formula) if isinstance(formula, str) else formula
 
 
 @dataclass
@@ -247,7 +253,7 @@ class OptimizeResult:
 
 
 def lFormula(
-    formula: str,
+    formula: Formula | str,
     data: pd.DataFrame,
     REML: bool = True,
     weights: NDArray[np.floating] | None = None,
@@ -263,8 +269,8 @@ def lFormula(
 
     Parameters
     ----------
-    formula : str
-        Model formula in lme4 syntax (e.g., "y ~ x + (1|group)").
+    formula : Formula or str
+        Parsed formula or model formula in lme4 syntax (e.g., "y ~ x + (1|group)").
     data : DataFrame
         Data containing the variables in the formula.
     REML : bool, default True
@@ -295,7 +301,7 @@ def lFormula(
     optimizeLmer : Optimize the deviance function.
     mkLmerMod : Create final model from optimization results.
     """
-    parsed_formula = parse_formula(formula)
+    parsed_formula = _coerce_formula(formula)
     matrices = build_model_matrices(
         parsed_formula,
         data,
@@ -313,7 +319,7 @@ def lFormula(
 
 
 def glFormula(
-    formula: str,
+    formula: Formula | str,
     data: pd.DataFrame,
     family: Family | None = None,
     weights: NDArray[np.floating] | None = None,
@@ -329,8 +335,8 @@ def glFormula(
 
     Parameters
     ----------
-    formula : str
-        Model formula in lme4 syntax (e.g., "y ~ x + (1|group)").
+    formula : Formula or str
+        Parsed formula or model formula in lme4 syntax (e.g., "y ~ x + (1|group)").
     data : DataFrame
         Data containing the variables in the formula.
     family : Family, optional
@@ -363,7 +369,10 @@ def glFormula(
     """
     from mixedlm.families import Binomial
 
-    parsed_formula = parse_formula(formula)
+    parsed_formula = _coerce_formula(formula)
+    if family is None:
+        family = Binomial()
+
     matrices = build_model_matrices(
         parsed_formula,
         data,
@@ -371,10 +380,8 @@ def glFormula(
         offset=offset,
         na_action=na_action,
         contrasts=contrasts,
+        grouped_binomial=isinstance(family, Binomial),
     )
-
-    if family is None:
-        family = Binomial()
 
     return GlmerParsedFormula(
         formula=parsed_formula,
@@ -733,8 +740,6 @@ def mkGlmerMod(
         opt.theta,
         devfun.parsed.matrices,
         devfun.parsed.family,
-        devfun.optimizer._beta_cache,
-        devfun.optimizer._u_cache,
     )
 
     return GlmerResult(
@@ -887,7 +892,7 @@ def mkReTrms(
 
 
 def simulate_formula(
-    formula: str,
+    formula: Formula | str,
     data: pd.DataFrame,
     beta: NDArray[np.floating] | dict[str, float] | None = None,
     theta: NDArray[np.floating] | None = None,
@@ -905,8 +910,8 @@ def simulate_formula(
 
     Parameters
     ----------
-    formula : str
-        Model formula with random effects (e.g., "y ~ x + (1|group)").
+    formula : Formula or str
+        Parsed formula or model formula with random effects (e.g., "y ~ x + (1|group)").
     data : pd.DataFrame
         Data frame containing the predictor variables.
     beta : array-like or dict, optional
@@ -922,7 +927,8 @@ def simulate_formula(
     nsim : int, default 1
         Number of simulations to generate.
     seed : int, optional
-        Random seed for reproducibility.
+        Random seed for reproducibility. Uses an isolated generator and does
+        not alter NumPy's global random state.
 
     Returns
     -------
@@ -963,20 +969,28 @@ def simulate_formula(
     lmer : Fit linear mixed models.
     LmerResult.simulate : Simulate from a fitted model.
     """
-    from scipy import sparse
+    from mixedlm.families import (
+        Binomial,
+        Gamma,
+        Gaussian,
+        InverseGaussian,
+        NegativeBinomial,
+        Poisson,
+    )
 
-    from mixedlm.families import Gaussian
+    if nsim < 1:
+        raise ValueError("nsim must be at least 1")
+    if not np.isfinite(sigma) or sigma < 0:
+        raise ValueError("sigma must be finite and non-negative")
 
-    if seed is not None:
-        np.random.seed(seed)
+    rng = np.random.default_rng(seed)
 
     if family is None:
         family = Gaussian()
 
-    parsed_formula = parse_formula(formula)
+    parsed_formula = parse_formula(formula) if isinstance(formula, str) else formula
     matrices = build_model_matrices(parsed_formula, data)
 
-    n = matrices.n_obs
     p = matrices.n_fixed
     q = matrices.n_random
 
@@ -990,70 +1004,62 @@ def simulate_formula(
     else:
         beta_vec = np.asarray(beta, dtype=np.float64).reshape(-1)
 
+    if len(beta_vec) != p:
+        raise ValueError(f"beta has length {len(beta_vec)}; expected {p}")
+
     if theta is None:
-        n_theta = sum(
-            s.n_terms * (s.n_terms + 1) // 2 if s.correlated else s.n_terms
-            for s in matrices.random_structures
-        )
-        theta_vec: NDArray[np.floating] = np.ones(n_theta)
+        theta_values: list[float] = []
+        for struct in matrices.random_structures:
+            cov_type = getattr(struct, "cov_type", "us")
+            if cov_type in ("cs", "ar1"):
+                theta_values.append(1.0)
+                if struct.n_terms > 1:
+                    theta_values.append(0.0)
+            else:
+                n_struct_theta = (
+                    struct.n_terms * (struct.n_terms + 1) // 2
+                    if struct.correlated
+                    else struct.n_terms
+                )
+                theta_values.extend([1.0] * n_struct_theta)
+        theta_vec: NDArray[np.floating] = np.asarray(theta_values, dtype=np.float64)
     else:
         theta_vec = np.asarray(theta, dtype=np.float64).reshape(-1)
 
+    n_theta = _count_theta(matrices.random_structures)
+    if theta_vec.size != n_theta:
+        raise ValueError(f"theta must contain {n_theta} parameters, got {theta_vec.size}")
+    if not np.all(np.isfinite(theta_vec)):
+        raise ValueError("theta must contain only finite values")
+
+    Lambda = _build_lambda(theta_vec, matrices.random_structures)
     results = []
 
     for _ in range(nsim):
         eta = matrices.X @ beta_vec
-
-        u = np.zeros(q)
-        idx = 0
-        theta_idx = 0
-
-        for struct in matrices.random_structures:
-            n_levels = struct.n_levels
-            n_terms = struct.n_terms
-
-            if struct.correlated:
-                n_theta_block = n_terms * (n_terms + 1) // 2
-                theta_block = theta_vec[theta_idx : theta_idx + n_theta_block]
-                theta_idx += n_theta_block
-
-                L = np.zeros((n_terms, n_terms))
-                k = 0
-                for j in range(n_terms):
-                    for i in range(j, n_terms):
-                        L[i, j] = theta_block[k]
-                        k += 1
-
-                for _level in range(n_levels):
-                    z = np.random.randn(n_terms)
-                    u_level = L @ z * sigma
-                    u[idx : idx + n_terms] = u_level
-                    idx += n_terms
-            else:
-                theta_block = theta_vec[theta_idx : theta_idx + n_terms]
-                theta_idx += n_terms
-
-                for term in range(n_terms):
-                    for _level in range(n_levels):
-                        u[idx] = np.random.randn() * theta_block[term] * sigma
-                        idx += 1
-
-        if sparse.issparse(matrices.Z):
-            eta += matrices.Z @ u
-        else:
-            eta += matrices.Z @ u
+        standard_random_effects = rng.standard_normal(q)
+        random_effects = np.asarray(Lambda @ standard_random_effects).reshape(-1) * sigma
+        eta += matrices.Z @ random_effects
 
         mu = family.link.inverse(eta)
 
-        family_name = getattr(family, "name", "gaussian")
-        if family_name == "gaussian":
-            y = mu + np.random.randn(n) * sigma
-        elif family_name == "binomial":
-            y = np.random.binomial(1, np.clip(mu, 0, 1)).astype(float)
-        elif family_name == "poisson":
-            y = np.random.poisson(np.maximum(mu, 0)).astype(float)
+        if isinstance(family, Binomial):
+            y = rng.binomial(1, np.clip(mu, 0, 1)).astype(float)
+        elif isinstance(family, Poisson):
+            y = rng.poisson(np.clip(mu, 0, 1e15)).astype(float)
+        elif isinstance(family, NegativeBinomial):
+            mu = np.clip(mu, 1e-10, 1e10)
+            y = rng.negative_binomial(family.theta, family.theta / (mu + family.theta)).astype(
+                float
+            )
+        elif isinstance(family, Gamma):
+            y = rng.gamma(1.0, np.clip(mu, 1e-10, 1e10)).astype(float)
+        elif isinstance(family, InverseGaussian):
+            y = rng.wald(np.clip(mu, 1e-10, 1e10), 1.0).astype(float)
+        elif isinstance(family, Gaussian):
+            y = rng.normal(mu, sigma)
         else:
-            y = mu + np.random.randn(n) * sigma
+            y = rng.normal(mu, sigma)
 
         result_df = data.copy()
         response_name = parsed_formula.response if parsed_formula.response else "y"

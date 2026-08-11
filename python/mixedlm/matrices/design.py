@@ -27,6 +27,7 @@ from mixedlm.formula.terms import (
     Formula,
     InteractionTerm,
     InterceptTerm,
+    PowerTerm,
     RandomTerm,
     VariableTerm,
 )
@@ -41,6 +42,7 @@ class RandomEffectStructure:
     correlated: bool
     level_map: dict[str, int]
     cov_type: str = "us"
+    level_indices: NDArray[np.int32] | None = field(default=None, repr=False, compare=False)
 
 
 @dataclass
@@ -57,12 +59,33 @@ class ModelMatrices:
     offset: NDArray[np.floating]
     frame: Any | None = field(default=None)
     na_info: NAInfo | None = field(default=None)
+    trials: NDArray[np.floating] | None = field(default=None)
     category_levels: dict[str, list[Any]] = field(default_factory=dict)
     contrasts: dict[str, str | NDArray[np.floating]] | None = field(default=None)
 
     @cached_property
     def Zt(self) -> sparse.csc_matrix:
         return self.Z.T.tocsc()
+
+
+def validate_prior_weights(
+    weights: NDArray[np.floating],
+    n: int,
+    *,
+    allow_missing: bool = False,
+) -> NDArray[np.float64]:
+    """Return validated, contiguous prior weights."""
+    weights_array = np.asarray(weights, dtype=np.float64)
+    if weights_array.ndim != 1:
+        raise ValueError("weights must be one-dimensional")
+    if len(weights_array) != n:
+        raise ValueError(f"weights has length {len(weights_array)}, expected {n}")
+    finite = ~np.isinf(weights_array) if allow_missing else np.isfinite(weights_array)
+    if not np.all(finite):
+        raise ValueError("weights must contain only finite values")
+    if np.any(weights_array <= 0.0):
+        raise ValueError("weights must be strictly positive")
+    return np.ascontiguousarray(weights_array)
 
 
 def _get_formula_variables(formula: Formula) -> set[str]:
@@ -76,10 +99,17 @@ def build_model_matrices(
     offset: NDArray[np.floating] | None = None,
     na_action: str | None = None,
     contrasts: dict[str, str | NDArray[np.floating]] | None = None,
+    grouped_binomial: bool = False,
 ) -> ModelMatrices:
     from mixedlm.utils.na_action import handle_na
 
-    data = ensure_dataframe(data)
+    data = ensure_dataframe(data, columns=sorted(_get_formula_variables(formula)))
+    if weights is not None:
+        weights = validate_prior_weights(
+            weights,
+            dataframe_length(data),
+            allow_missing=True,
+        )
 
     if na_action is not None:
         clean_data, na_info, weights, offset = handle_na(data, formula, na_action, weights, offset)
@@ -104,7 +134,7 @@ def build_model_matrices(
         }
     )
 
-    y = _build_response(formula, clean_data)
+    y, trials = _build_response(formula, clean_data, grouped_binomial=grouped_binomial)
     X, fixed_names = build_fixed_matrix(
         formula,
         clean_data,
@@ -122,8 +152,12 @@ def build_model_matrices(
     model_frame = select_columns(clean_data, available_vars)
 
     n = len(y)
-    if weights is None:
+    if trials is not None:
+        weights = trials.copy() if weights is None else np.asarray(weights) * trials
+    elif weights is None:
         weights = np.ones(n, dtype=np.float64)
+    else:
+        weights = validate_prior_weights(weights, n)
     if offset is None:
         offset = np.zeros(n, dtype=np.float64)
 
@@ -140,14 +174,46 @@ def build_model_matrices(
         offset=offset,
         frame=model_frame,
         na_info=na_info,
+        trials=trials,
         category_levels=category_levels,
         contrasts=stored_contrasts,
     )
 
 
-def _build_response(formula: Formula, data: Any) -> NDArray[np.floating]:
-    arr = get_column_numpy(data, formula.response, dtype=np.float64)
-    return arr
+def _build_response(
+    formula: Formula,
+    data: Any,
+    *,
+    grouped_binomial: bool,
+) -> tuple[NDArray[np.floating], NDArray[np.floating] | None]:
+    successes = get_column_numpy(data, formula.response, dtype=np.float64)
+    denominator = formula.response_denominator
+    if denominator is None:
+        return successes, None
+
+    if not grouped_binomial:
+        raise ValueError(
+            "The 'successes / trials' response syntax is only supported for binomial GLMMs"
+        )
+
+    trials = get_column_numpy(data, denominator, dtype=np.float64)
+    return _normalize_grouped_binomial_response(successes, trials), trials
+
+
+def _normalize_grouped_binomial_response(
+    successes: NDArray[np.floating],
+    trials: NDArray[np.floating],
+) -> NDArray[np.floating]:
+    if not np.all(np.isfinite(successes)) or not np.all(np.isfinite(trials)):
+        raise ValueError("Grouped binomial successes and trials must be finite")
+    if np.any(trials <= 0):
+        raise ValueError("Grouped binomial trials must be greater than zero")
+    if np.any(successes < 0) or np.any(successes > trials):
+        raise ValueError("Grouped binomial successes must be between zero and trials")
+    if np.any(successes != np.floor(successes)) or np.any(trials != np.floor(trials)):
+        raise ValueError("Grouped binomial successes and trials must be whole numbers")
+
+    return successes / trials
 
 
 def build_fixed_matrix(
@@ -164,22 +230,15 @@ def build_fixed_matrix(
         columns.append(np.ones(n, dtype=np.float64))
         names.append("(Intercept)")
 
-    for term in formula.fixed.terms:
-        if isinstance(term, InterceptTerm):
-            continue
-        elif isinstance(term, VariableTerm):
-            col, col_names = _encode_variable(term.name, data, contrasts, category_levels)
-            columns.extend(col)
-            names.extend(col_names)
-        elif isinstance(term, InteractionTerm):
-            col, col_names = _encode_interaction(
-                term.variables,
-                data,
-                contrasts,
-                category_levels,
-            )
-            columns.extend(col)
-            names.extend(col_names)
+    term_columns, term_names = _encode_terms(
+        formula.fixed.terms,
+        data,
+        has_intercept=formula.fixed.has_intercept,
+        contrasts=contrasts,
+        category_levels=category_levels,
+    )
+    columns.extend(term_columns)
+    names.extend(term_names)
 
     if not columns:
         columns.append(np.ones(n, dtype=np.float64))
@@ -194,12 +253,28 @@ def _encode_variable(
     data: Any,
     contrasts: dict[str, str | NDArray[np.floating]] | None = None,
     category_levels: dict[str, list[Any]] | None = None,
+    *,
+    full_rank: bool = False,
 ) -> tuple[list[NDArray[np.floating]], list[str]]:
     if name in (category_levels or {}) or is_categorical_or_string(data, name):
-        return _encode_categorical(name, data, contrasts, category_levels)
+        return _encode_categorical(
+            name,
+            data,
+            contrasts,
+            category_levels,
+            full_rank=full_rank,
+        )
     else:
         arr = get_column_numpy(data, name, dtype=np.float64)
         return [arr], [name]
+
+
+def _encode_power(
+    term: PowerTerm,
+    data: Any,
+) -> tuple[list[NDArray[np.floating]], list[str]]:
+    arr = get_column_numpy(data, term.name, dtype=np.float64)
+    return [np.power(arr, term.exponent)], [f"I({term.name}**{term.exponent})"]
 
 
 def _encode_categorical(
@@ -207,6 +282,8 @@ def _encode_categorical(
     data: Any,
     contrasts: dict[str, str | NDArray[np.floating]] | None = None,
     category_levels: dict[str, list[Any]] | None = None,
+    *,
+    full_rank: bool = False,
 ) -> tuple[list[NDArray[np.floating]], list[str]]:
     from mixedlm.utils.contrasts import apply_contrasts_array, get_contrast_matrix
 
@@ -219,25 +296,79 @@ def _encode_categorical(
     if n_levels < 2:
         return [np.ones(n, dtype=np.float64)], [f"{name}"]
 
-    contrast_spec = None
-    if contrasts is not None and name in contrasts:
-        contrast_spec = contrasts[name]
-
-    contrast_matrix = get_contrast_matrix(n_levels, contrast_spec)
+    contrast_matrix: NDArray[np.floating]
+    if full_rank:
+        contrast_matrix = np.eye(n_levels, dtype=np.float64)
+    else:
+        contrast_spec = None
+        if contrasts is not None and name in contrasts:
+            contrast_spec = contrasts[name]
+        contrast_matrix = get_contrast_matrix(n_levels, contrast_spec)
 
     col_values = get_column_numpy(data, name)
-    return apply_contrasts_array(col_values, name, contrast_matrix, categories)
+    columns, names = apply_contrasts_array(col_values, name, contrast_matrix, categories)
+    if full_rank:
+        names = [f"{name}.{category}" for category in categories]
+    return columns, names
+
+
+def _encode_terms(
+    terms: tuple[InterceptTerm | VariableTerm | PowerTerm | InteractionTerm, ...],
+    data: Any,
+    has_intercept: bool,
+    contrasts: dict[str, str | NDArray[np.floating]] | None = None,
+    category_levels: dict[str, list[Any]] | None = None,
+) -> tuple[list[NDArray[np.floating]], list[str]]:
+    """Encode model terms, using full indicators for the first factor without an intercept."""
+    columns: list[NDArray[np.floating]] = []
+    names: list[str] = []
+    use_full_rank_factor = not has_intercept
+
+    for term in terms:
+        if isinstance(term, InterceptTerm):
+            continue
+        if isinstance(term, VariableTerm):
+            is_categorical = term.name in (category_levels or {}) or is_categorical_or_string(
+                data, term.name
+            )
+            full_rank = use_full_rank_factor and is_categorical
+            term_columns, term_names = _encode_variable(
+                term.name,
+                data,
+                contrasts,
+                category_levels,
+                full_rank=full_rank,
+            )
+            if full_rank:
+                use_full_rank_factor = False
+        elif isinstance(term, PowerTerm):
+            term_columns, term_names = _encode_power(term, data)
+        else:
+            term_columns, term_names = _encode_interaction(
+                term.variables,
+                data,
+                contrasts,
+                category_levels,
+            )
+
+        columns.extend(term_columns)
+        names.extend(term_names)
+
+    return columns, names
 
 
 def _encode_interaction(
-    variables: tuple[str, ...],
+    variables: tuple[str | PowerTerm, ...],
     data: Any,
     contrasts: dict[str, str | NDArray[np.floating]] | None = None,
     category_levels: dict[str, list[Any]] | None = None,
 ) -> tuple[list[NDArray[np.floating]], list[str]]:
     encoded_vars: list[tuple[list[NDArray[np.floating]], list[str]]] = []
     for var in variables:
-        cols, nms = _encode_variable(var, data, contrasts, category_levels)
+        if isinstance(var, PowerTerm):
+            cols, nms = _encode_power(var, data)
+        else:
+            cols, nms = _encode_variable(var, data, contrasts, category_levels)
         encoded_vars.append((cols, nms))
 
     result_cols: list[NDArray[np.floating]] = []
@@ -350,29 +481,19 @@ def _build_random_block(
     level_indices, level_map = factorize_levels(group_values)
     n_levels = len(level_map)
 
-    term_cols: list[NDArray[np.floating]] = []
-    term_names: list[str] = []
-
-    if rterm.has_intercept:
-        term_cols.append(np.ones(n, dtype=np.float64))
-        term_names.append("(Intercept)")
-
-    for term in rterm.expr:
-        if isinstance(term, InterceptTerm):
-            continue
-        elif isinstance(term, VariableTerm):
-            cols, nms = _encode_variable(term.name, data, contrasts, category_levels)
-            term_cols.extend(cols)
-            term_names.extend(nms)
-        elif isinstance(term, InteractionTerm):
-            cols, nms = _encode_interaction(
-                term.variables,
-                data,
-                contrasts,
-                category_levels,
-            )
-            term_cols.extend(cols)
-            term_names.extend(nms)
+    term_cols: list[NDArray[np.floating]] = (
+        [np.ones(n, dtype=np.float64)] if rterm.has_intercept else []
+    )
+    term_names = ["(Intercept)"] if rterm.has_intercept else []
+    encoded_cols, encoded_names = _encode_terms(
+        rterm.expr,
+        data,
+        has_intercept=rterm.has_intercept,
+        contrasts=contrasts,
+        category_levels=category_levels,
+    )
+    term_cols.extend(encoded_cols)
+    term_names.extend(encoded_names)
 
     n_terms = len(term_cols)
 
@@ -386,6 +507,7 @@ def _build_random_block(
         correlated=rterm.correlated,
         level_map=level_map,
         cov_type=rterm.cov_type,
+        level_indices=level_indices,
     )
 
     return Z_block, structure
@@ -404,29 +526,19 @@ def _build_nested_random_block(
     level_indices, level_map = factorize_levels(combined_group)
     n_levels = len(level_map)
 
-    term_cols: list[NDArray[np.floating]] = []
-    term_names: list[str] = []
-
-    if rterm.has_intercept:
-        term_cols.append(np.ones(n, dtype=np.float64))
-        term_names.append("(Intercept)")
-
-    for term in rterm.expr:
-        if isinstance(term, InterceptTerm):
-            continue
-        elif isinstance(term, VariableTerm):
-            cols, nms = _encode_variable(term.name, data, contrasts, category_levels)
-            term_cols.extend(cols)
-            term_names.extend(nms)
-        elif isinstance(term, InteractionTerm):
-            cols, nms = _encode_interaction(
-                term.variables,
-                data,
-                contrasts,
-                category_levels,
-            )
-            term_cols.extend(cols)
-            term_names.extend(nms)
+    term_cols: list[NDArray[np.floating]] = (
+        [np.ones(n, dtype=np.float64)] if rterm.has_intercept else []
+    )
+    term_names = ["(Intercept)"] if rterm.has_intercept else []
+    encoded_cols, encoded_names = _encode_terms(
+        rterm.expr,
+        data,
+        has_intercept=rterm.has_intercept,
+        contrasts=contrasts,
+        category_levels=category_levels,
+    )
+    term_cols.extend(encoded_cols)
+    term_names.extend(encoded_names)
 
     n_terms = len(term_cols)
 
@@ -440,6 +552,7 @@ def _build_nested_random_block(
         correlated=rterm.correlated,
         level_map=level_map,
         cov_type=rterm.cov_type,
+        level_indices=level_indices,
     )
 
     return Z_block, structure

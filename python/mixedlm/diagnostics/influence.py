@@ -4,17 +4,23 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import numpy as np
-import pandas as pd
 from numpy.typing import NDArray
-from scipy import linalg
 
 if TYPE_CHECKING:
+    import pandas as pd
+
     from mixedlm.models.glmer import GlmerResult
     from mixedlm.models.lmer import LmerResult
 
 
 @dataclass
 class InfluenceResult:
+    """Influence measures evaluated on the fitted model's working scale.
+
+    Linear-model residuals and design rows include square-root prior weights.
+    Generalized-model values use the final IRLS working projection.
+    """
+
     hat_values: NDArray[np.floating]
     residuals: NDArray[np.floating]
     sigma: float
@@ -22,7 +28,12 @@ class InfluenceResult:
     beta: NDArray[np.floating]
     vcov: NDArray[np.floating]
     model_type: str
-    _X_XtXinv: NDArray[np.floating] | None = None
+    _beta_sensitivity: NDArray[np.floating] | None = None
+
+    @property
+    def leverage(self) -> NDArray[np.floating]:
+        """Compatibility alias for the leverage values."""
+        return self.hat_values
 
     @property
     def dfbeta(self) -> NDArray[np.floating]:
@@ -32,8 +43,8 @@ class InfluenceResult:
         denom = np.where(denom > 1e-10, denom, np.inf)
         scale = r / denom
 
-        if self._X_XtXinv is not None:
-            return self._X_XtXinv * scale[:, None]
+        if self._beta_sensitivity is not None:
+            return self._beta_sensitivity * scale[:, None]
 
         XtX_inv = self.vcov / (self.sigma**2)
         return (self.X @ XtX_inv) * scale[:, None]
@@ -47,25 +58,21 @@ class InfluenceResult:
     @property
     def cooks_distance(self) -> NDArray[np.floating]:
         p = len(self.beta)
-        h = self.hat_values
+        h = np.clip(self.hat_values, 0, 1 - 1e-10)
         r = self.residuals
-
-        standardized_resid = r / (self.sigma * np.sqrt(1 - h + 1e-10))
-        cooks = (standardized_resid**2 / p) * (h / (1 - h + 1e-10))
-
-        return cooks
+        return (r**2 / (p * self.sigma**2)) * (h / (1 - h) ** 2)
 
     @property
     def dffits(self) -> NDArray[np.floating]:
-        h = self.hat_values
+        h = np.clip(self.hat_values, 0, 1 - 1e-10)
         r = self.residuals
-        studentized = r / (self.sigma * np.sqrt(1 - h + 1e-10))
-        return studentized * np.sqrt(h / (1 - h + 1e-10))
+        return (r / self.sigma) * np.sqrt(h) / (1 - h)
 
 
 def influence(
     model: LmerResult | GlmerResult,
 ) -> InfluenceResult:
+    """Compute influence diagnostics from a fitted mixed model."""
     from mixedlm.models.glmer import GlmerResult
     from mixedlm.models.lmer import LmerResult
 
@@ -78,112 +85,71 @@ def influence(
 
 
 def _influence_lmer(model: LmerResult) -> InfluenceResult:
-    X = model.matrices.X
-    y = model.matrices.y
-    beta = model.beta
-    sigma = model.sigma
-
-    fitted = X @ beta
-    residuals = y - fitted
-
-    XtX = X.T @ X
-    try:
-        L = linalg.cholesky(XtX, lower=True)
-        XtX_inv = linalg.cho_solve((L, True), np.eye(XtX.shape[0]))
-    except linalg.LinAlgError:
-        try:
-            XtX_inv = linalg.solve(XtX, np.eye(XtX.shape[0]))
-        except linalg.LinAlgError:
-            XtX_inv = linalg.pinv(XtX)
-
-    X_XtXinv = X @ XtX_inv
-    hat_values = np.einsum("ij,ij->i", X_XtXinv, X)
-
-    vcov = sigma**2 * XtX_inv
+    projection = model._weighted_projection
+    vcov = model.vcov()
+    information_inv = vcov / model.sigma**2
+    residuals = projection.sqrt_weights * model.residuals(type="response", na_expand=False)
 
     return InfluenceResult(
-        hat_values=hat_values,
+        hat_values=model.hatvalues(),
         residuals=residuals,
-        sigma=sigma,
-        X=X,
-        beta=beta,
+        sigma=model.sigma,
+        X=projection.weighted_X,
+        beta=model.beta,
         vcov=vcov,
         model_type="lmer",
-        _X_XtXinv=X_XtXinv,
+        _beta_sensitivity=projection.weighted_X @ information_inv,
     )
 
 
 def _influence_glmer(model: GlmerResult) -> InfluenceResult:
-    X = model.matrices.X
-    y = model.matrices.y
-    beta = model.beta
-
-    eta = X @ beta
-    mu = model.family.link.inverse(eta)
-    residuals = y - mu
-
-    weights = model.family.variance(mu)
-    sqrt_w = np.sqrt(weights)
-
-    WX = sqrt_w[:, None] * X
-    XtWX = WX.T @ WX
-    try:
-        L = linalg.cholesky(XtWX, lower=True)
-        XtWX_inv = linalg.cho_solve((L, True), np.eye(XtWX.shape[0]))
-    except linalg.LinAlgError:
-        try:
-            XtWX_inv = linalg.solve(XtWX, np.eye(XtWX.shape[0]))
-        except linalg.LinAlgError:
-            XtWX_inv = linalg.pinv(XtWX)
-
-    WX_XtWXinv = WX @ XtWX_inv
-    hat_values = np.einsum("ij,ij->i", WX_XtWXinv, WX)
-
-    scale = 1.0
-    if hasattr(model.family, "scale") and model.family.scale is not None:
-        scale = model.family.scale
-
-    vcov = scale * XtWX_inv
-
-    X_XtWXinv = X @ XtWX_inv
+    projection = model._working_projection
+    vcov = model.vcov()
 
     return InfluenceResult(
-        hat_values=hat_values,
-        residuals=residuals,
-        sigma=np.sqrt(scale),
-        X=X,
-        beta=beta,
+        hat_values=model.hatvalues(),
+        residuals=model.residuals(type="pearson", na_expand=False),
+        sigma=1.0,
+        X=projection.weighted_X,
+        beta=model.beta,
         vcov=vcov,
         model_type="glmer",
-        _X_XtXinv=X_XtWXinv,
+        _beta_sensitivity=projection.weighted_X @ vcov,
     )
 
 
-def dfbeta(inf: InfluenceResult) -> NDArray[np.floating]:
-    return inf.dfbeta
+def _coerce_influence(
+    value: InfluenceResult | LmerResult | GlmerResult,
+) -> InfluenceResult:
+    return value if isinstance(value, InfluenceResult) else influence(value)
 
 
-def dfbetas(inf: InfluenceResult) -> NDArray[np.floating]:
-    return inf.dfbetas
+def dfbeta(inf: InfluenceResult | LmerResult | GlmerResult) -> NDArray[np.floating]:
+    return _coerce_influence(inf).dfbeta
 
 
-def cooks_distance(inf: InfluenceResult) -> NDArray[np.floating]:
-    return inf.cooks_distance
+def dfbetas(inf: InfluenceResult | LmerResult | GlmerResult) -> NDArray[np.floating]:
+    return _coerce_influence(inf).dfbetas
 
 
-def dffits(inf: InfluenceResult) -> NDArray[np.floating]:
-    return inf.dffits
+def cooks_distance(inf: InfluenceResult | LmerResult | GlmerResult) -> NDArray[np.floating]:
+    return _coerce_influence(inf).cooks_distance
 
 
-def leverage(inf: InfluenceResult) -> NDArray[np.floating]:
-    return inf.hat_values
+def dffits(inf: InfluenceResult | LmerResult | GlmerResult) -> NDArray[np.floating]:
+    return _coerce_influence(inf).dffits
+
+
+def leverage(inf: InfluenceResult | LmerResult | GlmerResult) -> NDArray[np.floating]:
+    return _coerce_influence(inf).hat_values
 
 
 def influence_plot(
-    inf: InfluenceResult,
+    inf: InfluenceResult | LmerResult | GlmerResult,
     which: str = "cooks",
     ax=None,
 ):
+    inf = _coerce_influence(inf)
     try:
         import matplotlib.pyplot as plt
     except ImportError as err:
@@ -231,7 +197,12 @@ def influence_plot(
         ax.legend()
 
 
-def influence_summary(inf: InfluenceResult) -> pd.DataFrame:
+def influence_summary(
+    inf: InfluenceResult | LmerResult | GlmerResult,
+) -> pd.DataFrame:
+    import pandas as pd
+
+    inf = _coerce_influence(inf)
     cooks = inf.cooks_distance
     max_dfbetas = np.max(np.abs(inf.dfbetas), axis=1)
     leverage = inf.hat_values
@@ -264,9 +235,10 @@ def influence_summary(inf: InfluenceResult) -> pd.DataFrame:
 
 
 def influential_obs(
-    inf: InfluenceResult,
+    inf: InfluenceResult | LmerResult | GlmerResult,
     threshold: str = "cooks",
 ) -> NDArray[np.intp]:
+    inf = _coerce_influence(inf)
     n = len(inf.residuals)
     p = len(inf.beta)
 

@@ -120,6 +120,44 @@ pvals = pvalues_with_ddf(model, method="Satterthwaite")
 | Satterthwaite | Default choice, fast, good for most cases |
 | Kenward-Roger | Small samples, complex random effects, more accurate but slower |
 
+## Custom Linear Hypotheses
+
+Use `linear_hypothesis` when the null cannot be expressed as a single formula
+term or nested-model comparison. It tests linear combinations of the fitted
+fixed effects without refitting the model.
+
+```python
+from mixedlm.inference import linear_hypothesis
+
+model = mlm.lmer("y ~ x + z + (1 | group)", data)
+
+# Test H0: beta_x - beta_z = 0
+equal_slopes = linear_hypothesis(model, {"x": 1, "z": -1})
+print(equal_slopes)
+```
+
+Non-zero null values and joint tests are supported:
+
+```python
+joint = linear_hypothesis(
+    model,
+    {
+        "equal slopes": {"x": 1, "z": -1},
+        "sum equals two": {"x": 1, "z": 1},
+    },
+    rhs=[0, 2],
+)
+
+print(joint.table)       # Individual restrictions
+print(joint.statistic)   # Joint F statistic
+print(joint.p_value)     # Joint p-value
+```
+
+For a numeric matrix, columns must follow `model.matrices.fixed_names`. Named
+weights are safer when coefficient order may change. LMMs use F tests by
+default; GLMMs use chi-square tests. Supply `denominator_df` when a specific
+small-sample denominator DF is required.
+
 ## Confidence Intervals
 
 ### Wald Intervals
@@ -286,38 +324,40 @@ print(ci)
 ### Basic Bootstrap
 
 ```python
-from mixedlm import bootMer
+from mixedlm import bootCI, bootMer
 
 # Bootstrap the model
-boot = bootMer(model, data, nsim=500)
+boot = bootMer(model, nsim=500, seed=42)
 
 # Access bootstrap samples
-boot.samples  # Array of parameter estimates
+boot.beta_samples   # Fixed-effect estimates
+boot.theta_samples  # Variance-parameter estimates
 
 # Bootstrap confidence intervals
-boot.confint()
+bootCI(boot, component="all")
 ```
 
 ### Bootstrap for Specific Statistics
 
 ```python
-# Define a function to extract the statistic of interest
-def my_stat(model):
-    return model.fixef()['Days']
+# Select a named parameter from the tidy interval table
+days_ci = bootCI(boot, parameters="Days")
 
-boot = bootMer(model, data, nsim=500, FUN=my_stat)
+# Or work directly with its bootstrap samples
+days_index = boot.fixed_names.index("Days")
+days_samples = boot.beta_samples[:, days_index]
 ```
 
 ### Bootstrap for Predictions
 
 ```python
-def predict_at_day_10(model):
-    import pandas as pd
-    new_data = pd.DataFrame({'Days': [10], 'Subject': ['308']})
-    return model.predict(newdata=new_data)[0]
+import numpy as np
 
-boot = bootMer(model, data, nsim=500, FUN=predict_at_day_10)
-ci = boot.confint()
+# Fixed-only linear prediction at Days=10 for every bootstrap replicate
+intercept = boot.beta_samples[:, boot.fixed_names.index("(Intercept)")]
+days = boot.beta_samples[:, boot.fixed_names.index("Days")]
+prediction_samples = intercept + 10 * days
+prediction_ci = np.quantile(prediction_samples, [0.025, 0.975])
 ```
 
 ## Testing Random Effects
@@ -392,9 +432,9 @@ print(mlm.anova(m_simple, m_full))
 
 # 4. Bootstrap CI for the Days effect
 print("\n=== Bootstrap CI for Days Effect ===")
-boot = mlm.bootMer(model, data, nsim=200)
-boot_ci = boot.confint()
-print(f"Days: [{boot_ci['Days'][0]:.2f}, {boot_ci['Days'][1]:.2f}]")
+boot = mlm.bootMer(model, nsim=200, seed=42)
+boot_ci = mlm.bootCI(boot, parameters="Days")
+print(boot_ci[["parameter", "conf.low", "conf.high"]])
 
 # 5. Check convergence
 conv = mlm.checkConv(model)

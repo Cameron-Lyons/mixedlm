@@ -2,6 +2,41 @@
 
 This page documents the result objects returned by model fitting functions and their methods.
 
+## Tidy reporting
+
+Linear, generalized, and nonlinear result objects share two reporting methods. The same
+functions are also available as `mixedlm.tidy(model, ...)` and `mixedlm.glance(model)`.
+
+### tidy
+
+```python
+fixed = result.tidy(conf_int=True)
+everything = result.tidy(effects="all", conf_int=True)
+```
+
+Return a row-oriented pandas table. `effects` accepts:
+
+- `"fixed"` for estimates, standard errors, test statistics, p-values, and optional
+  confidence intervals
+- `"ran_pars"` for random-effect standard deviations and correlations
+- `"ran_vals"` for group-level conditional modes and conditional standard errors when available
+- `"all"` for all three components in one stable schema
+
+For linear mixed models, `ddf_method` accepts `"Satterthwaite"` (the default),
+`"Kenward-Roger"`, or `"normal"`. Generalized models use Wald z tests, while nonlinear
+models use residual degrees of freedom.
+
+### glance
+
+```python
+fit_stats = result.glance()
+```
+
+Return one row containing the model type, family, observation and group counts, parameter
+counts, residual scale, log likelihood, deviance, AIC, BIC, fit method, convergence state,
+singularity state, and iteration count. The schema is common across all model families, so
+rows from several fits can be concatenated directly.
+
 ## LmerResult
 
 The result object returned by `lmer()`.
@@ -40,9 +75,13 @@ Extract random effects (BLUPs).
 
 **Parameters:**
 
-- `condVar`: If True, include conditional variances.
+- `condVar`: If True, return a `RanefResult` containing the random effects and
+  their per-level conditional variances. The calculation uses sparse block
+  extraction, so it does not materialize the full random-effect covariance
+  matrix.
 
-**Returns:** Dictionary with group names as keys and DataFrames of random effects as values.
+**Returns:** A nested dictionary of random-effect arrays, or a `RanefResult`
+when `condVar=True`.
 
 #### VarCorr
 
@@ -53,6 +92,21 @@ result.VarCorr()
 Extract variance-covariance components of random effects.
 
 **Returns:** VarCorr object with variance, standard deviation, and correlation information.
+
+Compound-symmetry and AR(1) structures are reported on their exact fitted covariance scale.
+The same structured covariance is used by `rePCA()`, `isSingular()`, and the parameter bounds
+returned by `getME("lower")`:
+
+```python
+from mixedlm import lmer, set_cov_type
+
+formula = set_cov_type("y ~ time + (time | subject)", "ar1")
+result = lmer(formula, data)
+
+print(result.VarCorr())
+print(result.rePCA())
+print(result.isSingular())
+```
 
 #### coef
 
@@ -96,7 +150,25 @@ Extract residuals.
 #### predict
 
 ```python
-result.predict(newdata=None, re_form=None, type="response")
+lmm_result.predict(
+    newdata=None,
+    re_form=None,
+    allow_new_levels=False,
+    se_fit=False,
+    interval="none",
+    level=0.95,
+    offset=None,
+)
+glmm_result.predict(
+    newdata=None,
+    type="response",
+    re_form=None,
+    allow_new_levels=False,
+    se_fit=False,
+    interval="none",
+    level=0.95,
+    offset=None,
+)
 ```
 
 Generate predictions.
@@ -105,9 +177,33 @@ Generate predictions.
 
 - `newdata`: New data for prediction. If None, uses original data.
 - `re_form`: Formula for random effects. Use `"~0"` to exclude random effects.
-- `type`: Type of prediction. Options: `"response"`, `"link"`.
+- `type`: For GLMMs, `"response"` or `"link"`.
+- `offset`: Numeric offset for new rows, a scalar, or the name of an offset
+  column in `newdata`. GLMM offsets are applied on the link scale.
+- `allow_new_levels`: Allow unseen grouping levels and center their random effects at zero.
+- `se_fit`: Return pointwise standard errors for the predicted mean.
+- `interval`: For LMMs, `"none"`, `"confidence"`, or `"prediction"`.
+- `level`: Interval coverage strictly between zero and one.
 
-**Returns:** Array of predictions.
+**Returns:** An array, or a `PredictResult` when standard errors or intervals are requested.
+
+For conditional LMM predictions, uncertainty is evaluated from the joint fixed- and
+random-effect covariance. This includes covariance between fixed and random estimates,
+covariance among correlated random slopes, and covariance across crossed structures. For an
+unseen group accepted with `allow_new_levels=True`, the fitted prior covariance is added while
+the predicted random effect remains zero. Prediction intervals add residual variance to the
+mean-prediction variance; `se_fit` continues to report the standard error of the mean.
+
+```python
+mean_ci = result.predict(newdata, interval="confidence", level=0.95)
+future_pi = result.predict(newdata, interval="prediction", level=0.95)
+
+new_groups = result.predict(
+    new_group_data,
+    allow_new_levels=True,
+    interval="prediction",
+)
+```
 
 #### simulate
 

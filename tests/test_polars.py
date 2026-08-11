@@ -79,6 +79,20 @@ class TestPolarsLmer:
         assert predicted.shape == (2,)
         assert np.all(np.isfinite(predicted))
 
+    def test_prediction_offset_column(self, sleepstudy_polars):
+        result = mlm.lmer("Reaction ~ Days + (1 | Subject)", sleepstudy_polars)
+        offset = np.array([-0.5, 0.0, 0.75])
+        new_data = (
+            sleepstudy_polars.head(3)
+            .select("Days")
+            .with_columns(pl.Series("exposure_offset", offset))
+        )
+
+        baseline = result.predict(new_data, re_form="NA")
+        predicted = result.predict(new_data, re_form="NA", offset="exposure_offset")
+
+        assert np.allclose(predicted, baseline + offset)
+
     def test_lmer_summary(self, sleepstudy_polars):
         """Test summary output with polars."""
         result = mlm.lmer("Reaction ~ Days + (1 | Subject)", sleepstudy_polars)
@@ -87,6 +101,44 @@ class TestPolarsLmer:
         assert "Linear mixed model" in summary
         assert "(Intercept)" in summary
         assert "Days" in summary
+
+    def test_lmer_lazyframe_matches_eager_input(self, sleepstudy_polars):
+        eager = mlm.lmer("Reaction ~ Days + (1 | Subject)", sleepstudy_polars)
+        lazy = mlm.lmer("Reaction ~ Days + (1 | Subject)", sleepstudy_polars.lazy())
+
+        np.testing.assert_allclose(lazy.beta, eager.beta)
+        np.testing.assert_allclose(lazy.theta, eager.theta)
+        assert isinstance(lazy.model_frame(), pl.DataFrame)
+
+    def test_lmer_lazyframe_projects_formula_and_vector_columns(self, sleepstudy_polars):
+        data = sleepstudy_polars.with_columns(
+            pl.lit(1.0).alias("prior_weight"),
+            pl.lit(2.0).alias("model_offset"),
+            pl.lit("invalid").alias("unused"),
+        )
+        lazy = data.lazy().with_columns(
+            pl.col("unused").str.to_integer(strict=True).alias("unused")
+        )
+
+        result = mlm.lmer(
+            "Reaction ~ Days + (1 | Subject)",
+            lazy,
+            weights="prior_weight",
+            offset="model_offset",
+        )
+
+        np.testing.assert_array_equal(result.matrices.weights, np.ones(len(data)))
+        np.testing.assert_array_equal(result.matrices.offset, np.full(len(data), 2.0))
+        assert "unused" not in result.model_frame().columns
+
+    def test_modular_formula_accepts_lazyframe(self, sleepstudy_polars):
+        parsed = mlm.lFormula(
+            "Reaction ~ Days + (1 | Subject)",
+            sleepstudy_polars.lazy(),
+        )
+
+        assert parsed.matrices.X.shape == (len(sleepstudy_polars), 2)
+        assert isinstance(parsed.matrices.frame, pl.DataFrame)
 
 
 class TestPolarsGlmer:
@@ -123,6 +175,21 @@ class TestPolarsGlmer:
 
         assert result.converged
         assert len(result.fixef()) == 2
+
+    def test_glmer_lazyframe(self):
+        rng = np.random.default_rng(42)
+        n = 80
+        groups = np.repeat(np.arange(10), 8)
+        x = rng.normal(size=n)
+        eta = -0.5 + 0.5 * x + rng.normal(scale=0.3, size=10)[groups]
+        y = rng.binomial(1, 1 / (1 + np.exp(-eta)))
+        data = pl.DataFrame({"y": y, "x": x, "group": groups.astype(str)})
+
+        eager = mlm.glmer("y ~ x + (1 | group)", data, family=mlm.families.Binomial())
+        lazy = mlm.glmer("y ~ x + (1 | group)", data.lazy(), family=mlm.families.Binomial())
+
+        np.testing.assert_allclose(lazy.beta, eager.beta)
+        np.testing.assert_allclose(lazy.theta, eager.theta)
 
 
 class TestPolarsDataTypes:

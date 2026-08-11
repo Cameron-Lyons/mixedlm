@@ -14,23 +14,41 @@ class VariableTerm:
 
 
 @dataclass(frozen=True)
+class PowerTerm:
+    name: str
+    exponent: int
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.exponent, int) or isinstance(self.exponent, bool):
+            raise TypeError("Power exponents must be integers")
+        if self.exponent < 0:
+            raise ValueError("Power exponents must be non-negative")
+
+
+@dataclass(frozen=True)
 class InteractionTerm:
-    variables: tuple[str, ...]
+    variables: tuple[str | PowerTerm, ...]
 
     @property
     def order(self) -> int:
         return len(self.variables)
 
+    @property
+    def source_variables(self) -> tuple[str, ...]:
+        return tuple(
+            factor.name if isinstance(factor, PowerTerm) else factor for factor in self.variables
+        )
+
 
 @dataclass(frozen=True)
 class FixedTerm:
-    terms: tuple[InterceptTerm | VariableTerm | InteractionTerm, ...]
+    terms: tuple[InterceptTerm | VariableTerm | PowerTerm | InteractionTerm, ...]
     has_intercept: bool = True
 
 
 @dataclass(frozen=True)
 class RandomTerm:
-    expr: tuple[InterceptTerm | VariableTerm | InteractionTerm, ...]
+    expr: tuple[InterceptTerm | VariableTerm | PowerTerm | InteractionTerm, ...]
     grouping: str | tuple[str, ...]
     correlated: bool = True
     has_intercept: bool = True
@@ -52,15 +70,24 @@ class Formula:
     response: str
     fixed: FixedTerm
     random: tuple[RandomTerm, ...] = field(default_factory=tuple)
+    response_denominator: str | None = None
+
+    @property
+    def response_expression(self) -> str:
+        if self.response_denominator is None:
+            return _format_identifier(self.response)
+        return (
+            f"{_format_identifier(self.response)} / {_format_identifier(self.response_denominator)}"
+        )
 
     @property
     def fixed_variables(self) -> set[str]:
         result: set[str] = set()
         for term in self.fixed.terms:
-            if isinstance(term, VariableTerm):
+            if isinstance(term, VariableTerm | PowerTerm):
                 result.add(term.name)
             elif isinstance(term, InteractionTerm):
-                result.update(term.variables)
+                result.update(term.source_variables)
         return result
 
     @property
@@ -68,10 +95,10 @@ class Formula:
         result: set[str] = set()
         for rterm in self.random:
             for term in rterm.expr:
-                if isinstance(term, VariableTerm):
+                if isinstance(term, VariableTerm | PowerTerm):
                     result.add(term.name)
                 elif isinstance(term, InteractionTerm):
-                    result.update(term.variables)
+                    result.update(term.source_variables)
         return result
 
     @property
@@ -83,15 +110,21 @@ class Formula:
 
     @property
     def all_variables(self) -> set[str]:
+        response_variables = {self.response}
+        if self.response_denominator is not None:
+            response_variables.add(self.response_denominator)
         return (
-            {self.response} | self.fixed_variables | self.random_variables | self.grouping_factors
+            response_variables
+            | self.fixed_variables
+            | self.random_variables
+            | self.grouping_factors
         )
 
     def __str__(self) -> str:
         fixed_str = _format_fixed(self.fixed)
         random_strs = [_format_random(r) for r in self.random]
         rhs = " + ".join([fixed_str] + random_strs)
-        return f"{_format_identifier(self.response)} ~ {rhs}"
+        return f"{self.response_expression} ~ {rhs}"
 
 
 def _format_identifier(name: str) -> str:
@@ -104,13 +137,25 @@ def _format_identifier(name: str) -> str:
     return f"`{escaped}`"
 
 
-def _format_term(term: InterceptTerm | VariableTerm | InteractionTerm) -> str:
+def _format_factor(factor: str | PowerTerm) -> str:
+    if isinstance(factor, PowerTerm):
+        return f"I({_format_identifier(factor.name)}**{factor.exponent})"
+    return _format_identifier(factor)
+
+
+def format_term(term: InterceptTerm | VariableTerm | PowerTerm | InteractionTerm) -> str:
     if isinstance(term, InterceptTerm):
         return "1"
     elif isinstance(term, VariableTerm):
         return _format_identifier(term.name)
+    elif isinstance(term, PowerTerm):
+        return _format_factor(term)
     else:
-        return ":".join(_format_identifier(variable) for variable in term.variables)
+        return ":".join(_format_factor(factor) for factor in term.variables)
+
+
+def _format_term(term: InterceptTerm | VariableTerm | PowerTerm | InteractionTerm) -> str:
+    return format_term(term)
 
 
 def _format_fixed(fixed: FixedTerm) -> str:
@@ -118,12 +163,12 @@ def _format_fixed(fixed: FixedTerm) -> str:
     if not fixed.has_intercept:
         parts.append("0")
     for term in fixed.terms:
-        parts.append(_format_term(term))
+        parts.append(format_term(term))
     return " + ".join(parts) if parts else "1"
 
 
 def _format_random(random: RandomTerm) -> str:
-    expr_parts = [_format_term(t) for t in random.expr if not isinstance(t, InterceptTerm)]
+    expr_parts = [format_term(t) for t in random.expr if not isinstance(t, InterceptTerm)]
     intercept = "1" if random.has_intercept else "0"
     expr_str = " + ".join([intercept, *expr_parts])
 

@@ -1,5 +1,6 @@
 from mixedlm.inference.allfit import AllFitResult, allfit_glmer, allfit_lmer
 from mixedlm.inference.anova import AnovaResult, anova
+from mixedlm.inference.boot_ci import bootCI
 from mixedlm.inference.bootstrap import (
     BootstrapResult,
     NlmerBootstrapResult,
@@ -32,6 +33,8 @@ from mixedlm.inference.emmeans import (
     Emmeans,
     emmeans,
 )
+from mixedlm.inference.hypothesis import LinearHypothesisResult, linear_hypothesis
+from mixedlm.inference.model_selection import ModelSelectionResult, model_selection
 from mixedlm.inference.profile import (
     ProfileResult,
     as_dataframe,
@@ -44,6 +47,7 @@ from mixedlm.inference.profile import (
     splom_profiles,
     varianceProf,
 )
+from mixedlm.inference.reporting import glance, tidy
 
 __all__ = [
     "AllFitResult",
@@ -51,6 +55,7 @@ __all__ = [
     "allfit_glmer",
     "AnovaResult",
     "anova",
+    "bootCI",
     "Drop1Result",
     "drop1_lmer",
     "drop1_glmer",
@@ -58,6 +63,8 @@ __all__ = [
     "EmmeanResult",
     "ContrastResult",
     "emmeans",
+    "ModelSelectionResult",
+    "model_selection",
     "ggpredict",
     "allEffects",
     "ProfileResult",
@@ -88,4 +95,8 @@ __all__ = [
     "satterthwaite_df",
     "kenward_roger_df",
     "pvalues_with_ddf",
+    "tidy",
+    "glance",
+    "LinearHypothesisResult",
+    "linear_hypothesis",
 ]

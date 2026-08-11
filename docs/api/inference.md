@@ -2,6 +2,59 @@
 
 This page documents functions for statistical inference, hypothesis testing, and confidence intervals.
 
+## Linear Hypotheses
+
+### linear_hypothesis
+
+Test arbitrary linear restrictions on fixed-effect coefficients. The null
+hypothesis is expressed as $C\beta = r$, where $C$ contains one or more
+constraint rows and $r$ is supplied with `rhs`.
+
+```python
+from mixedlm.inference import linear_hypothesis
+
+# H0: the x and z slopes are equal
+test = linear_hypothesis(model, {"x": 1, "z": -1})
+print(test)
+```
+
+Named rows test several restrictions jointly while retaining readable labels:
+
+```python
+test = linear_hypothesis(
+    model,
+    {
+        "equal slopes": {"x": 1, "z": -1},
+        "target sum": {"x": 1, "z": 1},
+    },
+    rhs=[0, 2],
+)
+
+test.statistic    # Joint Wald statistic
+test.p_value      # Joint p-value
+test.table        # Row-level estimates, SEs, intervals, and p-values
+```
+
+Numeric arrays are interpreted in `model.matrices.fixed_names` order. A pandas
+DataFrame can instead use coefficient names as columns and row labels as its
+index. Constraint rows must be finite, nonzero, linearly independent, and
+estimable from the fitted covariance matrix.
+
+The default joint test is an F test for linear mixed models and a chi-square
+test for generalized linear mixed models. An F test uses residual denominator
+degrees of freedom unless `denominator_df` is provided explicitly.
+
+**Parameters:**
+
+- `model`: Fitted linear or generalized linear mixed model
+- `hypothesis`: Constraint matrix, named weights, named rows, or DataFrame
+- `rhs`: Scalar null value or one value per row; defaults to zero
+- `labels`: Optional replacement row labels
+- `test`: `"auto"`, `"F"`, or `"Chisq"`
+- `denominator_df`: Optional positive denominator DF for an F test
+- `level`: Confidence level for row-level intervals
+
+**Returns:** `LinearHypothesisResult`
 ## Cross-Validation
 
 ### cross_validate
@@ -89,6 +142,30 @@ r2 = mlm.weighted_r2(y_true, y_pred, weights)
 ```
 
 ## Model Comparison
+
+### model_selection
+
+Rank candidate mixed models with AIC, small-sample corrected AIC, or BIC:
+
+```python
+ranking = mlm.model_selection(
+    model1,
+    model2,
+    model3,
+    names=["baseline", "linear", "interaction"],
+    criterion="AICc",
+)
+
+print(ranking.to_dataframe())
+best = ranking.best_model
+supported = ranking.evidence_set(threshold=0.95)
+```
+
+Models are returned from strongest to weakest support. The result includes log-likelihood,
+parameter count, AIC, AICc, BIC, criterion deltas, relative likelihoods, normalized weights,
+and cumulative weights. Candidate models must use the same observations, response, likelihood
+class, and generalized family. Linear models should be fit with `REML=False`; set
+`allow_reml=True` only when every candidate has the same fixed-effects specification.
 
 ### anova
 
@@ -243,30 +320,48 @@ print(em.pairs())
 Parametric bootstrap for mixed models.
 
 ```python
-boot = mlm.bootMer(model, data, nsim=500, FUN=None)
+boot = mlm.bootMer(model, nsim=500, seed=42)
 ```
 
 **Parameters:**
 
 - `model`: Fitted model
-- `data`: Original data frame
 - `nsim`: Number of bootstrap simulations
-- `FUN`: Optional function to extract statistics (default: all parameters)
+- `seed`: Optional reproducibility seed
 
 **Returns:** BootstrapResult object
 
 **Methods:**
 
-- `confint(level=0.95)`: Bootstrap confidence intervals
-- `samples`: Array of bootstrap samples
+- `ci(level=0.95, method="percentile")`: Fixed-effect confidence intervals
+- `se()`: Fixed-effect bootstrap standard errors
+- `beta_samples`, `theta_samples`, `sigma_samples`: Bootstrap sample arrays
 
 **Example:**
 
 ```python
-boot = mlm.bootMer(model, data, nsim=500)
-ci = boot.confint()
+boot = mlm.bootMer(model, nsim=500, seed=42)
+ci = boot.ci()
 print(ci)
 ```
+
+### bootCI
+
+Create tidy confidence intervals for fixed effects, variance parameters, and
+the residual scale. Multiple interval methods can be computed in one pass.
+
+```python
+intervals = mlm.bootCI(
+    boot,
+    component="all",
+    method=["percentile", "basic", "normal"],
+)
+```
+
+The returned data frame includes each parameter's original estimate, bootstrap
+mean, bias, sample standard error, confidence bounds, and successful replicate
+count. `component="sigma"` is available for linear and nonlinear models; GLMM
+results do not have a separately estimated residual scale.
 
 ## Profile Likelihood
 
@@ -383,10 +478,10 @@ print(em.pairs())
 model = mlm.lmer("Reaction ~ Days + (Days | Subject)", data)
 
 # Parametric bootstrap
-boot = mlm.bootMer(model, data, nsim=500)
+boot = mlm.bootMer(model, nsim=500, seed=42)
 
 # Get CIs
-ci = boot.confint()
+ci = mlm.bootCI(boot, component="all")
 print(ci)
 ```
 

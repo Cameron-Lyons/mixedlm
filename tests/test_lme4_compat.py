@@ -25,6 +25,7 @@ from mixedlm import (
     ranef,
 )
 from mixedlm.inference.bootstrap import bootMer
+from mixedlm.inference.ddf import kenward_roger_df, pvalues_with_ddf, satterthwaite_df
 from mixedlm.utils.lme4_compat import (
     ConvergenceInfo,
     DevComp,
@@ -180,6 +181,28 @@ class TestPvalues:
         assert "(Intercept)" in pvals
         assert "Days" in pvals
         assert all(0 <= p <= 1 for p in pvals.values())
+        assert pvals["Days"] > 0
+
+    @pytest.mark.parametrize(
+        ("method", "canonical"),
+        [
+            ("Satterthwaite", "Satterthwaite"),
+            ("satt", "Satterthwaite"),
+            ("KR", "Kenward-Roger"),
+            ("kenward_roger", "Kenward-Roger"),
+        ],
+    )
+    def test_pvalues_matches_canonical_ddf(self, lmer_model, method, canonical) -> None:
+        expected = {
+            name: values[2]
+            for name, values in pvalues_with_ddf(lmer_model, method=canonical).items()
+        }
+
+        assert pvalues(lmer_model, method=method) == pytest.approx(expected)
+
+    def test_denominator_df_methods_report_canonical_names(self, lmer_model) -> None:
+        assert satterthwaite_df(lmer_model).method == "Satterthwaite"
+        assert kenward_roger_df(lmer_model).method == "Kenward-Roger"
 
     def test_pvalues_invalid_method(self, lmer_model) -> None:
         with pytest.raises(ValueError, match="Unknown method"):

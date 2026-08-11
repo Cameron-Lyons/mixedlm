@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, cast
 
@@ -10,7 +11,7 @@ from scipy import linalg
 if TYPE_CHECKING:
     import pandas as pd
 
-from mixedlm.estimation.nlmm import NLMMOptimizer, _build_psi_matrix
+from mixedlm.estimation.nlmm import NLMMOptimizer, _as_prior_weights, _build_psi_matrix
 from mixedlm.models.lmer_types import LogLik
 from mixedlm.nlme.models import NonlinearModel
 
@@ -117,7 +118,7 @@ class NlmerResult:
         if type == "response":
             return self.y - fitted
         elif type == "pearson":
-            return (self.y - fitted) / self.sigma
+            return np.sqrt(self.weights(copy=False)) * (self.y - fitted) / self.sigma
         else:
             raise ValueError(f"Unknown residual type: {type}")
 
@@ -312,8 +313,9 @@ class NlmerResult:
     def weights(self, copy: bool = True) -> NDArray[np.floating]:
         """Get the model weights.
 
-        Returns the prior weights used in model fitting.
-        If no weights were specified, returns an array of ones.
+        Returns the strictly positive prior weights used in model fitting.
+        Conditional residual variance is ``sigma**2 / weights``. If no
+        weights were specified, returns an array of ones.
         """
         if self._weights is not None:
             return self._weights.copy() if copy else self._weights
@@ -336,6 +338,31 @@ class NlmerResult:
         if self._data is not None:
             return self._data.copy()
         return pd.DataFrame({self._x_var: self.x, self._y_var: self.y, self.group_var: self.groups})
+
+    def tidy(
+        self,
+        effects: str | Sequence[str] = "fixed",
+        *,
+        conf_int: bool = False,
+        conf_level: float = 0.95,
+        ddf_method: str | None = "Satterthwaite",
+    ) -> pd.DataFrame:
+        """Return model components in an analysis-ready table."""
+        from mixedlm.inference.reporting import tidy
+
+        return tidy(
+            self,
+            effects=effects,
+            conf_int=conf_int,
+            conf_level=conf_level,
+            ddf_method=ddf_method,
+        )
+
+    def glance(self) -> pd.DataFrame:
+        """Return one row of model-level fit statistics."""
+        from mixedlm.inference.reporting import glance
+
+        return glance(self)
 
     def simulate(
         self,
@@ -397,7 +424,8 @@ class NlmerResult:
             b_new = np.zeros((n_groups, n_random))
 
         pred = self._conditional_mean(random_effects=b_new) + self.offset(copy=False)
-        noise = np.random.randn(n) * self.sigma
+        residual_scale = self.sigma / np.sqrt(self.weights(copy=False))
+        noise = np.random.randn(n) * residual_scale
         return pred + noise
 
     def refit(
@@ -443,7 +471,10 @@ class NlmerResult:
         maxiter = kwargs.pop("maxiter", _DEFAULT_MAXITER)
 
         opt_result = optimizer.optimize(
+            start_theta=self.theta,
             start_phi=start_phi,
+            start_b=self.b,
+            start_sigma=self.sigma,
             method=method,
             maxiter=maxiter,
         )
@@ -571,7 +602,7 @@ class NlmerResult:
         def neg_log_lik(phi_vec):
             pred = self._conditional_mean(phi=phi_vec)
             resid = adjusted_response - pred
-            return 0.5 * np.sum(resid**2) / self.sigma**2
+            return 0.5 * np.dot(self.weights(copy=False), resid**2) / self.sigma**2
 
         hessian = np.zeros((n_params, n_params), dtype=np.float64)
 
@@ -718,13 +749,15 @@ class NlmerResult:
 
             J[:, j] = (pred_plus - fitted_base) / eps
 
-        JtJ = J.T @ J
-        JtJ_inv = self._invert_with_fallback(JtJ)
-        J_JtJ_inv = J @ JtJ_inv
-        h = np.sum(J_JtJ_inv * J, axis=1)
+        sqrt_weights = np.sqrt(self.weights(copy=False))
+        weighted_J = sqrt_weights[:, None] * J
+        JtWJ = weighted_J.T @ weighted_J
+        JtWJ_inv = self._invert_with_fallback(JtWJ)
+        J_JtWJ_inv = weighted_J @ JtWJ_inv
+        h = np.sum(J_JtWJ_inv * weighted_J, axis=1)
 
         if not np.all(np.isfinite(h)):
-            h = np.sum(J**2, axis=1) / (np.sum(J**2) + _HAT_FALLBACK_EPS)
+            h = np.sum(weighted_J**2, axis=1) / (np.sum(weighted_J**2) + _HAT_FALLBACK_EPS)
 
         h = np.nan_to_num(h, nan=0.0, posinf=_HAT_CLIP_MAX, neginf=0.0)
         return np.clip(h, 0, _HAT_CLIP_MAX)
@@ -738,7 +771,7 @@ class NlmerResult:
             Cook's distance for each observation.
         """
         h = self.hatvalues()
-        resid = self.residuals(type="response")
+        resid = self.residuals(type="pearson") * self.sigma
         p = max(len(self.phi), 1)
 
         h = np.clip(h, 0, _HAT_CLIP_MAX)
@@ -760,7 +793,7 @@ class NlmerResult:
             - 'std_resid': Standardized residuals
         """
         h = self.hatvalues()
-        resid = self.residuals(type="response")
+        resid = self.residuals(type="pearson") * self.sigma
         h_safe = np.clip(h, 0, _HAT_CLIP_MAX)
         std_resid = resid / (self.sigma * np.sqrt(1 - h_safe))
 
@@ -925,9 +958,7 @@ class NlmerMod:
         self.offset: NDArray[np.floating] | None = None
 
         if weights is not None:
-            self.weights = np.asarray(weights, dtype=np.float64)
-            if len(self.weights) != len(self.y):
-                raise ValueError(f"weights has length {len(self.weights)}, expected {len(self.y)}")
+            self.weights = _as_prior_weights(weights, len(self.y)).copy()
         else:
             self.weights = None
 
@@ -1042,7 +1073,8 @@ def nlmer(
     verbose : int, default 0
         Verbosity level for optimization output.
     weights : array-like, optional
-        Prior weights for observations.
+        Strictly positive prior weights for observations. Conditional
+        residual variance is inversely proportional to the weights.
     offset : array-like, optional
         Known offset added to the fitted nonlinear mean.
     **kwargs
