@@ -69,7 +69,7 @@ result.confint(method="boot")     # Bootstrap confidence intervals
 import polars as pl
 import mixedlm as mlm
 
-# Works directly with polars DataFrames
+# Works directly with eager or lazy polars frames
 data = pl.DataFrame({
     "y": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
     "x": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
@@ -78,6 +78,9 @@ data = pl.DataFrame({
 
 result = mlm.lmer("y ~ x + (1 | group)", data)
 print(result.summary())
+
+# LazyFrame plans are projected to model columns before one-time collection
+lazy_result = mlm.lmer("y ~ x + (1 | group)", data.lazy())
 ```
 
 ### Generalized Linear Mixed Model
@@ -177,6 +180,14 @@ mixedlm supports lme4-style formula syntax for specifying random effects:
 | `(x \|\| group)` | Random intercept and slope (uncorrelated) |
 | `(1 \| group1/group2)` | Nested random effects |
 | `(1 \| group1) + (1 \| group2)` | Crossed random effects |
+
+Structured covariance models can use compound symmetry or AR(1) correlation:
+
+```python
+formula = mlm.set_cov_type("y ~ time + (time | subject)", "ar1")
+model = mlm.lmer(formula, data)
+print(model.VarCorr())
+```
 
 ## API Reference
 
