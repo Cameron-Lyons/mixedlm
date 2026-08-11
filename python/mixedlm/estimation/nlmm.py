@@ -507,6 +507,7 @@ class NLMMOptimizer:
         self.n_theta = self.n_random * (self.n_random + 1) // 2
 
         self._start_phi: NDArray[np.floating] | None = None
+        self._start_b = np.zeros((self.n_groups, self.n_random), dtype=np.float64)
         self._start_sigma = _weighted_standard_deviation(self.y, self.weights)
         self._last_theta: NDArray[np.floating] | None = None
         self._last_evaluation: (
@@ -546,7 +547,6 @@ class NLMMOptimizer:
         if self._start_phi is None:
             self._start_phi = self.get_start_phi()
 
-        start_b = np.zeros((self.n_groups, self.n_random), dtype=np.float64)
         invalid_evaluation: tuple[
             float,
             NDArray[np.floating],
@@ -555,7 +555,7 @@ class NLMMOptimizer:
         ] = (
             _INVALID_OBJECTIVE,
             self._start_phi.copy(),
-            start_b,
+            self._start_b.copy(),
             self._start_sigma,
         )
 
@@ -572,7 +572,7 @@ class NLMMOptimizer:
                             self.groups,
                             self.model,
                             self._start_phi,
-                            start_b,
+                            self._start_b,
                             self.random_params,
                             self._start_sigma,
                             self.weights,
@@ -585,7 +585,7 @@ class NLMMOptimizer:
                             self.groups,
                             self.model,
                             self._start_phi,
-                            start_b,
+                            self._start_b,
                             self.random_params,
                             self._start_sigma,
                             n_jobs=self.n_jobs,
@@ -609,6 +609,8 @@ class NLMMOptimizer:
         self,
         start_theta: NDArray[np.floating] | None = None,
         start_phi: NDArray[np.floating] | None = None,
+        start_b: NDArray[np.floating] | None = None,
+        start_sigma: float | None = None,
         method: str = "L-BFGS-B",
         maxiter: int = 500,
     ) -> NLMMOptimizationResult:
@@ -616,7 +618,23 @@ class NLMMOptimizer:
             start_theta = self.get_start_theta()
 
         self._start_phi = start_phi.copy() if start_phi is not None else self.get_start_phi()
-        self._start_sigma = _weighted_standard_deviation(self.y, self.weights)
+        if start_b is None:
+            self._start_b = np.zeros((self.n_groups, self.n_random), dtype=np.float64)
+        else:
+            start_b_array = np.asarray(start_b, dtype=np.float64)
+            expected_shape = (self.n_groups, self.n_random)
+            if start_b_array.shape != expected_shape:
+                raise ValueError(
+                    f"start_b has shape {start_b_array.shape}, expected {expected_shape}"
+                )
+            self._start_b = start_b_array.copy()
+
+        sigma = (
+            _weighted_standard_deviation(self.y, self.weights)
+            if start_sigma is None
+            else float(start_sigma)
+        )
+        self._start_sigma = max(sigma, np.sqrt(_MIN_VARIANCE))
         self._last_theta = None
         self._last_evaluation = None
 

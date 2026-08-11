@@ -545,7 +545,7 @@ class TestGLMMFunctions:
 
     def test_pirls_poisson(self, simple_glmm_data):
         d = simple_glmm_data
-        d["y"] = np.random.poisson(3, len(d["y"])).astype(float)
+        d["y"] = np.full(len(d["y"]), 5.0)
 
         beta, u, deviance, converged = pirls(
             d["y"],
@@ -563,7 +563,12 @@ class TestGLMMFunctions:
             "poisson",
             "log",
         )
+        z = sparse.csc_matrix((d["z_data"], d["z_indices"], d["z_indptr"]), shape=d["z_shape"])
+        fitted = np.exp(d["x"] @ np.asarray(beta) + z @ np.asarray(u) + d["offset"])
+
+        assert converged
         assert np.isfinite(deviance)
+        assert_allclose(fitted, 5.0, rtol=1e-6)
 
     def test_pirls_gaussian(self, simple_glmm_data):
         d = simple_glmm_data

@@ -20,6 +20,19 @@ def create_nlme_data(n_groups: int = 8, n_per_group: int = 10, seed: int = 42) -
     return pd.DataFrame(data_rows)
 
 
+def create_offset_nlme_data(seed: int = 20260803) -> pd.DataFrame:
+    rng = np.random.default_rng(seed)
+    data_rows = []
+    for subject in range(8):
+        asym = 200 + rng.normal(0, 12)
+        r0 = 180 + rng.normal(0, 6)
+        lrc = -3 + rng.normal(0, 0.1)
+        for time in np.linspace(0, 10, 10):
+            y = asym + (r0 - asym) * np.exp(-np.exp(lrc) * time) + rng.normal(0, 2)
+            data_rows.append({"subject": f"S{subject + 1}", "time": time, "y": y})
+    return pd.DataFrame(data_rows)
+
+
 NLME_DATA = create_nlme_data()
 
 
@@ -354,6 +367,47 @@ class TestNlmerWeightsOffset:
 
         off = result.offset()
         assert np.allclose(off, offset)
+
+    def test_offset_applied_consistently(self) -> None:
+        data = create_offset_nlme_data()
+        offset = np.linspace(-2.0, 2.0, len(data))
+        adjusted_data = data.assign(y=data["y"].to_numpy() - offset)
+        fit_kwargs = {
+            "x_var": "time",
+            "y_var": "y",
+            "group_var": "subject",
+            "random_params": ["Asym"],
+        }
+
+        with_offset = nlmer(nlme.SSasymp(), data, offset=offset, **fit_kwargs)
+        without_offset = nlmer(nlme.SSasymp(), adjusted_data, **fit_kwargs)
+
+        assert with_offset.converged
+        assert without_offset.converged
+        np.testing.assert_allclose(with_offset.phi, without_offset.phi)
+        np.testing.assert_allclose(with_offset.theta, without_offset.theta)
+        np.testing.assert_allclose(with_offset.b, without_offset.b)
+        np.testing.assert_allclose(with_offset.y, data["y"].to_numpy())
+        np.testing.assert_allclose(with_offset.getME("y"), data["y"].to_numpy())
+        np.testing.assert_allclose(with_offset.fitted(), without_offset.fitted() + offset)
+        np.testing.assert_allclose(with_offset.residuals(), without_offset.residuals())
+        np.testing.assert_allclose(with_offset.vcov(), without_offset.vcov())
+        np.testing.assert_allclose(with_offset.hatvalues(), without_offset.hatvalues())
+
+        simulated = with_offset.simulate(seed=123, use_re=False)
+        adjusted_simulated = without_offset.simulate(seed=123, use_re=False)
+        np.testing.assert_allclose(simulated, adjusted_simulated + offset)
+
+        refitted = with_offset.refit(simulated)
+        adjusted_refitted = without_offset.refit(adjusted_simulated)
+        assert refitted.converged
+        assert adjusted_refitted.converged
+        np.testing.assert_allclose(refitted.phi, adjusted_refitted.phi, rtol=1e-6, atol=1e-6)
+        np.testing.assert_allclose(refitted.theta, adjusted_refitted.theta, rtol=1e-6, atol=1e-6)
+        np.testing.assert_allclose(refitted.b, adjusted_refitted.b, rtol=1e-6, atol=1e-6)
+        np.testing.assert_allclose(refitted.deviance, adjusted_refitted.deviance)
+        np.testing.assert_allclose(refitted.y, simulated)
+        np.testing.assert_allclose(refitted.model_frame()["y"], simulated)
 
     def test_weights_wrong_length_raises(self) -> None:
         model = nlme.SSasymp()
