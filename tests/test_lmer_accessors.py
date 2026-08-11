@@ -2,6 +2,8 @@ import numpy as np
 import pandas as pd
 import pytest
 from mixedlm import (
+    AllFitResult,
+    allFit,
     families,
     findbars,
     glmer,
@@ -662,6 +664,7 @@ class TestAllFit:
         result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
         allfit_result = result.allFit(SLEEPSTUDY, optimizers=["L-BFGS-B", "Nelder-Mead"])
 
+        assert isinstance(allfit_result, AllFitResult)
         assert len(allfit_result.fits) == 2
         assert "L-BFGS-B" in allfit_result.fits
         assert "Nelder-Mead" in allfit_result.fits
@@ -741,6 +744,33 @@ class TestAllFit:
         repr_output = repr(allfit_result)
         assert "AllFitResult" in repr_output
         assert "successful" in repr_output
+
+    def test_function_and_method_share_result_interface(self):
+        from mixedlm.inference import AllFitResult as InferenceAllFitResult
+
+        formula_result = allFit(
+            "Reaction ~ Days + (1 | Subject)",
+            SLEEPSTUDY,
+            optimizers=["L-BFGS-B"],
+        )
+
+        assert AllFitResult is InferenceAllFitResult
+        assert isinstance(formula_result, AllFitResult)
+        assert formula_result.results["L-BFGS-B"] is formula_result.fits["L-BFGS-B"]
+        assert formula_result.best_optimizer == "L-BFGS-B"
+        assert list(formula_result.summary["optimizer"]) == ["L-BFGS-B"]
+
+    def test_legacy_result_interface_preserves_failures(self):
+        allfit_result = AllFitResult(
+            fits={"broken": None},
+            errors={"broken": "optimizer failed"},
+            warnings={"broken": []},
+        )
+
+        assert isinstance(allfit_result.results["broken"], RuntimeError)
+        assert str(allfit_result.results["broken"]) == "optimizer failed"
+        assert allfit_result.summary.loc[0, "error"] == "optimizer failed"
+        assert allfit_result.best_optimizer == "broken"
 
 
 class TestVarCorr:
