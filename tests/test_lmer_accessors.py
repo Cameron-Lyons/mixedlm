@@ -454,6 +454,18 @@ class TestUpdateFormula:
         assert "subject" in str(new)
         assert new.response == "y"
 
+    def test_update_formula_adds_and_removes_quoted_names(self) -> None:
+        from mixedlm.formula.parser import parse_formula, update_formula
+        from mixedlm.formula.terms import VariableTerm
+
+        old = parse_formula("`response value` ~ x + (1 | `group id`)")
+        added = update_formula(old, ". ~ . + `new + value`")
+        removed = update_formula(added, ". ~ . - `new + value`")
+
+        assert VariableTerm("new + value") in added.fixed.terms
+        assert str(added) == ("`response value` ~ x + `new + value` + (1 | `group id`)")
+        assert removed == old
+
 
 class TestDrop1:
     def test_drop1_lmer_basic(self) -> None:
