@@ -24,6 +24,7 @@ A Python implementation of mixed-effects models inspired by R's [lme4](https://g
 - **Power analysis** - powerSim, powerCurve for sample size planning
 - **Diagnostics** - Dispersion and zero-inflation checks, influence measures, Cook's distance, leverage, VIF/GVIF, condition indices
 - **Fast startup** - Public objects are loaded on demand, so lightweight imports avoid the modeling stack
+- **Fit metrics** - Nakagawa marginal/conditional R² and adjusted/unadjusted ICC
 
 ## Installation
 
@@ -62,6 +63,8 @@ result.coef()       # Combined coefficients
 # Inference
 result.confint(method="profile")  # Profile confidence intervals
 result.confint(method="boot")     # Bootstrap confidence intervals
+mlm.r2_nakagawa(result)            # Marginal and conditional R²
+mlm.icc(result)                     # Adjusted and unadjusted ICC
 mlm.check_collinearity(result)     # VIF/GVIF and condition diagnostics
 ```
 

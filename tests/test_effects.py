@@ -91,6 +91,19 @@ def test_all_effects_returns_every_fixed_variable(lmm_result) -> None:
     assert len(effects["treatment"]) == 2
 
 
+def test_all_effects_tracks_polynomial_source_variables(effect_data: pd.DataFrame) -> None:
+    model = lmer(
+        "y ~ x + I(x**2) * treatment + (1 | group)",
+        effect_data,
+        control=lmerControl(check_singular=False),
+    )
+
+    effects = allEffects(model, n_points=4)
+
+    assert list(effects) == ["x", "treatment"]
+    assert len(effects["x"]) == 4
+
+
 def test_ggpredict_honors_nondefault_contrasts(effect_data: pd.DataFrame) -> None:
     model = lmer(
         "y ~ treatment + (1 | group)",

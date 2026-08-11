@@ -223,6 +223,33 @@ Exclude random effects (set to zero):
 model.predict(newdata=new_data, re_form="~0")
 ```
 
+### Prediction Uncertainty
+
+Request pointwise uncertainty for the conditional mean or a future observation:
+
+```python
+# Mean prediction with its standard error and confidence interval
+mean_ci = model.predict(newdata=new_data, se_fit=True, interval="confidence")
+
+# Future observation interval, including residual variation
+future_pi = model.predict(newdata=new_data, interval="prediction")
+```
+
+For known groups, these intervals use the full joint covariance of fixed and random effects,
+including correlated random slopes. For unseen groups, allow the level explicitly; the random
+effect is centered at zero and its fitted population covariance is included in the uncertainty:
+
+```python
+new_group_pi = model.predict(
+    newdata=new_subject_data,
+    allow_new_levels=True,
+    interval="prediction",
+)
+```
+
+`se_fit` is the standard error of the predicted mean. A prediction interval is wider because
+its bounds additionally include the residual variance.
+
 ## Handling Convergence Issues
 
 ### Check Convergence
