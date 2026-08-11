@@ -19,6 +19,7 @@ if TYPE_CHECKING:
 
 from mixedlm.estimation.reml import (
     LMMOptimizer,
+    _build_lambda,
     _build_theta_bounds,
     _count_theta,
 )
@@ -892,7 +893,7 @@ def mkReTrms(
 
 
 def simulate_formula(
-    formula: str,
+    formula: Formula | str,
     data: pd.DataFrame,
     beta: NDArray[np.floating] | dict[str, float] | None = None,
     theta: NDArray[np.floating] | None = None,
@@ -910,8 +911,8 @@ def simulate_formula(
 
     Parameters
     ----------
-    formula : str
-        Model formula with random effects (e.g., "y ~ x + (1|group)").
+    formula : Formula or str
+        Parsed formula or model formula with random effects (e.g., "y ~ x + (1|group)").
     data : pd.DataFrame
         Data frame containing the predictor variables.
     beta : array-like or dict, optional
@@ -968,8 +969,6 @@ def simulate_formula(
     lmer : Fit linear mixed models.
     LmerResult.simulate : Simulate from a fitted model.
     """
-    from scipy import sparse
-
     from mixedlm.families import Gaussian
 
     if seed is not None:
@@ -978,7 +977,7 @@ def simulate_formula(
     if family is None:
         family = Gaussian()
 
-    parsed_formula = parse_formula(formula)
+    parsed_formula = parse_formula(formula) if isinstance(formula, str) else formula
     matrices = build_model_matrices(parsed_formula, data)
 
     n = matrices.n_obs
@@ -996,57 +995,36 @@ def simulate_formula(
         beta_vec = np.asarray(beta, dtype=np.float64).reshape(-1)
 
     if theta is None:
-        n_theta = sum(
-            s.n_terms * (s.n_terms + 1) // 2 if s.correlated else s.n_terms
-            for s in matrices.random_structures
-        )
-        theta_vec: NDArray[np.floating] = np.ones(n_theta)
+        theta_values: list[float] = []
+        for struct in matrices.random_structures:
+            cov_type = getattr(struct, "cov_type", "us")
+            if cov_type in ("cs", "ar1"):
+                theta_values.append(1.0)
+                if struct.n_terms > 1:
+                    theta_values.append(0.0)
+            else:
+                n_struct_theta = (
+                    struct.n_terms * (struct.n_terms + 1) // 2
+                    if struct.correlated
+                    else struct.n_terms
+                )
+                theta_values.extend([1.0] * n_struct_theta)
+        theta_vec: NDArray[np.floating] = np.asarray(theta_values, dtype=np.float64)
     else:
         theta_vec = np.asarray(theta, dtype=np.float64).reshape(-1)
 
+    n_theta = _count_theta(matrices.random_structures)
+    if theta_vec.size != n_theta:
+        raise ValueError(f"theta must contain {n_theta} parameters, got {theta_vec.size}")
+
+    Lambda = _build_lambda(theta_vec, matrices.random_structures)
     results = []
 
     for _ in range(nsim):
         eta = matrices.X @ beta_vec
-
-        u = np.zeros(q)
-        idx = 0
-        theta_idx = 0
-
-        for struct in matrices.random_structures:
-            n_levels = struct.n_levels
-            n_terms = struct.n_terms
-
-            if struct.correlated:
-                n_theta_block = n_terms * (n_terms + 1) // 2
-                theta_block = theta_vec[theta_idx : theta_idx + n_theta_block]
-                theta_idx += n_theta_block
-
-                L = np.zeros((n_terms, n_terms))
-                k = 0
-                for j in range(n_terms):
-                    for i in range(j, n_terms):
-                        L[i, j] = theta_block[k]
-                        k += 1
-
-                for _level in range(n_levels):
-                    z = np.random.randn(n_terms)
-                    u_level = L @ z * sigma
-                    u[idx : idx + n_terms] = u_level
-                    idx += n_terms
-            else:
-                theta_block = theta_vec[theta_idx : theta_idx + n_terms]
-                theta_idx += n_terms
-
-                for term in range(n_terms):
-                    for _level in range(n_levels):
-                        u[idx] = np.random.randn() * theta_block[term] * sigma
-                        idx += 1
-
-        if sparse.issparse(matrices.Z):
-            eta += matrices.Z @ u
-        else:
-            eta += matrices.Z @ u
+        standard_random_effects = np.random.randn(q)
+        random_effects = np.asarray(Lambda @ standard_random_effects).reshape(-1) * sigma
+        eta += matrices.Z @ random_effects
 
         mu = family.link.inverse(eta)
 
