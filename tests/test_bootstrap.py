@@ -183,7 +183,7 @@ class TestBootstrapLmer:
 
     def test_polars_categorical_predictor(self, categorical_lmer_data):
         pl = pytest.importorskip("polars")
-        data = pl.from_pandas(categorical_lmer_data)
+        data = pl.DataFrame(categorical_lmer_data.to_dict(orient="list"))
         result = lmer("y ~ treatment + (1 | group)", data)
 
         boot = bootstrap_lmer(result, n_boot=3, seed=42)
