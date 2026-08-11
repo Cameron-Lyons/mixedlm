@@ -92,16 +92,26 @@ class GlmerResult(MerResultMixin):
     ) -> dict[str, dict[str, NDArray[np.floating]]] | RanefResult:
         return self._ranef_with_optional_condvar(self.u, condVar)
 
-    def _compute_condVar(self) -> dict[str, dict[str, NDArray[np.floating]]]:
+    def _compute_condVar(
+        self, include_cov: bool = False
+    ) -> dict[str, dict[str, NDArray[np.floating]]]:
+        from mixedlm.utils.variance import _conditional_variance_blocks
+
         q = self.matrices.n_random
         if q == 0:
             return {}
 
         projection = self._working_projection
-        Lambda_dense = projection.Lambda.toarray()
-        V_inv_Lambda_t = linalg.cho_solve((projection.random_cholesky, True), Lambda_dense.T)
-        cond_cov = Lambda_dense @ V_inv_Lambda_t
-        return self._condvar_from_cov(cond_cov)
+        weighted_z = self.matrices.Z.multiply(np.sqrt(projection.weights)[:, np.newaxis])
+        ztwz = weighted_z.T @ weighted_z
+        precision = projection.Lambda.T @ ztwz @ projection.Lambda + sparse.eye(q, format="csc")
+
+        return _conditional_variance_blocks(
+            precision,
+            projection.Lambda,
+            self.matrices.random_structures,
+            include_cov=include_cov,
+        )
 
     def get_sigma(self) -> float:
         return 1.0
@@ -191,7 +201,7 @@ class GlmerResult(MerResultMixin):
         """
         return self._build_model_terms(self.formula)
 
-    def model_frame(self) -> pd.DataFrame:
+    def model_frame(self) -> Any:
         """Get the model frame.
 
         Returns the data frame containing only the variables used
@@ -199,9 +209,9 @@ class GlmerResult(MerResultMixin):
 
         Returns
         -------
-        pd.DataFrame
-            Data frame with the response variable, fixed effect
-            variables, and grouping factors.
+        DataFrame
+            Data frame with the response variable, fixed effect variables,
+            and grouping factors. The fitted input's backend is preserved.
 
         Examples
         --------
