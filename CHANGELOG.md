@@ -33,6 +33,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - Nonlinear mixed models now apply offsets consistently to responses, fitted values, simulations, refits, covariance estimates, and leverage diagnostics
 
+### Fixed
+- Gamma GLMMs now minimize the non-negative unit deviance instead of its negative
+- Poisson and other unbounded GLMM families no longer clamp fitted means below one
+- Unsupported family and link combinations no longer route through the native fast path
+
 ## [1.1.0] - 2026-01-27
 
 ### Added

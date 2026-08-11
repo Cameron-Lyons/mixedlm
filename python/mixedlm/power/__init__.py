@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import warnings
 from collections.abc import Callable
 from dataclasses import dataclass
 from numbers import Real
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
+from numpy.typing import NDArray
 from scipy import stats
 
 if TYPE_CHECKING:
@@ -17,7 +19,7 @@ if TYPE_CHECKING:
 _DEFAULT_NSIM = 1000
 _DEFAULT_NSIM_CURVE = 500
 _DEFAULT_ALPHA = 0.05
-_Z_95 = 1.96
+_CI_ALPHA = 0.05
 _POWER_THRESHOLD = 0.8
 _VERBOSE_INTERVAL = 100
 _MIN_GROUPS = 5
@@ -144,8 +146,41 @@ def _default_test(
     se = np.sqrt(vcov[idx, idx])
     z_val = beta[idx] / se if se > 0 else 0.0
 
-    p_val = 2 * (1 - stats.norm.cdf(np.abs(z_val)))
+    p_val = 2 * stats.norm.sf(np.abs(z_val))
     return bool(p_val < alpha)
+
+
+def _binomial_score_interval(
+    n_successes: int,
+    n_trials: int,
+    alpha: float,
+) -> tuple[float, float]:
+    """Compute a Wilson score interval for a binomial proportion."""
+    proportion = n_successes / n_trials
+    z_critical = float(stats.norm.ppf(1.0 - alpha / 2.0))
+    z_squared = z_critical**2
+    denominator = 1.0 + z_squared / n_trials
+    center = (proportion + z_squared / (2.0 * n_trials)) / denominator
+    half_width = (
+        z_critical
+        * np.sqrt(proportion * (1.0 - proportion) / n_trials + z_squared / (4.0 * n_trials**2))
+        / denominator
+    )
+    lower = 0.0 if n_successes == 0 else max(0.0, center - half_width)
+    upper = 1.0 if n_successes == n_trials else min(1.0, center + half_width)
+    return lower, upper
+
+
+def _simulate_with_isolated_seed(
+    model: LmerResult | GlmerResult,
+    seed: int,
+) -> NDArray[np.floating]:
+    """Simulate reproducibly without changing NumPy's process-wide RNG state."""
+    random_state = np.random.get_state()
+    try:
+        return model.simulate(nsim=1, seed=seed, use_re=True)
+    finally:
+        np.random.set_state(random_state)
 
 
 def powerSim(
@@ -174,14 +209,15 @@ def powerSim(
     alpha : float, default 0.05
         Significance level.
     seed : int, optional
-        Random seed for reproducibility.
+        Random seed for reproducibility. The process-wide NumPy random state
+        is preserved.
     verbose : bool, default False
         Print progress information.
 
     Returns
     -------
     PowerResult
-        Object containing power estimate and confidence interval.
+        Object containing the power estimate and a 95% Wilson score interval.
 
     Examples
     --------
@@ -189,8 +225,16 @@ def powerSim(
     >>> power = powerSim(result, test="x", nsim=500)
     >>> print(power)
     """
-    if seed is not None:
-        np.random.seed(seed)
+    if isinstance(nsim, bool) or not isinstance(nsim, (int, np.integer)) or nsim < 1:
+        raise ValueError("nsim must be a positive integer")
+    if not np.isfinite(alpha) or not 0.0 < alpha < 1.0:
+        raise ValueError("alpha must be strictly between 0 and 1")
+
+    param_names = model.matrices.fixed_names
+    if not param_names:
+        raise ValueError("model has no fixed effects to test")
+
+    rng = np.random.default_rng(seed)
 
     def make_test_func(param: str, a: float) -> Callable[[LmerResult | GlmerResult], bool]:
         def test_fn(m: LmerResult | GlmerResult) -> bool:
@@ -198,49 +242,19 @@ def powerSim(
 
         return test_fn
 
+    test_param: str | None = None
     if test is None:
-        param_names = model.matrices.fixed_names
         test_param = param_names[1] if len(param_names) > 1 else param_names[0]
         test_func = make_test_func(test_param, alpha)
     elif isinstance(test, str):
+        if test not in param_names:
+            raise ValueError(f"Parameter '{test}' not found. Available: {param_names}")
         test_param = test
         test_func = make_test_func(test_param, alpha)
-    else:
+    elif callable(test):
         test_func = test
-
-    n_successes = 0
-    n_completed = 0
-
-    for i in range(nsim):
-        if verbose and (i + 1) % _VERBOSE_INTERVAL == 0:
-            print(f"Simulation {i + 1}/{nsim}")
-
-        try:
-            y_sim = model.simulate(nsim=1, use_re=True)
-            fit_sim = model.refit(y_sim)
-            if test_func(fit_sim):
-                n_successes += 1
-            n_completed += 1
-        except Exception:
-            continue
-
-    if n_completed == 0:
-        return PowerResult(
-            power=np.nan,
-            ci_lower=np.nan,
-            ci_upper=np.nan,
-            n_successes=0,
-            n_simulations=nsim,
-            effect_size=None,
-            n_obs=model.matrices.n_obs,
-            n_groups=None,
-        )
-
-    power = n_successes / n_completed
-
-    se = np.sqrt(power * (1 - power) / n_completed)
-    ci_lower = max(0.0, power - _Z_95 * se)
-    ci_upper = min(1.0, power + _Z_95 * se)
+    else:
+        raise TypeError("test must be a parameter name, callable, or None")
 
     n_groups = None
     if hasattr(model, "ngrps"):
@@ -249,9 +263,58 @@ def powerSim(
             n_groups = list(grps.values())[0]
 
     effect_size = None
-    if isinstance(test, str):
-        idx = model.matrices.fixed_names.index(test)
+    if test_param is not None:
+        idx = param_names.index(test_param)
         effect_size = float(model.beta[idx])
+
+    n_successes = 0
+    n_completed = 0
+    first_error: Exception | None = None
+
+    for i in range(nsim):
+        if verbose and (i + 1) % _VERBOSE_INTERVAL == 0:
+            print(f"Simulation {i + 1}/{nsim}")
+
+        try:
+            simulation_seed = int(rng.integers(0, 2**32, dtype=np.uint64))
+            y_sim = _simulate_with_isolated_seed(model, simulation_seed)
+            fit_sim = model.refit(y_sim)
+            if test_func(fit_sim):
+                n_successes += 1
+            n_completed += 1
+        except Exception as exc:
+            if first_error is None:
+                first_error = exc
+            continue
+
+    if n_completed == 0:
+        error_detail = f" First error: {first_error}" if first_error is not None else ""
+        warnings.warn(
+            f"All {nsim} power simulations failed.{error_detail}",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return PowerResult(
+            power=np.nan,
+            ci_lower=np.nan,
+            ci_upper=np.nan,
+            n_successes=0,
+            n_simulations=0,
+            effect_size=effect_size,
+            n_obs=model.matrices.n_obs,
+            n_groups=n_groups,
+        )
+
+    power = n_successes / n_completed
+    if n_completed < nsim:
+        error_detail = f" First error: {first_error}" if first_error is not None else ""
+        warnings.warn(
+            f"{nsim - n_completed} of {nsim} power simulations failed.{error_detail}",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+
+    ci_lower, ci_upper = _binomial_score_interval(n_successes, n_completed, _CI_ALPHA)
 
     return PowerResult(
         power=power,

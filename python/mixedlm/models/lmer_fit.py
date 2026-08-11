@@ -96,11 +96,12 @@ class LmerMod:
             use_rust=ctrl.use_rust,
         )
 
+        opt_options = ctrl.get_scipy_options(optimizer=opt_method, maxiter=opt_maxiter)
         opt_result = optimizer.optimize(
             start=start,
             method=opt_method,
             maxiter=opt_maxiter,
-            options=ctrl.optCtrl,
+            options=opt_options,
         )
 
         result = LmerResult(
@@ -140,7 +141,7 @@ class LmerMod:
 
 
 def lmer(
-    formula: str | Formula,
+    formula: Formula | str,
     data: pd.DataFrame,
     REML: bool = True,
     verbose: int = 0,
@@ -155,8 +156,8 @@ def lmer(
 
     Parameters
     ----------
-    formula : str
-        Model formula in lme4 syntax (e.g., "y ~ x + (1|group)").
+    formula : Formula or str
+        Parsed formula or model formula in lme4 syntax (e.g., "y ~ x + (1|group)").
     data : DataFrame
         Data containing the variables in the formula.
     REML : bool, default True
