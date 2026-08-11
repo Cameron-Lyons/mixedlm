@@ -151,6 +151,19 @@ class TestPolarsDataTypes:
 
 
 class TestPolarsNAHandling:
+    @pytest.fixture(params=[pl.Float32, pl.Float64], ids=["float32", "float64"])
+    def nan_data(self, request):
+        return pl.DataFrame(
+            {
+                "y": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+                "x": pl.Series(
+                    [1.0, 2.0, float("nan"), 4.0, 5.0, 6.0],
+                    dtype=request.param,
+                ),
+                "group": ["A", "A", "B", "B", "C", "C"],
+            }
+        )
+
     def test_na_omit(self):
         """Test NA handling with polars."""
         data = pl.DataFrame(
@@ -177,6 +190,30 @@ class TestPolarsNAHandling:
 
         with pytest.raises(ValueError, match="Missing values"):
             mlm.lmer("y ~ x + (1 | group)", data, na_action="fail")
+
+    def test_nan_omit(self, nan_data):
+        """Floating-point NaN values are omitted like pandas missing values."""
+        result = mlm.lmer("y ~ x + (1 | group)", nan_data, na_action="omit")
+
+        assert result.converged
+        assert result.matrices.n_obs == 5
+
+    def test_nan_exclude(self, nan_data):
+        """Excluded NaN rows are restored in observation-aligned outputs."""
+        result = mlm.lmer("y ~ x + (1 | group)", nan_data, na_action="exclude")
+
+        fitted = result.fitted()
+        residuals = result.residuals()
+        assert result.matrices.n_obs == 5
+        assert len(fitted) == len(nan_data)
+        assert len(residuals) == len(nan_data)
+        assert np.isnan(fitted[2])
+        assert np.isnan(residuals[2])
+
+    def test_nan_fail(self, nan_data):
+        """The fail action reports floating-point NaN values."""
+        with pytest.raises(ValueError, match=r"Variables with NA: \['x'\]"):
+            mlm.lmer("y ~ x + (1 | group)", nan_data, na_action="fail")
 
 
 class TestPolarsEquivalence:

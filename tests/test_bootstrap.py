@@ -54,6 +54,33 @@ def simple_glmer_data():
 
 
 @pytest.fixture
+def categorical_lmer_data():
+    rng = np.random.default_rng(47)
+    n_groups = 8
+    n_per_group = 12
+    groups = np.repeat([f"G{i}" for i in range(n_groups)], n_per_group)
+    treatment = np.tile(np.repeat(["control", "treated"], n_per_group // 2), n_groups)
+    group_effects = np.repeat(rng.normal(0, 0.7, n_groups), n_per_group)
+    y = 2.0 + 1.5 * (treatment == "treated") + group_effects + rng.normal(0, 0.5, len(groups))
+
+    return pd.DataFrame({"y": y, "treatment": treatment, "group": groups})
+
+
+@pytest.fixture
+def categorical_glmer_data():
+    rng = np.random.default_rng(53)
+    n_groups = 8
+    n_per_group = 16
+    groups = np.repeat([f"G{i}" for i in range(n_groups)], n_per_group)
+    treatment = np.tile(np.repeat(["control", "treated"], n_per_group // 2), n_groups)
+    group_effects = np.repeat(rng.normal(0, 0.5, n_groups), n_per_group)
+    eta = -0.5 + 1.0 * (treatment == "treated") + group_effects
+    y = rng.binomial(1, 1 / (1 + np.exp(-eta)))
+
+    return pd.DataFrame({"y": y, "treatment": treatment, "group": groups})
+
+
+@pytest.fixture
 def lmer_result(simple_lmer_data):
     return lmer("y ~ x + (1|group)", simple_lmer_data)
 
@@ -205,6 +232,16 @@ class TestBootstrapLmer:
 
         assert_allclose(simulated, expected)
 
+    def test_polars_categorical_predictor(self, categorical_lmer_data):
+        pl = pytest.importorskip("polars")
+        data = pl.DataFrame(categorical_lmer_data.to_dict(orient="list"))
+        result = lmer("y ~ treatment + (1 | group)", data)
+
+        boot = bootstrap_lmer(result, n_boot=3, seed=42)
+
+        assert boot.n_failed == 0
+        assert np.isfinite(boot.beta_samples).all()
+
 
 class TestBootstrapGlmer:
     def test_basic_bootstrap(self, glmer_result, simple_glmer_data):
@@ -217,6 +254,14 @@ class TestBootstrapGlmer:
         boot1 = bootstrap_glmer(glmer_result, n_boot=10, seed=42)
         boot2 = bootstrap_glmer(glmer_result, n_boot=10, seed=42)
         assert_allclose(boot1.beta_samples, boot2.beta_samples, rtol=1e-10)
+
+    def test_categorical_predictor(self, categorical_glmer_data):
+        result = glmer("y ~ treatment + (1 | group)", categorical_glmer_data, family=Binomial())
+
+        boot = bootstrap_glmer(result, n_boot=3, seed=42)
+
+        assert boot.n_failed == 0
+        assert np.isfinite(boot.beta_samples).all()
 
     def test_bootstrap_does_not_rebuild_validated_design(self, monkeypatch, glmer_result):
         def fail_rebuild(*args, **kwargs):

@@ -135,10 +135,13 @@ def concat_columns_as_string(data: Any, columns: list[str], separator: str = "/"
         result = data.select(expr.alias("_combined")).get_column("_combined")
         return result.to_numpy()
 
-    combined = data[list(columns)].apply(lambda row: separator.join(str(x) for x in row), axis=1)
+    string_columns = data[list(columns)].astype(str)
+    combined = string_columns.iloc[:, 0]
+    for name in string_columns.columns[1:]:
+        combined = combined.str.cat(string_columns[name], sep=separator)
     if hasattr(combined.dtype, "storage"):
         combined = combined.astype(object)
-    return combined.values
+    return combined.to_numpy()
 
 
 def _is_polars(data: Any) -> bool:
