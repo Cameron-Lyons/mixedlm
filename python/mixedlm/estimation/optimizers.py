@@ -9,14 +9,6 @@ import numpy as np
 from numpy.typing import NDArray
 from scipy.optimize import minimize
 
-try:
-    import nlopt
-
-    _HAS_NLOPT = True
-except ImportError:
-    _HAS_NLOPT = False
-
-
 SCIPY_OPTIMIZERS = {
     "L-BFGS-B",
     "BFGS",
@@ -30,12 +22,12 @@ SCIPY_OPTIMIZERS = {
 }
 
 NLOPT_OPTIMIZERS = {
-    "nloptwrap_BOBYQA": nlopt.LN_BOBYQA if _HAS_NLOPT else None,
-    "nloptwrap_NEWUOA": nlopt.LN_NEWUOA_BOUND if _HAS_NLOPT else None,
-    "nloptwrap_PRAXIS": nlopt.LN_PRAXIS if _HAS_NLOPT else None,
-    "nloptwrap_SBPLX": nlopt.LN_SBPLX if _HAS_NLOPT else None,
-    "nloptwrap_COBYLA": nlopt.LN_COBYLA if _HAS_NLOPT else None,
-    "nloptwrap_NELDERMEAD": nlopt.LN_NELDERMEAD if _HAS_NLOPT else None,
+    "nloptwrap_BOBYQA": "LN_BOBYQA",
+    "nloptwrap_NEWUOA": "LN_NEWUOA_BOUND",
+    "nloptwrap_PRAXIS": "LN_PRAXIS",
+    "nloptwrap_SBPLX": "LN_SBPLX",
+    "nloptwrap_COBYLA": "LN_COBYLA",
+    "nloptwrap_NELDERMEAD": "LN_NELDERMEAD",
 }
 
 NLOPT_OPTIMIZER_NAMES = set(NLOPT_OPTIMIZERS.keys())
@@ -58,13 +50,21 @@ def has_cobyqa() -> bool:
     return True
 
 
+def _load_nlopt() -> Any | None:
+    try:
+        import nlopt
+    except ImportError:
+        return None
+    return nlopt
+
+
 def has_nlopt() -> bool:
-    return _HAS_NLOPT
+    return _load_nlopt() is not None
 
 
 def available_optimizers() -> list[str]:
     opts = list(SCIPY_OPTIMIZERS | COMPATIBILITY_OPTIMIZERS)
-    if _HAS_NLOPT:
+    if has_nlopt():
         opts.extend(NLOPT_OPTIMIZER_NAMES)
     return sorted(opts)
 
@@ -157,9 +157,10 @@ def _optimize_nlopt(
     x0: NDArray[np.floating],
     bounds: list[tuple[float | None, float | None]],
     options: dict[str, Any],
-    algorithm: int,
+    algorithm: str,
 ) -> OptimizeResult:
-    if not _HAS_NLOPT:
+    nlopt = _load_nlopt()
+    if nlopt is None:
         raise ImportError(
             "nlopt is required for nloptwrap optimizers. Install it with: pip install nlopt"
         )
@@ -167,7 +168,7 @@ def _optimize_nlopt(
     n = len(x0)
     lower, upper = _convert_bounds_to_arrays(bounds, n)
 
-    opt = nlopt.opt(algorithm, n)
+    opt = nlopt.opt(getattr(nlopt, algorithm), n)
 
     lower_clean = np.where(np.isfinite(lower), lower, -1e30)
     upper_clean = np.where(np.isfinite(upper), upper, 1e30)
@@ -644,10 +645,6 @@ def run_optimizer(
         )
     elif method in NLOPT_OPTIMIZER_NAMES:
         algorithm = NLOPT_OPTIMIZERS[method]
-        if algorithm is None:
-            raise ImportError(
-                f"nlopt is required for '{method}'. Install it with: pip install nlopt"
-            )
         return _optimize_nlopt(fun, x0, bounds, options, algorithm)
     elif method in SCIPY_OPTIMIZERS:
         return _optimize_scipy(fun, x0, method, bounds, options, callback)
