@@ -1,5 +1,6 @@
 /target/
 /fuzz/Cargo.lock
+/fuzz/target/
 
 __pycache__/
 *.py[cod]

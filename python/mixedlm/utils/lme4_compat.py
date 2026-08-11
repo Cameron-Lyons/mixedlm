@@ -391,8 +391,9 @@ def lmList(
     Parameters
     ----------
     formula : str
-        Model formula without random effects (e.g., "y ~ x1 + x2").
-        Random effects terms like "(1|group)" should NOT be included.
+        Fixed-effects formula (e.g., ``"y ~ x1 + x2"``). The grouping
+        variable may also be supplied with ``"y ~ x1 + x2 | group"`` or
+        inferred from a single random-effects term such as ``"(1 | group)"``.
     data : pd.DataFrame
         Data containing the variables in the formula.
     group : str, optional
@@ -412,9 +413,8 @@ def lmList(
     Raises
     ------
     ValueError
-        If group is not specified and cannot be inferred.
-    ImportError
-        If statsmodels is not available.
+        If the grouping variable is missing, ambiguous, or inconsistent with
+        the formula.
 
     Examples
     --------
@@ -424,9 +424,9 @@ def lmList(
 
     Notes
     -----
-    This function requires statsmodels to be installed for OLS fitting.
-    If statsmodels is not available, a simplified implementation using
-    numpy's least squares is used.
+    Formula encoding uses mixedlm's native design-matrix builder and NumPy
+    least squares, so categorical predictors, interactions, and multiple
+    numeric predictors require no additional dependency.
 
     See Also
     --------
@@ -434,60 +434,84 @@ def lmList(
     """
     import re
 
-    if group is None:
-        bar_match = re.search(r"\|\s*(\w+)\s*\)", formula)
-        if bar_match:
-            group = bar_match.group(1)
-            formula = re.sub(r"\s*\+?\s*\([^)]*\|\s*\w+\s*\)", "", formula).strip()
-        else:
-            raise ValueError("group must be specified when formula does not contain random effects")
+    from mixedlm.formula.parser import nobars, parse_formula
+    from mixedlm.matrices import build_model_matrices
+
+    grouped_formula = re.fullmatch(
+        r"\s*(?P<fixed>.+~.+?)\s*\|\s*(?P<group>[A-Za-z_]\w*)\s*",
+        formula,
+    )
+    if grouped_formula is not None:
+        parsed_formula = parse_formula(grouped_formula.group("fixed"))
+        inferred_groups = {grouped_formula.group("group")}
+    else:
+        parsed_formula = parse_formula(formula)
+        inferred_groups = parsed_formula.grouping_factors
+        parsed_formula = nobars(parsed_formula)
+
+    if len(inferred_groups) > 1:
+        raise ValueError(
+            "lmList requires exactly one grouping variable; "
+            f"formula contains {sorted(inferred_groups)}"
+        )
+
+    if inferred_groups:
+        inferred_group = next(iter(inferred_groups))
+        if group is None:
+            group = inferred_group
+        elif group != inferred_group:
+            raise ValueError(
+                f"Grouping variable '{group}' does not match formula group '{inferred_group}'"
+            )
+    elif group is None:
+        raise ValueError("group must be specified when formula does not contain a group")
 
     if group not in data.columns:
         raise ValueError(f"Grouping variable '{group}' not found in data")
 
-    formula_parts = formula.split("~")
-    if len(formula_parts) != 2:
-        raise ValueError(f"Invalid formula: {formula}")
+    matrices = build_model_matrices(parsed_formula, data, na_action="omit")
+    group_values = data[group].to_numpy()
+    if matrices.na_info is not None and matrices.na_info.n_omitted:
+        keep = np.ones(len(data), dtype=bool)
+        keep[matrices.na_info.omitted_indices] = False
+        group_values = group_values[keep]
 
-    response = formula_parts[0].strip()
-    predictors = formula_parts[1].strip()
+    def fit_arrays(
+        X: NDArray[np.floating],
+        y: NDArray[np.floating],
+    ) -> tuple[dict[str, object], dict[str, float]]:
+        beta, _, rank, singular_values = np.linalg.lstsq(X, y, rcond=None)
+        fitted = X @ beta
+        params = dict(zip(matrices.fixed_names, beta, strict=False))
+        fit: dict[str, object] = {
+            "coef": beta,
+            "coef_names": list(matrices.fixed_names),
+            "params": params,
+            "fitted": fitted,
+            "residuals": y - fitted,
+            "rank": int(rank),
+            "singular_values": singular_values,
+            "n": len(y),
+        }
+        return fit, params
 
-    try:
-        import statsmodels.formula.api as smf
+    valid_group = ~pd.isna(group_values)
+    group_X = matrices.X[valid_group]
+    group_y = matrices.y[valid_group]
+    group_values = group_values[valid_group]
 
-        use_statsmodels = True
-    except ImportError:
-        use_statsmodels = False
-
-    groups = data[group].unique()
     fits: dict[str, object] = {}
-    coef_list: list[dict] = []
+    coef_list: list[dict[str, object]] = []
 
-    for g in groups:
-        subset = data[data[group] == g].copy()
+    for group_value in pd.unique(group_values):
+        mask = group_values == group_value
 
-        if len(subset) < 2:
+        if np.count_nonzero(mask) < 2:
             continue
 
-        if use_statsmodels:
-            try:
-                fit = smf.ols(formula, data=subset).fit()
-                fits[str(g)] = fit
-                coef_row = {group: g}
-                coef_row.update(dict(zip(fit.params.index, fit.params.values, strict=False)))
-                coef_list.append(coef_row)
-            except Exception:
-                continue
-        else:
-            try:
-                y = subset[response].values
-                X = np.column_stack([np.ones(len(subset)), subset[predictors].values])
-                beta, _, _, _ = np.linalg.lstsq(X, y, rcond=None)
-                fits[str(g)] = {"coef": beta, "n": len(subset)}
-                coef_row = {group: g, "(Intercept)": beta[0], predictors: beta[1]}
-                coef_list.append(coef_row)
-            except Exception:
-                continue
+        fit, params = fit_arrays(group_X[mask], group_y[mask])
+        fits[str(group_value)] = fit
+        coef_list.append({group: group_value, **params})
 
     coef_df = pd.DataFrame(coef_list)
     if group in coef_df.columns:
@@ -499,20 +523,7 @@ def lmList(
     }
 
     if pool:
-        if use_statsmodels:
-            try:
-                pooled = smf.ols(formula, data=data).fit()
-                result["pooled"] = pooled
-            except Exception:
-                result["pooled"] = None
-        else:
-            try:
-                y = data[response].values
-                X = np.column_stack([np.ones(len(data)), data[predictors].values])
-                beta, _, _, _ = np.linalg.lstsq(X, y, rcond=None)
-                result["pooled"] = {"coef": beta, "n": len(data)}
-            except Exception:
-                result["pooled"] = None
+        result["pooled"], _ = fit_arrays(matrices.X, matrices.y)
 
     return result
 
