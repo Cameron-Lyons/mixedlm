@@ -1,99 +1,151 @@
 use faer::Mat;
+use numpy::ndarray::Array2;
 use numpy::{PyArray1, PyArray2, PyArrayLike1};
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use rand::prelude::*;
 use rand_distr::StandardNormal;
 use rayon::prelude::*;
 
-use crate::lmm::RandomEffectStructure;
+struct SimulationBlock {
+    n_levels: usize,
+    factor: Mat<f64>,
+}
 
-fn simulate_re_single(
+fn checked_simulation_sizes(
+    n_levels: &[usize],
+    n_terms: &[usize],
+    correlated: &[bool],
+) -> PyResult<(usize, usize)> {
+    if n_levels.len() != n_terms.len() || n_levels.len() != correlated.len() {
+        return Err(PyValueError::new_err(format!(
+            "n_levels, n_terms, and correlated must have the same length, got {}, {}, and {}",
+            n_levels.len(),
+            n_terms.len(),
+            correlated.len()
+        )));
+    }
+
+    let mut theta_len = 0usize;
+    let mut total_dim = 0usize;
+    for (index, ((&levels, &terms), &is_correlated)) in
+        n_levels.iter().zip(n_terms).zip(correlated).enumerate()
+    {
+        if levels == 0 {
+            return Err(PyValueError::new_err(format!(
+                "n_levels[{index}] must be positive"
+            )));
+        }
+        if terms == 0 {
+            return Err(PyValueError::new_err(format!(
+                "n_terms[{index}] must be positive"
+            )));
+        }
+
+        let block_theta_len = if is_correlated {
+            terms
+                .checked_add(1)
+                .and_then(|next| terms.checked_mul(next))
+                .map(|product| product / 2)
+        } else {
+            Some(terms)
+        }
+        .ok_or_else(|| PyValueError::new_err("random-effect dimensions are too large"))?;
+
+        theta_len = theta_len
+            .checked_add(block_theta_len)
+            .ok_or_else(|| PyValueError::new_err("theta dimension is too large"))?;
+        total_dim = total_dim
+            .checked_add(
+                levels
+                    .checked_mul(terms)
+                    .ok_or_else(|| PyValueError::new_err("simulation dimension is too large"))?,
+            )
+            .ok_or_else(|| PyValueError::new_err("simulation dimension is too large"))?;
+    }
+
+    Ok((theta_len, total_dim))
+}
+
+fn build_simulation_blocks(
     theta: &[f64],
     sigma: f64,
-    structures: &[RandomEffectStructure],
-    rng: &mut impl Rng,
-) -> Vec<f64> {
-    let mut total_dim = 0;
-    for s in structures {
-        total_dim += s.n_levels * s.n_terms;
-    }
-
-    if total_dim == 0 {
-        return vec![];
-    }
-
-    let mut u = vec![0.0; total_dim];
+    n_levels: &[usize],
+    n_terms: &[usize],
+    correlated: &[bool],
+) -> Vec<SimulationBlock> {
+    let mut blocks = Vec::with_capacity(n_levels.len());
     let mut theta_idx = 0;
-    let mut u_idx = 0;
 
-    for structure in structures {
-        let q = structure.n_terms;
-        let n_levels = structure.n_levels;
-
-        let l_block: Mat<f64> = if structure.correlated {
-            let n_theta = q * (q + 1) / 2;
-            let theta_block = &theta[theta_idx..theta_idx + n_theta];
-            theta_idx += n_theta;
-
-            let mut l = Mat::zeros(q, q);
-            let mut idx = 0;
+    for ((&levels, &q), &is_correlated) in n_levels.iter().zip(n_terms).zip(correlated) {
+        let mut factor = Mat::zeros(q, q);
+        if is_correlated {
             for i in 0..q {
                 for j in 0..=i {
-                    l[(i, j)] = theta_block[idx] * sigma;
-                    idx += 1;
+                    factor[(i, j)] = theta[theta_idx] * sigma;
+                    theta_idx += 1;
                 }
             }
-            l
         } else {
-            let theta_block = &theta[theta_idx..theta_idx + q];
-            theta_idx += q;
-
-            let mut l = Mat::zeros(q, q);
             for i in 0..q {
-                l[(i, i)] = theta_block[i] * sigma;
+                factor[(i, i)] = theta[theta_idx] * sigma;
+                theta_idx += 1;
             }
-            l
-        };
+        }
+        blocks.push(SimulationBlock {
+            n_levels: levels,
+            factor,
+        });
+    }
 
-        for _g in 0..n_levels {
-            let z: Vec<f64> = (0..q).map(|_| rng.sample(StandardNormal)).collect();
+    blocks
+}
+
+fn simulate_re_single(blocks: &[SimulationBlock], rng: &mut impl Rng, u: &mut [f64]) {
+    let mut u_idx = 0;
+
+    for block in blocks {
+        let q = block.factor.nrows();
+        let mut z = vec![0.0; q];
+        for _ in 0..block.n_levels {
+            for value in &mut z {
+                *value = rng.sample(StandardNormal);
+            }
 
             for i in 0..q {
                 let mut sum = 0.0;
-                for j in 0..=i {
-                    sum += l_block[(i, j)] * z[j];
+                for (j, value) in z.iter().take(i + 1).enumerate() {
+                    sum += block.factor[(i, j)] * value;
                 }
                 u[u_idx + i] = sum;
             }
             u_idx += q;
         }
     }
-
-    u
 }
 
-pub fn simulate_re_batch_impl(
-    theta: &[f64],
-    sigma: f64,
-    structures: &[RandomEffectStructure],
+fn simulate_re_batch_impl(
+    blocks: &[SimulationBlock],
+    total_dim: usize,
     n_sim: usize,
     seed: Option<u64>,
-) -> Vec<Vec<f64>> {
-    if n_sim == 0 {
+) -> Vec<f64> {
+    let mut results = vec![0.0; n_sim * total_dim];
+    if results.is_empty() {
         return vec![];
     }
 
     let base_seed = seed.unwrap_or_else(|| rand::rng().random());
 
     #[cfg(miri)]
-    let iter = (0..n_sim).into_iter();
+    let iter = results.chunks_mut(total_dim).enumerate();
     #[cfg(not(miri))]
-    let iter = (0..n_sim).into_par_iter();
-    iter.map(|i| {
+    let iter = results.par_chunks_mut(total_dim).enumerate();
+    iter.for_each(|(i, result)| {
         let mut rng = rand::rngs::StdRng::seed_from_u64(base_seed.wrapping_add(i as u64));
-        simulate_re_single(theta, sigma, structures, &mut rng)
-    })
-    .collect()
+        simulate_re_single(blocks, &mut rng, result);
+    });
+    results
 }
 
 #[pyfunction]
@@ -117,24 +169,41 @@ pub fn simulate_re_batch<'py>(
     n_sim: usize,
     seed: Option<u64>,
 ) -> PyResult<Py<PyArray2<f64>>> {
-    let structures: Vec<RandomEffectStructure> = n_levels
-        .into_iter()
-        .zip(n_terms)
-        .zip(correlated)
-        .map(|((nl, nt), c)| RandomEffectStructure {
-            n_levels: nl,
-            n_terms: nt,
-            correlated: c,
-        })
-        .collect();
-
-    let results = simulate_re_batch_impl(theta.as_slice()?, sigma, &structures, n_sim, seed);
-
-    if results.is_empty() {
-        return Ok(PyArray2::from_vec2(py, &[])?.into());
+    if !sigma.is_finite() || sigma < 0.0 {
+        return Err(PyValueError::new_err(
+            "sigma must be finite and non-negative",
+        ));
     }
 
-    Ok(PyArray2::from_vec2(py, &results)?.into())
+    let (expected_theta_len, total_dim) =
+        checked_simulation_sizes(&n_levels, &n_terms, &correlated)?;
+    let theta = theta.as_slice()?;
+    if theta.len() != expected_theta_len {
+        return Err(PyValueError::new_err(format!(
+            "theta must contain exactly {expected_theta_len} values, got {}",
+            theta.len()
+        )));
+    }
+    if let Some((index, _)) = theta
+        .iter()
+        .enumerate()
+        .find(|(_, value)| !value.is_finite())
+    {
+        return Err(PyValueError::new_err(format!(
+            "theta[{index}] must be finite"
+        )));
+    }
+
+    n_sim
+        .checked_mul(total_dim)
+        .ok_or_else(|| PyValueError::new_err("simulation output is too large"))?;
+
+    let blocks = build_simulation_blocks(theta, sigma, &n_levels, &n_terms, &correlated);
+    let results = simulate_re_batch_impl(&blocks, total_dim, n_sim, seed);
+    let array = Array2::from_shape_vec((n_sim, total_dim), results)
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
+
+    Ok(PyArray2::from_owned_array(py, array).into())
 }
 
 #[pyfunction]
