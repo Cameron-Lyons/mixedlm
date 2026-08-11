@@ -538,6 +538,11 @@ def _simulate_glmer_components(
         eta = matrices.X @ beta + matrices.offset
 
     mu = family.link.inverse(eta)
+    if family.__class__.__name__ == "Binomial" and matrices.trials is not None:
+        mu = family.clamp_mu(mu, eps=1e-6)
+        trials = matrices.trials.astype(np.int64)
+        successes = np.random.binomial(trials, mu).astype(np.float64)
+        return successes / trials
     return family.simulate(mu)
 
 

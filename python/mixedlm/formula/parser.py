@@ -14,7 +14,6 @@ from mixedlm.formula.terms import (
     VariableTerm,
     _format_fixed,
     _format_grouping,
-    _format_identifier,
     _format_random,
     _format_term,
 )
@@ -182,16 +181,26 @@ class Parser:
         return self.advance()
 
     def parse(self) -> Formula:
-        response = self._parse_response()
+        response, response_denominator = self._parse_response()
         self.expect(TokenType.TILDE)
         fixed_terms, random_terms, has_intercept = self._parse_rhs()
 
         fixed = FixedTerm(terms=tuple(fixed_terms), has_intercept=has_intercept)
-        return Formula(response=response, fixed=fixed, random=tuple(random_terms))
+        return Formula(
+            response=response,
+            fixed=fixed,
+            random=tuple(random_terms),
+            response_denominator=response_denominator,
+        )
 
-    def _parse_response(self) -> str:
+    def _parse_response(self) -> tuple[str, str | None]:
         tok = self.expect(TokenType.IDENTIFIER)
-        return tok.value
+        if self.peek().type != TokenType.SLASH:
+            return tok.value, None
+
+        self.advance()
+        denominator = self.expect(TokenType.IDENTIFIER)
+        return tok.value, denominator.value
 
     def _parse_rhs(
         self,
@@ -408,18 +417,27 @@ def update_formula(old_formula: Formula, new_formula_str: str) -> Formula:
     lhs = lhs.strip()
     rhs = rhs.strip()
 
-    response = old_formula.response if lhs == "." else parse_formula(f"{lhs} ~ 1").response
+    if lhs == ".":
+        response = old_formula.response
+        response_denominator = old_formula.response_denominator
+        response_expression = old_formula.response_expression
+    else:
+        parsed_response = parse_formula(f"{lhs} ~ 1")
+        response = parsed_response.response
+        response_denominator = parsed_response.response_denominator
+        response_expression = parsed_response.response_expression
 
     if rhs == ".":
         return Formula(
             response=response,
             fixed=old_formula.fixed,
             random=old_formula.random,
+            response_denominator=response_denominator,
         )
 
     updates = _split_update_rhs(rhs)
     if not any(term == "." for _, term in updates):
-        return parse_formula(f"{_format_identifier(response)} ~ {rhs}")
+        return parse_formula(f"{response_expression} ~ {rhs}")
 
     new_fixed_terms = list(old_formula.fixed.terms)
     has_intercept = old_formula.fixed.has_intercept
@@ -456,7 +474,12 @@ def update_formula(old_formula: Formula, new_formula_str: str) -> Formula:
             new_fixed_terms = [term for term in new_fixed_terms if term not in parsed_terms]
 
     new_fixed = FixedTerm(terms=tuple(new_fixed_terms), has_intercept=has_intercept)
-    return Formula(response=response, fixed=new_fixed, random=tuple(new_random))
+    return Formula(
+        response=response,
+        fixed=new_fixed,
+        random=tuple(new_random),
+        response_denominator=response_denominator,
+    )
 
 
 def _split_formula_parts(formula: str) -> tuple[str, str]:
@@ -554,6 +577,7 @@ def nobars(formula: Formula | str) -> Formula:
         response=formula.response,
         fixed=formula.fixed,
         random=(),
+        response_denominator=formula.response_denominator,
     )
 
 
@@ -640,7 +664,7 @@ def subbars(formula: Formula | str) -> str:
             fixed_parts.append(f"{grouping}:{_format_term(term)}")
 
     rhs = " + ".join(fixed_parts) if fixed_parts else "1"
-    return f"{_format_identifier(formula.response)} ~ {rhs}"
+    return f"{formula.response_expression} ~ {rhs}"
 
 
 def is_mixed_formula(formula: Formula | str) -> bool:
@@ -734,6 +758,7 @@ def set_cov_type(
         response=formula.response,
         fixed=formula.fixed,
         random=tuple(new_random),
+        response_denominator=formula.response_denominator,
     )
 
 
@@ -886,7 +911,7 @@ def getFixedFormulaStr(formula: Formula | str) -> str:
     if isinstance(formula, str):
         formula = parse_formula(formula)
 
-    return f"{_format_identifier(formula.response)} ~ {_format_fixed(formula.fixed)}"
+    return f"{formula.response_expression} ~ {_format_fixed(formula.fixed)}"
 
 
 def getRandomFormulaStr(formula: Formula | str) -> str:

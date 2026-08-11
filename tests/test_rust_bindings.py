@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+from mixedlm.nlme.models import SSasymp
 from numpy.testing import assert_allclose
 from scipy import sparse
 
@@ -19,6 +20,9 @@ try:
         sparse_cholesky_logdet,
         sparse_cholesky_solve,
         update_cholesky_factor,
+    )
+    from mixedlm._rust import (
+        nlmm_deviance as rust_nlmm_deviance,
     )
 
     _HAS_RUST = True
@@ -57,6 +61,27 @@ class TestPyArrayLikeInputs:
             "n_terms": [1],
             "correlated": [False],
         }
+
+    def test_nlmm_weights_are_optional_and_effective(self):
+        groups = np.repeat(np.arange(4), 8)
+        x = np.tile(np.linspace(0.0, 5.0, 8), 4)
+        phi = np.array([10.0, 0.5, -0.5])
+        b = np.zeros((4, 1))
+        theta = np.array([1.0])
+        model = SSasymp()
+        y = np.concatenate(
+            [model.predict(phi + np.array([effect, 0.0, 0.0]), x[:8]) for effect in (-1, 0, 1, 2)]
+        )
+
+        default = rust_nlmm_deviance(theta, y, x, groups, "ssasymp", phi, b, [0], 0.3)
+        unit_weighted = rust_nlmm_deviance(
+            theta, y, x, groups, "ssasymp", phi, b, [0], 0.3, np.ones(len(y))
+        )
+        weights = np.linspace(0.25, 2.0, len(y))
+        weighted = rust_nlmm_deviance(theta, y, x, groups, "ssasymp", phi, b, [0], 0.3, weights)
+
+        assert default[0] == pytest.approx(unit_weighted[0], abs=1e-12)
+        assert weighted[0] != pytest.approx(default[0])
 
     def test_profiled_deviance_with_numpy_arrays(self, simple_lmm_data):
         d = simple_lmm_data

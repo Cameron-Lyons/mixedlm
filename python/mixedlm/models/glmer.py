@@ -5,7 +5,7 @@ from functools import cached_property
 from typing import TYPE_CHECKING, Any, ClassVar
 
 import numpy as np
-from numpy.typing import NDArray
+from numpy.typing import ArrayLike, NDArray
 from scipy import linalg, sparse, stats
 
 if TYPE_CHECKING:
@@ -360,6 +360,7 @@ class GlmerResult(MerResultMixin):
         se_fit: bool = False,
         interval: str = "none",
         level: float = 0.95,
+        offset: ArrayLike | str | None = None,
     ) -> NDArray[np.floating] | PredictResult:
         """Generate predictions from the fitted model.
 
@@ -380,6 +381,9 @@ class GlmerResult(MerResultMixin):
             Note: prediction intervals not available for GLMMs.
         level : float, default 0.95
             Confidence level for intervals.
+        offset : array-like, scalar, or str, optional
+            Offset for new-data predictions on the link scale. A string selects
+            a column from ``newdata``. Scalars are broadcast to every row.
 
         Returns
         -------
@@ -389,6 +393,8 @@ class GlmerResult(MerResultMixin):
         include_re = re_form != "NA" and re_form != "~0"
 
         if newdata is None:
+            if offset is not None:
+                raise ValueError("Prediction offset can only be supplied with newdata.")
             if include_re:
                 eta = self._linear_predictor.copy()
             else:
@@ -396,7 +402,7 @@ class GlmerResult(MerResultMixin):
             X = self.matrices.X
         else:
             X = self._prediction_fixed_matrix(newdata)
-            eta = X @ self.beta
+            eta = X @ self.beta + self._prediction_offset(newdata, offset)
 
             if include_re:
                 eta = self._add_random_effects_to_eta(eta, newdata, allow_new_levels)
@@ -1438,19 +1444,58 @@ class GlmerResult(MerResultMixin):
         use_re: bool = True,
         re_form: str | None = None,
     ) -> NDArray[np.floating]:
+        if nsim < 1:
+            raise ValueError("nsim must be at least 1")
+
         if seed is not None:
             np.random.seed(seed)
 
         n = self.matrices.n_obs
+        q = self.matrices.n_random
 
         if nsim == 1:
             return self._simulate_once(use_re, re_form)
+
+        include_re = use_re and q > 0 and re_form not in ("~0", "NA")
+
+        if not include_re:
+            fixed_eta = self.matrices.X @ self.beta + self.matrices.offset
+            eta = np.broadcast_to(fixed_eta[:, None], (n, nsim))
+            return self._simulate_response(self.family.link.inverse(eta))
+
+        try:
+            from mixedlm._rust import simulate_re_batch
+
+            return self._simulate_batch_rust(nsim, seed, simulate_re_batch)
+        except ImportError:
+            pass
 
         result = np.zeros((n, nsim), dtype=np.float64)
         for i in range(nsim):
             result[:, i] = self._simulate_once(use_re, re_form)
 
         return result
+
+    def _simulate_batch_rust(
+        self,
+        nsim: int,
+        seed: int | None,
+        simulate_re_batch: Any,
+    ) -> NDArray[np.floating]:
+        fixed_eta = self.matrices.X @ self.beta + self.matrices.offset
+        structures = self.matrices.random_structures
+        u_batch = simulate_re_batch(
+            self.theta,
+            1.0,
+            [structure.n_levels for structure in structures],
+            [structure.n_terms for structure in structures],
+            [structure.correlated for structure in structures],
+            nsim,
+            seed,
+        )
+        eta = np.asarray(self.matrices.Z @ u_batch.T, dtype=np.float64)
+        eta += fixed_eta[:, None]
+        return self._simulate_response(self.family.link.inverse(eta))
 
     def _simulate_once(
         self,
@@ -1459,9 +1504,9 @@ class GlmerResult(MerResultMixin):
     ) -> NDArray[np.floating]:
         q = self.matrices.n_random
 
-        if re_form == "~0" or re_form == "NA" or not use_re or q == 0:
-            eta = self.matrices.X @ self.beta + self.matrices.offset
-        else:
+        eta = self.matrices.X @ self.beta + self.matrices.offset
+
+        if re_form != "~0" and re_form != "NA" and use_re and q > 0:
             u_new = np.zeros(q, dtype=np.float64)
             u_idx = 0
             theta_start = 0
@@ -1494,9 +1539,20 @@ class GlmerResult(MerResultMixin):
                 u_idx += n_levels * n_terms
                 theta_start += n_theta
 
-            eta = self.matrices.X @ self.beta + self.matrices.Z @ u_new + self.matrices.offset
+            eta += self.matrices.Z @ u_new
 
-        mu = self.family.link.inverse(eta)
+        return self._simulate_response(self.family.link.inverse(eta))
+
+    def _simulate_response(
+        self,
+        mu: NDArray[np.floating],
+    ) -> NDArray[np.floating]:
+        if self.family.__class__.__name__ == "Binomial" and self.matrices.trials is not None:
+            mu = self.family.clamp_mu(mu, eps=1e-6)
+            trials = self.matrices.trials.astype(np.int64)
+            if mu.ndim > 1:
+                trials = trials[:, None]
+            return np.random.binomial(trials, mu).astype(np.float64)
         return self.family.simulate(mu)
 
     def _refit_from_matrices(self, matrices: ModelMatrices, **kwargs) -> GlmerResult:
@@ -1552,7 +1608,9 @@ class GlmerResult(MerResultMixin):
         ----------
         newresp : array-like, optional
             New response values. Must have the same length as the original
-            response. If None, refits with the original response.
+            response. For grouped binomial models, provide success counts;
+            the original trial counts are reused. If None, refits with the
+            original response.
         **kwargs
             Additional arguments passed to the optimizer (start, method, maxiter).
 

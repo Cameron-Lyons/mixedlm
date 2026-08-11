@@ -2,6 +2,9 @@ use nalgebra::{Cholesky, DMatrix, DVector};
 use pyo3::PyResult;
 use pyo3::prelude::*;
 
+const PNLS_MAX_ITER: usize = 50;
+const PNLS_TOLERANCE: f64 = 1e-6;
+
 fn logistic(value: f64) -> f64 {
     if value >= 0.0 {
         1.0 / (1.0 + (-value).exp())
@@ -23,7 +26,7 @@ pub enum NlmeModel {
 }
 
 #[cfg(test)]
-mod tests {
+mod logistic_tests {
     use super::*;
 
     #[test]
@@ -226,7 +229,7 @@ impl NlmeModel {
     }
 }
 
-fn build_psi_matrix(theta: &[f64], n_random: usize) -> DMatrix<f64> {
+fn build_psi_factor(theta: &[f64], n_random: usize) -> DMatrix<f64> {
     if theta.is_empty() {
         return DMatrix::identity(n_random, n_random);
     }
@@ -234,7 +237,7 @@ fn build_psi_matrix(theta: &[f64], n_random: usize) -> DMatrix<f64> {
     let n_theta = theta.len();
     let q = ((-1.0 + (1.0 + 8.0 * n_theta as f64).sqrt()) / 2.0) as usize;
 
-    let l = if q * (q + 1) / 2 == n_theta {
+    if q * (q + 1) / 2 == n_theta {
         let mut l = DMatrix::zeros(q, q);
         let mut idx = 0;
         for i in 0..q {
@@ -249,9 +252,49 @@ fn build_psi_matrix(theta: &[f64], n_random: usize) -> DMatrix<f64> {
             n_random,
             theta.iter().take(n_random).cloned(),
         ))
-    };
+    }
+}
 
+fn build_psi_matrix(theta: &[f64], n_random: usize) -> DMatrix<f64> {
+    let l = build_psi_factor(theta, n_random);
     &l * l.transpose()
+}
+
+fn validate_prior_weights(weights: &[f64], n: usize) -> PyResult<()> {
+    if weights.len() != n {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "weights has length {}, expected {}",
+            weights.len(),
+            n
+        )));
+    }
+    if weights.iter().any(|weight| !weight.is_finite()) {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "weights must contain only finite values",
+        ));
+    }
+    if weights.iter().any(|weight| *weight <= 0.0) {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "weights must be strictly positive",
+        ));
+    }
+    Ok(())
+}
+
+fn grouped_observation_indices(groups: &[i64]) -> Vec<Vec<usize>> {
+    let mut unique_groups = groups.to_vec();
+    unique_groups.sort_unstable();
+    unique_groups.dedup();
+    unique_groups
+        .iter()
+        .map(|group| {
+            groups
+                .iter()
+                .enumerate()
+                .filter_map(|(index, candidate)| (candidate == group).then_some(index))
+                .collect()
+        })
+        .collect()
 }
 
 pub struct PnlsResult {
@@ -265,23 +308,19 @@ pub fn pnls_step_impl(
     y: &[f64],
     x: &[f64],
     groups: &[i64],
+    weights: &[f64],
     model: NlmeModel,
     phi: &[f64],
     b: &DMatrix<f64>,
     psi: &DMatrix<f64>,
-    sigma: f64,
+    _sigma: f64,
     random_params: &[usize],
 ) -> PnlsResult {
     let n = y.len();
-    let unique_groups: Vec<i64> = {
-        let mut v: Vec<i64> = groups.to_vec();
-        v.sort();
-        v.dedup();
-        v
-    };
-    let _n_groups = unique_groups.len();
+    let group_indices = grouped_observation_indices(groups);
     let n_phi = phi.len();
     let n_random = random_params.len();
+    let sqrt_weights: Vec<f64> = weights.iter().map(|weight| weight.sqrt()).collect();
 
     let psi_reg = {
         let mut m = psi.clone();
@@ -299,18 +338,13 @@ pub fn pnls_step_impl(
     let mut phi_new: Vec<f64> = phi.to_vec();
     let mut b_new = b.clone();
 
-    for _iteration in 0..10 {
+    for _iteration in 0..PNLS_MAX_ITER {
+        let phi_previous = phi_new.clone();
+        let b_previous = b_new.clone();
         let mut resid_total = vec![0.0; n];
         let mut grad_total = DMatrix::zeros(n, n_phi);
 
-        for (g_idx, &g) in unique_groups.iter().enumerate() {
-            let mask: Vec<usize> = groups
-                .iter()
-                .enumerate()
-                .filter(|&(_, grp)| *grp == g)
-                .map(|(i, _)| i)
-                .collect();
-
+        for (g_idx, mask) in group_indices.iter().enumerate() {
             let x_g: Vec<f64> = mask.iter().map(|&i| x[i]).collect();
             let y_g: Vec<f64> = mask.iter().map(|&i| y[i]).collect();
 
@@ -327,6 +361,14 @@ pub fn pnls_step_impl(
                 for p in 0..n_phi {
                     grad_total[(global_i, p)] = grad_g[(local_i, p)];
                 }
+            }
+        }
+
+        for i in 0..n {
+            let sqrt_weight = sqrt_weights[i];
+            resid_total[i] *= sqrt_weight;
+            for p in 0..n_phi {
+                grad_total[(i, p)] *= sqrt_weight;
             }
         }
 
@@ -353,14 +395,7 @@ pub fn pnls_step_impl(
             phi_new[i] += 0.5 * delta_phi[i];
         }
 
-        for (g_idx, &g) in unique_groups.iter().enumerate() {
-            let mask: Vec<usize> = groups
-                .iter()
-                .enumerate()
-                .filter(|&(_, grp)| *grp == g)
-                .map(|(i, _)| i)
-                .collect();
-
+        for (g_idx, mask) in group_indices.iter().enumerate() {
             let x_g: Vec<f64> = mask.iter().map(|&i| x[i]).collect();
             let y_g: Vec<f64> = mask.iter().map(|&i| y[i]).collect();
 
@@ -390,17 +425,26 @@ pub fn pnls_step_impl(
                 }
             }
 
-            let ztz = z_g.transpose() * &z_g;
-            let ztr = z_g.transpose() * &resid_g;
+            let mut weighted_z_g = z_g.clone();
+            let mut weighted_resid_g = resid_g.clone();
+            for i in 0..n_g {
+                let sqrt_weight = sqrt_weights[mask[i]];
+                weighted_resid_g[i] *= sqrt_weight;
+                for j in 0..n_random {
+                    weighted_z_g[(i, j)] *= sqrt_weight;
+                }
+            }
 
-            let sigma_sq = sigma * sigma;
-            let c = &ztz / sigma_sq + &psi_inv;
+            let ztz = weighted_z_g.transpose() * &weighted_z_g;
+            let ztr = weighted_z_g.transpose() * &weighted_resid_g;
+
+            let c = &ztz + &psi_inv;
 
             let b_g_new = match Cholesky::new(c.clone()) {
-                Some(chol) => chol.solve(&(&ztr / sigma_sq)),
+                Some(chol) => chol.solve(&ztr),
                 None => c
                     .try_inverse()
-                    .map_or(DVector::zeros(n_random), |inv| inv * &ztr / sigma_sq),
+                    .map_or(DVector::zeros(n_random), |inv| inv * &ztr),
             };
 
             for j in 0..n_random {
@@ -410,24 +454,23 @@ pub fn pnls_step_impl(
 
         let max_delta: f64 = phi_new
             .iter()
-            .zip(phi.iter())
+            .zip(phi_previous.iter())
             .map(|(a, b)| (a - b).abs())
+            .chain(
+                b_new
+                    .iter()
+                    .zip(b_previous.iter())
+                    .map(|(a, b)| (a - b).abs()),
+            )
             .fold(0.0, f64::max);
 
-        if max_delta < 1e-6 {
+        if max_delta < PNLS_TOLERANCE {
             break;
         }
     }
 
     let mut rss = 0.0;
-    for (g_idx, &g) in unique_groups.iter().enumerate() {
-        let mask: Vec<usize> = groups
-            .iter()
-            .enumerate()
-            .filter(|&(_, grp)| *grp == g)
-            .map(|(i, _)| i)
-            .collect();
-
+    for (g_idx, mask) in group_indices.iter().enumerate() {
         let x_g: Vec<f64> = mask.iter().map(|&i| x[i]).collect();
         let y_g: Vec<f64> = mask.iter().map(|&i| y[i]).collect();
 
@@ -440,11 +483,17 @@ pub fn pnls_step_impl(
 
         for i in 0..mask.len() {
             let r = y_g[i] - pred_g[i];
-            rss += r * r;
+            rss += weights[mask[i]] * r * r;
         }
     }
 
-    let sigma_new = (rss / n as f64).sqrt();
+    let mut penalty = 0.0;
+    for g_idx in 0..group_indices.len() {
+        let b_g: DVector<f64> = DVector::from_fn(n_random, |j, _| b_new[(g_idx, j)]);
+        penalty += b_g.dot(&(&psi_inv * &b_g));
+    }
+
+    let sigma_new = ((rss + penalty) / n as f64).max(f64::MIN_POSITIVE).sqrt();
 
     PnlsResult {
         phi: phi_new,
@@ -459,6 +508,7 @@ pub fn nlmm_deviance_impl(
     y: &[f64],
     x: &[f64],
     groups: &[i64],
+    weights: &[f64],
     model: NlmeModel,
     phi: &[f64],
     b: &DMatrix<f64>,
@@ -466,32 +516,32 @@ pub fn nlmm_deviance_impl(
     sigma: f64,
 ) -> (f64, Vec<f64>, DMatrix<f64>, f64) {
     let n = y.len();
-    let unique_groups: Vec<i64> = {
-        let mut v: Vec<i64> = groups.to_vec();
-        v.sort();
-        v.dedup();
-        v
-    };
-    let n_groups = unique_groups.len();
+    let group_indices = grouped_observation_indices(groups);
+    let n_groups = group_indices.len();
     let n_random = random_params.len();
+    let sqrt_weights: Vec<f64> = weights.iter().map(|weight| weight.sqrt()).collect();
 
-    let psi = build_psi_matrix(theta, n_random);
+    let psi_factor = build_psi_factor(theta, n_random);
+    let psi = &psi_factor * psi_factor.transpose();
 
-    let result = pnls_step_impl(y, x, groups, model, phi, b, &psi, sigma, random_params);
+    let result = pnls_step_impl(
+        y,
+        x,
+        groups,
+        weights,
+        model,
+        phi,
+        b,
+        &psi,
+        sigma,
+        random_params,
+    );
 
     let phi_new = result.phi;
     let b_new = result.b;
-    let sigma_new = result.sigma;
 
     let mut rss = 0.0;
-    for (g_idx, &g) in unique_groups.iter().enumerate() {
-        let mask: Vec<usize> = groups
-            .iter()
-            .enumerate()
-            .filter(|&(_, grp)| *grp == g)
-            .map(|(i, _)| i)
-            .collect();
-
+    for (g_idx, mask) in group_indices.iter().enumerate() {
         let x_g: Vec<f64> = mask.iter().map(|&i| x[i]).collect();
         let y_g: Vec<f64> = mask.iter().map(|&i| y[i]).collect();
 
@@ -504,12 +554,9 @@ pub fn nlmm_deviance_impl(
 
         for i in 0..mask.len() {
             let r = y_g[i] - pred_g[i];
-            rss += r * r;
+            rss += weights[mask[i]] * r * r;
         }
     }
-
-    let sigma_sq = sigma_new * sigma_new;
-    let mut deviance = n as f64 * (2.0 * std::f64::consts::PI * sigma_sq).ln() + rss / sigma_sq;
 
     let psi_reg = {
         let mut m = psi.clone();
@@ -524,32 +571,64 @@ pub fn nlmm_deviance_impl(
         None => DMatrix::identity(n_random, n_random),
     };
 
+    let mut penalty = 0.0;
     for g_idx in 0..n_groups {
         let b_g: DVector<f64> = DVector::from_fn(n_random, |j, _| b_new[(g_idx, j)]);
-        let penalty = b_g.dot(&(&psi_inv * &b_g));
-        deviance += penalty;
+        penalty += b_g.dot(&(&psi_inv * &b_g));
     }
 
-    let (sign, logdet) = {
-        match Cholesky::new(psi.clone()) {
-            Some(chol) => {
-                let l = chol.l();
-                let logdet = 2.0 * (0..n_random).map(|i| l[(i, i)].ln()).sum::<f64>();
-                (1.0, logdet)
-            }
-            None => {
-                let eigvals = psi.symmetric_eigenvalues();
-                let logdet: f64 = eigvals.iter().map(|&e| e.max(1e-10).ln()).sum();
-                (1.0, logdet)
+    let sigma_sq = ((rss + penalty) / n as f64).max(f64::MIN_POSITIVE);
+    let mut laplace_correction = 0.0;
+    let identity = DMatrix::identity(n_random, n_random);
+
+    for (g_idx, mask) in group_indices.iter().enumerate() {
+        let x_g: Vec<f64> = mask.iter().map(|&i| x[i]).collect();
+        let mut params_g = phi_new.clone();
+        for (j, &p_idx) in random_params.iter().enumerate() {
+            params_g[p_idx] += b_new[(g_idx, j)];
+        }
+
+        let grad_g = model.gradient(&params_g, &x_g);
+        let mut z_g = DMatrix::zeros(mask.len(), n_random);
+        for i in 0..mask.len() {
+            for (j, &p_idx) in random_params.iter().enumerate() {
+                z_g[(i, j)] = grad_g[(i, p_idx)];
             }
         }
-    };
 
-    if sign > 0.0 {
-        deviance += n_groups as f64 * logdet;
+        let mut weighted_z_g = z_g.clone();
+        for i in 0..mask.len() {
+            let sqrt_weight = sqrt_weights[mask[i]];
+            for j in 0..n_random {
+                weighted_z_g[(i, j)] *= sqrt_weight;
+            }
+        }
+        let ztz = weighted_z_g.transpose() * &weighted_z_g;
+        // Stable form of log|Psi| + log|Z'WZ + Psi^-1| for Psi = L L'.
+        let system = &identity + psi_factor.transpose() * ztz * &psi_factor;
+        let logdet = match Cholesky::new(system.clone()) {
+            Some(chol) => {
+                let l = chol.l();
+                2.0 * (0..n_random).map(|i| l[(i, i)].ln()).sum::<f64>()
+            }
+            None => {
+                let eigenvalues = system.symmetric_eigenvalues();
+                if eigenvalues
+                    .iter()
+                    .any(|value| *value <= 0.0 || !value.is_finite())
+                {
+                    return (1e100, phi_new, b_new, sigma_sq.sqrt());
+                }
+                eigenvalues.iter().map(|value| value.ln()).sum()
+            }
+        };
+        laplace_correction += logdet;
     }
 
-    (deviance, phi_new, b_new, sigma_new)
+    let deviance =
+        n as f64 * (1.0 + (2.0 * std::f64::consts::PI * sigma_sq).ln()) + laplace_correction;
+
+    (deviance, phi_new, b_new, sigma_sq.sqrt())
 }
 
 #[pyfunction]
@@ -562,7 +641,8 @@ pub fn nlmm_deviance_impl(
     b,
     theta,
     sigma,
-    random_params
+    random_params,
+    weights=None
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn pnls_step<'py>(
@@ -575,6 +655,7 @@ pub fn pnls_step<'py>(
     theta: numpy::PyArrayLike1<'py, f64>,
     sigma: f64,
     random_params: Vec<usize>,
+    weights: Option<numpy::PyArrayLike1<'py, f64>>,
 ) -> PyResult<(Vec<f64>, Vec<Vec<f64>>, f64)> {
     let model = match model_name.to_lowercase().as_str() {
         "ssasymp" => NlmeModel::SSasymp,
@@ -608,12 +689,18 @@ pub fn pnls_step<'py>(
     let b_mat = DMatrix::from_fn(n_groups, n_random, |i, j| b_arr[[i, j]]);
 
     let theta_vec: Vec<f64> = theta_arr.iter().cloned().collect();
+    let weights_vec = match weights {
+        Some(weights) => weights.as_array().iter().copied().collect(),
+        None => vec![1.0; y_vec.len()],
+    };
+    validate_prior_weights(&weights_vec, y_vec.len())?;
     let psi = build_psi_matrix(&theta_vec, n_random);
 
     let result = pnls_step_impl(
         &y_vec,
         &x_vec,
         &groups_vec,
+        &weights_vec,
         model,
         &phi_vec,
         &b_mat,
@@ -639,7 +726,8 @@ pub fn pnls_step<'py>(
     phi,
     b,
     random_params,
-    sigma
+    sigma,
+    weights=None
 ))]
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn nlmm_deviance<'py>(
@@ -652,6 +740,7 @@ pub fn nlmm_deviance<'py>(
     b: numpy::PyArrayLike2<'py, f64>,
     random_params: Vec<usize>,
     sigma: f64,
+    weights: Option<numpy::PyArrayLike1<'py, f64>>,
 ) -> PyResult<(f64, Vec<f64>, Vec<Vec<f64>>, f64)> {
     let model = match model_name.to_lowercase().as_str() {
         "ssasymp" => NlmeModel::SSasymp,
@@ -680,6 +769,11 @@ pub fn nlmm_deviance<'py>(
     let groups_vec: Vec<i64> = groups_arr.iter().cloned().collect();
     let phi_vec: Vec<f64> = phi_arr.iter().cloned().collect();
     let theta_vec: Vec<f64> = theta_arr.iter().cloned().collect();
+    let weights_vec = match weights {
+        Some(weights) => weights.as_array().iter().copied().collect(),
+        None => vec![1.0; y_vec.len()],
+    };
+    validate_prior_weights(&weights_vec, y_vec.len())?;
 
     let n_groups = b_arr.nrows();
     let n_random = b_arr.ncols();
@@ -690,6 +784,7 @@ pub fn nlmm_deviance<'py>(
         &y_vec,
         &x_vec,
         &groups_vec,
+        &weights_vec,
         model,
         &phi_vec,
         &b_mat,
@@ -702,4 +797,167 @@ pub fn nlmm_deviance<'py>(
         .collect();
 
     Ok((deviance, phi_new, b_out, sigma_new))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn asymptotic_data() -> (Vec<f64>, Vec<f64>, Vec<i64>) {
+        let base = [10.0, 0.5, -0.5];
+        let group_effects = [-1.0, -0.3, 0.4, 1.0];
+        let mut x = Vec::new();
+        let mut y = Vec::new();
+        let mut groups = Vec::new();
+
+        for (group, effect) in group_effects.iter().enumerate() {
+            let params = [base[0] + effect, base[1], base[2]];
+            for observation in 0..10 {
+                let x_value = observation as f64 * 5.0 / 9.0;
+                let noise = (observation as f64 % 3.0 - 1.0) * 0.05;
+                x.push(x_value);
+                y.push(NlmeModel::SSasymp.predict(&params, &[x_value])[0] + noise);
+                groups.push(group as i64);
+            }
+        }
+
+        (x, y, groups)
+    }
+
+    #[test]
+    fn nlmm_deviance_is_repeatable_and_finite() {
+        let (x, y, groups) = asymptotic_data();
+        let weights = vec![1.0; y.len()];
+        let phi = vec![10.0, 0.5, -0.5];
+        let b = DMatrix::zeros(4, 1);
+        let theta = vec![1.0];
+
+        let first = nlmm_deviance_impl(
+            &theta,
+            &y,
+            &x,
+            &groups,
+            &weights,
+            NlmeModel::SSasymp,
+            &phi,
+            &b,
+            &[0],
+            0.3,
+        );
+        let repeated = nlmm_deviance_impl(
+            &theta,
+            &y,
+            &x,
+            &groups,
+            &weights,
+            NlmeModel::SSasymp,
+            &phi,
+            &b,
+            &[0],
+            0.3,
+        );
+
+        assert!(first.0.is_finite());
+        assert!(first.3.is_finite() && first.3 > 0.0);
+        assert!((first.0 - repeated.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn laplace_correction_avoids_collapsed_variance_optimum() {
+        let (x, y, groups) = asymptotic_data();
+        let weights = vec![1.0; y.len()];
+        let phi = vec![10.0, 0.5, -0.5];
+        let b = DMatrix::zeros(4, 1);
+
+        let collapsed = nlmm_deviance_impl(
+            &[1e-6],
+            &y,
+            &x,
+            &groups,
+            &weights,
+            NlmeModel::SSasymp,
+            &phi,
+            &b,
+            &[0],
+            0.3,
+        );
+        let nonzero = nlmm_deviance_impl(
+            &[1.0],
+            &y,
+            &x,
+            &groups,
+            &weights,
+            NlmeModel::SSasymp,
+            &phi,
+            &b,
+            &[0],
+            0.3,
+        );
+
+        assert!(collapsed.0.is_finite());
+        assert!(nonzero.0 < collapsed.0);
+    }
+
+    #[test]
+    fn prior_weights_downweight_an_outlier() {
+        let (x, y, groups) = asymptotic_data();
+        let weights = vec![1.0; y.len()];
+        let phi = vec![10.0, 0.5, -0.5];
+        let b = DMatrix::zeros(4, 1);
+        let theta = vec![1.0];
+
+        let clean = nlmm_deviance_impl(
+            &theta,
+            &y,
+            &x,
+            &groups,
+            &weights,
+            NlmeModel::SSasymp,
+            &phi,
+            &b,
+            &[0],
+            0.3,
+        );
+
+        let mut contaminated_y = y.clone();
+        contaminated_y[0] += 50.0;
+        let unweighted = nlmm_deviance_impl(
+            &theta,
+            &contaminated_y,
+            &x,
+            &groups,
+            &weights,
+            NlmeModel::SSasymp,
+            &phi,
+            &b,
+            &[0],
+            0.3,
+        );
+
+        let mut downweighted = weights.clone();
+        downweighted[0] = 1e-5;
+        let weighted = nlmm_deviance_impl(
+            &theta,
+            &contaminated_y,
+            &x,
+            &groups,
+            &downweighted,
+            NlmeModel::SSasymp,
+            &phi,
+            &b,
+            &[0],
+            0.3,
+        );
+
+        let distance = |estimate: &[f64], reference: &[f64]| {
+            estimate
+                .iter()
+                .zip(reference.iter())
+                .map(|(estimate, reference)| (estimate - reference).powi(2))
+                .sum::<f64>()
+                .sqrt()
+        };
+
+        assert!(distance(&weighted.1, &clean.1) < distance(&unweighted.1, &clean.1));
+    }
 }
