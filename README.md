@@ -160,7 +160,7 @@ extended_data = extend(fitted_model, data, along="n", n=200)
 from mixedlm import plot_profiles, slice2D
 
 # 1D profile likelihood
-profiles = result.profile(data)
+profiles = result.profile()
 plot_profiles(profiles)
 
 # 2D profile likelihood slice
