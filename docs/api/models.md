@@ -172,6 +172,9 @@ parsed = mlm.glFormula(formula, data, family)
 
 **Returns:** GlmerParsedFormula
 
+Both modular preparers accept strings and composed `Formula` objects, including
+objects returned by utilities such as `set_cov_type()`.
+
 ### mkLmerDevfun
 
 Create the deviance function for optimization.
