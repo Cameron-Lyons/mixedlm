@@ -7,6 +7,7 @@ from mixedlm import (
     glmer,
     lmer,
 )
+from numpy.testing import assert_allclose
 
 from tests._lmer_data import CBPP, SLEEPSTUDY
 
@@ -169,6 +170,57 @@ class TestInference:
 
         assert y_sim.shape == (180, 10)
         assert np.isfinite(y_sim).all()
+
+    def test_lmer_simulate_multiple_preserves_seeded_draws(self) -> None:
+        from mixedlm._rust import simulate_re_batch
+
+        result = lmer("Reaction ~ Days + (Days | Subject)", SLEEPSTUDY)
+        nsim = 5
+        seed = 42
+        structures = result.matrices.random_structures
+        u_batch = simulate_re_batch(
+            result.theta,
+            result.sigma,
+            [struct.n_levels for struct in structures],
+            [struct.n_terms for struct in structures],
+            [struct.correlated for struct in structures],
+            nsim,
+            seed,
+        )
+
+        np.random.seed(seed)
+        expected = np.column_stack(
+            [
+                result.matrices.X @ result.beta
+                + result.matrices.Z @ u_batch[i]
+                + np.random.randn(result.matrices.n_obs) * result.sigma
+                for i in range(nsim)
+            ]
+        )
+
+        simulated = result.simulate(nsim=nsim, seed=seed)
+
+        assert_allclose(simulated, expected)
+
+    def test_lmer_simulate_multiple_without_random_effects_preserves_seeded_draws(
+        self,
+    ) -> None:
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+        nsim = 5
+        seed = 42
+
+        np.random.seed(seed)
+        expected = np.column_stack([result._simulate_once(use_re=False) for _ in range(nsim)])
+
+        simulated = result.simulate(nsim=nsim, seed=seed, use_re=False)
+
+        assert_allclose(simulated, expected)
+
+    def test_lmer_simulate_rejects_nonpositive_nsim(self) -> None:
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+
+        with pytest.raises(ValueError, match="nsim must be at least 1"):
+            result.simulate(nsim=0)
 
     def test_lmer_simulate_no_re(self) -> None:
         result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
