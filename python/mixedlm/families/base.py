@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from typing import Any
 
 import numpy as np
 from numpy.typing import NDArray
@@ -226,8 +227,7 @@ def resolve_link(
 
 class Family(ABC):
     link: Link
-    mu_lower_bound: float | None = None
-    mu_upper_bound: float | None = None
+    mean_bounds: tuple[float | None, float | None] = (None, None)
 
     def __init__(
         self,
@@ -269,8 +269,9 @@ class Family(ABC):
         return self.deviance_resids(y, mu, weights)
 
     def _mean_bounds(self) -> tuple[float | None, float | None]:
-        lower_bounds = (self.mu_lower_bound, self.link.mu_lower_bound)
-        upper_bounds = (self.mu_upper_bound, self.link.mu_upper_bound)
+        family_lower, family_upper = self.mean_bounds
+        lower_bounds = (family_lower, self.link.mu_lower_bound)
+        upper_bounds = (family_upper, self.link.mu_upper_bound)
         defined_lowers = [bound for bound in lower_bounds if bound is not None]
         defined_uppers = [bound for bound in upper_bounds if bound is not None]
         lower = max(defined_lowers) if defined_lowers else None
@@ -278,12 +279,8 @@ class Family(ABC):
         return lower, upper
 
     def clip_mu(self, mu: NDArray[np.floating], eps: float = 1e-10) -> NDArray[np.floating]:
-        lower, upper = self._mean_bounds()
-        lower = None if lower is None else lower + eps
-        upper = None if upper is None else upper - eps
-        if lower is not None or upper is not None:
-            np.clip(mu, lower, upper, out=mu)
-        return mu
+        """Clamp response means in place for backwards compatibility."""
+        return self.clamp_mu(mu, eps=eps, out=mu)
 
     def initialize_mu(self, y: NDArray[np.floating]) -> NDArray[np.floating]:
         """Choose finite starting means inside the family and link domains."""
@@ -295,4 +292,36 @@ class Family(ABC):
         elif lower == 0.0:
             np.maximum(mu, 0.1, out=mu)
 
-        return self.clip_mu(mu, eps=1e-7)
+        return self.clamp_mu(mu, eps=1e-7, out=mu)
+
+    def clamp_mu(
+        self,
+        mu: NDArray[np.floating],
+        eps: float = 1e-10,
+        *,
+        out: NDArray[np.floating] | None = None,
+    ) -> NDArray[np.floating]:
+        """Clamp response means to this family's valid domain.
+
+        Custom families can set ``mean_bounds`` or override this method when
+        their response mean has a more specialized domain.
+        """
+        lower, upper = self._mean_bounds()
+        if lower is None and upper is None:
+            if out is None or out is mu:
+                return mu
+            np.copyto(out, mu)
+            return out
+
+        lower_bound = None if lower is None else lower + eps
+        upper_bound = None if upper is None else upper - eps
+        return np.clip(mu, lower_bound, upper_bound, out=out)
+
+    def simulate(self, mu: NDArray[np.floating], rng: Any | None = None) -> NDArray[np.floating]:
+        """Draw responses at the supplied means.
+
+        The default provides a small Gaussian perturbation for custom families.
+        Built-in families override it with their corresponding distribution.
+        """
+        rng = np.random if rng is None else rng
+        return mu + rng.standard_normal(mu.shape) * 0.1
