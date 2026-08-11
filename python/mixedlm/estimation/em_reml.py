@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import cast
 
 import numpy as np
 from numpy.typing import NDArray
-from scipy import linalg
+from scipy import linalg, sparse
 
 from mixedlm.matrices.design import ModelMatrices, RandomEffectStructure
 
@@ -51,17 +52,6 @@ def _safe_inverse(A: NDArray[np.floating]) -> NDArray[np.floating]:
             return linalg.pinv(A)
 
 
-def _logdet_spd(A: NDArray[np.floating]) -> float:
-    """Compute a stable log determinant for a positive-definite matrix."""
-    try:
-        chol = linalg.cholesky(A, lower=True, check_finite=False)
-        return float(2.0 * np.sum(np.log(np.diag(chol))))
-    except linalg.LinAlgError:
-        with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
-            sign, logdet = np.linalg.slogdet(A)
-        return float(logdet) if sign > 0 else -np.inf
-
-
 def _compound_symmetry_moments(cov: NDArray[np.floating]) -> tuple[float, float]:
     """Return the common variance and off-diagonal covariance."""
     q = cov.shape[0]
@@ -71,6 +61,17 @@ def _compound_symmetry_moments(cov: NDArray[np.floating]) -> tuple[float, float]
         return variance, 0.0
     covariance = float((np.sum(cov) - trace) / (q * (q - 1)))
     return variance, covariance
+
+
+def _positive_definite_logdet(A: NDArray[np.floating]) -> float:
+    """Compute a stable log determinant for an expected positive-definite matrix."""
+    try:
+        factor = linalg.cholesky(A, lower=True, check_finite=False)
+    except linalg.LinAlgError:
+        with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+            sign, logabsdet = np.linalg.slogdet(A)
+        return float(logabsdet) if sign > 0 else -np.inf
+    return float(2.0 * np.sum(np.log(np.diag(factor))))
 
 
 def _init_sigma_k(
@@ -98,6 +99,38 @@ def _build_block_diag_D_inv(
         block = np.kron(np.eye(n_levels), sigma_k_inv)
         blocks.append(block)
     return linalg.block_diag(*blocks)
+
+
+def _weighted_crossproducts(
+    X: NDArray[np.floating],
+    Z: NDArray[np.floating] | sparse.spmatrix,
+    y: NDArray[np.floating],
+    weights: NDArray[np.floating],
+) -> tuple[
+    NDArray[np.floating],
+    NDArray[np.floating],
+    NDArray[np.floating],
+    NDArray[np.floating],
+    NDArray[np.floating],
+]:
+    """Compute the iteration-invariant weighted normal-equation products."""
+    weighted_y = weights * y
+    XtWX = X.T @ (weights[:, None] * X)
+    XtWy = X.T @ weighted_y
+
+    if sparse.issparse(Z):
+        sparse_Z = cast(sparse.spmatrix, Z)
+        weighted_Z = sparse_Z.multiply(weights[:, None])
+        XtWZ = np.asarray(X.T @ weighted_Z)
+        ZtWZ = (sparse_Z.T @ weighted_Z).toarray()
+        ZtWy = np.asarray(sparse_Z.T @ weighted_y).ravel()
+    else:
+        weighted_Z = weights[:, None] * Z
+        XtWZ = X.T @ weighted_Z
+        ZtWZ = Z.T @ weighted_Z
+        ZtWy = Z.T @ weighted_y
+
+    return XtWX, XtWZ, ZtWZ, XtWy, ZtWy
 
 
 def _m_step_update_sigma(
@@ -276,6 +309,9 @@ def em_reml_simple(
     >>> parsed = lFormula("Reaction ~ Days + (Days | Subject)", data)
     >>> result = em_reml_simple(parsed.matrices, max_iter=50, verbose=1)
     """
+    if max_iter < 1:
+        raise ValueError("max_iter must be at least 1")
+
     structures = matrices.random_structures
 
     for struct in structures:
@@ -288,7 +324,7 @@ def em_reml_simple(
 
     y = matrices.y
     X = matrices.X
-    Z = matrices.Z.toarray() if hasattr(matrices.Z, "toarray") else matrices.Z
+    Z = matrices.Z
     weights = matrices.weights
     offset = matrices.offset
 
@@ -321,15 +357,22 @@ def em_reml_simple(
         col_offsets.append(offset_val)
         offset_val += struct.n_levels * struct.n_terms
 
+    XtWX_base, XtWZ_base, ZtWZ_base, XtWy_base, ZtWy_base = _weighted_crossproducts(
+        X,
+        Z,
+        y_adj,
+        weights,
+    )
+
     for iteration in range(max_iter):
-        W = weights / sigma2_e
-        XtWX = X.T @ (W[:, None] * X)
-        XtWZ = X.T @ (W[:, None] * Z)
-        ZtWZ = Z.T @ (W[:, None] * Z)
+        inverse_sigma2_e = 1.0 / sigma2_e
+        XtWX = XtWX_base * inverse_sigma2_e
+        XtWZ = XtWZ_base * inverse_sigma2_e
+        ZtWZ = ZtWZ_base * inverse_sigma2_e
         D_inv = _build_block_diag_D_inv(structures, sigma_list)
 
-        XtWy = X.T @ (W * y_adj)
-        ZtWy = Z.T @ (W * y_adj)
+        XtWy = XtWy_base * inverse_sigma2_e
+        ZtWy = ZtWy_base * inverse_sigma2_e
 
         LHS_top = np.hstack([XtWX, XtWZ])
         LHS_bot = np.hstack([XtWZ.T, ZtWZ + D_inv])
@@ -363,14 +406,14 @@ def em_reml_simple(
 
         residuals = y_adj - X @ beta_new - Z @ u_hat
         wrss = float(np.sum(weights * residuals**2))
-        uncertainty_term = float(np.trace(ZtWZ @ Var_u))
+        uncertainty_term = float(np.trace(ZtWZ_base @ Var_u))
         sigma2_e_new = max((wrss + uncertainty_term) / n, variance_floor)
 
         loglik = -0.5 * (
             (n - p) * np.log(2 * np.pi * sigma2_e_new)
             + wrss / sigma2_e_new
-            + _logdet_spd(ZtWZ + D_inv)
-            + _logdet_spd(XtWX)
+            + _positive_definite_logdet(ZtWZ + D_inv)
+            + _positive_definite_logdet(XtWX)
         )
 
         if not np.isfinite(loglik):
@@ -390,16 +433,16 @@ def em_reml_simple(
                 f"rel_change={rel_change:.6f}"
             )
 
+        beta = beta_new
+        sigma2_e = sigma2_e_new
+        sigma_list = sigma_list_new
+        prev_loglik = loglik
+
         if rel_change < tol and iteration >= min_iter_converge:
             converged = True
             if verbose >= 1:
                 print(f"Converged after {iteration + 1} iterations")
             break
-
-        beta = beta_new
-        sigma2_e = sigma2_e_new
-        sigma_list = sigma_list_new
-        prev_loglik = loglik
 
     sigma = np.sqrt(sigma2_e)
     theta = _sigma_to_theta(structures, sigma_list, sigma2_e)

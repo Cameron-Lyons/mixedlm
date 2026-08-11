@@ -59,7 +59,8 @@ c = mlm.coef(model)
 # Or: model.coef()
 ```
 
-**Returns:** Dictionary with combined fixed + random effects per group
+**Returns:** Nested dictionary mapping each grouping factor to all fixed and
+random-only coefficient names, with one combined value per grouping level.
 
 ### getME
 
