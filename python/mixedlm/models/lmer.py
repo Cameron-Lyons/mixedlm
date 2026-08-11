@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 
 from mixedlm.estimation.reml import LMMOptimizer, _build_lambda, _count_theta
 from mixedlm.formula.terms import Formula
-from mixedlm.matrices.design import ModelMatrices, build_model_matrices
+from mixedlm.matrices.design import ModelMatrices
 from mixedlm.models.lmer_types import (
     LogLik,
     ModelTerms,
@@ -342,12 +342,8 @@ class LmerResult(MerResultMixin):
                 return pred
             X = self.matrices.X
         else:
-            pred_matrices = build_model_matrices(self.formula, newdata)
-            X = self._align_fixed_matrix(pred_matrices)
+            X = self._prediction_fixed_matrix(newdata)
             pred = X @ self.beta
-
-            if pred_matrices.offset is not None:
-                pred = pred + pred_matrices.offset
 
             if include_re:
                 pred = self._add_random_effects_to_pred(pred, newdata, allow_new_levels)

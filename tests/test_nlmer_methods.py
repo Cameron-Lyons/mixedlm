@@ -275,6 +275,7 @@ class TestNlmerIsSingular:
         result = nlmer(model, NLME_DATA, x_var="time", y_var="y", group_var="subject")
 
         assert isinstance(result.isSingular(), bool)
+        assert result.is_singular() == result.isSingular()
 
     def test_is_singular_with_tolerance(self) -> None:
         model = nlme.SSasymp()
