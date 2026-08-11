@@ -3,7 +3,8 @@ from __future__ import annotations
 import warnings
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from numbers import Real
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from numpy.typing import NDArray
@@ -26,6 +27,31 @@ _DEFAULT_EFFECT_SIZE_VALUES = [0.5, 0.75, 1.0, 1.25, 1.5]
 _DEFAULT_N_GROUPS_VALUES = [10, 20, 30, 40]
 _SEED_OFFSET_MULTIPLIER = 1000
 _FIGURE_SIZE = (8, 5)
+
+
+def _new_group_labels(existing: list[Any], count: int) -> list[Any]:
+    existing_set = set(existing)
+    labels: list[Any] = []
+
+    if existing and all(
+        isinstance(value, Real) and not isinstance(value, bool) for value in existing
+    ):
+        candidate = max(existing)
+        while len(labels) < count:
+            candidate += 1
+            if candidate not in existing_set:
+                labels.append(candidate)
+                existing_set.add(candidate)
+        return labels
+
+    suffix = 1
+    while len(labels) < count:
+        candidate = f"new_group_{suffix}"
+        suffix += 1
+        if candidate not in existing_set:
+            labels.append(candidate)
+            existing_set.add(candidate)
+    return labels
 
 
 @dataclass
@@ -338,6 +364,9 @@ def extend(
     """
     import pandas as pd
 
+    if n < 1:
+        raise ValueError("n must be at least 1")
+
     if data is None:
         data = model.model_frame()
 
@@ -353,32 +382,47 @@ def extend(
             return data
 
         n_to_add = n - n_current
-        template = data.groupby(along).first().reset_index()
+        is_categorical = isinstance(data[along].dtype, pd.CategoricalDtype)
+        existing_labels = (
+            data[along].cat.categories.tolist() if is_categorical else current_groups.tolist()
+        )
+        new_labels = _new_group_labels(existing_labels, n_to_add)
+
+        if is_categorical:
+            data[along] = data[along].cat.add_categories(new_labels)
+
+        templates = [
+            group.copy()
+            for _, group in data.groupby(along, sort=False, observed=True, dropna=False)
+        ]
 
         new_data_list = [data]
-        for i in range(n_to_add):
-            new_group = template.copy()
-            new_group[along] = f"new_group_{i + 1}"
+        for i, label in enumerate(new_labels):
+            new_group = templates[i % n_current].copy()
+            new_group[along] = label
             new_data_list.append(new_group)
 
-        return pd.concat(new_data_list, ignore_index=True)
+        extended = pd.concat(new_data_list, ignore_index=True)
+        if is_categorical:
+            extended[along] = pd.Categorical(
+                extended[along],
+                categories=data[along].cat.categories,
+            )
+        return extended
 
     elif along == "within":
-        obs_per_group = data.groupby(grp_factors[0]).size()
-        current_n = int(obs_per_group.mean())
+        if not grp_factors:
+            raise ValueError("Cannot extend within groups: model has no grouping factors")
 
-        if n <= current_n:
-            return data
+        group_col = grp_factors[0]
+        extended_groups = []
+        for _, group in data.groupby(group_col, sort=False, observed=True, dropna=False):
+            if len(group) < n:
+                take = np.arange(n) % len(group)
+                group = group.iloc[take].copy()
+            extended_groups.append(group)
 
-        factor = n // current_n
-        if factor <= 1:
-            return data
-
-        new_data_list = [data]
-        for _ in range(factor - 1):
-            new_data_list.append(data.copy())
-
-        return pd.concat(new_data_list, ignore_index=True)
+        return pd.concat(extended_groups, ignore_index=True)
 
     else:
         raise ValueError(f"Unknown 'along' value: {along}. Use a grouping factor or 'within'.")

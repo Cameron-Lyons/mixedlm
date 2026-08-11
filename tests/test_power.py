@@ -273,7 +273,8 @@ class TestExtend:
         extended = extend(model, along="group", n=30)
 
         assert len(extended["group"].unique()) == 30
-        assert len(extended) > len(POWER_DATA)
+        assert len(extended) == 30 * 5
+        assert (extended.groupby("group").size() == 5).all()
 
     def test_extend_groups_no_change_if_fewer(self) -> None:
         model = lmer("y ~ x + (1|group)", POWER_DATA)
@@ -285,7 +286,17 @@ class TestExtend:
         model = lmer("y ~ x + (1|group)", POWER_DATA)
         extended = extend(model, along="within", n=20)
 
-        assert len(extended) > len(POWER_DATA)
+        assert len(extended) == 20 * 20
+        assert (extended.groupby("group").size() == 20).all()
+
+    @pytest.mark.parametrize("target", [8, 12])
+    def test_extend_within_exact_nonmultiple(self, target: int) -> None:
+        model = lmer("y ~ x + (1|group)", POWER_DATA)
+
+        extended = extend(model, along="within", n=target)
+
+        assert len(extended) == 20 * target
+        assert (extended.groupby("group").size() == target).all()
 
     def test_extend_within_no_change_if_fewer(self) -> None:
         model = lmer("y ~ x + (1|group)", POWER_DATA)
@@ -305,6 +316,33 @@ class TestExtend:
         extended = extend(model, along="group", n=30, data=custom_data)
 
         assert len(extended["group"].unique()) == 30
+
+    def test_extend_preserves_numeric_group_labels(self) -> None:
+        data = POWER_DATA.copy()
+        data["group"] = data["group"].str.removeprefix("G").astype(int)
+        model = lmer("y ~ x + (1|group)", data)
+
+        extended = extend(model, along="group", n=25)
+
+        assert pd.api.types.is_integer_dtype(extended["group"])
+        assert sorted(extended["group"].unique()) == list(range(1, 26))
+        assert (extended.groupby("group").size() == 5).all()
+
+    def test_extend_preserves_categorical_group_labels(self) -> None:
+        data = POWER_DATA.copy()
+        data["group"] = data["group"].astype("category")
+        model = lmer("y ~ x + (1|group)", data)
+
+        extended = extend(model, along="group", n=25)
+
+        assert isinstance(extended["group"].dtype, pd.CategoricalDtype)
+        assert extended["group"].nunique() == 25
+
+    def test_extend_rejects_nonpositive_target(self) -> None:
+        model = lmer("y ~ x + (1|group)", POWER_DATA)
+
+        with pytest.raises(ValueError, match="n must be at least 1"):
+            extend(model, along="group", n=0)
 
 
 class TestPowerCurve:
