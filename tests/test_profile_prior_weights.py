@@ -123,9 +123,7 @@ def _direct_held_deviance(result, held: dict[int, float]) -> float:
         beta = np.empty(0, dtype=np.float64)
 
     weighted_residual = weighted_y - weighted_X @ beta
-    pwrss = float(
-        weighted_residual @ linalg.cho_solve(covariance_factor, weighted_residual)
-    )
+    pwrss = float(weighted_residual @ linalg.cho_solve(covariance_factor, weighted_residual))
     denominator = matrices.n_obs - len(keep_idx) if result.REML else matrices.n_obs
     sigma2 = pwrss / denominator
     deviance = (

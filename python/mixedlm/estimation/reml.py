@@ -633,29 +633,42 @@ class LMMOptimizer:
             sigma_start = max(0.5 * sigma_ols, 0.1)
             return [sigma_start] * q
 
-        Z_block_start = 0
-        for s in self.matrices.random_structures:
-            if s is struct:
-                break
-            Z_block_start += s.n_levels * s.n_terms
+        level_indices = getattr(struct, "level_indices", None)
+        if level_indices is not None and len(level_indices) == len(residuals):
+            valid = (level_indices >= 0) & (level_indices < struct.n_levels)
+            counts = np.bincount(level_indices[valid], minlength=struct.n_levels)
+            sums = np.bincount(
+                level_indices[valid],
+                weights=residuals[valid],
+                minlength=struct.n_levels,
+            )
+            populated = counts > 0
+            group_residual_means = sums[populated] / counts[populated]
+        else:
+            Z_block_start = 0
+            for s in self.matrices.random_structures:
+                if s is struct:
+                    break
+                Z_block_start += s.n_levels * s.n_terms
 
-        Z_block_end = Z_block_start + struct.n_levels * struct.n_terms
-        Z_block = self.matrices.Z[:, Z_block_start:Z_block_end]
+            Z_block_end = Z_block_start + struct.n_levels * struct.n_terms
+            Z_block = self.matrices.Z[:, Z_block_start:Z_block_end]
 
-        group_residuals = []
-        for level_idx in range(struct.n_levels):
-            level_cols = range(level_idx * q, (level_idx + 1) * q)
-            level_block = Z_block[:, level_cols]
-            if sparse.issparse(level_block):
-                level_mask = level_block.getnnz(axis=1) > 0
-            else:
-                level_mask = np.asarray(level_block != 0).any(axis=1)
-            if np.any(level_mask):
-                level_resid_mean = residuals[level_mask].mean()
-                group_residuals.append(level_resid_mean)
+            residual_means: list[float] = []
+            for level_idx in range(struct.n_levels):
+                level_cols = range(level_idx * q, (level_idx + 1) * q)
+                level_block = Z_block[:, level_cols]
+                if sparse.issparse(level_block):
+                    level_mask = level_block.getnnz(axis=1) > 0
+                else:
+                    level_mask = np.asarray(level_block != 0).any(axis=1)
+                if np.any(level_mask):
+                    level_resid_mean = residuals[level_mask].mean()
+                    residual_means.append(float(level_resid_mean))
+            group_residual_means = np.asarray(residual_means)
 
-        if len(group_residuals) > 1:
-            group_var = max(np.var(group_residuals, ddof=1), 0.01)
+        if len(group_residual_means) > 1:
+            group_var = max(float(np.var(group_residual_means, ddof=1)), 0.01)
             relative_sd = np.sqrt(group_var) / max(sigma_ols, 0.1)
             theta_diag = max(min(relative_sd, 3.0), 0.2)
         else:

@@ -11,6 +11,7 @@ from mixedlm.formula.terms import Formula
 from mixedlm.matrices.design import build_model_matrices
 from mixedlm.models.lmer import LmerResult
 from mixedlm.models.shared_utils import resolve_optional_vector
+from mixedlm.utils.dataframe import ensure_dataframe
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -200,11 +201,19 @@ def lmer(
     >>> ctrl = lmerControl(optimizer="Nelder-Mead", maxiter=2000)
     >>> result = lmer("y ~ x + (1|group)", data, control=ctrl)
     """
+    parsed_formula = parse_formula(formula) if isinstance(formula, str) else formula
+    required_columns = set(parsed_formula.all_variables)
+    if isinstance(weights, str):
+        required_columns.add(weights)
+    if isinstance(offset, str):
+        required_columns.add(offset)
+    data = ensure_dataframe(data, columns=sorted(required_columns))
+
     weights_arr = resolve_optional_vector(data, weights, "weights")
     offset_arr = resolve_optional_vector(data, offset, "offset")
 
     model = LmerMod(
-        formula,
+        parsed_formula,
         data,
         REML=REML,
         verbose=verbose,
