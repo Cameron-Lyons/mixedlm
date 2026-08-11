@@ -75,7 +75,7 @@ def test_predict_accepts_polars_newdata() -> None:
     pl = pytest.importorskip("polars")
     data = _random_intercept_data()
     data["group"] = data["group"].astype(str)
-    polars_data = pl.from_pandas(data)
+    polars_data = pl.DataFrame(data.to_dict(orient="list"))
     result = lmer("y ~ x + (1 | group)", polars_data)
 
     predicted = result.predict(newdata=polars_data)
