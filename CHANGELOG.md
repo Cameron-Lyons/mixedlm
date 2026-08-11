@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Backtick quoting for column names with spaces or formula operators
 - EM-REML now supports multiple random effects and random slopes (correlated and uncorrelated)
 - Automatic convergence recommendations in `summary()` output for non-converged and singular fits
 - `em_init` control parameter is now wired up in `lmer()` and `glmer()` model fitting
@@ -19,6 +20,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - EM-REML algorithm generalized from single random intercept to arbitrary unstructured covariance models
 - Replaced the Py-BOBYQA dependency and default optimizer with SciPy COBYQA
 - Reduced unused and redundant Python and Rust dependencies
+- Vectorized pandas nested-group construction for faster large model setup
+- Consolidated duplicate CI and security checks while preserving coverage
+
+### Fixed
+- Poisson and other unbounded GLMM families no longer clamp fitted means below one
+- Unsupported family and link combinations no longer route through the native fast path
+
+### Fixed
+- Synthetic dataset loaders no longer reset NumPy's global random state
+
+### Fixed
+- Nonlinear mixed models now apply offsets consistently to responses, fitted values, simulations, refits, covariance estimates, and leverage diagnostics
 
 ### Fixed
 - GLMM PIRLS, Laplace, and adaptive-quadrature calculations now use the covariance factor

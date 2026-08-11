@@ -71,7 +71,7 @@ def test_pirls_uses_spherical_prior_for_correlated_random_slopes() -> None:
     assert_allclose(random_effects, expected_random, rtol=1e-11, atol=1e-11)
 
     mu = matrices.X @ expected_beta + matrices.Z @ expected_random + matrices.offset
-    mu = np.clip(mu, 1e-10, 1.0 - 1e-10)
+    family.clip_mu(mu, eps=1e-10)
     expected_deviance = np.sum(family.deviance_resids(matrices.y, mu, matrices.weights))
     expected_deviance += spherical @ spherical
     assert deviance == pytest.approx(expected_deviance, rel=1e-12, abs=1e-12)
@@ -85,7 +85,7 @@ def test_laplace_adjustment_matches_spherical_hessian() -> None:
 
     deviance, actual_beta, actual_random = laplace_deviance(theta, matrices, family)
     mu = matrices.X @ beta + matrices.Z @ random_effects + matrices.offset
-    mu = np.clip(mu, 1e-10, 1.0 - 1e-10)
+    family.clip_mu(mu, eps=1e-10)
     conditional = np.sum(family.deviance_resids(matrices.y, mu, matrices.weights))
     conditional += spherical @ spherical
     q = matrices.n_random

@@ -1,7 +1,7 @@
 use nalgebra::{Cholesky, DMatrix, DVector};
 use nalgebra_sparse::csc::CscMatrix;
-use pyo3::prelude::*;
 use pyo3::PyResult;
+use pyo3::prelude::*;
 use rayon::prelude::*;
 
 use crate::linalg::LinalgError;
@@ -45,6 +45,22 @@ impl LinkFunction {
 }
 
 impl FamilyType {
+    fn clip_mu(&self, mu: &mut DVector<f64>) {
+        match self {
+            FamilyType::Gaussian => {}
+            FamilyType::Binomial => {
+                for value in mu.iter_mut() {
+                    *value = value.clamp(1e-10, 1.0 - 1e-10);
+                }
+            }
+            FamilyType::Poisson => {
+                for value in mu.iter_mut() {
+                    *value = value.max(1e-10);
+                }
+            }
+        }
+    }
+
     fn variance(&self, mu: &DVector<f64>) -> DVector<f64> {
         match self {
             FamilyType::Gaussian => DVector::from_element(mu.len(), 1.0),
@@ -307,10 +323,7 @@ pub fn pirls_impl(
         }
 
         let mut mu = link.inverse(&eta);
-
-        for i in 0..n {
-            mu[i] = mu[i].clamp(1e-10, 1.0 - 1e-10);
-        }
+        family.clip_mu(&mut mu);
 
         let mut w_vec = family.weights(&mu, link);
         for i in 0..n {
@@ -464,9 +477,7 @@ pub fn pirls_impl(
     }
 
     let mut mu_final = link.inverse(&eta_final);
-    for i in 0..n {
-        mu_final[i] = mu_final[i].clamp(1e-10, 1.0 - 1e-10);
-    }
+    family.clip_mu(&mut mu_final);
 
     let dev_resids = family.deviance_resids(y, &mu_final, weights);
 
@@ -527,9 +538,7 @@ pub fn laplace_deviance_impl(
     }
 
     let mut mu = link.inverse(&eta);
-    for i in 0..n {
-        mu[i] = mu[i].clamp(1e-10, 1.0 - 1e-10);
-    }
+    family.clip_mu(&mut mu);
 
     let dev_resids = family.deviance_resids(y, &mu, weights);
 
@@ -610,7 +619,6 @@ fn compute_group_log_integral(
     link: LinkFunction,
 ) -> f64 {
     let sqrt2 = std::f64::consts::SQRT_2;
-    let n = y.len();
     let q = z.ncols();
 
     let idx_start = g * n_terms;
@@ -653,10 +661,10 @@ fn compute_group_log_integral(
             }
         }
 
-        let mu_quad = link.inverse(&eta_quad);
-        let mu_clamped = DVector::from_fn(n, |i, _| mu_quad[i].clamp(1e-10, 1.0 - 1e-10));
+        let mut mu_quad = link.inverse(&eta_quad);
+        family.clip_mu(&mut mu_quad);
 
-        let dev_resids = family.deviance_resids_rows(y, &mu_clamped, prior_weights, group_rows);
+        let dev_resids = family.deviance_resids_rows(y, &mu_quad, prior_weights, group_rows);
         let log_lik_y = -0.5 * dev_resids;
 
         let spherical_block: DVector<f64> = spherical_quad.rows(idx_start, n_terms).into_owned();
@@ -735,9 +743,7 @@ pub fn adaptive_gh_deviance_impl(
     }
 
     let mut mu = link.inverse(&eta);
-    for i in 0..n {
-        mu[i] = mu[i].clamp(1e-10, 1.0 - 1e-10);
-    }
+    family.clip_mu(&mut mu);
 
     let mut w_vec = family.weights(&mu, link);
     for i in 0..n {

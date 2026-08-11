@@ -20,10 +20,8 @@ from mixedlm.matrices.design import ModelMatrices, RandomEffectStructure
 
 _ETA_CLIP_MIN = -30.0
 _ETA_CLIP_MAX = 30.0
-_MU_CLIP_MIN = 1e-7
-_MU_CLIP_MAX = 1.0 - 1e-7
-_MU_CLIP_MIN_STRICT = 1e-10
-_MU_CLIP_MAX_STRICT = 1.0 - 1e-10
+_MU_CLIP_EPS = 1e-7
+_MU_CLIP_EPS_STRICT = 1e-10
 _WEIGHT_CLIP_MIN = 1e-10
 _WEIGHT_CLIP_MAX = 1e10
 _DERIV_CLIP_MIN = -1e10
@@ -76,26 +74,22 @@ except ImportError:
     _HAS_RUST = False
 
 
-def _get_family_name(family: Family) -> str:
+def _get_family_name(family: Family) -> str | None:
     class_name = family.__class__.__name__.lower()
-    if "binomial" in class_name:
-        return "binomial"
-    elif "poisson" in class_name:
-        return "poisson"
-    elif "gaussian" in class_name:
-        return "gaussian"
-    return "gaussian"
+    return {
+        "binomial": "binomial",
+        "gaussian": "gaussian",
+        "poisson": "poisson",
+    }.get(class_name)
 
 
-def _get_link_name(family: Family) -> str:
+def _get_link_name(family: Family) -> str | None:
     link_name = family.link.__class__.__name__.lower()
-    if "logit" in link_name:
-        return "logit"
-    elif "log" in link_name and "logit" not in link_name:
-        return "log"
-    elif "identity" in link_name:
-        return "identity"
-    return "identity"
+    return {
+        "identitylink": "identity",
+        "loglink": "log",
+        "logitlink": "logit",
+    }.get(link_name)
 
 
 def _native_covariance_supported(matrices: ModelMatrices) -> bool:
@@ -189,7 +183,7 @@ def _pirls_state(
         eta = matrices.X @ beta + matrices.Z @ random_effects + offset
         np.clip(eta, _ETA_CLIP_MIN, _ETA_CLIP_MAX, out=eta)
         mu = family.link.inverse(eta)
-        np.clip(mu, _MU_CLIP_MIN, _MU_CLIP_MAX, out=mu)
+        family.clip_mu(mu, eps=_MU_CLIP_EPS)
 
         np.multiply(family.weights(mu), prior_weights, out=W)
         np.clip(W, _WEIGHT_CLIP_MIN, _WEIGHT_CLIP_MAX, out=W)
@@ -300,7 +294,7 @@ def _pirls_state(
     random_effects = np.asarray(Lambda @ spherical).ravel()
     eta = matrices.X @ beta + matrices.Z @ random_effects + offset
     mu = family.link.inverse(eta)
-    np.clip(mu, _MU_CLIP_MIN_STRICT, _MU_CLIP_MAX_STRICT, out=mu)
+    family.clip_mu(mu, eps=_MU_CLIP_EPS_STRICT)
 
     dev_resids = family.deviance_resids(matrices.y, mu, prior_weights)
     deviance = np.sum(dev_resids)
@@ -355,7 +349,7 @@ def laplace_deviance(
     eta_fixed = matrices.X @ beta + offset
     eta = eta_fixed + matrices.Z @ random_effects
     mu = family.link.inverse(eta)
-    mu = np.clip(mu, _MU_CLIP_MIN_STRICT, _MU_CLIP_MAX_STRICT)
+    family.clip_mu(mu, eps=_MU_CLIP_EPS_STRICT)
 
     dev_resids = family.deviance_resids(matrices.y, mu, prior_weights)
     deviance = np.sum(dev_resids) + np.dot(spherical, spherical)
@@ -436,7 +430,8 @@ def _compute_group_quadrature(
         spherical[idx_start:idx_end] = spherical_block
         random_effects = np.asarray(Lambda @ spherical).ravel()
         eta_quad = eta_fixed + matrices.Z @ random_effects
-        mu_quad = np.clip(family.link.inverse(eta_quad), _MU_CLIP_MIN_STRICT, _MU_CLIP_MAX_STRICT)
+        mu_quad = family.link.inverse(eta_quad)
+        family.clip_mu(mu_quad, eps=_MU_CLIP_EPS_STRICT)
         log_lik_y = -0.5 * np.sum(
             family.deviance_resids(
                 matrices.y[group_rows], mu_quad[group_rows], prior_weights[group_rows]
@@ -513,7 +508,7 @@ def adaptive_gh_deviance(
     eta_fixed = matrices.X @ beta + offset
     eta = eta_fixed + matrices.Z @ random_effects
     mu = family.link.inverse(eta)
-    mu = np.clip(mu, _MU_CLIP_MIN_STRICT, _MU_CLIP_MAX_STRICT)
+    family.clip_mu(mu, eps=_MU_CLIP_EPS_STRICT)
 
     W = np.clip(family.weights(mu) * prior_weights, _WEIGHT_CLIP_MIN, _WEIGHT_CLIP_MAX)
 
@@ -592,6 +587,8 @@ def _laplace_deviance_rust(
 
     family_name = _get_family_name(family)
     link_name = _get_link_name(family)
+    if family_name is None or link_name is None:
+        raise ValueError("Family and link combination is not supported by the Rust backend")
 
     deviance, beta, u = _rust_laplace_deviance(
         np.ascontiguousarray(matrices.y, dtype=np.float64),
@@ -627,6 +624,8 @@ def _adaptive_gh_deviance_rust(
 
     family_name = _get_family_name(family)
     link_name = _get_link_name(family)
+    if family_name is None or link_name is None:
+        raise ValueError("Family and link combination is not supported by the Rust backend")
 
     deviance, beta, u = _rust_adaptive_gh_deviance(
         np.ascontiguousarray(matrices.y, dtype=np.float64),
@@ -663,7 +662,8 @@ def laplace_deviance_fast(
         and _native_covariance_supported(matrices)
     ):
         family_name = _get_family_name(family)
-        if family_name in ("binomial", "poisson", "gaussian"):
+        link_name = _get_link_name(family)
+        if family_name is not None and link_name is not None:
             return _laplace_deviance_rust(theta, matrices, family)
     return laplace_deviance(theta, matrices, family, beta_start, u_start)
 
@@ -686,7 +686,8 @@ def adaptive_gh_deviance_fast(
         and _native_covariance_supported(matrices)
     ):
         family_name = _get_family_name(family)
-        if family_name in ("binomial", "poisson", "gaussian"):
+        link_name = _get_link_name(family)
+        if family_name is not None and link_name is not None:
             first_struct = matrices.random_structures[0] if matrices.random_structures else None
             if first_struct and first_struct.n_terms == 1:
                 return _adaptive_gh_deviance_rust(theta, matrices, family, nAGQ)
