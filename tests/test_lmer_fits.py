@@ -240,9 +240,14 @@ class TestGlmer:
 
         aic = result.AIC()
         bic = result.BIC()
+        ll = result.logLik()
 
         assert np.isfinite(aic)
         assert np.isfinite(bic)
+        assert ll.value == float(ll)
+        assert ll.df == result.npar()
+        assert ll.nobs == result.nobs()
+        assert ll.REML is False
 
     def test_gamma_model(self) -> None:
         np.random.seed(123)
@@ -520,6 +525,11 @@ class TestNlmer:
 
         aic = result.AIC()
         bic = result.BIC()
+        ll = result.logLik()
 
         assert np.isfinite(aic)
         assert np.isfinite(bic)
+        assert ll.value == float(ll)
+        assert ll.df == result.npar()
+        assert ll.nobs == result.nobs()
+        assert ll.REML is False

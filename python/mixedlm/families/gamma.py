@@ -25,7 +25,8 @@ class Gamma(Family):
         mu = self.clamp_mu(mu, eps=eps)
         y = np.maximum(y, eps)
 
-        return 2 * wt * (-((y - mu) / mu) + np.log(y / mu))
+        ratio = y / mu
+        return 2 * wt * (ratio - 1 - np.log(ratio))
 
     def simulate(self, mu: NDArray[np.floating], rng: Any | None = None) -> NDArray[np.floating]:
         rng = np.random if rng is None else rng
