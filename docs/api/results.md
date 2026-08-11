@@ -89,6 +89,21 @@ Extract variance-covariance components of random effects.
 
 **Returns:** VarCorr object with variance, standard deviation, and correlation information.
 
+Compound-symmetry and AR(1) structures are reported on their exact fitted covariance scale.
+The same structured covariance is used by `rePCA()`, `isSingular()`, and the parameter bounds
+returned by `getME("lower")`:
+
+```python
+from mixedlm import lmer, set_cov_type
+
+formula = set_cov_type("y ~ time + (time | subject)", "ar1")
+result = lmer(formula, data)
+
+print(result.VarCorr())
+print(result.rePCA())
+print(result.isSingular())
+```
+
 #### coef
 
 ```python
