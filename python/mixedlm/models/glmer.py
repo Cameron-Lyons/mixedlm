@@ -204,7 +204,7 @@ class GlmerResult(MerResultMixin):
         """
         return self._build_model_terms(self.formula)
 
-    def model_frame(self) -> pd.DataFrame:
+    def model_frame(self) -> Any:
         """Get the model frame.
 
         Returns the data frame containing only the variables used
@@ -212,9 +212,9 @@ class GlmerResult(MerResultMixin):
 
         Returns
         -------
-        pd.DataFrame
-            Data frame with the response variable, fixed effect
-            variables, and grouping factors.
+        DataFrame
+            Data frame with the response variable, fixed effect variables,
+            and grouping factors. The fitted input's backend is preserved.
 
         Examples
         --------
