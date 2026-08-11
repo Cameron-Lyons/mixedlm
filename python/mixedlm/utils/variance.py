@@ -1,15 +1,133 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 import numpy as np
 from numpy.typing import NDArray
 from scipy import linalg, sparse
+from scipy.sparse import linalg as sparse_linalg
 
 if TYPE_CHECKING:
     from mixedlm.matrices.design import RandomEffectStructure
     from mixedlm.models.glmer import GlmerResult
     from mixedlm.models.lmer import LmerResult
+
+
+_CONDVAR_BATCH_COLUMNS = 64
+
+
+def _dense_condvar_solver(
+    precision: NDArray[np.floating],
+) -> Callable[[NDArray[np.floating]], NDArray[np.floating]]:
+    try:
+        chol = linalg.cho_factor(precision, lower=True)
+
+        def solve(rhs: NDArray[np.floating]) -> NDArray[np.floating]:
+            return linalg.cho_solve(chol, rhs)
+
+    except linalg.LinAlgError:
+
+        def solve(rhs: NDArray[np.floating]) -> NDArray[np.floating]:
+            return linalg.lstsq(precision, rhs)[0]
+
+    return solve
+
+
+def _conditional_variance_blocks(
+    precision: sparse.spmatrix | NDArray[np.floating],
+    lambda_factor: sparse.spmatrix | NDArray[np.floating],
+    structures: list[RandomEffectStructure],
+    *,
+    scale: float = 1.0,
+    include_cov: bool = False,
+) -> dict[str, dict[str, NDArray[np.floating]]]:
+    """Extract per-level conditional covariance blocks without a dense q-by-q inverse."""
+    q = precision.shape[0]
+    if q == 0:
+        return {}
+
+    precision_csc = sparse.csc_matrix(precision)
+    lambda_csc = sparse.csc_matrix(lambda_factor)
+
+    solver: Callable[[NDArray[np.floating]], NDArray[np.floating]]
+    try:
+        factor = sparse_linalg.splu(precision_csc)
+        solver = factor.solve
+    except RuntimeError:
+        precision_dense = precision_csc.toarray()
+        solver = _dense_condvar_solver(precision_dense)
+
+    grouped_structures: dict[str, list[tuple[RandomEffectStructure, int]]] = {}
+    offset = 0
+    for struct in structures:
+        grouped_structures.setdefault(struct.grouping_factor, []).append((struct, offset))
+        offset += struct.n_levels * struct.n_terms
+
+    result: dict[str, dict[str, NDArray[np.floating]]] = {}
+    for group_name, group_structures in grouped_structures.items():
+        n_levels = group_structures[0][0].n_levels
+        if any(struct.n_levels != n_levels for struct, _ in group_structures):
+            raise ValueError(f"Random-effect structures for '{group_name}' have unequal levels")
+
+        term_names = list(
+            dict.fromkeys(
+                term_name for struct, _ in group_structures for term_name in struct.term_names
+            )
+        )
+        raw_term_names = [
+            term_name for struct, _ in group_structures for term_name in struct.term_names
+        ]
+        n_terms = len(term_names)
+        n_raw_terms = len(raw_term_names)
+        aggregation = np.zeros((n_terms, n_raw_terms), dtype=np.float64)
+        term_positions = {name: index for index, name in enumerate(term_names)}
+        for raw_index, term_name in enumerate(raw_term_names):
+            aggregation[term_positions[term_name], raw_index] = 1.0
+
+        term_variances = np.empty((n_levels, n_terms), dtype=np.float64)
+        covariance_blocks = (
+            np.empty((n_levels, n_terms, n_terms), dtype=np.float64)
+            if include_cov and n_terms > 1
+            else None
+        )
+        levels_per_batch = max(1, _CONDVAR_BATCH_COLUMNS // n_raw_terms)
+
+        for first_level in range(0, n_levels, levels_per_batch):
+            last_level = min(first_level + levels_per_batch, n_levels)
+            indices = np.asarray(
+                [
+                    struct_offset + level * struct.n_terms + term_index
+                    for level in range(first_level, last_level)
+                    for struct, struct_offset in group_structures
+                    for term_index in range(struct.n_terms)
+                ],
+                dtype=np.intp,
+            )
+            lambda_rows = lambda_csc[indices, :]
+            rhs = lambda_rows.T.toarray()
+            solved = np.asarray(solver(rhs))
+            batch_cov = np.asarray(lambda_rows @ solved) * scale
+
+            for level in range(first_level, last_level):
+                local_level = level - first_level
+                block_start = local_level * n_raw_terms
+                block_end = block_start + n_raw_terms
+                raw_block = batch_cov[block_start:block_end, block_start:block_end]
+                block = aggregation @ raw_block @ aggregation.T
+                block = (block + block.T) * 0.5
+                term_variances[level] = np.diag(block)
+                if covariance_blocks is not None:
+                    covariance_blocks[level] = block
+
+        group_result: dict[str, NDArray[np.floating]] = {}
+        for term_index, term_name in enumerate(term_names):
+            group_result[term_name] = term_variances[:, term_index]
+        if covariance_blocks is not None:
+            group_result["_cov"] = covariance_blocks
+        result[group_name] = group_result
+
+    return result
 
 
 def sdcor2cov(
@@ -540,8 +658,9 @@ def condVar(
     -------
     dict
         Nested dictionary: {grouping_factor: {term: variance_array}}.
-        Each variance_array has shape (n_levels,) for scalar terms or
-        (n_levels, n_terms, n_terms) for correlated terms.
+        Each named term has an array of shape ``(n_levels,)``. Groups with
+        multiple random terms also include ``"_cov"`` with shape
+        ``(n_levels, n_terms, n_terms)``.
 
     Examples
     --------
@@ -552,76 +671,7 @@ def condVar(
     >>> cv['Subject']['(Intercept)'].shape
     (18,)
     """
-    from mixedlm.estimation.reml import _build_lambda
-
-    matrices = model.matrices
-    theta = model.theta
-    sigma = getattr(model, "sigma", 1.0)
-
-    q = matrices.n_random
-
-    if q == 0:
-        return {}
-
-    Lambda = _build_lambda(theta, matrices.random_structures)
-    w = matrices.weights
-
-    if sparse.issparse(matrices.Z):
-        Z_weighted = matrices.Z.multiply(np.sqrt(w)[:, np.newaxis])
-        Zt_w = Z_weighted.T
-        ZtWZ = Zt_w @ Z_weighted
-    else:
-        sqrt_w = np.sqrt(w)
-        Z_weighted = matrices.Z * sqrt_w[:, np.newaxis]
-        ZtWZ = Z_weighted.T @ Z_weighted
-
-    LtZtWZL = Lambda.T @ ZtWZ @ Lambda
-    I_q = sparse.eye(q, format="csc")
-    V = LtZtWZL + I_q
-
-    V_dense = V.toarray() if sparse.issparse(V) else V
-    Lambda_dense = Lambda.toarray() if sparse.issparse(Lambda) else Lambda
-
-    try:
-        V_inv_Lt = linalg.solve(V_dense, Lambda_dense.T, assume_a="pos")
-    except linalg.LinAlgError:
-        V_inv_Lt = linalg.lstsq(V_dense, Lambda_dense.T)[0]
-
-    cond_cov = sigma**2 * Lambda_dense @ V_inv_Lt
-
-    result: dict[str, dict[str, NDArray[np.floating]]] = {}
-    idx = 0
-
-    for struct in matrices.random_structures:
-        group = struct.grouping_factor
-        n_levels = struct.n_levels
-        n_terms = struct.n_terms
-
-        result[group] = {}
-        block_size = n_levels * n_terms
-        block = cond_cov[idx : idx + block_size, idx : idx + block_size]
-
-        if n_terms == 1:
-            variances = np.diag(block)
-            result[group][struct.term_names[0]] = variances
-        else:
-            for t, term in enumerate(struct.term_names):
-                term_indices = [t + k * n_terms for k in range(n_levels)]
-                variances = np.array([block[i, i] for i in term_indices])
-                result[group][term] = variances
-
-            cov_matrices = np.zeros((n_levels, n_terms, n_terms))
-            for k in range(n_levels):
-                for i in range(n_terms):
-                    for j in range(n_terms):
-                        row = k * n_terms + i
-                        col = k * n_terms + j
-                        cov_matrices[k, i, j] = block[row, col]
-            result[group]["_cov"] = cov_matrices
-
-        idx += block_size
-
-    return result
+    return model._compute_condVar(include_cov=True)
 
 
 def safe_chol(

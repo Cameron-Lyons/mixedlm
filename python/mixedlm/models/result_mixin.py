@@ -44,7 +44,9 @@ class MerResultMixin:
     def fixef(self) -> dict[str, float]:
         raise NotImplementedError
 
-    def _compute_condVar(self) -> dict[str, dict[str, NDArray[np.floating]]]:
+    def _compute_condVar(
+        self, include_cov: bool = False
+    ) -> dict[str, dict[str, NDArray[np.floating]]]:
         raise NotImplementedError
 
     def _fixef_dict(self, beta: NDArray[np.floating]) -> dict[str, float]:

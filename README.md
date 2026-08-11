@@ -22,7 +22,7 @@ A Python implementation of mixed-effects models inspired by R's [lme4](https://g
 - **Model comparison** - ANOVA (including Type III), drop1, allFit
 - **Model validation** - Case-level and whole-group cross-validation with weighted scoring
 - **Power analysis** - powerSim, powerCurve for sample size planning
-- **Diagnostics** - Dispersion and zero-inflation checks, influence measures, Cook's distance, leverage
+- **Diagnostics** - Dispersion and zero-inflation checks, influence measures, Cook's distance, leverage, VIF/GVIF, condition indices
 
 ## Installation
 
@@ -61,6 +61,7 @@ result.coef()       # Combined coefficients
 # Inference
 result.confint(method="profile")  # Profile confidence intervals
 result.confint(method="boot")     # Bootstrap confidence intervals
+mlm.check_collinearity(result)     # VIF/GVIF and condition diagnostics
 ```
 
 ### Using Polars
