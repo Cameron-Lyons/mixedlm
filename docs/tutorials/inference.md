@@ -112,7 +112,9 @@ print(result)
 ```
 
 !!! important
-    Use `REML=False` for likelihood ratio tests comparing random effects structures.
+    `anova()` automatically refits REML linear mixed models with ML before
+    comparison. Pass `refit=False` only when you intentionally want to compare
+    the supplied REML fits directly, such as models with identical fixed effects.
 
 ### Type III ANOVA
 
@@ -145,15 +147,15 @@ This fits the model without each term and reports the change in fit.
 model = mlm.lmer("yield ~ treatment + block + (1 | field)", data)
 
 # Marginal means for treatment
-em = mlm.emmeans(model, "treatment", data)
-print(em.emmeans())
+em = mlm.emmeans(model, "treatment")
+print(em)
 ```
 
 ### Pairwise Contrasts
 
 ```python
 # All pairwise comparisons
-contrasts = em.contrasts("pairwise")
+contrasts = em.pairs()
 print(contrasts)
 ```
 
@@ -161,14 +163,14 @@ print(contrasts)
 
 ```python
 # Compare specific levels
-contrasts = em.contrasts("trt.vs.ctrl", ref="control")
+contrasts = em.contrast("trt.vs.ctrl")
 print(contrasts)
 ```
 
 ### Multiple Comparison Adjustment
 
 ```python
-contrasts = em.contrasts("pairwise", adjust="bonferroni")
+contrasts = em.pairs(adjust="bonferroni")
 # Options: "none", "bonferroni", "holm", "tukey"
 ```
 

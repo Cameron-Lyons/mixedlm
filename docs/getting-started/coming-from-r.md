@@ -134,9 +134,9 @@ This guide helps lme4 users transition to mixedlm. The API is designed to be as 
 === "Python (mixedlm)"
 
     ```python
-    em = mlm.emmeans(m, "treatment", data)
-    em.emmeans()
-    em.contrasts("pairwise")
+    em = mlm.emmeans(m, "treatment")
+    print(em)
+    em.pairs()
     ```
 
 ### Power Analysis

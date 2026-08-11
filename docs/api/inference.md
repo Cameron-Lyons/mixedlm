@@ -89,29 +89,32 @@ pvals = mlm.pvalues_with_ddf(model, method="Satterthwaite")
 Compute estimated marginal means.
 
 ```python
-em = mlm.emmeans(model, variable, data)
+em = mlm.emmeans(model, "treatment", type="response")
 ```
 
 **Parameters:**
 
 - `model`: Fitted model
-- `variable`: Variable name to compute marginal means for
-- `data`: Original data frame
+- `specs`: Factor name or names to compute marginal means for
+- `at`: Optional values at which to evaluate other predictors
+- `cov_reduce`: Function used to reduce numeric covariates (default: mean)
+- `type`: `"response"` (default) or `"link"` for generalized models
+- `level`: Confidence level (default: `0.95`)
 
 **Returns:** Emmeans object
 
 **Methods on Emmeans object:**
 
-- `emmeans()`: Get the marginal means
-- `contrasts(type)`: Compute contrasts (`"pairwise"`, `"trt.vs.ctrl"`, etc.)
+- `pairs(adjust="tukey")`: Compute all pairwise comparisons
+- `contrast(method, adjust="none")`: Compute pairwise, treatment-vs-control, or custom contrasts
 
 **Example:**
 
 ```python
 model = mlm.lmer("yield ~ treatment + (1 | block)", data)
-em = mlm.emmeans(model, "treatment", data)
-print(em.emmeans())
-print(em.contrasts("pairwise"))
+em = mlm.emmeans(model, "treatment")
+print(em)
+print(em.pairs())
 ```
 
 ## Bootstrap
@@ -266,11 +269,11 @@ pvals = mlm.pvalues_with_ddf(model)
 model = mlm.lmer("yield ~ treatment + (1 | block)", data)
 
 # Marginal means for treatment
-em = mlm.emmeans(model, "treatment", data)
-print(em.emmeans())
+em = mlm.emmeans(model, "treatment")
+print(em)
 
 # Pairwise contrasts
-print(em.contrasts("pairwise"))
+print(em.pairs())
 ```
 
 ### Bootstrap Confidence Intervals
