@@ -89,22 +89,27 @@ class NlmerResult:
 
         return {self.group_var: group_coef}
 
-    def fitted(self) -> NDArray[np.floating]:
-        n = len(self.y)
-        n_groups = len(np.unique(self.groups))
-        pred = np.zeros(n, dtype=np.float64)
+    def _conditional_mean(
+        self,
+        phi: NDArray[np.floating] | None = None,
+        random_effects: NDArray[np.floating] | None = None,
+    ) -> NDArray[np.floating]:
+        """Evaluate the nonlinear mean without the observation offset."""
+        base_params = self.phi if phi is None else phi
+        effects = self.b if random_effects is None else random_effects
+        pred = np.zeros(len(self.y), dtype=np.float64)
 
-        for g in range(n_groups):
-            mask = self.groups == g
-            x_g = self.x[mask]
-
-            params_g = self.phi.copy()
-            for j, p_idx in enumerate(self.random_params):
-                params_g[p_idx] += self.b[g, j]
-
-            pred[mask] = self.model.predict(params_g, x_g)
+        for group_idx in range(len(self.group_levels)):
+            mask = self.groups == group_idx
+            params = base_params.copy()
+            for effect_idx, param_idx in enumerate(self.random_params):
+                params[param_idx] += effects[group_idx, effect_idx]
+            pred[mask] = self.model.predict(params, self.x[mask])
 
         return pred
+
+    def fitted(self) -> NDArray[np.floating]:
+        return self._conditional_mean() + self.offset(copy=False)
 
     def residuals(self, type: str = "response") -> NDArray[np.floating]:
         fitted = self.fitted()
@@ -364,17 +369,7 @@ class NlmerResult:
         else:
             b_new = np.zeros((n_groups, n_random))
 
-        pred = np.zeros(n, dtype=np.float64)
-        for g in range(n_groups):
-            mask = self.groups == g
-            x_g = self.x[mask]
-
-            params_g = self.phi.copy()
-            for j, p_idx in enumerate(self.random_params):
-                params_g[p_idx] += b_new[g, j]
-
-            pred[mask] = self.model.predict(params_g, x_g)
-
+        pred = self._conditional_mean(random_effects=b_new) + self.offset(copy=False)
         noise = np.random.randn(n) * self.sigma
         return pred + noise
 
@@ -405,8 +400,9 @@ class NlmerResult:
             if len(newresp) != len(self.y):
                 raise ValueError(f"newresp has length {len(newresp)}, expected {len(self.y)}")
 
+        adjusted_response = newresp - self.offset(copy=False)
         optimizer = NLMMOptimizer(
-            newresp,
+            adjusted_response,
             self.x,
             self.groups,
             self.model,
@@ -425,6 +421,11 @@ class NlmerResult:
             maxiter=maxiter,
         )
 
+        refit_data = None
+        if self._data is not None:
+            refit_data = self._data.copy()
+            refit_data[self._y_var] = newresp
+
         return NlmerResult(
             model=self.model,
             group_var=self.group_var,
@@ -442,7 +443,7 @@ class NlmerResult:
             group_levels=self.group_levels,
             _weights=self._weights,
             _offset=self._offset,
-            _data=self._data,
+            _data=refit_data,
             _x_var=self._x_var,
             _y_var=self._y_var,
         )
@@ -538,19 +539,11 @@ class NlmerResult:
         """
         n_params = len(self.phi)
         eps = _VCOV_EPS
+        adjusted_response = self.y - self.offset(copy=False)
 
         def neg_log_lik(phi_vec):
-            pred = np.zeros(len(self.y), dtype=np.float64)
-            n_groups = len(self.group_levels)
-            for g in range(n_groups):
-                mask = self.groups == g
-                x_g = self.x[mask]
-                params_g = phi_vec.copy()
-                for j, p_idx in enumerate(self.random_params):
-                    params_g[p_idx] += self.b[g, j]
-                pred[mask] = self.model.predict(params_g, x_g)
-
-            resid = self.y - pred
+            pred = self._conditional_mean(phi=phi_vec)
+            resid = adjusted_response - pred
             return 0.5 * np.sum(resid**2) / self.sigma**2
 
         hessian = np.zeros((n_params, n_params), dtype=np.float64)
@@ -688,21 +681,13 @@ class NlmerResult:
         J = np.zeros((n, n_params), dtype=np.float64)
         eps = _JACOBIAN_EPS
 
-        fitted_base = self.fitted()
+        fitted_base = self._conditional_mean()
 
         for j in range(n_params):
             phi_plus = self.phi.copy()
             phi_plus[j] += eps
 
-            pred_plus = np.zeros(n, dtype=np.float64)
-            n_groups = len(self.group_levels)
-            for g in range(n_groups):
-                mask = self.groups == g
-                x_g = self.x[mask]
-                params_g = phi_plus.copy()
-                for k, p_idx in enumerate(self.random_params):
-                    params_g[p_idx] += self.b[g, k]
-                pred_plus[mask] = self.model.predict(params_g, x_g)
+            pred_plus = self._conditional_mean(phi=phi_plus)
 
             J[:, j] = (pred_plus - fitted_base) / eps
 
@@ -919,9 +904,10 @@ class NlmerMod:
             self.offset = np.asarray(offset, dtype=np.float64)
             if len(self.offset) != len(self.y):
                 raise ValueError(f"offset has length {len(self.offset)}, expected {len(self.y)}")
-            self.y = self.y - self.offset
+            self._adjusted_y = self.y - self.offset
         else:
             self.offset = None
+            self._adjusted_y = self.y
 
         group_col = data[group_var].astype(str)
         self.group_levels = sorted(group_col.unique().tolist())
@@ -943,7 +929,7 @@ class NlmerMod:
                 dtype=np.float64,
             )
         else:
-            self.start_phi = model.get_start(self.x, self.y)
+            self.start_phi = model.get_start(self.x, self._adjusted_y)
 
     def fit(
         self,
@@ -951,7 +937,7 @@ class NlmerMod:
         maxiter: int = _DEFAULT_MAXITER,
     ) -> NlmerResult:
         optimizer = NLMMOptimizer(
-            self.y,
+            self._adjusted_y,
             self.x,
             self.groups,
             self.model,
@@ -1027,7 +1013,7 @@ def nlmer(
     weights : array-like, optional
         Prior weights for observations.
     offset : array-like, optional
-        Offset term subtracted from the response.
+        Known offset added to the fitted nonlinear mean.
     **kwargs
         Additional arguments passed to the optimizer (method, maxiter).
 
