@@ -655,16 +655,17 @@ def laplace_deviance_fast(
     beta_start: NDArray[np.floating] | None = None,
     u_start: NDArray[np.floating] | None = None,
 ) -> tuple[float, NDArray[np.floating], NDArray[np.floating]]:
+    family_name = _get_family_name(family)
+    link_name = _get_link_name(family)
     if (
         _HAS_RUST
         and beta_start is None
         and u_start is None
+        and family_name is not None
+        and link_name is not None
         and _native_covariance_supported(matrices)
     ):
-        family_name = _get_family_name(family)
-        link_name = _get_link_name(family)
-        if family_name is not None and link_name is not None:
-            return _laplace_deviance_rust(theta, matrices, family)
+        return _laplace_deviance_rust(theta, matrices, family)
     return laplace_deviance(theta, matrices, family, beta_start, u_start)
 
 
@@ -679,18 +680,19 @@ def adaptive_gh_deviance_fast(
     if nAGQ == 1:
         return laplace_deviance_fast(theta, matrices, family, beta_start, u_start)
 
+    family_name = _get_family_name(family)
+    link_name = _get_link_name(family)
     if (
         _HAS_RUST
         and beta_start is None
         and u_start is None
+        and family_name is not None
+        and link_name is not None
         and _native_covariance_supported(matrices)
     ):
-        family_name = _get_family_name(family)
-        link_name = _get_link_name(family)
-        if family_name is not None and link_name is not None:
-            first_struct = matrices.random_structures[0] if matrices.random_structures else None
-            if first_struct and first_struct.n_terms == 1:
-                return _adaptive_gh_deviance_rust(theta, matrices, family, nAGQ)
+        first_struct = matrices.random_structures[0] if matrices.random_structures else None
+        if first_struct and first_struct.n_terms == 1:
+            return _adaptive_gh_deviance_rust(theta, matrices, family, nAGQ)
 
     return adaptive_gh_deviance(theta, matrices, family, nAGQ, beta_start, u_start)
 
