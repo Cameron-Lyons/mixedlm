@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import subprocess
+import sys
+
 import numpy as np
 import pytest
 from mixedlm.estimation.optimizers import (
@@ -53,6 +56,31 @@ class TestHasOptionalDeps:
     def test_has_nlopt_returns_bool(self):
         result = has_nlopt()
         assert isinstance(result, bool)
+
+    def test_import_does_not_load_nlopt(self):
+        script = """
+import builtins
+
+real_import = builtins.__import__
+
+
+def guarded_import(name, *args, **kwargs):
+    if name == "nlopt" or name.startswith("nlopt."):
+        raise AssertionError(f"unexpected eager import: {name}")
+    return real_import(name, *args, **kwargs)
+
+
+builtins.__import__ = guarded_import
+import mixedlm.estimation.optimizers
+"""
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        assert result.returncode == 0, result.stderr
 
 
 class TestOptimizeResult:
