@@ -124,6 +124,25 @@ def anova(
     *models: LmerResult | GlmerResult,
     refit: bool = True,
 ) -> AnovaResult:
+    """Compare fitted mixed models with likelihood-ratio tests.
+
+    Linear mixed models fitted with REML are automatically refitted with ML
+    when ``refit=True`` so their likelihoods are comparable. The original
+    fitted objects are not modified. Set ``refit=False`` to compare the
+    supplied fits directly; a warning is emitted when any of them use REML.
+
+    Parameters
+    ----------
+    *models
+        Two or more fitted linear or generalized mixed models.
+    refit : bool, default True
+        Refit REML linear mixed models with ML before comparison.
+
+    Returns
+    -------
+    AnovaResult
+        Model fit statistics and sequential likelihood-ratio tests.
+    """
     if len(models) < 2:
         raise ValueError("anova requires at least 2 models to compare")
 
@@ -138,18 +157,21 @@ def anova(
 
     from mixedlm.models.lmer import LmerResult
 
-    is_lmer = [isinstance(m, LmerResult) for m in model_list]
-    if refit and any(is_lmer):
-        reml_flags = [m.REML for m in model_list if isinstance(m, LmerResult)]
-        if any(reml_flags):
-            import warnings
+    has_reml_models = any(isinstance(model, LmerResult) and model.REML for model in model_list)
+    if refit:
+        model_list = [
+            model.refitML() if isinstance(model, LmerResult) and model.REML else model
+            for model in model_list
+        ]
+    elif has_reml_models:
+        import warnings
 
-            warnings.warn(
-                "Some models were fit with REML. For valid likelihood ratio tests, "
-                "models should be fit with ML (REML=False). Consider refitting.",
-                UserWarning,
-                stacklevel=2,
-            )
+        warnings.warn(
+            "Some models were fit with REML and refit=False. Their likelihoods may not "
+            "be comparable when the fixed-effects structures differ.",
+            UserWarning,
+            stacklevel=2,
+        )
 
     model_data = []
     for m in model_list:
