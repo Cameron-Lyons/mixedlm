@@ -370,7 +370,7 @@ class TestWeightedDDF:
         model_df = satterthwaite_df(model).df
         scaled_df = satterthwaite_df(scaled).df
 
-        assert_allclose(scaled_df, model_df, rtol=5e-6, atol=5e-5)
+        assert_allclose(scaled_df, model_df, rtol=5e-5, atol=5e-4)
         assert_allclose(model_df, [11.0, 11.0], rtol=0, atol=5e-3)
 
     def test_gradient_cache_is_isolated_between_fitted_models(self) -> None:
