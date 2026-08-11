@@ -3,11 +3,15 @@ from __future__ import annotations
 import warnings
 from collections.abc import Callable
 from dataclasses import dataclass
+from importlib.util import find_spec
 from typing import Any
 
 import numpy as np
 from numpy.typing import NDArray
 from scipy.optimize import minimize
+
+_HAS_NLOPT = find_spec("nlopt") is not None
+
 
 SCIPY_OPTIMIZERS = {
     "L-BFGS-B",
@@ -57,6 +61,8 @@ def _load_nlopt() -> Any | None:
 
 
 def has_nlopt() -> bool:
+    if not _HAS_NLOPT:
+        return False
     return _load_nlopt() is not None
 
 
@@ -634,6 +640,10 @@ def run_optimizer(
         )
     elif method in NLOPT_OPTIMIZER_NAMES:
         algorithm = NLOPT_OPTIMIZERS[method]
+        if not _HAS_NLOPT:
+            raise ImportError(
+                f"nlopt is required for '{method}'. Install it with: pip install nlopt"
+            )
         return _optimize_nlopt(fun, x0, bounds, options, algorithm)
     elif method in SCIPY_OPTIMIZERS:
         return _optimize_scipy(fun, x0, method, bounds, options, callback)
