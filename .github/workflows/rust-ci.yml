@@ -15,17 +15,12 @@ env:
   CARGO_HTTP_MULTIPLEXING: "false"
   CARGO_NET_RETRY: "10"
   RUSTFLAGS: -D warnings
+  CARGO_MANIFEST_PATH: fuzz/Cargo.toml
 
 jobs:
   rust:
-    name: Rust checks (${{ matrix.manifest }})
+    name: Rust checks (fuzz/Cargo.toml)
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        manifest:
-          - Cargo.toml
-          - fuzz/Cargo.toml
 
     steps:
       - name: Checkout
@@ -35,17 +30,6 @@ jobs:
         run: |
           rustup toolchain install stable --profile minimal --component clippy --component rustfmt
           rustup default stable
-
-      - name: Prepare Cargo manifest path
-        run: |
-          manifest="${{ matrix.manifest }}"
-          dir="$(dirname "$manifest")"
-          base="$(basename "$manifest")"
-          if [ "$base" != "Cargo.toml" ]; then
-            ln -sf "$base" "$dir/Cargo.toml"
-            manifest="$dir/Cargo.toml"
-          fi
-          echo "CARGO_MANIFEST_PATH=$manifest" >> "$GITHUB_ENV"
 
       - name: Check formatting
         run: cargo fmt --all --manifest-path "$CARGO_MANIFEST_PATH" -- --check

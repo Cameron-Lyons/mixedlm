@@ -160,11 +160,27 @@ class BootstrapResult:
         )
 
 
+def _get_bootstrap_frame(result: LmerResult | GlmerResult) -> Any:
+    frame = result.matrices.frame
+    if frame is None:
+        raise ValueError("Parametric bootstrap requires the original model frame")
+    return frame
+
+
+def _replace_bootstrap_response(frame: Any, response_name: str, values: NDArray) -> Any:
+    if type(frame).__module__.split(".", 1)[0] == "polars":
+        import polars as pl
+
+        return frame.with_columns(pl.Series(response_name, values))
+
+    result = frame.copy()
+    result[response_name] = values
+    return result
+
+
 def _lmer_bootstrap_worker(
     args: tuple[Any, ...],
 ) -> tuple[int, NDArray | None, NDArray | None, float | None]:
-    import pandas as pd
-
     from mixedlm.models.lmer import LmerMod
 
     (
@@ -173,7 +189,7 @@ def _lmer_bootstrap_worker(
         formula,
         X,
         Z,
-        fixed_names,
+        model_frame,
         random_structures_data,
         response_name,
         beta,
@@ -218,20 +234,7 @@ def _lmer_bootstrap_worker(
         noise = np.random.randn(n) * sigma
         y_sim = fixed_part + random_part + noise
 
-        sim_df = pd.DataFrame(X, columns=fixed_names)
-        sim_df[response_name] = y_sim
-
-        for struct_data in random_structures_data:
-            level_map = struct_data["level_map"]
-            grouping_factor = struct_data["grouping_factor"]
-            n_terms = struct_data["n_terms"]
-            z_slice = struct_data["z_slice"]
-
-            levels = list(level_map.keys())
-            z_first_cols = z_slice[:, ::n_terms]
-            level_indices = np.argmax(z_first_cols != 0, axis=1)
-            group_col = [levels[idx] for idx in level_indices]
-            sim_df[grouping_factor] = group_col
+        sim_df = _replace_bootstrap_response(model_frame, response_name, y_sim)
 
         model = LmerMod(formula, sim_df, REML=REML)
         boot_result = model.fit(start=theta)
@@ -242,8 +245,6 @@ def _lmer_bootstrap_worker(
 
 
 def _glmer_bootstrap_worker(args: tuple[Any, ...]) -> tuple[int, NDArray | None, NDArray | None]:
-    import pandas as pd
-
     from mixedlm.models.glmer import GlmerMod
 
     (
@@ -252,7 +253,7 @@ def _glmer_bootstrap_worker(args: tuple[Any, ...]) -> tuple[int, NDArray | None,
         formula,
         X,
         Z,
-        fixed_names,
+        model_frame,
         random_structures_data,
         response_name,
         beta,
@@ -307,20 +308,7 @@ def _glmer_bootstrap_worker(args: tuple[Any, ...]) -> tuple[int, NDArray | None,
         else:
             y_sim = mu + np.random.randn(n) * 0.1
 
-        sim_df = pd.DataFrame(X, columns=fixed_names)
-        sim_df[response_name] = y_sim
-
-        for struct_data in random_structures_data:
-            level_map = struct_data["level_map"]
-            grouping_factor = struct_data["grouping_factor"]
-            n_terms = struct_data["n_terms"]
-            z_slice = struct_data["z_slice"]
-
-            levels = list(level_map.keys())
-            z_first_cols = z_slice[:, ::n_terms]
-            level_indices = np.argmax(z_first_cols != 0, axis=1)
-            group_col = [levels[idx] for idx in level_indices]
-            sim_df[grouping_factor] = group_col
+        sim_df = _replace_bootstrap_response(model_frame, response_name, y_sim)
 
         model = GlmerMod(formula, sim_df, family=family)
         boot_result = model.fit(start=theta)
@@ -334,33 +322,24 @@ def _prepare_lmer_worker_data(result: LmerResult) -> dict[str, Any]:
     n_structs = len(result.matrices.random_structures)
     random_structures_data: list[dict[str, Any]] = [{}] * n_structs
     theta_offset = 0
-    z_start = 0
-
     for s_idx, struct in enumerate(result.matrices.random_structures):
         n_terms = struct.n_terms
         n_theta = n_terms * (n_terms + 1) // 2 if struct.correlated else n_terms
         theta_block = result.theta[theta_offset : theta_offset + n_theta]
         theta_offset += n_theta
 
-        z_end = z_start + struct.n_levels * struct.n_terms
-        z_slice = result.matrices.Z[:, z_start:z_end]
-
         random_structures_data[s_idx] = {
             "n_levels": struct.n_levels,
             "n_terms": struct.n_terms,
             "correlated": struct.correlated,
-            "level_map": dict(struct.level_map),
-            "grouping_factor": struct.grouping_factor,
             "theta_block": theta_block.copy(),
-            "z_slice": z_slice.copy() if hasattr(z_slice, "copy") else np.array(z_slice),
         }
-        z_start = z_end
 
     return {
         "formula": result.formula,
         "X": result.matrices.X.copy(),
         "Z": result.matrices.Z.copy() if result.matrices.Z is not None else None,
-        "fixed_names": result.matrices.fixed_names,
+        "model_frame": _get_bootstrap_frame(result),
         "random_structures_data": random_structures_data,
         "response_name": result.formula.response,
         "beta": result.beta.copy(),
@@ -374,33 +353,24 @@ def _prepare_glmer_worker_data(result: GlmerResult) -> dict[str, Any]:
     n_structs = len(result.matrices.random_structures)
     random_structures_data: list[dict[str, Any]] = [{}] * n_structs
     theta_offset = 0
-    z_start = 0
-
     for s_idx, struct in enumerate(result.matrices.random_structures):
         n_terms = struct.n_terms
         n_theta = n_terms * (n_terms + 1) // 2 if struct.correlated else n_terms
         theta_block = result.theta[theta_offset : theta_offset + n_theta]
         theta_offset += n_theta
 
-        z_end = z_start + struct.n_levels * struct.n_terms
-        z_slice = result.matrices.Z[:, z_start:z_end]
-
         random_structures_data[s_idx] = {
             "n_levels": struct.n_levels,
             "n_terms": struct.n_terms,
             "correlated": struct.correlated,
-            "level_map": dict(struct.level_map),
-            "grouping_factor": struct.grouping_factor,
             "theta_block": theta_block.copy(),
-            "z_slice": z_slice.copy() if hasattr(z_slice, "copy") else np.array(z_slice),
         }
-        z_start = z_end
 
     return {
         "formula": result.formula,
         "X": result.matrices.X.copy(),
         "Z": result.matrices.Z.copy() if result.matrices.Z is not None else None,
-        "fixed_names": result.matrices.fixed_names,
+        "model_frame": _get_bootstrap_frame(result),
         "random_structures_data": random_structures_data,
         "response_name": result.formula.response,
         "beta": result.beta.copy(),
@@ -427,12 +397,10 @@ def bootstrap_lmer(
     seeds = rng.integers(0, 2**31, size=n_boot)
 
     if n_jobs == 1:
-        import pandas as pd
-
         from mixedlm.models.lmer import LmerMod
 
         n_failed = 0
-        n = result.matrices.n_obs
+        model_frame = _get_bootstrap_frame(result)
 
         for b in range(n_boot):
             if verbose and (b + 1) % 100 == 0:
@@ -443,21 +411,7 @@ def bootstrap_lmer(
             try:
                 y_sim = _simulate_lmer(result)
 
-                sim_data = result.matrices.X.copy()
-                sim_df = pd.DataFrame(sim_data, columns=result.matrices.fixed_names)
-                sim_df[result.formula.response] = y_sim
-
-                for struct in result.matrices.random_structures:
-                    levels = list(struct.level_map.keys())
-                    group_col = []
-                    for i in range(n):
-                        for lv, idx in struct.level_map.items():
-                            if result.matrices.Z[i, idx * struct.n_terms] != 0:
-                                group_col.append(lv)
-                                break
-                        else:
-                            group_col.append(levels[0])
-                    sim_df[struct.grouping_factor] = group_col
+                sim_df = _replace_bootstrap_response(model_frame, result.formula.response, y_sim)
 
                 model = LmerMod(
                     result.formula,
@@ -485,7 +439,7 @@ def bootstrap_lmer(
                 worker_data["formula"],
                 worker_data["X"],
                 worker_data["Z"],
-                worker_data["fixed_names"],
+                worker_data["model_frame"],
                 worker_data["random_structures_data"],
                 worker_data["response_name"],
                 worker_data["beta"],
@@ -587,12 +541,10 @@ def bootstrap_glmer(
     seeds = rng.integers(0, 2**31, size=n_boot)
 
     if n_jobs == 1:
-        import pandas as pd
-
         from mixedlm.models.glmer import GlmerMod
 
         n_failed = 0
-        n = result.matrices.n_obs
+        model_frame = _get_bootstrap_frame(result)
 
         for b in range(n_boot):
             if verbose and (b + 1) % 100 == 0:
@@ -603,21 +555,7 @@ def bootstrap_glmer(
             try:
                 y_sim = _simulate_glmer(result)
 
-                sim_data = result.matrices.X.copy()
-                sim_df = pd.DataFrame(sim_data, columns=result.matrices.fixed_names)
-                sim_df[result.formula.response] = y_sim
-
-                for struct in result.matrices.random_structures:
-                    levels = list(struct.level_map.keys())
-                    group_col = []
-                    for i in range(n):
-                        for lv, idx in struct.level_map.items():
-                            if result.matrices.Z[i, idx * struct.n_terms] != 0:
-                                group_col.append(lv)
-                                break
-                        else:
-                            group_col.append(levels[0])
-                    sim_df[struct.grouping_factor] = group_col
+                sim_df = _replace_bootstrap_response(model_frame, result.formula.response, y_sim)
 
                 model = GlmerMod(
                     result.formula,
@@ -644,7 +582,7 @@ def bootstrap_glmer(
                 worker_data["formula"],
                 worker_data["X"],
                 worker_data["Z"],
-                worker_data["fixed_names"],
+                worker_data["model_frame"],
                 worker_data["random_structures_data"],
                 worker_data["response_name"],
                 worker_data["beta"],
