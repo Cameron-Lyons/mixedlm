@@ -5,7 +5,7 @@ from dataclasses import replace
 import numpy as np
 import pandas as pd
 import pytest
-from mixedlm import glmer, lmer
+from mixedlm import glmer, lmer, load_cbpp
 from mixedlm.families import Binomial
 from mixedlm.inference.bootstrap import (
     BootstrapResult,
@@ -325,6 +325,23 @@ class TestBootstrapGlmer:
         result = glmer("y ~ treatment + (1 | group)", categorical_glmer_data, family=Binomial())
 
         boot = bootstrap_glmer(result, n_boot=3, seed=42)
+
+        assert boot.n_failed == 0
+        assert np.isfinite(boot.beta_samples).all()
+
+    def test_grouped_binomial_bootstrap_uses_proportion_scale(self):
+        data = load_cbpp()
+        result = glmer("incidence / size ~ period + (1 | herd)", data, family=Binomial())
+
+        np.random.seed(42)
+        simulated = _simulate_glmer(result)
+        trials = result.matrices.trials
+
+        assert trials is not None
+        assert np.all((simulated >= 0.0) & (simulated <= 1.0))
+        assert_allclose(simulated * trials, np.round(simulated * trials))
+
+        boot = bootstrap_glmer(result, n_boot=2, seed=42)
 
         assert boot.n_failed == 0
         assert np.isfinite(boot.beta_samples).all()
