@@ -42,6 +42,16 @@ from mixedlm.formula.parser import (
 )
 from mixedlm.inference.anova import AnovaResult, AnovaType3Result, anova, anova_type3
 from mixedlm.inference.bootstrap import bootMer, bootstrap_nlmer
+from mixedlm.inference.cross_validation import (
+    CrossValidationFold,
+    CrossValidationResult,
+    cross_validate,
+    make_folds,
+    weighted_mae,
+    weighted_mse,
+    weighted_r2,
+    weighted_rmse,
+)
 from mixedlm.inference.ddf import (
     DenomDFResult,
     kenward_roger_df,
@@ -161,6 +171,14 @@ __all__ = [
     "allEffects",
     "bootMer",
     "bootstrap_nlmer",
+    "cross_validate",
+    "make_folds",
+    "weighted_mae",
+    "weighted_mse",
+    "weighted_r2",
+    "weighted_rmse",
+    "CrossValidationFold",
+    "CrossValidationResult",
     "satterthwaite_df",
     "kenward_roger_df",
     "pvalues_with_ddf",
