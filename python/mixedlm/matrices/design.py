@@ -58,6 +58,8 @@ class ModelMatrices:
     offset: NDArray[np.floating]
     frame: Any | None = field(default=None)
     na_info: NAInfo | None = field(default=None)
+    category_levels: dict[str, list[Any]] = field(default_factory=dict)
+    contrasts: dict[str, str | NDArray[np.floating]] | None = field(default=None)
 
     @cached_property
     def Zt(self) -> sparse.csc_matrix:
@@ -86,12 +88,37 @@ def build_model_matrices(
         clean_data = data
         na_info = None
 
-    y = _build_response(formula, clean_data)
-    X, fixed_names = build_fixed_matrix(formula, clean_data, contrasts=contrasts)
-    Z, random_structures = build_random_matrix(formula, clean_data, contrasts=contrasts)
-
     frame_vars = _get_formula_variables(formula)
     available_cols = get_columns(clean_data)
+    encoded_variables = formula.fixed_variables | formula.random_variables
+    category_levels = {
+        name: get_categories(clean_data, name)
+        for name in encoded_variables
+        if name in available_cols and is_categorical_or_string(clean_data, name)
+    }
+    stored_contrasts = (
+        None
+        if contrasts is None
+        else {
+            name: value.copy() if isinstance(value, np.ndarray) else value
+            for name, value in contrasts.items()
+        }
+    )
+
+    y = _build_response(formula, clean_data)
+    X, fixed_names = build_fixed_matrix(
+        formula,
+        clean_data,
+        contrasts=stored_contrasts,
+        category_levels=category_levels,
+    )
+    Z, random_structures = build_random_matrix(
+        formula,
+        clean_data,
+        contrasts=stored_contrasts,
+        category_levels=category_levels,
+    )
+
     available_vars = [v for v in frame_vars if v in available_cols]
     model_frame = select_columns(clean_data, available_vars)
 
@@ -114,6 +141,8 @@ def build_model_matrices(
         offset=offset,
         frame=model_frame,
         na_info=na_info,
+        category_levels=category_levels,
+        contrasts=stored_contrasts,
     )
 
 
@@ -126,6 +155,7 @@ def build_fixed_matrix(
     formula: Formula,
     data: Any,
     contrasts: dict[str, str | NDArray[np.floating]] | None = None,
+    category_levels: dict[str, list[Any]] | None = None,
 ) -> tuple[NDArray[np.floating], list[str]]:
     n = dataframe_length(data)
     columns: list[NDArray[np.floating]] = []
@@ -139,7 +169,7 @@ def build_fixed_matrix(
         if isinstance(term, InterceptTerm):
             continue
         elif isinstance(term, VariableTerm):
-            col, col_names = _encode_variable(term.name, data, contrasts)
+            col, col_names = _encode_variable(term.name, data, contrasts, category_levels)
             columns.extend(col)
             names.extend(col_names)
         elif isinstance(term, PowerTerm):
@@ -147,7 +177,12 @@ def build_fixed_matrix(
             columns.extend(col)
             names.extend(col_names)
         elif isinstance(term, InteractionTerm):
-            col, col_names = _encode_interaction(term.variables, data, contrasts)
+            col, col_names = _encode_interaction(
+                term.variables,
+                data,
+                contrasts,
+                category_levels,
+            )
             columns.extend(col)
             names.extend(col_names)
 
@@ -163,9 +198,10 @@ def _encode_variable(
     name: str,
     data: Any,
     contrasts: dict[str, str | NDArray[np.floating]] | None = None,
+    category_levels: dict[str, list[Any]] | None = None,
 ) -> tuple[list[NDArray[np.floating]], list[str]]:
-    if is_categorical_or_string(data, name):
-        return _encode_categorical(name, data, contrasts)
+    if name in (category_levels or {}) or is_categorical_or_string(data, name):
+        return _encode_categorical(name, data, contrasts, category_levels)
     else:
         arr = get_column_numpy(data, name, dtype=np.float64)
         return [arr], [name]
@@ -183,10 +219,13 @@ def _encode_categorical(
     name: str,
     data: Any,
     contrasts: dict[str, str | NDArray[np.floating]] | None = None,
+    category_levels: dict[str, list[Any]] | None = None,
 ) -> tuple[list[NDArray[np.floating]], list[str]]:
     from mixedlm.utils.contrasts import apply_contrasts_array, get_contrast_matrix
 
-    categories = get_categories(data, name)
+    categories = (category_levels or {}).get(name)
+    if categories is None:
+        categories = get_categories(data, name)
     n_levels = len(categories)
     n = dataframe_length(data)
 
@@ -207,13 +246,14 @@ def _encode_interaction(
     variables: tuple[str | PowerTerm, ...],
     data: Any,
     contrasts: dict[str, str | NDArray[np.floating]] | None = None,
+    category_levels: dict[str, list[Any]] | None = None,
 ) -> tuple[list[NDArray[np.floating]], list[str]]:
     encoded_vars: list[tuple[list[NDArray[np.floating]], list[str]]] = []
     for var in variables:
         if isinstance(var, PowerTerm):
             cols, nms = _encode_power(var, data)
         else:
-            cols, nms = _encode_variable(var, data, contrasts)
+            cols, nms = _encode_variable(var, data, contrasts, category_levels)
         encoded_vars.append((cols, nms))
 
     result_cols: list[NDArray[np.floating]] = []
@@ -294,13 +334,20 @@ def build_random_matrix(
     formula: Formula,
     data: Any,
     contrasts: dict[str, str | NDArray[np.floating]] | None = None,
+    category_levels: dict[str, list[Any]] | None = None,
 ) -> tuple[sparse.csc_matrix, list[RandomEffectStructure]]:
     n = dataframe_length(data)
     Z_blocks: list[sparse.csc_matrix] = []
     structures: list[RandomEffectStructure] = []
 
     for rterm in formula.random:
-        Z_block, structure = _build_random_block(rterm, data, n, contrasts)
+        Z_block, structure = _build_random_block(
+            rterm,
+            data,
+            n,
+            contrasts,
+            category_levels,
+        )
         Z_blocks.append(Z_block)
         structures.append(structure)
 
@@ -316,9 +363,10 @@ def _build_random_block(
     data: Any,
     n: int,
     contrasts: dict[str, str | NDArray[np.floating]] | None = None,
+    category_levels: dict[str, list[Any]] | None = None,
 ) -> tuple[sparse.csc_matrix, RandomEffectStructure]:
     if rterm.is_nested:
-        return _build_nested_random_block(rterm, data, n, contrasts)
+        return _build_nested_random_block(rterm, data, n, contrasts, category_levels)
 
     grouping_factor = rterm.grouping
     assert isinstance(grouping_factor, str)
@@ -340,7 +388,7 @@ def _build_random_block(
         if isinstance(term, InterceptTerm):
             continue
         elif isinstance(term, VariableTerm):
-            cols, nms = _encode_variable(term.name, data, contrasts)
+            cols, nms = _encode_variable(term.name, data, contrasts, category_levels)
             term_cols.extend(cols)
             term_names.extend(nms)
         elif isinstance(term, PowerTerm):
@@ -348,7 +396,12 @@ def _build_random_block(
             term_cols.extend(cols)
             term_names.extend(nms)
         elif isinstance(term, InteractionTerm):
-            cols, nms = _encode_interaction(term.variables, data, contrasts)
+            cols, nms = _encode_interaction(
+                term.variables,
+                data,
+                contrasts,
+                category_levels,
+            )
             term_cols.extend(cols)
             term_names.extend(nms)
 
@@ -374,6 +427,7 @@ def _build_nested_random_block(
     data: Any,
     n: int,
     contrasts: dict[str, str | NDArray[np.floating]] | None = None,
+    category_levels: dict[str, list[Any]] | None = None,
 ) -> tuple[sparse.csc_matrix, RandomEffectStructure]:
     grouping_factors = rterm.grouping_factors
     combined_group = concat_columns_as_string(data, list(grouping_factors), separator="/")
@@ -398,7 +452,7 @@ def _build_nested_random_block(
         if isinstance(term, InterceptTerm):
             continue
         elif isinstance(term, VariableTerm):
-            cols, nms = _encode_variable(term.name, data, contrasts)
+            cols, nms = _encode_variable(term.name, data, contrasts, category_levels)
             term_cols.extend(cols)
             term_names.extend(nms)
         elif isinstance(term, PowerTerm):
@@ -406,7 +460,12 @@ def _build_nested_random_block(
             term_cols.extend(cols)
             term_names.extend(nms)
         elif isinstance(term, InteractionTerm):
-            cols, nms = _encode_interaction(term.variables, data, contrasts)
+            cols, nms = _encode_interaction(
+                term.variables,
+                data,
+                contrasts,
+                category_levels,
+            )
             term_cols.extend(cols)
             term_names.extend(nms)
 
