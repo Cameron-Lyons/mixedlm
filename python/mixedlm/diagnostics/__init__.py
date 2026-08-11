@@ -1,6 +1,13 @@
 from __future__ import annotations
 
 from mixedlm.diagnostics.collinearity import CollinearityResult, check_collinearity
+from mixedlm.diagnostics.dispersion import (
+    DispersionResult,
+    ZeroInflationResult,
+    check_overdispersion,
+    check_zero_inflation,
+    check_zeroinflation,
+)
 from mixedlm.diagnostics.influence import (
     InfluenceResult,
     cooks_distance,
@@ -23,6 +30,11 @@ from mixedlm.diagnostics.plots import (
 )
 
 __all__ = [
+    "DispersionResult",
+    "ZeroInflationResult",
+    "check_overdispersion",
+    "check_zero_inflation",
+    "check_zeroinflation",
     "plot_diagnostics",
     "plot_qq",
     "plot_ranef",

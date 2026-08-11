@@ -82,6 +82,58 @@ class AllFitResult:
         n_total = len(self.fits)
         return f"AllFitResult({n_success}/{n_total} successful)"
 
+    @property
+    def results(self) -> dict[str, LmerResult | GlmerResult | Exception]:
+        """Return fits and failures in the legacy combined mapping."""
+        return {
+            name: fit
+            if fit is not None
+            else RuntimeError(self.errors.get(name, "Fit failed without an error message"))
+            for name, fit in self.fits.items()
+        }
+
+    @property
+    def summary(self) -> pd.DataFrame:
+        """Return a tabular optimizer comparison."""
+        import pandas as pd
+
+        rows: list[dict[str, Any]] = []
+        for name, fit in self.fits.items():
+            if fit is None:
+                rows.append(
+                    {
+                        "optimizer": name,
+                        "converged": False,
+                        "deviance": np.nan,
+                        "iterations": np.nan,
+                        "gradient_norm": np.nan,
+                        "at_boundary": np.nan,
+                        "error": self.errors.get(name),
+                    }
+                )
+            else:
+                gradient_norm = getattr(fit, "gradient_norm", None)
+                rows.append(
+                    {
+                        "optimizer": name,
+                        "converged": fit.converged,
+                        "deviance": fit.deviance,
+                        "iterations": fit.n_iter,
+                        "gradient_norm": gradient_norm if gradient_norm is not None else np.nan,
+                        "at_boundary": getattr(fit, "at_boundary", np.nan),
+                        "error": None,
+                    }
+                )
+        return pd.DataFrame(rows)
+
+    @property
+    def best_optimizer(self) -> str:
+        """Return the optimizer with the lowest deviance."""
+        successful = {name: fit for name, fit in self.fits.items() if fit is not None}
+        if not successful:
+            return next(iter(self.fits), "")
+        return min(successful, key=lambda name: successful[name].deviance)
+
     def fixef_table(self) -> dict[str, dict[str, float]]:
         result: dict[str, dict[str, float]] = {}
         for opt_name, fit in self.fits.items():

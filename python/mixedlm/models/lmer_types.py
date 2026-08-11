@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import SupportsIndex
 
 import numpy as np
 from numpy.typing import NDArray
@@ -51,25 +52,69 @@ class PredictResult:
     interval: str = "none"
     level: float = 0.95
 
-    def __array__(self) -> NDArray[np.floating]:
-        return self.fit
+    def __array__(self, dtype=None, copy: bool | None = None) -> NDArray:
+        """Return predictions as an array while honoring NumPy conversion options."""
+        if copy is None:
+            return np.asarray(self.fit, dtype=dtype)
+        return np.array(self.fit, dtype=dtype, copy=copy)
 
     def __len__(self) -> int:
         return len(self.fit)
 
-    def __getitem__(self, idx: int) -> float:
-        return float(self.fit[idx])
+    def __iter__(self):
+        return iter(self.fit)
+
+    def __getitem__(self, idx):
+        value = self.fit[idx]
+        return float(value) if np.ndim(value) == 0 else value
+
+    @property
+    def shape(self) -> tuple[int, ...]:
+        return self.fit.shape
+
+    @property
+    def ndim(self) -> int:
+        return self.fit.ndim
+
+    @property
+    def dtype(self) -> np.dtype:
+        return self.fit.dtype
+
+    @property
+    def size(self) -> int:
+        return self.fit.size
 
 
-@dataclass
-class LogLik:
-    value: float
+class LogLik(float):
+    """Numeric log-likelihood value with model-selection metadata."""
+
     df: int
     nobs: int
-    REML: bool = False
+    REML: bool
 
-    def __float__(self) -> float:
-        return float(self.value)
+    def __new__(
+        cls,
+        value: float,
+        df: int,
+        nobs: int,
+        REML: bool = False,
+    ) -> LogLik:
+        instance = super().__new__(cls, value)
+        instance.df = df
+        instance.nobs = nobs
+        instance.REML = REML
+        return instance
+
+    @property
+    def value(self) -> float:
+        """Return the plain numeric value for compatibility."""
+        return float(self)
+
+    def __reduce_ex__(
+        self,
+        _protocol: SupportsIndex,
+    ) -> tuple[type[LogLik], tuple[float, int, int, bool]]:
+        return type(self), (self.value, self.df, self.nobs, self.REML)
 
     def __str__(self) -> str:
         reml_str = " (REML)" if self.REML else ""
