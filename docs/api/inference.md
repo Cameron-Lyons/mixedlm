@@ -243,30 +243,48 @@ print(em.pairs())
 Parametric bootstrap for mixed models.
 
 ```python
-boot = mlm.bootMer(model, data, nsim=500, FUN=None)
+boot = mlm.bootMer(model, nsim=500, seed=42)
 ```
 
 **Parameters:**
 
 - `model`: Fitted model
-- `data`: Original data frame
 - `nsim`: Number of bootstrap simulations
-- `FUN`: Optional function to extract statistics (default: all parameters)
+- `seed`: Optional reproducibility seed
 
 **Returns:** BootstrapResult object
 
 **Methods:**
 
-- `confint(level=0.95)`: Bootstrap confidence intervals
-- `samples`: Array of bootstrap samples
+- `ci(level=0.95, method="percentile")`: Fixed-effect confidence intervals
+- `se()`: Fixed-effect bootstrap standard errors
+- `beta_samples`, `theta_samples`, `sigma_samples`: Bootstrap sample arrays
 
 **Example:**
 
 ```python
-boot = mlm.bootMer(model, data, nsim=500)
-ci = boot.confint()
+boot = mlm.bootMer(model, nsim=500, seed=42)
+ci = boot.ci()
 print(ci)
 ```
+
+### bootCI
+
+Create tidy confidence intervals for fixed effects, variance parameters, and
+the residual scale. Multiple interval methods can be computed in one pass.
+
+```python
+intervals = mlm.bootCI(
+    boot,
+    component="all",
+    method=["percentile", "basic", "normal"],
+)
+```
+
+The returned data frame includes each parameter's original estimate, bootstrap
+mean, bias, sample standard error, confidence bounds, and successful replicate
+count. `component="sigma"` is available for linear and nonlinear models; GLMM
+results do not have a separately estimated residual scale.
 
 ## Profile Likelihood
 
@@ -383,10 +401,10 @@ print(em.pairs())
 model = mlm.lmer("Reaction ~ Days + (Days | Subject)", data)
 
 # Parametric bootstrap
-boot = mlm.bootMer(model, data, nsim=500)
+boot = mlm.bootMer(model, nsim=500, seed=42)
 
 # Get CIs
-ci = boot.confint()
+ci = mlm.bootCI(boot, component="all")
 print(ci)
 ```
 

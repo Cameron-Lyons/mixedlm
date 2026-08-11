@@ -10,6 +10,83 @@ pub struct RemlResult {
     pub converged: bool,
 }
 
+fn matrix_is_finite(matrix: &Mat<f64>) -> bool {
+    (0..matrix.nrows())
+        .all(|row| (0..matrix.ncols()).all(|column| matrix[(row, column)].is_finite()))
+}
+
+fn validate_reml_inputs(
+    y: &Mat<f64>,
+    x: &Mat<f64>,
+    z_blocks: &[Mat<f64>],
+    variances: &[f64],
+    sigma2: f64,
+) -> Result<(), String> {
+    let n = y.nrows();
+    if n == 0 {
+        return Err("y must contain at least one observation".to_string());
+    }
+    if y.ncols() != 1 {
+        return Err("y must be a column vector".to_string());
+    }
+    if x.nrows() != n {
+        return Err(format!(
+            "x must have {n} rows to match y, got {}",
+            x.nrows()
+        ));
+    }
+    if x.ncols() >= n {
+        return Err(format!(
+            "x must have fewer columns than observations, got {} columns for {n} observations",
+            x.ncols()
+        ));
+    }
+    if z_blocks.len() != variances.len() {
+        return Err(format!(
+            "init_variances must contain one value per Z block, got {} values for {} blocks",
+            variances.len(),
+            z_blocks.len()
+        ));
+    }
+    for (index, z) in z_blocks.iter().enumerate() {
+        if z.nrows() != n {
+            return Err(format!(
+                "Z block {index} must have {n} rows to match y, got {}",
+                z.nrows()
+            ));
+        }
+        if z.ncols() == 0 {
+            return Err(format!("Z block {index} must contain at least one column"));
+        }
+        if !matrix_is_finite(z) {
+            return Err(format!("Z block {index} must contain only finite values"));
+        }
+    }
+    if !matrix_is_finite(y) {
+        return Err("y must contain only finite values".to_string());
+    }
+    if !matrix_is_finite(x) {
+        return Err("x must contain only finite values".to_string());
+    }
+    if variances
+        .iter()
+        .any(|variance| !variance.is_finite() || *variance < 0.0)
+    {
+        return Err("init_variances must contain finite, nonnegative values".to_string());
+    }
+    if !sigma2.is_finite() || sigma2 <= 0.0 {
+        return Err("init_sigma2 must be finite and greater than zero".to_string());
+    }
+    Ok(())
+}
+
+fn validate_iteration_parameters(tol: f64) -> Result<(), String> {
+    if !tol.is_finite() || tol <= 0.0 {
+        return Err("tol must be finite and greater than zero".to_string());
+    }
+    Ok(())
+}
+
 fn compute_trace_product_ref(a: &Mat<f64>, b: MatRef<'_, f64>) -> f64 {
     let n = a.nrows();
     let m = a.ncols();
@@ -33,6 +110,16 @@ fn compute_quadratic_form(x: &Mat<f64>, a: &Mat<f64>) -> f64 {
     result
 }
 
+fn squared_norm(x: &Mat<f64>) -> f64 {
+    let mut result = 0.0;
+    for row in 0..x.nrows() {
+        for column in 0..x.ncols() {
+            result += x[(row, column)] * x[(row, column)];
+        }
+    }
+    result
+}
+
 pub fn mm_reml_step(
     y: &Mat<f64>,
     x: &Mat<f64>,
@@ -40,6 +127,8 @@ pub fn mm_reml_step(
     current_variances: &[f64],
     sigma2: f64,
 ) -> Result<(Vec<f64>, f64), String> {
+    validate_reml_inputs(y, x, z_blocks, current_variances, sigma2)?;
+
     let n = y.nrows();
     let p = x.ncols();
     let k = z_blocks.len();
@@ -58,36 +147,39 @@ pub fn mm_reml_step(
     }
 
     let chol_v = Llt::new(v.as_ref(), Side::Lower).map_err(|_| "V not positive definite")?;
-    let v_inv = chol_v.solve(&Mat::<f64>::identity(n, n));
+    let v_inv_x = chol_v.solve(x);
+    let xt_vinv_x = x.transpose() * &v_inv_x;
+    let chol_xtvx = if p == 0 {
+        None
+    } else {
+        Some(
+            Llt::new(xt_vinv_x.as_ref(), Side::Lower)
+                .map_err(|_| "X'V^-1 X not positive definite")?,
+        )
+    };
 
-    let xt_vinv = x.transpose() * &v_inv;
-    let xt_vinv_x = &xt_vinv * x;
-    let chol_xtvx =
-        Llt::new(xt_vinv_x.as_ref(), Side::Lower).map_err(|_| "X'V^-1 X not positive definite")?;
-    let xtvx_inv = chol_xtvx.solve(&Mat::<f64>::identity(p, p));
-
-    let mut p_mat = v_inv.clone();
-    let proj = &v_inv * x * &xtvx_inv * &xt_vinv;
-    for i in 0..n {
-        for j in 0..n {
-            p_mat[(i, j)] -= proj[(i, j)];
+    let project = |rhs: &Mat<f64>| {
+        let v_inv_rhs = chol_v.solve(rhs);
+        if let Some(chol) = &chol_xtvx {
+            let fixed_rhs = x.transpose() * &v_inv_rhs;
+            let fixed_coefficients = chol.solve(&fixed_rhs);
+            &v_inv_rhs - &v_inv_x * &fixed_coefficients
+        } else {
+            v_inv_rhs
         }
-    }
+    };
 
-    let py_vec = &p_mat * y;
+    let py_vec = project(y);
     let df = (n - p) as f64;
 
     let mut new_variances = vec![0.0; k];
     for (idx, z) in z_blocks.iter().enumerate() {
         let zt = z.transpose();
-        let pz = &p_mat * z;
-        let _zt_p_z = zt.as_ref() * &pz;
-
-        let q = z.ncols();
+        let pz = project(z);
         let trace_pzzt = compute_trace_product_ref(&pz, zt);
 
         let zt_py = zt.as_ref() * &py_vec;
-        let quad_form = compute_quadratic_form(&zt_py, &Mat::<f64>::identity(q, q));
+        let quad_form = squared_norm(&zt_py);
 
         let c = current_variances[idx] * current_variances[idx];
         let numerator = quad_form;
@@ -100,7 +192,7 @@ pub fn mm_reml_step(
         }
     }
 
-    let py_quad = compute_quadratic_form(&py_vec, &Mat::<f64>::identity(n, n));
+    let py_quad = squared_norm(&py_vec);
     let new_sigma2 = (sigma2 * sigma2 * py_quad / df).max(1e-10);
 
     Ok((new_variances, new_sigma2))
@@ -116,6 +208,9 @@ pub fn mm_reml_iterate(
     max_iter: usize,
     tol: f64,
 ) -> Result<RemlResult, String> {
+    validate_reml_inputs(y, x, z_blocks, init_variances, init_sigma2)?;
+    validate_iteration_parameters(tol)?;
+
     let mut variances = init_variances.to_vec();
     let mut sigma2 = init_sigma2;
 
@@ -158,6 +253,8 @@ pub fn augmented_ai_reml_step(
     current_variances: &[f64],
     sigma2: f64,
 ) -> Result<(Vec<f64>, f64, Mat<f64>), String> {
+    validate_reml_inputs(y, x, z_blocks, current_variances, sigma2)?;
+
     let n = y.nrows();
     let p = x.ncols();
     let k = z_blocks.len();
@@ -204,7 +301,7 @@ pub fn augmented_ai_reml_step(
 
         let trace_pzzt = compute_trace_product_ref(&pz, zt);
         let zt_py = zt.as_ref() * &py_vec;
-        let quad = compute_quadratic_form(&zt_py, &Mat::<f64>::identity(z.ncols(), z.ncols()));
+        let quad = squared_norm(&zt_py);
 
         score[idx] = -0.5 * trace_pzzt + 0.5 * quad;
 
@@ -215,20 +312,18 @@ pub fn augmented_ai_reml_step(
         for (jdx, z2) in z_blocks.iter().enumerate().skip(idx + 1) {
             let z2t = z2.transpose();
             let zz2t = z2 * z2t.as_ref();
-            let _pzz2t_py = &p_mat * &zz2t * &py_vec;
             let cross = 0.5 * compute_quadratic_form(&pzzt_py, &(&p_mat * &zz2t));
             ai_matrix[(idx, jdx)] = cross;
             ai_matrix[(jdx, idx)] = cross;
         }
 
-        let _p_py = &p_mat * &py_vec;
         let cross_sigma = 0.5 * compute_quadratic_form(&pzzt_py, &p_mat);
         ai_matrix[(idx, k)] = cross_sigma;
         ai_matrix[(k, idx)] = cross_sigma;
     }
 
     let trace_p = (0..n).map(|i| p_mat[(i, i)]).sum::<f64>();
-    let py_quad = compute_quadratic_form(&py_vec, &Mat::<f64>::identity(n, n));
+    let py_quad = squared_norm(&py_vec);
     score[k] = -0.5 * trace_p + 0.5 * py_quad;
 
     let p_py = &p_mat * &py_vec;
@@ -258,6 +353,9 @@ pub fn augmented_ai_reml_iterate(
     max_iter: usize,
     tol: f64,
 ) -> Result<RemlResult, String> {
+    validate_reml_inputs(y, x, z_blocks, init_variances, init_sigma2)?;
+    validate_iteration_parameters(tol)?;
+
     let mut variances = init_variances.to_vec();
     let mut sigma2 = init_sigma2;
 
@@ -318,6 +416,57 @@ fn spd_exponential(x: &Mat<f64>) -> Mat<f64> {
     result
 }
 
+fn validate_riemannian_inputs(
+    y: &Mat<f64>,
+    x: &Mat<f64>,
+    z_blocks: &[Mat<f64>],
+    current_s: &Mat<f64>,
+    sigma2: f64,
+) -> Result<(), String> {
+    let placeholder_variances = vec![0.0; z_blocks.len()];
+    validate_reml_inputs(y, x, z_blocks, &placeholder_variances, sigma2)?;
+
+    let k = z_blocks.len();
+    if k == 0 {
+        return Err("Riemannian REML requires at least one Z block".to_string());
+    }
+    if current_s.nrows() != k || current_s.ncols() != k {
+        return Err(format!(
+            "S must be a {k} by {k} matrix to match the Z blocks, got {} by {}",
+            current_s.nrows(),
+            current_s.ncols()
+        ));
+    }
+    if !matrix_is_finite(current_s) {
+        return Err("S must contain only finite values".to_string());
+    }
+    for row in 0..k {
+        for column in 0..row {
+            let tolerance = 1e-12
+                * current_s[(row, column)]
+                    .abs()
+                    .max(current_s[(column, row)].abs())
+                    .max(1.0);
+            if (current_s[(row, column)] - current_s[(column, row)]).abs() > tolerance {
+                return Err("S must be symmetric".to_string());
+            }
+        }
+    }
+    Llt::new(current_s.as_ref(), Side::Lower).map_err(|_| "S not positive definite")?;
+    if let Some(first) = z_blocks.first() {
+        let columns = first.ncols();
+        for (index, z) in z_blocks.iter().enumerate().skip(1) {
+            if z.ncols() != columns {
+                return Err(format!(
+                    "all Z blocks must have {columns} columns for a Riemannian covariance update; block {index} has {}",
+                    z.ncols()
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 pub fn riemannian_gradient(
     y: &Mat<f64>,
     x: &Mat<f64>,
@@ -325,6 +474,8 @@ pub fn riemannian_gradient(
     current_s: &Mat<f64>,
     sigma2: f64,
 ) -> Result<Mat<f64>, String> {
+    validate_riemannian_inputs(y, x, z_blocks, current_s, sigma2)?;
+
     let n = y.nrows();
     let p = x.ncols();
     let k = current_s.nrows();
@@ -410,6 +561,9 @@ pub fn riemannian_reml_step(
     sigma2: f64,
     step_size: f64,
 ) -> Result<(Mat<f64>, f64), String> {
+    if !step_size.is_finite() || step_size <= 0.0 {
+        return Err("step_size must be finite and greater than zero".to_string());
+    }
     let grad = riemannian_gradient(y, x, z_blocks, current_s, sigma2)?;
 
     let k = current_s.nrows();
@@ -461,7 +615,7 @@ pub fn riemannian_reml_step(
 
     let py_vec = &p_mat * y;
     let df = (n - p) as f64;
-    let py_quad = compute_quadratic_form(&py_vec, &Mat::<f64>::identity(n, n));
+    let py_quad = squared_norm(&py_vec);
     let new_sigma2 = (py_quad / df).max(1e-10);
 
     Ok((new_s, new_sigma2))
@@ -478,6 +632,12 @@ pub fn riemannian_reml_iterate(
     tol: f64,
     step_size: f64,
 ) -> Result<RemlResult, String> {
+    validate_riemannian_inputs(y, x, z_blocks, init_s, init_sigma2)?;
+    validate_iteration_parameters(tol)?;
+    if !step_size.is_finite() || step_size <= 0.0 {
+        return Err("step_size must be finite and greater than zero".to_string());
+    }
+
     let k = init_s.nrows();
     let mut s = init_s.clone();
     let mut sigma2 = init_sigma2;
@@ -547,11 +707,19 @@ pub fn mm_reml<'py>(
     max_iter: usize,
     tol: f64,
 ) -> PyResult<(pyo3::Py<PyArray1<f64>>, f64, usize, bool)> {
-    let n = y.as_array().len();
-    let p = x.as_array().ncols();
+    let y_array = y.as_array();
+    let x_array = x.as_array();
+    let n = y_array.len();
+    let p = x_array.ncols();
+    if x_array.nrows() != n {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "x must have {n} rows to match y, got {}",
+            x_array.nrows()
+        )));
+    }
 
-    let y_mat = Mat::from_fn(n, 1, |i, _| y.as_array()[i]);
-    let x_mat = Mat::from_fn(n, p, |i, j| x.as_array()[[i, j]]);
+    let y_mat = Mat::from_fn(n, 1, |i, _| y_array[i]);
+    let x_mat = Mat::from_fn(n, p, |i, j| x_array[[i, j]]);
 
     let z_blocks: Vec<Mat<f64>> = z_data_list
         .iter()
@@ -603,11 +771,19 @@ pub fn augmented_ai_reml<'py>(
     max_iter: usize,
     tol: f64,
 ) -> PyResult<(pyo3::Py<PyArray1<f64>>, f64, usize, bool)> {
-    let n = y.as_array().len();
-    let p = x.as_array().ncols();
+    let y_array = y.as_array();
+    let x_array = x.as_array();
+    let n = y_array.len();
+    let p = x_array.ncols();
+    if x_array.nrows() != n {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "x must have {n} rows to match y, got {}",
+            x_array.nrows()
+        )));
+    }
 
-    let y_mat = Mat::from_fn(n, 1, |i, _| y.as_array()[i]);
-    let x_mat = Mat::from_fn(n, p, |i, j| x.as_array()[[i, j]]);
+    let y_mat = Mat::from_fn(n, 1, |i, _| y_array[i]);
+    let x_mat = Mat::from_fn(n, p, |i, j| x_array[[i, j]]);
 
     let z_blocks: Vec<Mat<f64>> = z_data_list
         .iter()
@@ -661,11 +837,19 @@ pub fn riemannian_reml<'py>(
     tol: f64,
     step_size: f64,
 ) -> PyResult<(pyo3::Py<PyArray1<f64>>, f64, usize, bool)> {
-    let n = y.as_array().len();
-    let p = x.as_array().ncols();
+    let y_array = y.as_array();
+    let x_array = x.as_array();
+    let n = y_array.len();
+    let p = x_array.ncols();
+    if x_array.nrows() != n {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "x must have {n} rows to match y, got {}",
+            x_array.nrows()
+        )));
+    }
 
-    let y_mat = Mat::from_fn(n, 1, |i, _| y.as_array()[i]);
-    let x_mat = Mat::from_fn(n, p, |i, j| x.as_array()[[i, j]]);
+    let y_mat = Mat::from_fn(n, 1, |i, _| y_array[i]);
+    let x_mat = Mat::from_fn(n, p, |i, j| x_array[[i, j]]);
 
     let z_blocks: Vec<Mat<f64>> = z_data_list
         .iter()
@@ -677,6 +861,20 @@ pub fn riemannian_reml<'py>(
 
     let k = z_blocks.len();
     let init_vars: Vec<f64> = init_variances.as_slice()?.to_vec();
+    if init_vars.len() != k {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "init_variances must contain one value per Z block, got {} values for {k} blocks",
+            init_vars.len()
+        )));
+    }
+    if init_vars
+        .iter()
+        .any(|variance| !variance.is_finite() || *variance <= 0.0)
+    {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "init_variances must contain finite values greater than zero for Riemannian REML",
+        ));
+    }
 
     let mut init_s = Mat::zeros(k, k);
     for i in 0..k {

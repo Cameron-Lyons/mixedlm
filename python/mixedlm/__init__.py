@@ -41,6 +41,7 @@ from mixedlm.formula.parser import (
     subbars,
 )
 from mixedlm.inference.anova import AnovaResult, AnovaType3Result, anova, anova_type3
+from mixedlm.inference.boot_ci import bootCI
 from mixedlm.inference.bootstrap import bootMer, bootstrap_nlmer
 from mixedlm.inference.cross_validation import (
     CrossValidationFold,
@@ -115,17 +116,21 @@ from mixedlm.utils.lme4_compat import (
     GHrule,
     REMLcrit,
     checkConv,
+    coef,
     convergence_ok,
     devcomp,
     dummy,
     factorize,
+    fixef,
     fortify,
+    getME,
     isNested,
     lmList,
     mkMerMod,
     ngrps,
     pvalues,
     quickSimulate,
+    ranef,
     scale_vcov,
     sigma,
     vcconv,
@@ -171,6 +176,7 @@ __all__ = [
     "ggpredict",
     "allEffects",
     "bootMer",
+    "bootCI",
     "bootstrap_nlmer",
     "cross_validate",
     "make_folds",
@@ -194,6 +200,10 @@ __all__ = [
     "power",
     "sigma",
     "ngrps",
+    "fixef",
+    "ranef",
+    "coef",
+    "getME",
     "lmList",
     "pvalues",
     "checkConv",
