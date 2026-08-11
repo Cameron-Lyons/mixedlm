@@ -13,6 +13,7 @@ from mixedlm.datasets import (
     load_verbagg,
 )
 from mixedlm.diagnostics.collinearity import CollinearityResult, check_collinearity
+from mixedlm.diagnostics.fit_metrics import ICCResult, R2NakagawaResult, icc, r2_nakagawa
 from mixedlm.estimation.em_reml import EMResult, em_reml_simple
 from mixedlm.estimation.laplace import GQN, GQdk
 from mixedlm.estimation.optimizers import NelderMead, NelderMeadState, golden, nlminbwrap
@@ -62,6 +63,7 @@ from mixedlm.inference.ddf import (
 )
 from mixedlm.inference.effects import allEffects, ggpredict
 from mixedlm.inference.emmeans import Emmeans, emmeans
+from mixedlm.inference.model_selection import ModelSelectionResult, model_selection
 from mixedlm.inference.profile import (
     Profile2DResult,
     logProf,
@@ -173,6 +175,8 @@ __all__ = [
     "AnovaType3Result",
     "emmeans",
     "Emmeans",
+    "model_selection",
+    "ModelSelectionResult",
     "ggpredict",
     "allEffects",
     "bootMer",
@@ -190,6 +194,10 @@ __all__ = [
     "kenward_roger_df",
     "pvalues_with_ddf",
     "DenomDFResult",
+    "r2_nakagawa",
+    "R2NakagawaResult",
+    "icc",
+    "ICCResult",
     "check_collinearity",
     "CollinearityResult",
     "powerSim",
