@@ -75,9 +75,14 @@ print(result.isSingular())
 result.coef()
 ```
 
-Extract combined coefficients (fixed + random) for each group.
+Extract combined coefficients (fixed + random) for each grouping factor.
 
-**Returns:** Dictionary mapping group names to coefficient DataFrames.
+Every fixed-effect coefficient is repeated across the grouping levels, then the
+matching conditional random effect is added. Random-only terms are included with
+a zero fixed baseline.
+
+**Returns:** Nested dictionary mapping grouping factors to coefficient names and
+their per-level NumPy arrays.
 
 #### fitted
 
@@ -156,7 +161,8 @@ result.logLik()
 
 Extract log-likelihood.
 
-**Returns:** LogLik object with value and degrees of freedom.
+**Returns:** Numeric `LogLik` value with `value`, `df`, `nobs`, and `REML`
+metadata. It can be used directly in arithmetic and NumPy operations.
 
 #### AIC / BIC
 
@@ -172,12 +178,12 @@ Compute information criteria.
 #### profile
 
 ```python
-result.profile(data)
+result.profile(which=None, n_points=20, level=0.95)
 ```
 
 Compute profile likelihood.
 
-**Returns:** ProfileResult object.
+**Returns:** Dictionary mapping parameter names to `ProfileResult` objects.
 
 #### drop1
 
