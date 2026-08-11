@@ -15,13 +15,16 @@ from mixedlm.estimation.reml import (
     _build_theta_bounds,
     _count_theta,
 )
-from mixedlm.families.base import Family
+from mixedlm.families.base import Family, IdentityLink, LogitLink, LogLink
+from mixedlm.families.binomial import Binomial
+from mixedlm.families.gaussian import Gaussian
+from mixedlm.families.poisson import Poisson
 from mixedlm.matrices.design import ModelMatrices, RandomEffectStructure
 
 _ETA_CLIP_MIN = -30.0
 _ETA_CLIP_MAX = 30.0
-_MU_CLIP_EPS = 1e-7
-_MU_CLIP_EPS_STRICT = 1e-10
+_MU_EPS = 1e-7
+_MU_EPS_STRICT = 1e-10
 _WEIGHT_CLIP_MIN = 1e-10
 _WEIGHT_CLIP_MAX = 1e10
 _DERIV_CLIP_MIN = -1e10
@@ -31,6 +34,9 @@ _CHOLESKY_REGULARIZATION = 1e-6
 _EIGENVALUE_FLOOR = 1e-10
 _lambda_cache: dict[tuple[bytes, tuple[tuple[int, int, bool, str], ...]], sparse.csc_matrix] = {}
 _LAMBDA_CACHE_MAX_SIZE = 8
+_NATIVE_FAMILY_LINKS = frozenset(
+    {("binomial", "logit"), ("poisson", "log"), ("gaussian", "identity")}
+)
 
 
 def _scale_sparse_rows(
@@ -75,21 +81,23 @@ except ImportError:
 
 
 def _get_family_name(family: Family) -> str | None:
-    class_name = family.__class__.__name__.lower()
-    return {
-        "binomial": "binomial",
-        "gaussian": "gaussian",
-        "poisson": "poisson",
-    }.get(class_name)
+    if type(family) is Binomial:
+        return "binomial"
+    if type(family) is Poisson:
+        return "poisson"
+    if type(family) is Gaussian:
+        return "gaussian"
+    return None
 
 
 def _get_link_name(family: Family) -> str | None:
-    link_name = family.link.__class__.__name__.lower()
-    return {
-        "identitylink": "identity",
-        "loglink": "log",
-        "logitlink": "logit",
-    }.get(link_name)
+    if type(family.link) is LogitLink:
+        return "logit"
+    if type(family.link) is LogLink:
+        return "log"
+    if type(family.link) is IdentityLink:
+        return "identity"
+    return None
 
 
 def _native_covariance_supported(matrices: ModelMatrices) -> bool:
@@ -183,7 +191,7 @@ def _pirls_state(
         eta = matrices.X @ beta + matrices.Z @ random_effects + offset
         np.clip(eta, _ETA_CLIP_MIN, _ETA_CLIP_MAX, out=eta)
         mu = family.link.inverse(eta)
-        family.clip_mu(mu, eps=_MU_CLIP_EPS)
+        family.clamp_mu(mu, eps=_MU_EPS, out=mu)
 
         np.multiply(family.weights(mu), prior_weights, out=W)
         np.clip(W, _WEIGHT_CLIP_MIN, _WEIGHT_CLIP_MAX, out=W)
@@ -294,7 +302,7 @@ def _pirls_state(
     random_effects = np.asarray(Lambda @ spherical).ravel()
     eta = matrices.X @ beta + matrices.Z @ random_effects + offset
     mu = family.link.inverse(eta)
-    family.clip_mu(mu, eps=_MU_CLIP_EPS_STRICT)
+    family.clamp_mu(mu, eps=_MU_EPS_STRICT, out=mu)
 
     dev_resids = family.deviance_resids(matrices.y, mu, prior_weights)
     deviance = np.sum(dev_resids)
@@ -349,7 +357,7 @@ def laplace_deviance(
     eta_fixed = matrices.X @ beta + offset
     eta = eta_fixed + matrices.Z @ random_effects
     mu = family.link.inverse(eta)
-    family.clip_mu(mu, eps=_MU_CLIP_EPS_STRICT)
+    mu = family.clamp_mu(mu, eps=_MU_EPS_STRICT)
 
     dev_resids = family.deviance_resids(matrices.y, mu, prior_weights)
     deviance = np.sum(dev_resids) + np.dot(spherical, spherical)
@@ -431,7 +439,7 @@ def _compute_group_quadrature(
         random_effects = np.asarray(Lambda @ spherical).ravel()
         eta_quad = eta_fixed + matrices.Z @ random_effects
         mu_quad = family.link.inverse(eta_quad)
-        family.clip_mu(mu_quad, eps=_MU_CLIP_EPS_STRICT)
+        mu_quad = family.clamp_mu(mu_quad, eps=_MU_EPS_STRICT)
         log_lik_y = -0.5 * np.sum(
             family.deviance_resids(
                 matrices.y[group_rows], mu_quad[group_rows], prior_weights[group_rows]
@@ -508,7 +516,7 @@ def adaptive_gh_deviance(
     eta_fixed = matrices.X @ beta + offset
     eta = eta_fixed + matrices.Z @ random_effects
     mu = family.link.inverse(eta)
-    family.clip_mu(mu, eps=_MU_CLIP_EPS_STRICT)
+    mu = family.clamp_mu(mu, eps=_MU_EPS_STRICT)
 
     W = np.clip(family.weights(mu) * prior_weights, _WEIGHT_CLIP_MIN, _WEIGHT_CLIP_MAX)
 
@@ -588,7 +596,7 @@ def _laplace_deviance_rust(
     family_name = _get_family_name(family)
     link_name = _get_link_name(family)
     if family_name is None or link_name is None:
-        raise ValueError("Family and link combination is not supported by the Rust backend")
+        raise TypeError("Family and link are not supported by the native GLMM backend")
 
     deviance, beta, u = _rust_laplace_deviance(
         np.ascontiguousarray(matrices.y, dtype=np.float64),
@@ -625,7 +633,7 @@ def _adaptive_gh_deviance_rust(
     family_name = _get_family_name(family)
     link_name = _get_link_name(family)
     if family_name is None or link_name is None:
-        raise ValueError("Family and link combination is not supported by the Rust backend")
+        raise TypeError("Family and link are not supported by the native GLMM backend")
 
     deviance, beta, u = _rust_adaptive_gh_deviance(
         np.ascontiguousarray(matrices.y, dtype=np.float64),
@@ -661,8 +669,7 @@ def laplace_deviance_fast(
         _HAS_RUST
         and beta_start is None
         and u_start is None
-        and family_name is not None
-        and link_name is not None
+        and (family_name, link_name) in _NATIVE_FAMILY_LINKS
         and _native_covariance_supported(matrices)
     ):
         return _laplace_deviance_rust(theta, matrices, family)
@@ -686,8 +693,7 @@ def adaptive_gh_deviance_fast(
         _HAS_RUST
         and beta_start is None
         and u_start is None
-        and family_name is not None
-        and link_name is not None
+        and (family_name, link_name) in _NATIVE_FAMILY_LINKS
         and _native_covariance_supported(matrices)
     ):
         first_struct = matrices.random_structures[0] if matrices.random_structures else None
