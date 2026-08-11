@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import warnings
 
 import numpy as np
 import pytest
@@ -241,6 +242,51 @@ class TestRunOptimizer:
         result = run_optimizer(quadratic, np.array([0.5, 0.5]), "L-BFGS-B", bounds)
         assert result.x[0] <= 1.5 + 1e-6
         assert result.x[1] <= 2.5 + 1e-6
+
+    def test_bfgs_omits_unsupported_bounds(self):
+        bounds = [(0.0, 1.5), (0.0, 2.5)]
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            result = run_optimizer(quadratic, np.array([0.5, 0.5]), "BFGS", bounds)
+
+        assert result.success
+        assert_allclose(result.x, [2.0, 3.0], atol=1e-4)
+        assert not any("cannot handle bounds" in str(item.message) for item in caught)
+
+    def test_tnc_translates_maxiter_to_maxfun(self):
+        bounds = [(None, None), (None, None)]
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            result = run_optimizer(
+                quadratic,
+                np.array([0.0, 0.0]),
+                "TNC",
+                bounds,
+                options={"maxiter": 100},
+            )
+
+        assert result.success
+        assert_allclose(result.x, [2.0, 3.0], atol=1e-4)
+        assert not any("Unknown solver options" in str(item.message) for item in caught)
+
+    def test_powell_translates_legacy_tolerance_names(self):
+        bounds = [(None, None), (None, None)]
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            result = run_optimizer(
+                quadratic,
+                np.array([0.0, 0.0]),
+                "Powell",
+                bounds,
+                options={"xatol": 1e-8, "fatol": 1e-8},
+            )
+
+        assert result.success
+        assert_allclose(result.x, [2.0, 3.0], atol=1e-4)
+        assert not any("Unknown solver options" in str(item.message) for item in caught)
 
 
 class TestCobyqa:

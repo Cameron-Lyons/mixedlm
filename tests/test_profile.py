@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+from unittest.mock import MagicMock
+
 import numpy as np
 import pandas as pd
 import pytest
 from mixedlm import families, glmer, lmer
 from mixedlm.inference.profile import (
+    Profile2DResult,
     ProfileResult,
     as_dataframe,
     confint_profile,
@@ -14,6 +17,7 @@ from mixedlm.inference.profile import (
     varianceProf,
 )
 from numpy.testing import assert_allclose
+from scipy import integrate
 
 from tests._lmer_data import CBPP
 
@@ -42,6 +46,24 @@ def lmer_result(sleepstudy_data):
 
 
 class TestProfileResult:
+    @staticmethod
+    def profile(
+        values=None,
+        zeta=None,
+        mle=2.0,
+        ci_lower=1.5,
+        ci_upper=2.5,
+    ) -> ProfileResult:
+        return ProfileResult(
+            parameter="test",
+            values=np.array([1.0, 2.0, 3.0]) if values is None else values,
+            zeta=np.array([-1.0, 0.0, 1.0]) if zeta is None else zeta,
+            mle=mle,
+            ci_lower=ci_lower,
+            ci_upper=ci_upper,
+            level=0.95,
+        )
+
     def test_dataclass_fields(self):
         result = ProfileResult(
             parameter="test",
@@ -69,6 +91,110 @@ class TestProfileResult:
         )
         ax = result.plot()
         assert ax is not None
+        matplotlib.pyplot.close("all")
+
+    def test_plot_allows_style_overrides(self):
+        matplotlib = pytest.importorskip("matplotlib")
+        result = self.profile()
+
+        ax = result.plot(color="black", linewidth=1)
+
+        assert ax.lines[0].get_color() == "black"
+        assert ax.lines[0].get_linewidth() == 1
+        matplotlib.pyplot.close("all")
+
+    def test_density_sorts_and_normalizes_profile_points(self):
+        matplotlib = pytest.importorskip("matplotlib")
+        result = self.profile(
+            values=np.array([3.0, np.nan, 1.0, 2.0]),
+            zeta=np.array([1.0, 0.0, -1.0, 0.0]),
+        )
+
+        ax = result.plot_density(color="purple", linewidth=1)
+        values = ax.lines[0].get_xdata()
+        density = ax.lines[0].get_ydata()
+
+        assert np.all(np.diff(values) >= 0.0)
+        assert np.all(density >= 0.0)
+        assert integrate.trapezoid(density, values) == pytest.approx(1.0)
+        assert ax.lines[0].get_color() == "purple"
+        matplotlib.pyplot.close("all")
+
+    def test_density_works_without_numpy_trapezoid(self, monkeypatch):
+        matplotlib = pytest.importorskip("matplotlib")
+        monkeypatch.delattr(np, "trapezoid", raising=False)
+        result = self.profile()
+
+        ax = result.plot_density()
+
+        assert np.all(ax.lines[0].get_ydata() >= 0.0)
+        matplotlib.pyplot.close("all")
+
+    def test_density_rejects_degenerate_profile(self):
+        matplotlib = pytest.importorskip("matplotlib")
+        result = self.profile(
+            values=np.array([1.0, 1.0]),
+            zeta=np.array([-1.0, 1.0]),
+            mle=1.0,
+            ci_lower=1.0,
+            ci_upper=1.0,
+        )
+
+        with pytest.raises(ValueError, match="distinct parameter values"):
+            result.plot_density()
+        matplotlib.pyplot.close("all")
+
+
+class TestProfile2DResult:
+    @staticmethod
+    def profile() -> Profile2DResult:
+        return Profile2DResult(
+            param1="a",
+            param2="b",
+            values1=np.array([0.0, 1.0, 2.0]),
+            values2=np.array([0.0, 1.0, 2.0, 3.0]),
+            zeta=np.array(
+                [
+                    [2.0, 1.5, 1.0, 1.5],
+                    [1.5, 0.5, 0.0, 1.0],
+                    [2.0, 1.5, 1.0, 1.5],
+                ]
+            ),
+            mle1=1.0,
+            mle2=2.0,
+            level=0.95,
+        )
+
+    def test_plot_filled_allows_contour_style_overrides(self):
+        matplotlib = pytest.importorskip("matplotlib")
+
+        ax = self.profile().plot_filled(levels=5, cmap="plasma")
+
+        assert ax is not None
+        assert len(ax.figure.axes) == 2
+        matplotlib.pyplot.close("all")
+
+    def test_plot_passes_1d_coordinates_to_contour(self, monkeypatch):
+        def unexpected_meshgrid(*args, **kwargs):
+            raise AssertionError("plotting should not materialize coordinate grids")
+
+        monkeypatch.setattr(np, "meshgrid", unexpected_meshgrid)
+        ax = MagicMock()
+
+        self.profile().plot(ax=ax, show_ci=False, show_mle=False)
+
+        x, y, z = ax.contour.call_args.args
+        assert x.ndim == 1
+        assert y.ndim == 1
+        assert z.shape == (3, 4)
+
+    def test_plot_rejects_mismatched_grid_shape(self):
+        matplotlib = pytest.importorskip("matplotlib")
+        profile = self.profile()
+        profile.zeta = np.zeros((4, 3))
+
+        with pytest.raises(ValueError, match=r"zeta must have shape \(3, 4\)"):
+            profile.plot()
         matplotlib.pyplot.close("all")
 
 

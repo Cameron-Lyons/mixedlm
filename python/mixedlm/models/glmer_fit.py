@@ -99,11 +99,12 @@ class GlmerMod:
             nAGQ=nAGQ,
         )
 
+        opt_options = ctrl.get_scipy_options(optimizer=opt_method, maxiter=opt_maxiter)
         opt_result = optimizer.optimize(
             start=start,
             method=opt_method,
             maxiter=opt_maxiter,
-            options=ctrl.optCtrl,
+            options=opt_options,
         )
 
         result = GlmerResult(
@@ -139,7 +140,7 @@ class GlmerMod:
 
 
 def glmer_nb(
-    formula: str,
+    formula: Formula | str,
     data: pd.DataFrame,
     verbose: int = 0,
     nAGQ: int = 1,
@@ -159,9 +160,8 @@ def glmer_nb(
 
     Parameters
     ----------
-    formula : str
-        Model formula in lme4 syntax (e.g., "y ~ x + (1|group)"). For grouped
-        binomial data, use "successes / trials ~ x + (1|group)".
+    formula : Formula or str
+        Parsed formula or model formula in lme4 syntax (e.g., "y ~ x + (1|group)").
     data : DataFrame
         Data containing the variables in the formula.
     verbose : int, default 0
@@ -169,8 +169,7 @@ def glmer_nb(
     nAGQ : int, default 1
         Number of adaptive Gauss-Hermite quadrature points.
     weights : array-like, optional
-        Prior weights for observations. With a grouped binomial response,
-        these are multiplied by the trial counts.
+        Prior weights for observations.
     offset : array-like, optional
         Offset term for the linear predictor.
     na_action : str, optional
@@ -227,7 +226,7 @@ def glmer_nb(
 
 
 def glmer(
-    formula: str,
+    formula: Formula | str,
     data: pd.DataFrame,
     family: Family | None = None,
     verbose: int = 0,
@@ -243,8 +242,8 @@ def glmer(
 
     Parameters
     ----------
-    formula : str
-        Model formula in lme4 syntax (e.g., "y ~ x + (1|group)").
+    formula : Formula or str
+        Parsed formula or model formula in lme4 syntax (e.g., "y ~ x + (1|group)").
     data : DataFrame
         Data containing the variables in the formula.
     family : Family, optional

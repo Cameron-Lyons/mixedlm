@@ -5,7 +5,59 @@ from typing import Any
 
 import numpy as np
 from numpy.typing import NDArray
-from scipy import stats
+from scipy import integrate, stats
+
+
+def _get_plot_axes(ax: Any | None, figsize: tuple[float, float]) -> Any:
+    if ax is not None:
+        return ax
+
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError:
+        raise ImportError("matplotlib is required for plotting") from None
+
+    _, ax = plt.subplots(figsize=figsize)
+    return ax
+
+
+def _profile_density(
+    values: NDArray[np.floating],
+    zeta: NDArray[np.floating],
+) -> tuple[NDArray[np.floating], NDArray[np.floating]]:
+    if values.ndim != 1 or zeta.ndim != 1 or values.shape != zeta.shape:
+        raise ValueError("profile values and zeta must be one-dimensional arrays of equal length")
+
+    finite = np.isfinite(values) & np.isfinite(zeta)
+    sorted_values = values[finite]
+    sorted_zeta = zeta[finite]
+
+    if len(sorted_values) < 2:
+        raise ValueError("profile density requires at least two finite points")
+
+    order = np.argsort(sorted_values, kind="stable")
+    sorted_values = sorted_values[order]
+    sorted_zeta = sorted_zeta[order]
+    density = np.exp(-0.5 * np.square(sorted_zeta))
+    normalization = integrate.trapezoid(density, sorted_values)
+
+    if not np.isfinite(normalization) or normalization <= 0.0:
+        raise ValueError("profile density requires at least two distinct parameter values")
+
+    return sorted_values, density / normalization
+
+
+def _validate_profile_grid(
+    values1: NDArray[np.floating],
+    values2: NDArray[np.floating],
+    zeta: NDArray[np.floating],
+) -> None:
+    if values1.ndim != 1 or values2.ndim != 1:
+        raise ValueError("profile grid coordinates must be one-dimensional")
+
+    expected_shape = (len(values1), len(values2))
+    if zeta.shape != expected_shape:
+        raise ValueError(f"zeta must have shape {expected_shape}, got {zeta.shape}")
 
 
 @dataclass
@@ -53,15 +105,11 @@ class ProfileResult:
         >>> profiles = profile_lmer(result, which=["x"])
         >>> profiles["x"].plot()
         """
-        try:
-            import matplotlib.pyplot as plt
-        except ImportError:
-            raise ImportError("matplotlib is required for plotting") from None
+        ax = _get_plot_axes(ax, (6, 4))
 
-        if ax is None:
-            fig, ax = plt.subplots(figsize=(6, 4))
-
-        ax.plot(self.values, self.zeta, "b-", linewidth=2, **kwargs)
+        line_kwargs = {"color": "blue", "linestyle": "-", "linewidth": 2}
+        line_kwargs.update(kwargs)
+        ax.plot(self.values, self.zeta, **line_kwargs)
         ax.axhline(0, color="gray", linestyle="--", alpha=0.5)
 
         if show_mle:
@@ -102,19 +150,13 @@ class ProfileResult:
         matplotlib.axes.Axes
             The axes with the density plot.
         """
-        try:
-            import matplotlib.pyplot as plt
-        except ImportError:
-            raise ImportError("matplotlib is required for plotting") from None
+        ax = _get_plot_axes(ax, (6, 4))
+        values, density = _profile_density(self.values, self.zeta)
 
-        if ax is None:
-            fig, ax = plt.subplots(figsize=(6, 4))
-
-        density = np.exp(-0.5 * self.zeta**2)
-        density = density / np.trapezoid(density, self.values)
-
-        ax.plot(self.values, density, "b-", linewidth=2, **kwargs)
-        ax.fill_between(self.values, density, alpha=0.3)
+        line_kwargs = {"color": "blue", "linestyle": "-", "linewidth": 2}
+        line_kwargs.update(kwargs)
+        line = ax.plot(values, density, **line_kwargs)[0]
+        ax.fill_between(values, density, color=line.get_color(), alpha=0.3)
 
         ax.axvline(self.mle, color="red", linestyle="--", alpha=0.7, label="MLE")
         ax.axvline(self.ci_lower, color="green", linestyle=":", alpha=0.5)
@@ -173,24 +215,19 @@ class Profile2DResult:
         matplotlib.axes.Axes
             The axes with the 2D profile plot.
         """
-        try:
-            import matplotlib.pyplot as plt
-        except ImportError:
-            raise ImportError("matplotlib is required for plotting") from None
+        ax = _get_plot_axes(ax, (8, 6))
+        _validate_profile_grid(self.values1, self.values2, self.zeta)
 
-        if ax is None:
-            fig, ax = plt.subplots(figsize=(8, 6))
-
-        V1, V2 = np.meshgrid(self.values1, self.values2, indexing="ij")
-
-        contour = ax.contour(V2, V1, self.zeta, levels=n_levels, **kwargs)
+        contour_kwargs = {"levels": n_levels}
+        contour_kwargs.update(kwargs)
+        contour = ax.contour(self.values2, self.values1, self.zeta, **contour_kwargs)
         ax.clabel(contour, inline=True, fontsize=8, fmt="%.1f")
 
         if show_ci:
             z_crit_sq = stats.chi2.ppf(self.level, df=2)
             ax.contour(
-                V2,
-                V1,
+                self.values2,
+                self.values1,
                 self.zeta**2,
                 levels=[z_crit_sq],
                 colors="red",
@@ -232,27 +269,22 @@ class Profile2DResult:
         matplotlib.axes.Axes
             The axes with the filled contour plot.
         """
-        try:
-            import matplotlib.pyplot as plt
-        except ImportError:
-            raise ImportError("matplotlib is required for plotting") from None
+        ax = _get_plot_axes(ax, (8, 6))
+        _validate_profile_grid(self.values1, self.values2, self.zeta)
+        squared_zeta = np.square(self.zeta)
+        lik_surface = np.exp(-0.5 * squared_zeta)
 
-        if ax is None:
-            fig, ax = plt.subplots(figsize=(8, 6))
-
-        V1, V2 = np.meshgrid(self.values1, self.values2, indexing="ij")
-
-        lik_surface = np.exp(-0.5 * self.zeta**2)
-
-        contourf = ax.contourf(V2, V1, lik_surface, levels=20, cmap="viridis", **kwargs)
-        plt.colorbar(contourf, ax=ax, label="Relative likelihood")
+        contour_kwargs = {"levels": 20, "cmap": "viridis"}
+        contour_kwargs.update(kwargs)
+        contourf = ax.contourf(self.values2, self.values1, lik_surface, **contour_kwargs)
+        ax.figure.colorbar(contourf, ax=ax, label="Relative likelihood")
 
         if show_ci:
             z_crit_sq = stats.chi2.ppf(self.level, df=2)
             ax.contour(
-                V2,
-                V1,
-                self.zeta**2,
+                self.values2,
+                self.values1,
+                squared_zeta,
                 levels=[z_crit_sq],
                 colors="white",
                 linewidths=2,
