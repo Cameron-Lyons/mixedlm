@@ -115,13 +115,24 @@ Extract residuals.
 #### predict
 
 ```python
-result.predict(
+lmm_result.predict(
     newdata=None,
     re_form=None,
     allow_new_levels=False,
     se_fit=False,
     interval="none",
     level=0.95,
+    offset=None,
+)
+glmm_result.predict(
+    newdata=None,
+    type="response",
+    re_form=None,
+    allow_new_levels=False,
+    se_fit=False,
+    interval="none",
+    level=0.95,
+    offset=None,
 )
 ```
 
@@ -131,6 +142,9 @@ Generate predictions.
 
 - `newdata`: New data for prediction. If None, uses original data.
 - `re_form`: Formula for random effects. Use `"~0"` to exclude random effects.
+- `type`: For GLMMs, `"response"` or `"link"`.
+- `offset`: Numeric offset for new rows, a scalar, or the name of an offset
+  column in `newdata`. GLMM offsets are applied on the link scale.
 - `allow_new_levels`: Allow unseen grouping levels and center their random effects at zero.
 - `se_fit`: Return pointwise standard errors for the predicted mean.
 - `interval`: For LMMs, `"none"`, `"confidence"`, or `"prediction"`.

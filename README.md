@@ -24,6 +24,7 @@ A Python implementation of mixed-effects models inspired by R's [lme4](https://g
 - **Model validation** - Case-level and whole-group cross-validation with weighted scoring
 - **Power analysis** - powerSim, powerCurve for sample size planning
 - **Diagnostics** - Dispersion and zero-inflation checks, influence measures, Cook's distance, leverage, VIF/GVIF, condition indices
+- **Fast startup** - Public objects are loaded on demand, so lightweight imports avoid the modeling stack
 - **Fit metrics** - Nakagawa marginal/conditional R² and adjusted/unadjusted ICC
 
 ## Installation
@@ -233,8 +234,7 @@ print(model.VarCorr())
 - `drop1(model, data)` - Single term deletions
 - `profile(model, data)` - 1D likelihood profiles
 - `slice2D(model, param1, param2)` - 2D profile likelihood
-- `bootMer(model, nsim)` - Parametric bootstrap
-- `bootCI(result, component, method)` - Tidy bootstrap confidence intervals
+- `bootMer(model, data, nsim)` - Parametric bootstrap
 - `satterthwaite_df(model)` - Satterthwaite denominator DF
 - `kenward_roger_df(model)` - Kenward-Roger denominator DF
 - `pvalues_with_ddf(model)` - P-values using denominator DF

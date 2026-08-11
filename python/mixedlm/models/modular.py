@@ -926,7 +926,8 @@ def simulate_formula(
     nsim : int, default 1
         Number of simulations to generate.
     seed : int, optional
-        Random seed for reproducibility.
+        Random seed for reproducibility. Uses an isolated generator and does
+        not alter NumPy's global random state.
 
     Returns
     -------
@@ -967,10 +968,21 @@ def simulate_formula(
     lmer : Fit linear mixed models.
     LmerResult.simulate : Simulate from a fitted model.
     """
-    from mixedlm.families import Gaussian
+    from mixedlm.families import (
+        Binomial,
+        Gamma,
+        Gaussian,
+        InverseGaussian,
+        NegativeBinomial,
+        Poisson,
+    )
 
-    if seed is not None:
-        np.random.seed(seed)
+    if nsim < 1:
+        raise ValueError("nsim must be at least 1")
+    if not np.isfinite(sigma) or sigma < 0:
+        raise ValueError("sigma must be finite and non-negative")
+
+    rng = np.random.default_rng(seed)
 
     if family is None:
         family = Gaussian()
@@ -978,7 +990,6 @@ def simulate_formula(
     parsed_formula = parse_formula(formula) if isinstance(formula, str) else formula
     matrices = build_model_matrices(parsed_formula, data)
 
-    n = matrices.n_obs
     p = matrices.n_fixed
     q = matrices.n_random
 
@@ -991,6 +1002,9 @@ def simulate_formula(
                 beta_vec[i] = beta[name]
     else:
         beta_vec = np.asarray(beta, dtype=np.float64).reshape(-1)
+
+    if len(beta_vec) != p:
+        raise ValueError(f"beta has length {len(beta_vec)}; expected {p}")
 
     if theta is None:
         theta_values: list[float] = []
@@ -1014,27 +1028,37 @@ def simulate_formula(
     n_theta = _count_theta(matrices.random_structures)
     if theta_vec.size != n_theta:
         raise ValueError(f"theta must contain {n_theta} parameters, got {theta_vec.size}")
+    if not np.all(np.isfinite(theta_vec)):
+        raise ValueError("theta must contain only finite values")
 
     Lambda = _build_lambda(theta_vec, matrices.random_structures)
     results = []
 
     for _ in range(nsim):
         eta = matrices.X @ beta_vec
-        standard_random_effects = np.random.randn(q)
+        standard_random_effects = rng.standard_normal(q)
         random_effects = np.asarray(Lambda @ standard_random_effects).reshape(-1) * sigma
         eta += matrices.Z @ random_effects
 
         mu = family.link.inverse(eta)
 
-        family_name = getattr(family, "name", "gaussian")
-        if family_name == "gaussian":
-            y = mu + np.random.randn(n) * sigma
-        elif family_name == "binomial":
-            y = np.random.binomial(1, np.clip(mu, 0, 1)).astype(float)
-        elif family_name == "poisson":
-            y = np.random.poisson(np.maximum(mu, 0)).astype(float)
+        if isinstance(family, Binomial):
+            y = rng.binomial(1, np.clip(mu, 0, 1)).astype(float)
+        elif isinstance(family, Poisson):
+            y = rng.poisson(np.clip(mu, 0, 1e15)).astype(float)
+        elif isinstance(family, NegativeBinomial):
+            mu = np.clip(mu, 1e-10, 1e10)
+            y = rng.negative_binomial(family.theta, family.theta / (mu + family.theta)).astype(
+                float
+            )
+        elif isinstance(family, Gamma):
+            y = rng.gamma(1.0, np.clip(mu, 1e-10, 1e10)).astype(float)
+        elif isinstance(family, InverseGaussian):
+            y = rng.wald(np.clip(mu, 1e-10, 1e10), 1.0).astype(float)
+        elif isinstance(family, Gaussian):
+            y = rng.normal(mu, sigma)
         else:
-            y = mu + np.random.randn(n) * sigma
+            y = rng.normal(mu, sigma)
 
         result_df = data.copy()
         response_name = parsed_formula.response if parsed_formula.response else "y"
