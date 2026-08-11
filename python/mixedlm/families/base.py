@@ -95,6 +95,8 @@ class InverseLink(Link):
 
 class Family(ABC):
     link: Link
+    mu_lower_bound: float | None = None
+    mu_upper_bound: float | None = None
 
     @abstractmethod
     def variance(self, mu: NDArray[np.floating]) -> NDArray[np.floating]:
@@ -108,3 +110,10 @@ class Family(ABC):
 
     def weights(self, mu: NDArray[np.floating]) -> NDArray[np.floating]:
         return 1.0 / (self.link.deriv(mu) ** 2 * self.variance(mu))
+
+    def clip_mu(self, mu: NDArray[np.floating], eps: float = 1e-10) -> NDArray[np.floating]:
+        lower = None if self.mu_lower_bound is None else self.mu_lower_bound + eps
+        upper = None if self.mu_upper_bound is None else self.mu_upper_bound - eps
+        if lower is not None or upper is not None:
+            np.clip(mu, lower, upper, out=mu)
+        return mu

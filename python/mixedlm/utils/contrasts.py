@@ -118,22 +118,14 @@ def contr_poly(n: int) -> NDArray[np.floating]:
     if n < 2:
         return np.ones((n, 1), dtype=np.float64)
 
-    x = np.arange(1, n + 1, dtype=np.float64)
-    x = (x - x.mean()) / x.std()
+    x = np.linspace(-1.0, 1.0, n)
+    polynomial_basis = np.polynomial.legendre.legvander(x, n - 1)
+    orthonormal_basis, _ = np.linalg.qr(polynomial_basis)
+    contrasts = orthonormal_basis[:, 1:]
 
-    contrasts = np.zeros((n, n - 1), dtype=np.float64)
-
-    for degree in range(1, n):
-        col = x**degree
-
-        for prev_degree in range(degree):
-            proj = np.dot(col, contrasts[:, prev_degree])
-            col = col - proj * contrasts[:, prev_degree]
-
-        norm = np.sqrt(np.sum(col**2))
-        if norm > 1e-10:
-            contrasts[:, degree - 1] = col / norm
-
+    # QR signs are not unique. Use the conventional orientation where the
+    # highest ordered level has a positive coefficient for every degree.
+    contrasts *= np.where(contrasts[-1, :] < 0, -1.0, 1.0)
     return contrasts
 
 
@@ -240,28 +232,7 @@ def apply_contrasts(
     tuple
         (list of encoded columns, list of column names)
     """
-    n = len(col)
-    n_contrasts = contrast_matrix.shape[1]
-
-    level_to_idx = {cat: i for i, cat in enumerate(categories)}
-
-    columns: list[NDArray[np.floating]] = []
-    names: list[str] = []
-
-    for j in range(n_contrasts):
-        encoded = np.zeros(n, dtype=np.float64)
-        for i in range(n):
-            val = col.iloc[i]
-            if val in level_to_idx:
-                idx = level_to_idx[val]
-                encoded[i] = contrast_matrix[idx, j]
-            else:
-                encoded[i] = np.nan
-
-        columns.append(encoded)
-        names.append(f"{name}.{j + 1}")
-
-    return columns, names
+    return apply_contrasts_array(col.to_numpy(), name, contrast_matrix, categories)
 
 
 ContrastsSpec = dict[str, str | ContrastType | NDArray[np.floating]]
@@ -296,20 +267,15 @@ def apply_contrasts_array(
 
     level_to_idx = {cat: i for i, cat in enumerate(categories)}
 
-    columns: list[NDArray[np.floating]] = []
-    names: list[str] = []
+    level_indices = np.fromiter(
+        (level_to_idx.get(value, -1) for value in col_values),
+        dtype=np.intp,
+        count=n,
+    )
+    encoded = np.full((n, n_contrasts), np.nan, dtype=np.float64)
+    known = level_indices >= 0
+    encoded[known, :] = contrast_matrix[level_indices[known], :]
 
-    for j in range(n_contrasts):
-        encoded = np.zeros(n, dtype=np.float64)
-        for i in range(n):
-            val = col_values[i]
-            if val in level_to_idx:
-                idx = level_to_idx[val]
-                encoded[i] = contrast_matrix[idx, j]
-            else:
-                encoded[i] = np.nan
-
-        columns.append(encoded)
-        names.append(f"{name}.{j + 1}")
-
+    columns: list[NDArray[np.floating]] = [encoded[:, j] for j in range(n_contrasts)]
+    names: list[str] = [f"{name}.{j + 1}" for j in range(n_contrasts)]
     return columns, names

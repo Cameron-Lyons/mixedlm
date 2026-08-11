@@ -1,5 +1,6 @@
 /target/
 /fuzz/Cargo.lock
+/fuzz/target/
 
 __pycache__/
 *.py[cod]
@@ -32,6 +33,7 @@ ENV/
 *.swo
 
 .pytest_cache/
+.hypothesis/
 .coverage
 htmlcov/
 

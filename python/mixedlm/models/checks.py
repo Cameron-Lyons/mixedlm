@@ -5,7 +5,8 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 from numpy.typing import NDArray
-from scipy import linalg
+from scipy import linalg, sparse
+from scipy.sparse import linalg as sparse_linalg
 
 if TYPE_CHECKING:
     from mixedlm.matrices.design import ModelMatrices
@@ -32,6 +33,8 @@ def _handle_check(
 def check_nobs_vs_rankZ(
     matrices: ModelMatrices,
     action: str,
+    *,
+    allow_equal: bool = False,
 ) -> None:
     if action == "ignore":
         return
@@ -41,16 +44,59 @@ def check_nobs_vs_rankZ(
     if Z is None:
         return
 
-    Z_dense = Z.toarray() if hasattr(Z, "toarray") else Z
+    # rank(Z) cannot exceed the number of observations, so generalized models
+    # that allow equality can never fail this check. Linear models also need
+    # their residual variance identified and therefore reject full row rank.
+    if allow_equal or not _has_full_row_rank(Z):
+        return
 
-    rank_Z = np.linalg.matrix_rank(Z_dense)
+    _handle_check(
+        action,
+        f"Number of observations ({n_obs}) <= rank(Z) ({n_obs}). "
+        "Random-effects parameters and residual variance may be unidentifiable.",
+    )
 
-    if n_obs < rank_Z:
-        _handle_check(
-            action,
-            f"Number of observations ({n_obs}) < rank(Z) ({rank_Z}). "
-            "Model may be overparameterized.",
-        )
+
+def _has_full_row_rank(
+    matrix: NDArray[np.floating] | sparse.spmatrix,
+) -> bool:
+    n_rows, n_cols = matrix.shape
+    if n_rows == 0 or n_cols < n_rows:
+        return False
+
+    if not sparse.issparse(matrix):
+        return bool(np.linalg.matrix_rank(matrix) == n_rows)
+
+    sparse_matrix = sparse.csc_matrix(matrix, dtype=np.float64)
+    if sparse.csgraph.structural_rank(sparse_matrix) < n_rows:
+        return False
+
+    if n_rows == 1:
+        return bool(sparse_matrix.nnz)
+
+    largest = float(
+        sparse_linalg.svds(
+            sparse_matrix,
+            k=1,
+            which="LM",
+            return_singular_vectors=False,
+            random_state=0,
+        )[0]
+    )
+    if largest == 0.0:
+        return False
+
+    smallest = float(
+        sparse_linalg.svds(
+            sparse_matrix,
+            k=1,
+            which="SM",
+            return_singular_vectors=False,
+            random_state=0,
+        )[0]
+    )
+    tolerance = largest * max(sparse_matrix.shape) * np.finfo(np.float64).eps
+    return smallest > tolerance
 
 
 def check_nobs_vs_nlev(
@@ -186,10 +232,16 @@ def run_model_checks(
     matrices: ModelMatrices,
     control: LmerControl | GlmerControl,
 ) -> tuple[ModelMatrices, list[int] | None]:
+    from mixedlm.models.control import GlmerControl
+
     check_nlev_gtr_1(matrices, control.check_nlev_gtr_1)
     check_nlev_gtreq_5(matrices, control.check_nlev_gtreq_5)
     check_nobs_vs_nlev(matrices, control.check_nobs_vs_nlev)
-    check_nobs_vs_rankZ(matrices, control.check_nobs_vs_rankZ)
+    check_nobs_vs_rankZ(
+        matrices,
+        control.check_nobs_vs_rankZ,
+        allow_equal=isinstance(control, GlmerControl),
+    )
     check_scaleX(matrices, control.check_scaleX)
 
     X_new, dropped_cols = check_rankX(matrices, control.check_rankX)
