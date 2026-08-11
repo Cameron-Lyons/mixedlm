@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- New-data LMM and GLMM predictions accept numeric, scalar, or column-based offsets
 - Vectorized AIC/AICc/BIC model rankings with normalized weights and evidence sets
 - Nakagawa marginal/conditional R² and adjusted/unadjusted ICC for all model families
 - Weighted VIF/GVIF, tolerance, severity, and condition diagnostics for all model types
@@ -40,6 +41,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - Nonlinear mixed-model optimization now uses a deterministic profiled Laplace deviance with consistent relative covariance scaling
+- GLMM PIRLS, Laplace, and adaptive-quadrature calculations now use the covariance factor
+  in spherical random-effect coordinates, with consistent likelihood normalization and
+  deterministic outer optimization
 - LMM prediction uncertainty now includes conditional random-effect covariance, fixed/random cross-covariance, correlated slopes, and unseen-group prior variance
 - Covariance tables, PCA diagnostics, singularity checks, and parameter bounds now honor compound-symmetry and AR(1) random-effect structures
 - Gamma GLMMs now minimize the non-negative unit deviance instead of its negative

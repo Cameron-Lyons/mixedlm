@@ -739,8 +739,6 @@ def mkGlmerMod(
         opt.theta,
         devfun.parsed.matrices,
         devfun.parsed.family,
-        devfun.optimizer._beta_cache,
-        devfun.optimizer._u_cache,
     )
 
     return GlmerResult(
