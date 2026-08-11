@@ -19,6 +19,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - EM-REML algorithm generalized from single random intercept to arbitrary unstructured covariance models
 - Replaced the Py-BOBYQA dependency and default optimizer with SciPy COBYQA
 - Reduced unused and redundant Python and Rust dependencies
+- Vectorized pandas nested-group construction for faster large model setup
+- Consolidated duplicate CI and security checks while preserving coverage
+
+### Fixed
+- Poisson and other unbounded GLMM families no longer clamp fitted means below one
+- Unsupported family and link combinations no longer route through the native fast path
+
+### Fixed
+- Synthetic dataset loaders no longer reset NumPy's global random state
+
+### Fixed
+- Nonlinear mixed models now apply offsets consistently to responses, fitted values, simulations, refits, covariance estimates, and leverage diagnostics
 
 ### Fixed
 - Gamma GLMMs now minimize the non-negative unit deviance instead of its negative
