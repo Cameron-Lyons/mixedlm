@@ -23,7 +23,7 @@ A Python implementation of mixed-effects models inspired by R's [lme4](https://g
 - **Model selection** - AIC/AICc/BIC rankings, normalized weights, and evidence sets
 - **Model validation** - Case-level and whole-group cross-validation with weighted scoring
 - **Power analysis** - powerSim, powerCurve for sample size planning
-- **Diagnostics** - Influence measures, Cook's distance, leverage
+- **Diagnostics** - Dispersion and zero-inflation checks, influence measures, Cook's distance, leverage
 
 ## Installation
 
