@@ -37,6 +37,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - GLMM PIRLS, Laplace, and adaptive-quadrature calculations now use the covariance factor
   in spherical random-effect coordinates, with consistent likelihood normalization and
   deterministic outer optimization
+- Gamma GLMMs now minimize the non-negative unit deviance instead of its negative
+- Poisson and other unbounded GLMM families no longer clamp fitted means below one
+- Unsupported family and link combinations no longer route through the native fast path
 
 ## [1.1.0] - 2026-01-27
 

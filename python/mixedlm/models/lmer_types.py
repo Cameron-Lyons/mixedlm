@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import SupportsIndex
 
 import numpy as np
 from numpy.typing import NDArray
@@ -61,15 +62,36 @@ class PredictResult:
         return float(self.fit[idx])
 
 
-@dataclass
-class LogLik:
-    value: float
+class LogLik(float):
+    """Numeric log-likelihood value with model-selection metadata."""
+
     df: int
     nobs: int
-    REML: bool = False
+    REML: bool
 
-    def __float__(self) -> float:
-        return float(self.value)
+    def __new__(
+        cls,
+        value: float,
+        df: int,
+        nobs: int,
+        REML: bool = False,
+    ) -> LogLik:
+        instance = super().__new__(cls, value)
+        instance.df = df
+        instance.nobs = nobs
+        instance.REML = REML
+        return instance
+
+    @property
+    def value(self) -> float:
+        """Return the plain numeric value for compatibility."""
+        return float(self)
+
+    def __reduce_ex__(
+        self,
+        _protocol: SupportsIndex,
+    ) -> tuple[type[LogLik], tuple[float, int, int, bool]]:
+        return type(self), (self.value, self.df, self.nobs, self.REML)
 
     def __str__(self) -> str:
         reml_str = " (REML)" if self.REML else ""
