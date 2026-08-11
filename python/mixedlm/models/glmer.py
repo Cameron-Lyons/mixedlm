@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 from mixedlm.estimation.laplace import GLMMOptimizer, _build_lambda, _count_theta
 from mixedlm.families.base import Family
 from mixedlm.formula.terms import Formula
-from mixedlm.matrices.design import ModelMatrices, build_model_matrices
+from mixedlm.matrices.design import ModelMatrices
 from mixedlm.models.lmer_types import (
     LogLik,
     PredictResult,
@@ -337,12 +337,8 @@ class GlmerResult(MerResultMixin):
                 eta = self.matrices.X @ self.beta + self.matrices.offset
             X = self.matrices.X
         else:
-            pred_matrices = build_model_matrices(self.formula, newdata)
-            X = self._align_fixed_matrix(pred_matrices)
+            X = self._prediction_fixed_matrix(newdata)
             eta = X @ self.beta
-
-            if pred_matrices.offset is not None:
-                eta = eta + pred_matrices.offset
 
             if include_re:
                 eta = self._add_random_effects_to_eta(eta, newdata, allow_new_levels)
