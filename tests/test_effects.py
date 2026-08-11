@@ -116,7 +116,7 @@ def test_ggpredict_accepts_polars_backed_model(effect_data: pd.DataFrame) -> Non
     polars = pytest.importorskip("polars")
     model = lmer(
         "y ~ x + (1 | group)",
-        polars.from_pandas(effect_data[["y", "x", "group"]]),
+        polars.DataFrame(effect_data[["y", "x", "group"]].to_dict(orient="list")),
         control=lmerControl(check_singular=False),
     )
 
