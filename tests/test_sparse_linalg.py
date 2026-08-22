@@ -81,11 +81,15 @@ class TestSparseCholeskySolve:
         size = 40
         offdiag = np.full(size - 1, -0.2)
         first = sparse.diags((offdiag, np.full(size, 2.0), offdiag), (-1, 0, 1), format="csc")
+        first.sum_duplicates()
+        first.sort_indices()
         second = first.copy()
         second.data = first.data * np.linspace(0.8, 1.2, first.nnz)
         second = (second + second.T) * 0.5 + sparse.eye(size, format="csc")
         # Explicitly retain the original pattern while changing all numeric values.
         second = second.tocsc()
+        second.sum_duplicates()
+        second.sort_indices()
         assert np.array_equal(first.indices, second.indices)
         assert np.array_equal(first.indptr, second.indptr)
 
