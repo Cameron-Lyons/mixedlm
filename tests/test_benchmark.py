@@ -2,10 +2,17 @@ import numpy as np
 import pandas as pd
 import pytest
 from mixedlm import lmer
+from mixedlm._rust import (
+    SparseCholeskySymbolic,
+    simulate_re_batch,
+    sparse_cholesky_logdet,
+    sparse_cholesky_solve,
+)
 from mixedlm.estimation.reml import LMMOptimizer
 from mixedlm.formula.parser import parse_formula
 from mixedlm.matrices.design import build_model_matrices
 from mixedlm.utils.variance import cov2sdcor, sdcor2cov
+from scipy import sparse
 
 
 @pytest.fixture
@@ -101,6 +108,26 @@ def large_nested_sparse_data():
     )
 
 
+@pytest.fixture
+def sparse_spd_system():
+    size = 2_000
+    offdiag = np.full(size - 1, -1.0)
+    matrix = sparse.diags(
+        (offdiag, np.full(size, 4.0), offdiag),
+        offsets=(-1, 0, 1),
+        format="csc",
+    )
+    rng = np.random.default_rng(42)
+    rhs = rng.standard_normal((size, 16))
+    return (
+        matrix.data.astype(np.float64),
+        matrix.indices.astype(np.int64),
+        matrix.indptr.astype(np.int64),
+        matrix.shape,
+        rhs,
+    )
+
+
 @pytest.mark.benchmark(group="lmer")
 def test_benchmark_lmer_simple(benchmark, sleepstudy_data):
     def fit_model():
@@ -182,3 +209,42 @@ def test_benchmark_large_district_school_sparse_design_build(benchmark, large_ne
 
     matrices = benchmark(build_model_matrices, formula, large_nested_sparse_data)
     assert matrices.Z.nnz == len(large_nested_sparse_data)
+
+
+@pytest.mark.benchmark(group="rust-sparse-cholesky")
+def test_benchmark_sparse_cholesky_solve(benchmark, sparse_spd_system):
+    data, indices, indptr, shape, rhs = sparse_spd_system
+    result = benchmark(sparse_cholesky_solve, data, indices, indptr, shape, rhs)
+    assert np.asarray(result).shape == rhs.shape
+
+
+@pytest.mark.benchmark(group="rust-sparse-cholesky")
+def test_benchmark_sparse_cholesky_logdet(benchmark, sparse_spd_system):
+    data, indices, indptr, shape, _rhs = sparse_spd_system
+    result = benchmark(sparse_cholesky_logdet, data, indices, indptr, shape)
+    assert np.isfinite(result)
+
+
+@pytest.mark.benchmark(group="rust-sparse-symbolic-cache")
+def test_benchmark_sparse_symbolic_refactor(benchmark, sparse_spd_system):
+    data, indices, indptr, shape, rhs = sparse_spd_system
+    symbolic = SparseCholeskySymbolic(indices, indptr, shape[0])
+
+    numeric = benchmark(symbolic.factor, data)
+    result = numeric.solve(rhs[:, :1])
+    assert np.asarray(result).shape == (shape[0], 1)
+
+
+@pytest.mark.benchmark(group="rust-random-effect-simulation")
+def test_benchmark_random_effect_simulation(benchmark):
+    result = benchmark(
+        simulate_re_batch,
+        np.array([1.0, 0.25, 0.75]),
+        1.0,
+        [200_000],
+        [2],
+        [True],
+        1,
+        seed=42,
+    )
+    assert np.asarray(result).shape == (1, 400_000)

@@ -1,4 +1,5 @@
-use nalgebra::{Cholesky, DMatrix, DVector};
+use faer::linalg::solvers::{DenseSolveCore, Llt, Solve};
+use faer::{Col as DVector, Mat as DMatrix, Side};
 use pyo3::PyResult;
 use pyo3::prelude::*;
 
@@ -46,8 +47,8 @@ mod logistic_tests {
         assert!(
             model
                 .gradient(&params, &x)
-                .iter()
-                .all(|value| value.is_finite())
+                .col_iter()
+                .all(|column| column.iter().all(|value| value.is_finite()))
         );
     }
 
@@ -61,8 +62,8 @@ mod logistic_tests {
         assert!(
             model
                 .gradient(&params, &x)
-                .iter()
-                .all(|value| value.is_finite())
+                .col_iter()
+                .all(|column| column.iter().all(|value| value.is_finite()))
         );
     }
 }
@@ -231,7 +232,7 @@ impl NlmeModel {
 
 fn build_psi_factor(theta: &[f64], n_random: usize) -> DMatrix<f64> {
     if theta.is_empty() {
-        return DMatrix::identity(n_random, n_random);
+        return DMatrix::<f64>::identity(n_random, n_random);
     }
 
     let n_theta = theta.len();
@@ -248,16 +249,35 @@ fn build_psi_factor(theta: &[f64], n_random: usize) -> DMatrix<f64> {
         }
         l
     } else {
-        DMatrix::from_diagonal(&DVector::from_iterator(
-            n_random,
-            theta.iter().take(n_random).cloned(),
-        ))
+        DMatrix::from_fn(n_random, n_random, |row, column| {
+            if row == column {
+                theta.get(row).copied().unwrap_or(0.0)
+            } else {
+                0.0
+            }
+        })
     }
 }
 
 fn build_psi_matrix(theta: &[f64], n_random: usize) -> DMatrix<f64> {
     let l = build_psi_factor(theta, n_random);
     &l * l.transpose()
+}
+
+fn invert_regularized(matrix: &DMatrix<f64>) -> DMatrix<f64> {
+    match Llt::new(matrix.as_ref(), Side::Lower) {
+        Ok(cholesky) => cholesky.inverse(),
+        Err(_) => matrix.partial_piv_lu().inverse(),
+    }
+}
+
+fn quadratic_form(matrix: &DMatrix<f64>, vector: &DVector<f64>) -> f64 {
+    let product = matrix * vector;
+    vector
+        .iter()
+        .zip(product.iter())
+        .map(|(&left, &right)| left * right)
+        .sum()
 }
 
 fn validate_prior_weights(weights: &[f64], n: usize) -> PyResult<()> {
@@ -330,10 +350,7 @@ pub fn pnls_step_impl(
         m
     };
 
-    let psi_inv = match psi_reg.clone().try_inverse() {
-        Some(inv) => inv,
-        None => DMatrix::identity(n_random, n_random),
-    };
+    let psi_inv = invert_regularized(&psi_reg);
 
     let mut phi_new: Vec<f64> = phi.to_vec();
     let mut b_new = b.clone();
@@ -373,8 +390,8 @@ pub fn pnls_step_impl(
         }
 
         let gtg = grad_total.transpose() * &grad_total;
-        let gtr: DVector<f64> =
-            grad_total.transpose() * DVector::from_iterator(n, resid_total.iter().cloned());
+        let residual: DVector<f64> = resid_total.iter().copied().collect();
+        let gtr: DVector<f64> = grad_total.transpose() * residual;
 
         let gtg_reg = {
             let mut m = gtg.clone();
@@ -384,11 +401,9 @@ pub fn pnls_step_impl(
             m
         };
 
-        let delta_phi = match Cholesky::new(gtg_reg.clone()) {
-            Some(chol) => chol.solve(&gtr),
-            None => gtg_reg
-                .try_inverse()
-                .map_or(DVector::zeros(n_phi), |inv| inv * &gtr),
+        let delta_phi = match Llt::new(gtg_reg.as_ref(), Side::Lower) {
+            Ok(chol) => chol.solve(&gtr),
+            Err(_) => gtg_reg.partial_piv_lu().solve(&gtr),
         };
 
         for i in 0..n_phi {
@@ -415,7 +430,7 @@ pub fn pnls_step_impl(
                 }
             }
 
-            let b_g: DVector<f64> = DVector::from_fn(n_random, |j, _| b_new[(g_idx, j)]);
+            let b_g: DVector<f64> = DVector::from_fn(n_random, |j| b_new[(g_idx, j)]);
 
             let mut resid_g = DVector::zeros(n_g);
             for i in 0..n_g {
@@ -440,11 +455,9 @@ pub fn pnls_step_impl(
 
             let c = &ztz + &psi_inv;
 
-            let b_g_new = match Cholesky::new(c.clone()) {
-                Some(chol) => chol.solve(&ztr),
-                None => c
-                    .try_inverse()
-                    .map_or(DVector::zeros(n_random), |inv| inv * &ztr),
+            let b_g_new = match Llt::new(c.as_ref(), Side::Lower) {
+                Ok(chol) => chol.solve(&ztr),
+                Err(_) => c.partial_piv_lu().solve(&ztr),
             };
 
             for j in 0..n_random {
@@ -452,17 +465,16 @@ pub fn pnls_step_impl(
             }
         }
 
-        let max_delta: f64 = phi_new
+        let mut max_delta: f64 = phi_new
             .iter()
             .zip(phi_previous.iter())
             .map(|(a, b)| (a - b).abs())
-            .chain(
-                b_new
-                    .iter()
-                    .zip(b_previous.iter())
-                    .map(|(a, b)| (a - b).abs()),
-            )
             .fold(0.0, f64::max);
+        for row in 0..b_new.nrows() {
+            for column in 0..b_new.ncols() {
+                max_delta = max_delta.max((b_new[(row, column)] - b_previous[(row, column)]).abs());
+            }
+        }
 
         if max_delta < PNLS_TOLERANCE {
             break;
@@ -489,8 +501,8 @@ pub fn pnls_step_impl(
 
     let mut penalty = 0.0;
     for g_idx in 0..group_indices.len() {
-        let b_g: DVector<f64> = DVector::from_fn(n_random, |j, _| b_new[(g_idx, j)]);
-        penalty += b_g.dot(&(&psi_inv * &b_g));
+        let b_g: DVector<f64> = DVector::from_fn(n_random, |j| b_new[(g_idx, j)]);
+        penalty += quadratic_form(&psi_inv, &b_g);
     }
 
     let sigma_new = ((rss + penalty) / n as f64).max(f64::MIN_POSITIVE).sqrt();
@@ -566,20 +578,17 @@ pub fn nlmm_deviance_impl(
         m
     };
 
-    let psi_inv = match psi_reg.clone().try_inverse() {
-        Some(inv) => inv,
-        None => DMatrix::identity(n_random, n_random),
-    };
+    let psi_inv = invert_regularized(&psi_reg);
 
     let mut penalty = 0.0;
     for g_idx in 0..n_groups {
-        let b_g: DVector<f64> = DVector::from_fn(n_random, |j, _| b_new[(g_idx, j)]);
-        penalty += b_g.dot(&(&psi_inv * &b_g));
+        let b_g: DVector<f64> = DVector::from_fn(n_random, |j| b_new[(g_idx, j)]);
+        penalty += quadratic_form(&psi_inv, &b_g);
     }
 
     let sigma_sq = ((rss + penalty) / n as f64).max(f64::MIN_POSITIVE);
     let mut laplace_correction = 0.0;
-    let identity = DMatrix::identity(n_random, n_random);
+    let identity = DMatrix::<f64>::identity(n_random, n_random);
 
     for (g_idx, mask) in group_indices.iter().enumerate() {
         let x_g: Vec<f64> = mask.iter().map(|&i| x[i]).collect();
@@ -606,13 +615,15 @@ pub fn nlmm_deviance_impl(
         let ztz = weighted_z_g.transpose() * &weighted_z_g;
         // Stable form of log|Psi| + log|Z'WZ + Psi^-1| for Psi = L L'.
         let system = &identity + psi_factor.transpose() * ztz * &psi_factor;
-        let logdet = match Cholesky::new(system.clone()) {
-            Some(chol) => {
-                let l = chol.l();
+        let logdet = match Llt::new(system.as_ref(), Side::Lower) {
+            Ok(chol) => {
+                let l = chol.L();
                 2.0 * (0..n_random).map(|i| l[(i, i)].ln()).sum::<f64>()
             }
-            None => {
-                let eigenvalues = system.symmetric_eigenvalues();
+            Err(_) => {
+                let eigenvalues = system
+                    .self_adjoint_eigenvalues(Side::Lower)
+                    .unwrap_or_else(|_| vec![f64::NAN; n_random]);
                 if eigenvalues
                     .iter()
                     .any(|value| *value <= 0.0 || !value.is_finite())
