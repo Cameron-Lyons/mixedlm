@@ -4,12 +4,98 @@ use numpy::{PyArray1, PyArray2, PyArrayLike1};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use rand::prelude::*;
-use rand_distr::StandardNormal;
 use rayon::prelude::*;
+use std::sync::OnceLock;
 
 struct SimulationBlock {
     n_levels: usize,
     factor: Mat<f64>,
+}
+
+const ZIG_NORM_R: f64 = 3.654_152_885_361_009;
+const ZIG_NORM_X0: f64 = 3.910_757_959_537_09;
+
+struct NormalZigguratTables {
+    x: [f64; 257],
+    density: [f64; 257],
+}
+
+#[inline(always)]
+fn normal_density(value: f64) -> f64 {
+    (-0.5 * value * value).exp()
+}
+
+fn normal_ziggurat_tables() -> &'static NormalZigguratTables {
+    static TABLES: OnceLock<NormalZigguratTables> = OnceLock::new();
+    TABLES.get_or_init(|| {
+        let mut x = [0.0; 257];
+        let mut density = [0.0; 257];
+        x[0] = ZIG_NORM_X0;
+        x[1] = ZIG_NORM_R;
+        let rectangle_area = x[0] * normal_density(x[1]);
+        for index in 2..256 {
+            let previous = x[index - 1];
+            x[index] = (-2.0 * (rectangle_area / previous + normal_density(previous)).ln()).sqrt();
+        }
+        for (value, output) in x.iter().zip(&mut density) {
+            *output = normal_density(*value);
+        }
+        NormalZigguratTables { x, density }
+    })
+}
+
+struct StandardNormalSampler {
+    tables: &'static NormalZigguratTables,
+}
+
+impl Default for StandardNormalSampler {
+    fn default() -> Self {
+        Self {
+            tables: normal_ziggurat_tables(),
+        }
+    }
+}
+
+impl StandardNormalSampler {
+    #[inline(always)]
+    fn sample(&mut self, rng: &mut impl Rng) -> f64 {
+        // Doornik's ZIGNOR variant uses eight index bits and 52 fraction bits
+        // from one RNG word. Most samples return after the first comparison.
+        loop {
+            let bits = rng.next_u64();
+            let index = bits as usize & 0xff;
+            let uniform = f64::from_bits((bits >> 12) | 0x4000_0000_0000_0000) - 3.0;
+            let value = uniform * self.tables.x[index];
+            if value.abs() < self.tables.x[index + 1] {
+                return value;
+            }
+            if index == 0 {
+                loop {
+                    let tail = open_unit_interval(rng).ln() / ZIG_NORM_R;
+                    let height = open_unit_interval(rng).ln();
+                    if -2.0 * height >= tail * tail {
+                        return if uniform < 0.0 {
+                            tail - ZIG_NORM_R
+                        } else {
+                            ZIG_NORM_R - tail
+                        };
+                    }
+                }
+            }
+            let lower_density = self.tables.density[index + 1];
+            if lower_density + (self.tables.density[index] - lower_density) * rng.random::<f64>()
+                < normal_density(value)
+            {
+                return value;
+            }
+        }
+    }
+}
+
+#[inline(always)]
+fn open_unit_interval(rng: &mut impl Rng) -> f64 {
+    const SCALE: f64 = 1.0 / ((1_u64 << 53) as f64);
+    ((rng.next_u64() >> 11) as f64 + 0.5) * SCALE
 }
 
 fn checked_simulation_sizes(
@@ -103,13 +189,14 @@ fn build_simulation_blocks(
 
 fn simulate_re_single(blocks: &[SimulationBlock], rng: &mut impl Rng, u: &mut [f64]) {
     let mut u_idx = 0;
+    let mut standard_normal = StandardNormalSampler::default();
 
     for block in blocks {
         let q = block.factor.nrows();
         let mut z = vec![0.0; q];
         for _ in 0..block.n_levels {
             for value in &mut z {
-                *value = rng.sample(StandardNormal);
+                *value = standard_normal.sample(rng);
             }
 
             for i in 0..q {
@@ -121,6 +208,40 @@ fn simulate_re_single(blocks: &[SimulationBlock], rng: &mut impl Rng, u: &mut [f
             }
             u_idx += q;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::StandardNormalSampler;
+    use rand::{SeedableRng, rngs::StdRng};
+
+    #[test]
+    fn standard_normal_sampler_is_reproducible_and_well_calibrated() {
+        const SAMPLE_COUNT: usize = 200_000;
+
+        let mut first_rng = StdRng::seed_from_u64(42);
+        let mut second_rng = StdRng::seed_from_u64(42);
+        let mut first = StandardNormalSampler::default();
+        let mut second = StandardNormalSampler::default();
+        let mut sum = 0.0;
+        let mut sum_squares = 0.0;
+
+        for _ in 0..SAMPLE_COUNT {
+            let value = first.sample(&mut first_rng);
+            assert_eq!(value, second.sample(&mut second_rng));
+            assert!(value.is_finite());
+            sum += value;
+            sum_squares += value * value;
+        }
+
+        let mean = sum / SAMPLE_COUNT as f64;
+        let variance = sum_squares / SAMPLE_COUNT as f64 - mean * mean;
+        assert!(mean.abs() < 0.01, "sample mean was {mean}");
+        assert!(
+            (variance - 1.0).abs() < 0.02,
+            "sample variance was {variance}"
+        );
     }
 }
 

@@ -43,6 +43,65 @@ class TestSparseCholeskySolve:
 
         assert_allclose(actual, np.linalg.solve(csc.toarray(), rhs), rtol=1e-12, atol=1e-12)
 
+    @pytest.mark.parametrize(("size", "density"), [(8, 0.35), (31, 0.12), (96, 0.04)])
+    def test_random_sparse_spd_matches_dense_reference(self, size, density):
+        """Exercise sparse patterns and numerical values independently of one fixture."""
+        rng = np.random.default_rng(10_000 + size)
+        lower = sparse.random(
+            size,
+            size,
+            density=density,
+            format="csc",
+            random_state=rng,
+            data_rvs=rng.standard_normal,
+        )
+        lower = sparse.tril(lower, format="csc")
+        lower.setdiag(rng.uniform(0.5, 1.5, size=size))
+        matrix = (lower @ lower.T + sparse.eye(size, format="csc") * 0.25).tocsc()
+        data = matrix.data.astype(np.float64)
+        indices = matrix.indices.astype(np.int64)
+        indptr = matrix.indptr.astype(np.int64)
+        rhs = rng.standard_normal((size, 5))
+
+        actual = sparse_cholesky_solve(data, indices, indptr, matrix.shape, rhs)
+        expected = np.linalg.solve(matrix.toarray(), rhs)
+        assert_allclose(actual, expected, rtol=2e-11, atol=2e-11)
+
+        actual_logdet = sparse_cholesky_logdet(data, indices, indptr, matrix.shape)
+        sign, expected_logdet = np.linalg.slogdet(matrix.toarray())
+        assert sign == 1.0
+        assert_allclose(actual_logdet, expected_logdet, rtol=2e-11, atol=2e-11)
+
+        symbolic = SparseCholeskySymbolic(indices, indptr, size)
+        numeric = symbolic.factor(data)
+        assert_allclose(numeric.solve(rhs), expected, rtol=2e-11, atol=2e-11)
+        assert_allclose(numeric.logdet(), expected_logdet, rtol=2e-11, atol=2e-11)
+
+    def test_symbolic_cache_accepts_new_values_with_same_pattern(self):
+        size = 40
+        offdiag = np.full(size - 1, -0.2)
+        first = sparse.diags((offdiag, np.full(size, 2.0), offdiag), (-1, 0, 1), format="csc")
+        second = first.copy()
+        second.data = first.data * np.linspace(0.8, 1.2, first.nnz)
+        second = (second + second.T) * 0.5 + sparse.eye(size, format="csc")
+        # Explicitly retain the original pattern while changing all numeric values.
+        second = second.tocsc()
+        assert np.array_equal(first.indices, second.indices)
+        assert np.array_equal(first.indptr, second.indptr)
+
+        symbolic = SparseCholeskySymbolic(
+            first.indices.astype(np.int64), first.indptr.astype(np.int64), size
+        )
+        rhs = np.arange(1, size + 1, dtype=np.float64)[:, None]
+        for matrix in (first, second):
+            numeric = symbolic.factor(matrix.data)
+            assert_allclose(
+                numeric.solve(rhs),
+                np.linalg.solve(matrix.toarray(), rhs),
+                rtol=2e-11,
+                atol=2e-11,
+            )
+
     def test_rejects_mismatched_right_hand_side(self):
         _, data, indices, indptr, shape = sparse_arguments(np.eye(2))
 

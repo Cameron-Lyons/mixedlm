@@ -1,9 +1,9 @@
-use nalgebra::DMatrix;
-use nalgebra_sparse::csc::CscMatrix;
-use nalgebra_sparse::factorization::CscCholesky;
 use numpy::ndarray::ArrayView2;
 use pyo3::PyResult;
 use pyo3::exceptions::PyValueError;
+
+use crate::csc::CscMatrix;
+use crate::sparse_chol::SymbolicCholeskyCache;
 
 #[derive(Debug, Clone)]
 pub enum LinalgError {
@@ -34,14 +34,6 @@ impl From<LinalgError> for pyo3::PyErr {
     }
 }
 
-fn checked_i64_to_usize(value: i64, field_name: &str, index: usize) -> Result<usize, LinalgError> {
-    usize::try_from(value).map_err(|_| {
-        LinalgError::InvalidSparseFormat(format!(
-            "{field_name}[{index}] must be non-negative, got {value}"
-        ))
-    })
-}
-
 fn validate_square(shape: (usize, usize)) -> Result<(), LinalgError> {
     if shape.0 != shape.1 {
         return Err(LinalgError::DimensionMismatch(format!(
@@ -57,22 +49,8 @@ fn csc_from_scipy(
     indices: &[i64],
     indptr: &[i64],
     shape: (usize, usize),
-) -> Result<CscMatrix<f64>, LinalgError> {
-    let (nrows, ncols) = shape;
-
-    let indices_usize: Vec<usize> = indices
-        .iter()
-        .enumerate()
-        .map(|(idx, &value)| checked_i64_to_usize(value, "indices", idx))
-        .collect::<Result<Vec<_>, _>>()?;
-    let indptr_usize: Vec<usize> = indptr
-        .iter()
-        .enumerate()
-        .map(|(idx, &value)| checked_i64_to_usize(value, "indptr", idx))
-        .collect::<Result<Vec<_>, _>>()?;
-
-    CscMatrix::try_from_csc_data(nrows, ncols, indptr_usize, indices_usize, data.to_vec())
-        .map_err(|e| LinalgError::InvalidSparseFormat(format!("{:?}", e)))
+) -> Result<CscMatrix, LinalgError> {
+    CscMatrix::try_from_i64(data, indices, indptr, shape)
 }
 
 pub fn sparse_cholesky_solve(
@@ -94,17 +72,17 @@ pub fn sparse_cholesky_solve(
 
     let a = csc_from_scipy(a_data, a_indices, a_indptr, a_shape)?;
 
-    let cholesky = CscCholesky::factor(&a).map_err(|_| LinalgError::NotPositiveDefinite)?;
-
     let (n, m) = (b.nrows(), b.ncols());
-    let b_matrix = DMatrix::from_fn(n, m, |row, col| b[(row, col)]);
-    let solution = cholesky.solve(&b_matrix);
-    let result = (0..n)
-        .flat_map(|row| {
-            let solution = &solution;
-            (0..m).map(move |col| solution[(row, col)])
-        })
-        .collect();
+    let cache = SymbolicCholeskyCache::new(a.row_indices(), a.col_offsets(), n)?;
+    let factor = cache.factor(a.values(), a.row_indices(), a.col_offsets())?;
+    let mut result = vec![0.0; n * m];
+    for column in 0..m {
+        let rhs: Vec<f64> = b.column(column).iter().copied().collect();
+        let solution = factor.solve(&rhs)?;
+        for (row, value) in solution.into_iter().enumerate() {
+            result[row * m + column] = value;
+        }
+    }
 
     Ok((result, n, m))
 }
@@ -118,20 +96,9 @@ pub fn sparse_cholesky_logdet(
     validate_square(a_shape)?;
     let a = csc_from_scipy(a_data, a_indices, a_indptr, a_shape)?;
 
-    let cholesky = CscCholesky::factor(&a).map_err(|_| LinalgError::NotPositiveDefinite)?;
-
-    let l = cholesky.l();
-    let mut logdet = 0.0;
-
-    for i in 0..l.nrows() {
-        let diag = l.get_entry(i, i).map(|e| e.into_value()).unwrap_or(0.0);
-        if diag <= 0.0 {
-            return Err(LinalgError::NotPositiveDefinite.into());
-        }
-        logdet += diag.ln();
-    }
-
-    Ok(2.0 * logdet)
+    let cache = SymbolicCholeskyCache::new(a.row_indices(), a.col_offsets(), a.nrows())?;
+    let factor = cache.factor(a.values(), a.row_indices(), a.col_offsets())?;
+    Ok(factor.logdet())
 }
 
 pub fn update_cholesky_factor(

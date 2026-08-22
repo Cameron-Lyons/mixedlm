@@ -1,6 +1,5 @@
 use faer::linalg::solvers::{Llt, Solve};
 use faer::{Mat, Side};
-use nalgebra_sparse::csc::CscMatrix;
 use numpy::PyArray1;
 use numpy::ndarray::{ArrayView1, ArrayView2};
 use pyo3::PyResult;
@@ -8,6 +7,7 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
 use crate::blocked_chol::{BlockedCholesky, BlockedMatrix};
+use crate::csc::CscMatrix;
 use crate::linalg::LinalgError;
 
 #[derive(Debug, Clone, Copy)]
@@ -47,13 +47,8 @@ fn csc_from_scipy(
     indices: &[i64],
     indptr: &[i64],
     shape: (usize, usize),
-) -> Result<CscMatrix<f64>, LinalgError> {
-    let (nrows, ncols) = shape;
-    let indices_usize: Vec<usize> = indices.iter().map(|&i| i as usize).collect();
-    let indptr_usize: Vec<usize> = indptr.iter().map(|&i| i as usize).collect();
-
-    CscMatrix::try_from_csc_data(nrows, ncols, indptr_usize, indices_usize, data.to_vec())
-        .map_err(|e| LinalgError::InvalidSparseFormat(format!("{:?}", e)))
+) -> Result<CscMatrix, LinalgError> {
+    CscMatrix::try_from_i64(data, indices, indptr, shape)
 }
 
 fn build_lambda_blocks(theta: &[f64], structures: &[RandomEffectStructure]) -> Vec<Mat<f64>> {
@@ -257,7 +252,7 @@ fn apply_dlambda_transpose_vector(
     result
 }
 
-fn compute_ztwz_sparse(z: &CscMatrix<f64>, weights: &[f64]) -> Mat<f64> {
+fn compute_ztwz_sparse(z: &CscMatrix, weights: &[f64]) -> Mat<f64> {
     let n = z.nrows();
     let q = z.ncols();
     let nnz = z.values().len();
@@ -350,7 +345,7 @@ fn apply_lambda_transpose_vector(
     result
 }
 
-fn compute_ztwy_sparse(z: &CscMatrix<f64>, w: &[f64], y: &[f64], q: usize) -> Mat<f64> {
+fn compute_ztwy_sparse(z: &CscMatrix, w: &[f64], y: &[f64], q: usize) -> Mat<f64> {
     let mut result = Mat::zeros(q, 1);
 
     for j in 0..q {
@@ -367,13 +362,7 @@ fn compute_ztwy_sparse(z: &CscMatrix<f64>, w: &[f64], y: &[f64], q: usize) -> Ma
     result
 }
 
-fn compute_ztwx_sparse(
-    z: &CscMatrix<f64>,
-    w: &[f64],
-    x: &Mat<f64>,
-    q: usize,
-    p: usize,
-) -> Mat<f64> {
+fn compute_ztwx_sparse(z: &CscMatrix, w: &[f64], x: &Mat<f64>, q: usize, p: usize) -> Mat<f64> {
     let mut result = Mat::zeros(q, p);
 
     for j in 0..q {
