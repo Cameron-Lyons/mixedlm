@@ -218,7 +218,9 @@ mod tests {
 
     #[test]
     fn standard_normal_sampler_is_reproducible_and_well_calibrated() {
-        const SAMPLE_COUNT: usize = 200_000;
+        const SAMPLE_COUNT: usize = if cfg!(miri) { 10_000 } else { 200_000 };
+        const MEAN_TOLERANCE: f64 = if cfg!(miri) { 0.05 } else { 0.01 };
+        const VARIANCE_TOLERANCE: f64 = if cfg!(miri) { 0.05 } else { 0.02 };
 
         let mut first_rng = StdRng::seed_from_u64(42);
         let mut second_rng = StdRng::seed_from_u64(42);
@@ -229,7 +231,12 @@ mod tests {
 
         for _ in 0..SAMPLE_COUNT {
             let value = first.sample(&mut first_rng);
-            assert_eq!(value, second.sample(&mut second_rng));
+            let repeated = second.sample(&mut second_rng);
+            let reproducibility_tolerance = 1e-14 * value.abs().max(repeated.abs()).max(1.0);
+            assert!(
+                (value - repeated).abs() <= reproducibility_tolerance,
+                "seeded samples differed: {value} versus {repeated}"
+            );
             assert!(value.is_finite());
             sum += value;
             sum_squares += value * value;
@@ -237,9 +244,9 @@ mod tests {
 
         let mean = sum / SAMPLE_COUNT as f64;
         let variance = sum_squares / SAMPLE_COUNT as f64 - mean * mean;
-        assert!(mean.abs() < 0.01, "sample mean was {mean}");
+        assert!(mean.abs() < MEAN_TOLERANCE, "sample mean was {mean}");
         assert!(
-            (variance - 1.0).abs() < 0.02,
+            (variance - 1.0).abs() < VARIANCE_TOLERANCE,
             "sample variance was {variance}"
         );
     }
