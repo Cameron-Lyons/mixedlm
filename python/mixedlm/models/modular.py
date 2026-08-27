@@ -1221,7 +1221,7 @@ def mkDataTemplate(
 
 
 def mkParsTemplate(
-    formula: str,
+    formula: Formula | str,
     data: pd.DataFrame,
 ) -> dict[str, object]:
     """Generate a parameter structure template from formula and data.
@@ -1232,8 +1232,8 @@ def mkParsTemplate(
 
     Parameters
     ----------
-    formula : str
-        Model formula with random effects.
+    formula : Formula or str
+        Parsed formula or model formula with random effects.
     data : pd.DataFrame
         Data frame containing the variables.
 
@@ -1265,8 +1265,13 @@ def mkParsTemplate(
         group = struct.grouping_factor
         terms = struct.term_names
         q = struct.n_terms
+        cov_type = getattr(struct, "cov_type", "us")
 
-        if struct.correlated:
+        if cov_type in ("cs", "ar1"):
+            theta_template.append(f"sd_common|{group}")
+            if q > 1:
+                theta_template.append(f"rho|{group}")
+        elif struct.correlated:
             for i in range(q):
                 for j in range(i + 1):
                     if i == j:

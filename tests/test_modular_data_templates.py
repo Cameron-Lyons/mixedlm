@@ -5,7 +5,7 @@ import pandas as pd
 import pytest
 from mixedlm.formula.parser import parse_formula
 from mixedlm.matrices.design import build_model_matrices
-from mixedlm.models.modular import mkDataTemplate, mkMinimalData
+from mixedlm.models.modular import mkDataTemplate, mkMinimalData, mkParsTemplate
 
 
 def test_balanced_template_deduplicates_repeated_grouping_factors() -> None:
@@ -81,3 +81,16 @@ def test_data_template_rejects_nonpositive_group_counts(count: int) -> None:
 def test_minimal_data_rejects_nonpositive_row_counts(n: int) -> None:
     with pytest.raises(ValueError, match="n must be positive"):
         mkMinimalData("y ~ x + (1 | group)", n=n)
+
+
+@pytest.mark.parametrize("cov_type", ["cs", "ar1"])
+def test_parameter_template_honors_structured_covariance(cov_type: str) -> None:
+    from mixedlm import set_cov_type
+
+    formula = set_cov_type("y ~ x + z + (x + z | group)", cov_type)
+    data = mkMinimalData(str(formula), n=20, seed=42)
+
+    template = mkParsTemplate(formula, data)
+
+    assert template["theta"] == ["sd_common|group", "rho|group"]
+    assert template["n_theta"] == 2

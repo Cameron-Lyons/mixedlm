@@ -248,6 +248,18 @@ minimal = mlm.mkMinimalData(
 )
 ```
 
+### mkParsTemplate
+
+Inspect the fixed-effect and covariance-parameter structure implied by a
+formula. Structured covariance models report their shared scale and
+correlation parameters directly.
+
+```python
+formula = mlm.set_cov_type("y ~ x + z + (x + z | group)", "ar1")
+parameters = mlm.mkParsTemplate(formula, data)
+# parameters["theta"] == ["sd_common|group", "rho|group"]
+```
+
 ### findbars
 
 Find random effects terms in a formula.
