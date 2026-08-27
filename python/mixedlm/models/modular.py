@@ -1071,10 +1071,63 @@ def simulate_formula(
     return results
 
 
+def _formula_template_components(formula: str) -> tuple[Formula, list[str], list[str]]:
+    """Parse a formula into ordered numeric and grouping columns."""
+    from mixedlm.formula.terms import InteractionTerm, PowerTerm, VariableTerm
+
+    parsed = parse_formula(formula)
+    numeric_variables: list[str] = []
+    seen_numeric: set[str] = set()
+
+    def add_terms(terms) -> None:
+        for term in terms:
+            if isinstance(term, VariableTerm | PowerTerm):
+                names: tuple[str, ...] = (term.name,)
+            elif isinstance(term, InteractionTerm):
+                names = term.source_variables
+            else:
+                continue
+            for name in names:
+                if name not in seen_numeric:
+                    seen_numeric.add(name)
+                    numeric_variables.append(name)
+
+    add_terms(parsed.fixed.terms)
+    for random_term in parsed.random:
+        add_terms(random_term.expr)
+
+    grouping_factors: list[str] = []
+    seen_groups: set[str] = set()
+    for random_term in parsed.random:
+        for group in random_term.grouping_factors:
+            if group not in seen_groups:
+                seen_groups.add(group)
+                grouping_factors.append(group)
+
+    excluded = {parsed.response, parsed.response_denominator, *grouping_factors}
+    numeric_variables = [name for name in numeric_variables if name not in excluded]
+    return parsed, numeric_variables, grouping_factors
+
+
+def _template_response_columns(
+    parsed: Formula,
+    n: int,
+    rng: np.random.Generator,
+) -> dict[str, object]:
+    """Create response columns, including valid grouped-binomial placeholders."""
+    if parsed.response_denominator is None:
+        return {parsed.response: rng.standard_normal(n)}
+    return {
+        parsed.response: np.zeros(n, dtype=np.int64),
+        parsed.response_denominator: np.ones(n, dtype=np.int64),
+    }
+
+
 def mkDataTemplate(
     formula: str,
     nlevs: dict[str, int] | None = None,
     balanced: bool = True,
+    seed: int | None = None,
 ) -> pd.DataFrame:
     """Create a template data frame for a mixed model formula.
 
@@ -1091,6 +1144,9 @@ def mkDataTemplate(
     balanced : bool, default True
         If True, creates a balanced design. If False, creates an
         unbalanced design with varying observations per group.
+    seed : int, optional
+        Random seed for reproducible numeric columns and unbalanced group
+        assignments. Randomness is isolated from NumPy's global state.
 
     Returns
     -------
@@ -1110,66 +1166,56 @@ def mkDataTemplate(
     >>> df.shape
     (50, 4)
     """
-    import re
+    import pandas as pd
 
-    bar_pattern = r"\(([^|]+)\|([^)]+)\)"
-    matches = re.findall(bar_pattern, formula)
+    parsed, numeric_variables, grouping_factors = _formula_template_components(formula)
+    rng = np.random.default_rng(seed)
 
-    grouping_factors = [match[1].strip() for match in matches]
-
-    if nlevs is None:
-        nlevs = {g: 10 for g in grouping_factors}
-
-    lhs_rhs = formula.split("~")
-    response = lhs_rhs[0].strip()
-
-    rhs = lhs_rhs[1] if len(lhs_rhs) > 1 else ""
-    rhs_no_bars = re.sub(bar_pattern, "", rhs)
-    rhs_no_bars = re.sub(r"\s*\+\s*\+\s*", " + ", rhs_no_bars)
-    rhs_no_bars = rhs_no_bars.strip(" +")
-
-    fixed_vars = []
-    if rhs_no_bars:
-        terms = [t.strip() for t in rhs_no_bars.split("+")]
-        for term in terms:
-            if term and term != "1" and term != "0":
-                fixed_vars.append(term)
+    supplied_levels = {} if nlevs is None else nlevs
+    level_counts: dict[str, int] = {}
+    for group in grouping_factors:
+        count = supplied_levels.get(group, 10)
+        if isinstance(count, bool) or not isinstance(count, (int, np.integer)):
+            raise TypeError(f"nlevs['{group}'] must be an integer")
+        if count < 1:
+            raise ValueError(f"nlevs['{group}'] must be positive")
+        level_counts[group] = int(count)
 
     if balanced:
-        total_levels = 1
-        for g in grouping_factors:
-            total_levels *= nlevs.get(g, 10)
-        n = total_levels
+        n = 1
+        for count in level_counts.values():
+            n *= count
     else:
-        n = sum(nlevs.get(g, 10) for g in grouping_factors) * 2
+        n = 2 * sum(level_counts.values()) if level_counts else 10
 
-    data: dict[str, object] = {response: np.random.randn(n)}
+    data = _template_response_columns(parsed, n, rng)
 
-    for var in fixed_vars:
-        data[var] = np.random.randn(n)
+    for variable in numeric_variables:
+        data[variable] = rng.standard_normal(n)
 
     if balanced and len(grouping_factors) >= 2:
-        levels_list = [list(range(1, nlevs.get(g, 10) + 1)) for g in grouping_factors]
+        levels_list = [np.arange(1, level_counts[group] + 1) for group in grouping_factors]
         grids = np.meshgrid(*levels_list, indexing="ij")
-        for i, g in enumerate(grouping_factors):
-            data[g] = [f"{g}{v}" for v in grids[i].ravel()]
+        for index, group in enumerate(grouping_factors):
+            data[group] = [f"{group}{value}" for value in grids[index].ravel()]
     else:
-        for g in grouping_factors:
-            n_levels = nlevs.get(g, 10)
+        for group in grouping_factors:
+            n_levels = level_counts[group]
             if balanced:
-                obs_per_level = max(1, n // n_levels)
-                levels = [f"{g}{i + 1}" for i in range(n_levels) for _ in range(obs_per_level)]
-                data[g] = levels[:n]
+                data[group] = [f"{group}{index + 1}" for index in range(n_levels)]
             else:
-                obs_per_level_arr = np.random.randint(1, 5, n_levels)
-                levels = []
-                for i, count in enumerate(obs_per_level_arr.tolist()):
-                    levels.extend([f"{g}{i + 1}"] * count)
-                if len(levels) < n:
-                    levels.extend(levels[: n - len(levels)])
-                else:
-                    levels = levels[:n]
-                data[g] = levels
+                relative_weights = rng.integers(1, 5, size=n_levels)
+                extra_counts = rng.multinomial(
+                    n - n_levels,
+                    relative_weights / relative_weights.sum(),
+                )
+                counts = extra_counts + 1
+                labels = np.repeat(
+                    [f"{group}{index + 1}" for index in range(n_levels)],
+                    counts,
+                )
+                rng.shuffle(labels)
+                data[group] = labels
 
     return pd.DataFrame(data)
 
@@ -1243,6 +1289,7 @@ def mkParsTemplate(
 def mkMinimalData(
     formula: str,
     n: int = 10,
+    seed: int | None = None,
 ) -> pd.DataFrame:
     """Create minimal test data from a formula.
 
@@ -1255,6 +1302,9 @@ def mkMinimalData(
         Model formula with random effects.
     n : int, default 10
         Number of observations.
+    seed : int, optional
+        Random seed for reproducible numeric columns. Randomness is isolated
+        from NumPy's global state.
 
     Returns
     -------
@@ -1267,45 +1317,25 @@ def mkMinimalData(
     >>> list(df.columns)
     ['y', 'x', 'z', 'group']
     """
-    import re
+    import pandas as pd
 
-    lhs_rhs = formula.split("~")
-    response = lhs_rhs[0].strip()
+    if isinstance(n, bool) or not isinstance(n, (int, np.integer)):
+        raise TypeError("n must be an integer")
+    if n < 1:
+        raise ValueError("n must be positive")
+    n = int(n)
 
-    bar_pattern = r"\(([^|]+)\|([^)]+)\)"
-    matches = re.findall(bar_pattern, formula)
-    grouping_factors = list(set(match[1].strip() for match in matches))
+    parsed, numeric_variables, grouping_factors = _formula_template_components(formula)
+    rng = np.random.default_rng(seed)
 
-    re_terms = set()
-    for terms_str, _ in matches:
-        for term in terms_str.split("+"):
-            term = term.strip()
-            if term and term != "1" and term != "0":
-                re_terms.add(term)
+    data = _template_response_columns(parsed, n, rng)
 
-    rhs = lhs_rhs[1] if len(lhs_rhs) > 1 else ""
-    rhs_no_bars = re.sub(bar_pattern, "", rhs)
-    rhs_no_bars = re.sub(r"\s*\+\s*\+\s*", " + ", rhs_no_bars)
-    rhs_no_bars = rhs_no_bars.strip(" +")
+    for variable in numeric_variables:
+        data[variable] = rng.standard_normal(n)
 
-    fixed_vars = set()
-    if rhs_no_bars:
-        for term in rhs_no_bars.split("+"):
-            term = term.strip()
-            if term and term != "1" and term != "0" and ":" not in term and "*" not in term:
-                fixed_vars.add(term)
-
-    all_numeric = fixed_vars | re_terms
-
-    data: dict[str, object] = {response: np.random.randn(n)}
-
-    for var in all_numeric:
-        data[var] = np.random.randn(n)
-
-    for g in grouping_factors:
+    for group in grouping_factors:
         n_levels = min(n, 5)
-        levels = [f"{g}{i % n_levels + 1}" for i in range(n)]
-        data[g] = levels
+        data[group] = [f"{group}{index % n_levels + 1}" for index in range(n)]
 
     return pd.DataFrame(data)
 

@@ -219,6 +219,35 @@ simulated = mlm.simulate_formula(
 )
 ```
 
+### mkDataTemplate
+
+Create balanced or unbalanced predictor templates directly from the parsed
+formula. Repeated grouping terms are deduplicated, and nested or double-bar
+random effects are supported.
+
+```python
+template = mlm.mkDataTemplate(
+    "y ~ x * time + (x || site/subject)",
+    nlevs={"site": 4, "subject": 10},
+    balanced=False,
+    seed=42,
+)
+```
+
+### mkMinimalData
+
+Create a small reproducible frame containing every source variable needed by
+the formula, including interactions, power terms, nested groups, and grouped
+responses.
+
+```python
+minimal = mlm.mkMinimalData(
+    "successes / trials ~ x * z + (1 | group)",
+    n=20,
+    seed=42,
+)
+```
+
 ### findbars
 
 Find random effects terms in a formula.
