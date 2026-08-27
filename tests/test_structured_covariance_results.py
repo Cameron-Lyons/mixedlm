@@ -183,3 +183,20 @@ def test_covariance_reporting_does_not_expand_group_level_factors(
     cov = result.VarCorr().groups["group"].cov
 
     assert cov.shape == (3, 3)
+
+
+@pytest.mark.parametrize("cov_type", ["cs", "ar1"])
+@pytest.mark.parametrize("nsim", [1, 5])
+def test_structured_simulation_is_reproducible(
+    result_factory: Callable[[str, NDArray[np.floating]], Result],
+    cov_type: str,
+    nsim: int,
+) -> None:
+    result = result_factory(cov_type, np.array([1.25, 0.3]))
+
+    first = result.simulate(nsim=nsim, seed=123)
+    second = result.simulate(nsim=nsim, seed=123)
+
+    expected_shape = (result.matrices.n_obs,) if nsim == 1 else (result.matrices.n_obs, nsim)
+    assert first.shape == expected_shape
+    np.testing.assert_array_equal(first, second)

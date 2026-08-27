@@ -77,3 +77,44 @@ class TestRandomEffectSimulationValidation:
 
         assert np.asarray(first).shape == (20, 10)
         np.testing.assert_array_equal(first, second)
+
+    @pytest.mark.parametrize("cov_type", ["cs", "ar1"])
+    def test_structured_covariance_matches_requested_correlation(self, cov_type):
+        relative_scale = 1.2
+        sigma = 1.5
+        rho = 0.35
+        n_terms = 3
+
+        samples = np.asarray(
+            simulate_re_batch(
+                np.array([relative_scale, rho]),
+                sigma,
+                [1],
+                [n_terms],
+                [True],
+                50_000,
+                seed=42,
+                cov_types=[cov_type],
+            )
+        )
+
+        if cov_type == "cs":
+            correlation = np.full((n_terms, n_terms), rho)
+            np.fill_diagonal(correlation, 1.0)
+        else:
+            indices = np.arange(n_terms)
+            correlation = rho ** np.abs(indices[:, None] - indices[None, :])
+        expected = relative_scale**2 * sigma**2 * correlation
+        np.testing.assert_allclose(np.cov(samples, rowvar=False), expected, rtol=0.03, atol=0.03)
+
+    def test_rejects_unknown_covariance_type(self):
+        with pytest.raises(ValueError, match=r"cov_types\[0\].*'us', 'cs', or 'ar1'"):
+            simulate_re_batch(
+                np.array([1.0]),
+                1.0,
+                [2],
+                [1],
+                [False],
+                1,
+                cov_types=["unknown"],
+            )

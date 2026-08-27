@@ -12,6 +12,13 @@ struct SimulationBlock {
     factor: Mat<f64>,
 }
 
+#[derive(Clone, Copy)]
+enum CovarianceType {
+    Unstructured,
+    CompoundSymmetry,
+    Autoregressive1,
+}
+
 const ZIG_NORM_R: f64 = 3.654_152_885_361_009;
 const ZIG_NORM_X0: f64 = 3.910_757_959_537_09;
 
@@ -102,20 +109,29 @@ fn checked_simulation_sizes(
     n_levels: &[usize],
     n_terms: &[usize],
     correlated: &[bool],
+    covariance_types: &[CovarianceType],
 ) -> PyResult<(usize, usize)> {
-    if n_levels.len() != n_terms.len() || n_levels.len() != correlated.len() {
+    if n_levels.len() != n_terms.len()
+        || n_levels.len() != correlated.len()
+        || n_levels.len() != covariance_types.len()
+    {
         return Err(PyValueError::new_err(format!(
-            "n_levels, n_terms, and correlated must have the same length, got {}, {}, and {}",
+            "n_levels, n_terms, correlated, and cov_types must have the same length, got {}, {}, {}, and {}",
             n_levels.len(),
             n_terms.len(),
-            correlated.len()
+            correlated.len(),
+            covariance_types.len()
         )));
     }
 
     let mut theta_len = 0usize;
     let mut total_dim = 0usize;
-    for (index, ((&levels, &terms), &is_correlated)) in
-        n_levels.iter().zip(n_terms).zip(correlated).enumerate()
+    for (index, (((&levels, &terms), &is_correlated), &covariance_type)) in n_levels
+        .iter()
+        .zip(n_terms)
+        .zip(correlated)
+        .zip(covariance_types)
+        .enumerate()
     {
         if levels == 0 {
             return Err(PyValueError::new_err(format!(
@@ -128,13 +144,15 @@ fn checked_simulation_sizes(
             )));
         }
 
-        let block_theta_len = if is_correlated {
-            terms
+        let block_theta_len = match covariance_type {
+            CovarianceType::CompoundSymmetry | CovarianceType::Autoregressive1 => {
+                Some(if terms > 1 { 2 } else { 1 })
+            }
+            CovarianceType::Unstructured if is_correlated => terms
                 .checked_add(1)
                 .and_then(|next| terms.checked_mul(next))
-                .map(|product| product / 2)
-        } else {
-            Some(terms)
+                .map(|product| product / 2),
+            CovarianceType::Unstructured => Some(terms),
         }
         .ok_or_else(|| PyValueError::new_err("random-effect dimensions are too large"))?;
 
@@ -153,38 +171,140 @@ fn checked_simulation_sizes(
     Ok((theta_len, total_dim))
 }
 
+fn parse_covariance_types(
+    cov_types: Option<Vec<String>>,
+    n_structures: usize,
+) -> PyResult<Vec<CovarianceType>> {
+    let Some(cov_types) = cov_types else {
+        return Ok(vec![CovarianceType::Unstructured; n_structures]);
+    };
+
+    cov_types
+        .into_iter()
+        .enumerate()
+        .map(|(index, covariance_type)| match covariance_type.as_str() {
+            "us" => Ok(CovarianceType::Unstructured),
+            "cs" => Ok(CovarianceType::CompoundSymmetry),
+            "ar1" => Ok(CovarianceType::Autoregressive1),
+            _ => Err(PyValueError::new_err(format!(
+                "cov_types[{index}] must be one of 'us', 'cs', or 'ar1', got '{covariance_type}'"
+            ))),
+        })
+        .collect()
+}
+
+fn structured_correlation_factor(
+    n_terms: usize,
+    rho: f64,
+    covariance_type: CovarianceType,
+) -> PyResult<Mat<f64>> {
+    if n_terms == 1 {
+        return Ok(Mat::identity(1, 1));
+    }
+
+    let lower_bound = match covariance_type {
+        CovarianceType::CompoundSymmetry => -1.0 / (n_terms - 1) as f64,
+        CovarianceType::Autoregressive1 => -1.0,
+        CovarianceType::Unstructured => unreachable!(),
+    };
+    let rho = rho.clamp(lower_bound + 1e-6, 1.0 - 1e-6);
+    let correlation = Mat::from_fn(n_terms, n_terms, |row, column| match covariance_type {
+        CovarianceType::CompoundSymmetry => {
+            if row == column {
+                1.0
+            } else {
+                rho
+            }
+        }
+        CovarianceType::Autoregressive1 => {
+            rho.powi(row.abs_diff(column).try_into().unwrap_or(i32::MAX))
+        }
+        CovarianceType::Unstructured => unreachable!(),
+    });
+
+    let mut factor = Mat::zeros(n_terms, n_terms);
+    for row in 0..n_terms {
+        for column in 0..=row {
+            let mut value = correlation[(row, column)];
+            for index in 0..column {
+                value -= factor[(row, index)] * factor[(column, index)];
+            }
+            if row == column {
+                if !value.is_finite() || value <= 0.0 {
+                    return Err(PyValueError::new_err(
+                        "structured covariance matrix is not positive definite",
+                    ));
+                }
+                factor[(row, column)] = value.sqrt();
+            } else {
+                factor[(row, column)] = value / factor[(column, column)];
+            }
+        }
+    }
+    Ok(factor)
+}
+
 fn build_simulation_blocks(
     theta: &[f64],
     sigma: f64,
     n_levels: &[usize],
     n_terms: &[usize],
     correlated: &[bool],
-) -> Vec<SimulationBlock> {
+    covariance_types: &[CovarianceType],
+) -> PyResult<Vec<SimulationBlock>> {
     let mut blocks = Vec::with_capacity(n_levels.len());
     let mut theta_idx = 0;
 
-    for ((&levels, &q), &is_correlated) in n_levels.iter().zip(n_terms).zip(correlated) {
-        let mut factor = Mat::zeros(q, q);
-        if is_correlated {
-            for i in 0..q {
-                for j in 0..=i {
-                    factor[(i, j)] = theta[theta_idx] * sigma;
-                    theta_idx += 1;
-                }
-            }
-        } else {
-            for i in 0..q {
-                factor[(i, i)] = theta[theta_idx] * sigma;
+    for (((&levels, &q), &is_correlated), &covariance_type) in n_levels
+        .iter()
+        .zip(n_terms)
+        .zip(correlated)
+        .zip(covariance_types)
+    {
+        let factor = match covariance_type {
+            CovarianceType::CompoundSymmetry | CovarianceType::Autoregressive1 => {
+                let relative_scale = theta[theta_idx];
                 theta_idx += 1;
+                let rho = if q > 1 {
+                    let value = theta[theta_idx];
+                    theta_idx += 1;
+                    value
+                } else {
+                    0.0
+                };
+                let mut factor = structured_correlation_factor(q, rho, covariance_type)?;
+                for row in 0..q {
+                    for column in 0..=row {
+                        factor[(row, column)] *= relative_scale * sigma;
+                    }
+                }
+                factor
             }
-        }
+            CovarianceType::Unstructured => {
+                let mut factor = Mat::zeros(q, q);
+                if is_correlated {
+                    for i in 0..q {
+                        for j in 0..=i {
+                            factor[(i, j)] = theta[theta_idx] * sigma;
+                            theta_idx += 1;
+                        }
+                    }
+                } else {
+                    for i in 0..q {
+                        factor[(i, i)] = theta[theta_idx] * sigma;
+                        theta_idx += 1;
+                    }
+                }
+                factor
+            }
+        };
         blocks.push(SimulationBlock {
             n_levels: levels,
             factor,
         });
     }
 
-    blocks
+    Ok(blocks)
 }
 
 fn simulate_re_single(blocks: &[SimulationBlock], rng: &mut impl Rng, u: &mut [f64]) {
@@ -284,7 +404,8 @@ fn simulate_re_batch_impl(
     n_terms,
     correlated,
     n_sim,
-    seed = None
+    seed = None,
+    cov_types = None
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn simulate_re_batch<'py>(
@@ -296,6 +417,7 @@ pub fn simulate_re_batch<'py>(
     correlated: Vec<bool>,
     n_sim: usize,
     seed: Option<u64>,
+    cov_types: Option<Vec<String>>,
 ) -> PyResult<Py<PyArray2<f64>>> {
     if !sigma.is_finite() || sigma < 0.0 {
         return Err(PyValueError::new_err(
@@ -303,8 +425,9 @@ pub fn simulate_re_batch<'py>(
         ));
     }
 
+    let covariance_types = parse_covariance_types(cov_types, n_levels.len())?;
     let (expected_theta_len, total_dim) =
-        checked_simulation_sizes(&n_levels, &n_terms, &correlated)?;
+        checked_simulation_sizes(&n_levels, &n_terms, &correlated, &covariance_types)?;
     let theta = theta.as_slice()?;
     if theta.len() != expected_theta_len {
         return Err(PyValueError::new_err(format!(
@@ -326,7 +449,14 @@ pub fn simulate_re_batch<'py>(
         .checked_mul(total_dim)
         .ok_or_else(|| PyValueError::new_err("simulation output is too large"))?;
 
-    let blocks = build_simulation_blocks(theta, sigma, &n_levels, &n_terms, &correlated);
+    let blocks = build_simulation_blocks(
+        theta,
+        sigma,
+        &n_levels,
+        &n_terms,
+        &correlated,
+        &covariance_types,
+    )?;
     let results = simulate_re_batch_impl(&blocks, total_dim, n_sim, seed);
     let array = Array2::from_shape_vec((n_sim, total_dim), results)
         .map_err(|error| PyValueError::new_err(error.to_string()))?;

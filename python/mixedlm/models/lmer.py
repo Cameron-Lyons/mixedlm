@@ -1814,6 +1814,10 @@ class LmerResult(MerResultMixin):
             correlated,
             nsim,
             seed,
+            cov_types=[
+                getattr(structure, "cov_type", "us")
+                for structure in self.matrices.random_structures
+            ],
         )
 
         Z = self.matrices.Z
@@ -1838,37 +1842,7 @@ class LmerResult(MerResultMixin):
         if re_form == "~0" or re_form == "NA" or not use_re or q == 0:
             random_part = np.zeros(n)
         else:
-            u_new = np.zeros(q, dtype=np.float64)
-            u_idx = 0
-            theta_start = 0
-
-            for struct in self.matrices.random_structures:
-                n_levels = struct.n_levels
-                n_terms = struct.n_terms
-
-                n_theta = n_terms * (n_terms + 1) // 2 if struct.correlated else n_terms
-                theta_block = self.theta[theta_start : theta_start + n_theta]
-
-                if struct.correlated:
-                    L = np.zeros((n_terms, n_terms))
-                    idx = 0
-                    for i in range(n_terms):
-                        for j in range(i + 1):
-                            L[i, j] = theta_block[idx]
-                            idx += 1
-                    cov = L @ L.T * self.sigma**2
-                else:
-                    cov = np.diag(theta_block**2) * self.sigma**2
-
-                for g in range(n_levels):
-                    b_g = np.random.multivariate_normal(np.zeros(n_terms), cov)
-                    for j in range(n_terms):
-                        u_new[u_idx + g * n_terms + j] = b_g[j]
-
-                u_idx += n_levels * n_terms
-                theta_start += n_theta
-
-            random_part = self.matrices.Z @ u_new
+            random_part = self.matrices.Z @ self._simulate_random_effects(self.sigma)
 
         noise = np.random.randn(n) * self.sigma
 

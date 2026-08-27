@@ -323,6 +323,23 @@ class MerResultMixin:
 
             yield struct, cov * scale
 
+    def _simulate_random_effects(self, scale: float = 1.0) -> NDArray[np.float64]:
+        """Draw random effects from each fitted covariance block."""
+        from mixedlm.utils.variance import getL
+
+        level_factors = cast(
+            list[NDArray[np.floating]],
+            getL(self.theta, self.matrices.random_structures, sigma=scale, as_blocks=True),
+        )
+        random_effects = np.empty(self.matrices.n_random, dtype=np.float64)
+        offset = 0
+        for struct, factor in zip(self.matrices.random_structures, level_factors, strict=True):
+            block_size = struct.n_levels * struct.n_terms
+            standard_normal = np.random.standard_normal((struct.n_levels, struct.n_terms))
+            random_effects[offset : offset + block_size] = (standard_normal @ factor.T).ravel()
+            offset += block_size
+        return random_effects
+
     def _is_singular_covariance(self, tol: float = 1e-4) -> bool:
         if not np.isfinite(tol) or tol < 0:
             raise ValueError("tol must be a finite, non-negative number")
