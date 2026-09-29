@@ -121,6 +121,74 @@ def test_independent_variances_use_linear_memory(monkeypatch, target):
         assert actual["cov"] == []
 
 
+@pytest.mark.parametrize("target", ["sdcorr", "varcov", "theta"])
+@pytest.mark.parametrize(
+    ("group_names", "block_names"),
+    [
+        (["group"] * 3, ["group", "group.1", "group.2"]),
+        (["group", "other", "group"], ["group", "other", "group.1"]),
+        (
+            ["group", "group", "group.1", "group"],
+            ["group", "group.2", "group.1", "group.3"],
+        ),
+        (
+            ["group", "group.1", "group", "group.1", "group.1.1", "group"],
+            ["group", "group.1", "group.2", "group.1.2", "group.1.1", "group.3"],
+        ),
+    ],
+)
+def test_repeated_groups_keep_every_block_and_reserve_original_names(
+    target, group_names, block_names
+):
+    structures = [_structure(n_terms=1, group=name) for name in group_names]
+    theta = np.arange(1.0, len(structures) + 1)
+
+    converted = vcconv(theta, structures, sigma=2.0, to=target)
+
+    assert list(converted) == block_names
+    for name, group, value in zip(block_names, group_names, theta, strict=True):
+        expected = {"terms": ["term0"], "grouping_factor": group}
+        if target == "theta":
+            expected["theta"] = [value]
+        elif target == "varcov":
+            expected.update(var=[(2.0 * value) ** 2], cov=[])
+        else:
+            expected.update(sd=[2.0 * value], corr=[])
+        assert converted[name] == expected
+
+
+@pytest.mark.parametrize("target", ["sdcorr", "varcov", "theta"])
+def test_repeated_groups_keep_mixed_covariance_parameter_boundaries(target):
+    structures = [_structure("us"), _structure("cs"), _structure("ar1", n_terms=3)]
+    parameters = [_parameters("us"), _parameters("cs"), _parameters("ar1", 3)]
+    structures.append(_structure(n_terms=3, correlated=False))
+    parameters.append((np.array([-0.4, 0.0, 0.7]), np.diag([0.16, 0.0, 0.49])))
+    theta = np.concatenate([block for block, _ in parameters])
+
+    converted = vcconv(theta, structures, sigma=1.7, to=target)
+
+    assert list(converted) == ["group", "group.1", "group.2", "group.3"]
+    for actual, structure, (block, covariance) in zip(
+        converted.values(), structures, parameters, strict=True
+    ):
+        assert actual["grouping_factor"] == "group"
+        assert actual["terms"] == structure.term_names
+        covariance = covariance * 1.7**2
+        sd = np.sqrt(np.diag(covariance))
+        off_diagonal = np.triu_indices(structure.n_terms, k=1)
+        if target == "theta":
+            assert_array_equal(actual["theta"], block)
+        elif target == "varcov":
+            assert_allclose(actual["var"], np.diag(covariance))
+            assert_allclose(actual["cov"], covariance[off_diagonal] if structure.correlated else [])
+        else:
+            assert_allclose(actual["sd"], sd)
+            expected_corr = (
+                (covariance / np.outer(sd, sd))[off_diagonal] if structure.correlated else []
+            )
+            assert_allclose(actual["corr"], expected_corr)
+
+
 def test_theta_passthrough_avoids_covariance_work_and_returns_owned_lists(monkeypatch):
     from mixedlm.estimation import reml
 

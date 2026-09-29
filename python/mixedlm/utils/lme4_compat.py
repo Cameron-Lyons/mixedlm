@@ -887,8 +887,11 @@ def vcconv(
     Returns
     -------
     dict
-        Dictionary mapping grouping factors to their variance components
-        in the requested parameterization. Off-diagonal values use upper-
+        Dictionary mapping covariance block names to their variance components
+        in the requested parameterization. Repeated grouping factors receive
+        unique suffixes, reserving existing group names. Each entry includes
+        the original ``grouping_factor`` and coefficient names in ``terms``.
+        Off-diagonal values use upper-
         triangular row order: (0, 1), (0, 2), ..., (1, 2), .... Independent
         unstructured terms have empty correlation/covariance lists.
 
@@ -914,7 +917,7 @@ def vcconv(
     VarCorr : Extract variance-covariance from model.
     """
     from mixedlm.estimation.reml import _build_lambda_blocks, _count_theta
-    from mixedlm.utils.variance import cov2sdcor
+    from mixedlm.utils.variance import _covariance_block_names, cov2sdcor
 
     if to not in ("sdcorr", "varcov", "theta"):
         raise ValueError("to must be 'sdcorr', 'varcov', or 'theta'")
@@ -927,19 +930,21 @@ def vcconv(
     if not np.all(np.isfinite(theta)):
         raise ValueError("theta must contain only finite values")
 
+    names = _covariance_block_names(random_structures)
     result: dict[str, dict] = {}
     if to == "theta":
         start = 0
-        for struct, count in zip(random_structures, counts, strict=True):
-            result[struct.grouping_factor] = {
+        for name, struct, count in zip(names, random_structures, counts, strict=True):
+            result[name] = {
                 "theta": theta[start : start + count].tolist(),
                 "terms": list(struct.term_names),
+                "grouping_factor": struct.grouping_factor,
             }
             start += count
         return result
 
     start = 0
-    for struct, count in zip(random_structures, counts, strict=True):
+    for name, struct, count in zip(names, random_structures, counts, strict=True):
         theta_block = theta[start : start + count]
         start += count
         correlated = struct.correlated or getattr(struct, "cov_type", "us") in ("cs", "ar1")
@@ -959,7 +964,11 @@ def vcconv(
             else:
                 sd, corr = cov2sdcor(cov)
                 converted = {"sd": sd.tolist(), "corr": corr[off_diagonal].tolist()}
-        result[struct.grouping_factor] = {**converted, "terms": list(struct.term_names)}
+        result[name] = {
+            **converted,
+            "terms": list(struct.term_names),
+            "grouping_factor": struct.grouping_factor,
+        }
 
     return result
 

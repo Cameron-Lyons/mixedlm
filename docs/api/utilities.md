@@ -183,8 +183,14 @@ components = mlm.vcconv(
 )
 ```
 
-The result maps grouping factors to dictionaries containing coefficient names
-(`terms`) and the requested values. Covariance and correlation lists use
+The result maps covariance block names to dictionaries containing coefficient
+names (`terms`), the original `grouping_factor`, and the requested values.
+Repeated grouping factors receive unique names such as `group` and `group.1`,
+so each random-effect term is retained. Existing grouping-factor names are
+reserved: if the data also contains a group named `group.1`, the second block
+for `group` is named `group.2`.
+
+Covariance and correlation lists use
 upper-triangular row order: `(0, 1), (0, 2), ..., (1, 2), ...`. Independent terms
 have empty off-diagonal lists. Returning `theta` preserves the fitted parameter
 layout and does not apply `sigma`.
