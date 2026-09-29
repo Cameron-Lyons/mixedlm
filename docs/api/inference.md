@@ -210,6 +210,11 @@ print(mlm.anova_type3(model))
 
 ## Degrees of Freedom
 
+Fixed-effect information projections use sparse random-effect precision solves
+for systems with at least 256 random coefficients. This avoids constructing a
+dense random-effect precision matrix for each information perturbation. Smaller
+systems retain dense Cholesky solves.
+
 ### satterthwaite_df
 
 Compute Satterthwaite denominator degrees of freedom.

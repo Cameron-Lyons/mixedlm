@@ -8,6 +8,8 @@ import numpy as np
 from numpy.typing import NDArray
 from scipy import linalg, sparse
 
+from mixedlm.models.shared_utils import _RandomEffectFactor
+
 if TYPE_CHECKING:
     from mixedlm.models.lmer import LmerResult
 
@@ -89,17 +91,10 @@ def _xt_vinv_x_from_theta(
     Lambda = _build_lambda(theta, result.matrices.random_structures)
     lambdat_ztz_lambda = Lambda.T @ crossproducts.ZtWZ @ Lambda
     v_factor = lambdat_ztz_lambda + sparse.eye(q, format="csc")
-    v_factor_dense = v_factor.toarray() if sparse.issparse(v_factor) else v_factor
-
-    try:
-        chol = linalg.cholesky(v_factor_dense, lower=True)
-    except linalg.LinAlgError:
-        v_factor_dense += _CHOLESKY_REGULARIZATION * np.eye(q, dtype=np.float64)
-        chol = linalg.cholesky(v_factor_dense, lower=True)
+    factor = _RandomEffectFactor(v_factor, jitter=_CHOLESKY_REGULARIZATION)
 
     lambdat_ztx = Lambda.T @ crossproducts.ZtWX
-    rzx = linalg.solve_triangular(chol, lambdat_ztx, lower=True)
-    information = crossproducts.XtWX - rzx.T @ rzx
+    information = crossproducts.XtWX - factor.crossproduct(lambdat_ztx)
     return (information + information.T) / (2.0 * residual_scale**2)
 
 

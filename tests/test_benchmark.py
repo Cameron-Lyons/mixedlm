@@ -480,3 +480,35 @@ def test_benchmark_large_fixed_effect_profile(benchmark, dimension):
 
     assert actual.zeta.shape == ((9,) if dimension == 1 else (9, 9))
     assert np.all(np.isfinite(actual.zeta))
+
+
+@pytest.mark.benchmark(group="ddf-information")
+@pytest.mark.parametrize("cached", [False, True])
+def test_benchmark_large_ddf_information(benchmark, large_crossed_sparse_data, cached):
+    from mixedlm.inference.ddf import _weighted_crossproducts, _xt_vinv_x_from_theta
+    from mixedlm.models.lmer import LmerResult
+
+    formula = parse_formula("y ~ x + (1 | group1) + (1 | group2)")
+    matrices = build_model_matrices(
+        formula,
+        large_crossed_sparse_data,
+        weights=np.linspace(0.4, 2.0, len(large_crossed_sparse_data)),
+    )
+    result = LmerResult(
+        formula=formula,
+        matrices=matrices,
+        theta=np.array([0.8, 0.5]),
+        beta=np.array([0.2, 0.1]),
+        sigma=0.7,
+        u=np.zeros(matrices.n_random),
+        deviance=0.0,
+        REML=True,
+        converged=True,
+        n_iter=0,
+    )
+    expected = np.linalg.inv(result.vcov())
+    crossproducts = _weighted_crossproducts(result) if cached else None
+
+    actual = benchmark(_xt_vinv_x_from_theta, result, result.theta, crossproducts)
+
+    np.testing.assert_allclose(actual, expected, rtol=1e-12, atol=1e-12)

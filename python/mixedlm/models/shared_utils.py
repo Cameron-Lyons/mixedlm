@@ -65,6 +65,13 @@ class _RandomEffectFactor:
         factor = self.solve if self._sparse_factor is not None else self.cholesky
         return sparse_quadratic_form_diagonal(design, factor)
 
+    def crossproduct(self, rhs: NDArray[np.floating]) -> NDArray[np.float64]:
+        """Return B.T C^-1 B, using only a forward solve for dense factors."""
+        if self._sparse_factor is not None:
+            return rhs.T @ self.solve(rhs)
+        whitened = linalg.solve_triangular(self.cholesky, rhs, lower=True)
+        return whitened.T @ whitened
+
     def solve_with_crossproduct(
         self, rhs: NDArray[np.floating]
     ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
