@@ -157,12 +157,37 @@ sd, corr = mlm.cov2sdcor(cov)
 
 ### Vv_to_Cv / Cv_to_Vv
 
-Convert between variance vector and Cholesky factor.
+Convert between a relative Cholesky factor (`theta`) and a covariance matrix,
+both stored as lower-triangular vectors in row order. Supply the number of random
+coefficients as `q` and the fitted residual scale as `sigma`.
 
 ```python
-cv = mlm.Vv_to_Cv(variance_vector)
-vv = mlm.Cv_to_Vv(cholesky_vector)
+theta = np.array([1.0, 0.2, 0.8])  # L[0, 0], L[1, 0], L[1, 1]
+cv = mlm.Vv_to_Cv(theta, q=2, sigma=1.5)
+theta_back = mlm.Cv_to_Vv(cv, q=2, sigma=1.5)
 ```
+
+### vcconv
+
+Report fitted variance parameters as standard deviations and correlations
+(`to="sdcorr"`), variances and covariances (`to="varcov"`), or the original
+parameters (`to="theta"`). This supports unstructured, independent,
+compound-symmetry, and AR(1) random effects.
+
+```python
+components = mlm.vcconv(
+    result.theta,
+    result.matrices.random_structures,
+    sigma=result.sigma,  # Use 1.0 for a GLMM.
+    to="varcov",
+)
+```
+
+The result maps grouping factors to dictionaries containing coefficient names
+(`terms`) and the requested values. Covariance and correlation lists use
+upper-triangular row order: `(0, 1), (0, 2), ..., (1, 2), ...`. Independent terms
+have empty off-diagonal lists. Returning `theta` preserves the fitted parameter
+layout and does not apply `sigma`.
 
 ## EM-REML Initialization
 

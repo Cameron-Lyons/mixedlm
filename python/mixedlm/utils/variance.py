@@ -517,7 +517,8 @@ def vec2STlist(
     """Convert a vector to a list of lower-triangular matrices.
 
     Each dimension specifies the size of a lower-triangular matrix.
-    The vector contains the lower-triangular elements in column-major order.
+    The vector contains the lower-triangular elements in row order, matching
+    fitted theta parameters: L[0, 0], L[1, 0], L[1, 1], L[2, 0], ....
 
     Parameters
     ----------
