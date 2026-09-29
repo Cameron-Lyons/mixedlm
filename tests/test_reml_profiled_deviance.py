@@ -98,7 +98,13 @@ def _direct_profiled_likelihood(
 
 
 @pytest.mark.parametrize("reml", [False, True])
-def test_profiled_core_matches_direct_marginal_likelihood(reml: bool) -> None:
+@pytest.mark.parametrize("sparse_profile", [False, True])
+def test_profiled_core_matches_direct_marginal_likelihood(
+    reml: bool, sparse_profile: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "mixedlm.estimation.reml._SPARSE_PROFILE_MIN_RANDOM", 0 if sparse_profile else 256
+    )
     matrices = _weighted_random_slope_matrices()
     theta = np.array([0.8, 0.15, 0.45])
 
@@ -118,7 +124,13 @@ def test_profiled_core_matches_direct_marginal_likelihood(reml: bool) -> None:
 
 @pytest.mark.parametrize("reml", [False, True])
 @pytest.mark.parametrize("cov_type", ["us", "cs", "ar1", "diagonal"])
-def test_cached_optimizer_matches_direct_likelihood(reml: bool, cov_type: str) -> None:
+@pytest.mark.parametrize("sparse_profile", [False, True])
+def test_cached_optimizer_matches_direct_likelihood(
+    reml: bool, cov_type: str, sparse_profile: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "mixedlm.estimation.reml._SPARSE_PROFILE_MIN_RANDOM", 0 if sparse_profile else 256
+    )
     matrices = _weighted_random_slope_matrices()
     structure = matrices.random_structures[0]
     if cov_type == "diagonal":

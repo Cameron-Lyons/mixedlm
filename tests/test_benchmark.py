@@ -240,6 +240,20 @@ def test_benchmark_large_crossed_sparse_adaptive_start(benchmark, large_crossed_
     assert theta.shape == (2,)
 
 
+@pytest.mark.benchmark(group="sparse-likelihood")
+def test_benchmark_sparse_python_likelihood(benchmark, large_crossed_sparse_data):
+    formula = parse_formula("y ~ x + (1 | group1) + (1 | group2)")
+    matrices = build_model_matrices(formula, large_crossed_sparse_data)
+    optimizer = LMMOptimizer(matrices, use_rust=False)
+    theta = np.array([0.8, 0.5])
+    expected = optimizer.objective(theta)
+
+    actual = benchmark(optimizer.objective, theta)
+
+    assert np.isfinite(actual)
+    assert actual == pytest.approx(expected)
+
+
 @pytest.mark.benchmark(group="covariance-conversion")
 def test_benchmark_sdcor2cov(benchmark, covariance_data):
     sd, corr, expected = covariance_data
