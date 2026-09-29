@@ -356,6 +356,9 @@ pre-commit run --all-files
 
 The project uses GitHub Actions for continuous integration:
 
+Pull-request checks run for every target branch, including feature branches used
+for stacked changes. Push-triggered checks run on `main`.
+
 - **Linting**: ruff, clippy, rustfmt
 - **Type checking**: mypy
 - **Testing**: pytest across Python 3.10-3.13, plus free-threaded 3.14t
