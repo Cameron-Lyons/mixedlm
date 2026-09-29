@@ -8,7 +8,7 @@ from mixedlm._rust import (
     sparse_cholesky_logdet,
     sparse_cholesky_solve,
 )
-from mixedlm.estimation.reml import LMMOptimizer
+from mixedlm.estimation.reml import LMMOptimizer, profiled_deviance
 from mixedlm.formula.parser import parse_formula
 from mixedlm.matrices.design import build_model_matrices
 from mixedlm.utils.variance import cov2sdcor, sdcor2cov
@@ -150,6 +150,23 @@ def test_benchmark_lmer_large_data(benchmark, large_data):
         return lmer("y ~ x + (1 | group)", data=large_data)
 
     benchmark(fit_model)
+
+
+@pytest.mark.benchmark(group="lmm-crossproducts")
+@pytest.mark.parametrize("cached", [False, True], ids=["uncached", "cached"])
+def test_benchmark_python_lmm_objective(benchmark, large_data, cached):
+    matrices = build_model_matrices(parse_formula("y ~ x + (1 | group)"), large_data)
+    theta = np.array([1.0])
+    optimizer = LMMOptimizer(matrices, use_rust=False)
+    expected = profiled_deviance(theta, matrices)
+    optimizer.objective(theta)
+
+    if cached:
+        result = benchmark(optimizer.objective, theta)
+    else:
+        result = benchmark(profiled_deviance, theta, matrices)
+
+    assert result == pytest.approx(expected, abs=1e-10)
 
 
 @pytest.mark.benchmark(group="sparse-design")

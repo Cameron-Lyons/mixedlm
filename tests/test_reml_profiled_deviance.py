@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import numpy as np
 import pandas as pd
 import pytest
 from mixedlm import lmer
 from mixedlm.estimation.reml import (
     _HAS_RUST,
+    LMMOptimizer,
     _build_lambda,
     _profiled_deviance_core,
     profiled_deviance,
@@ -111,6 +114,84 @@ def test_profiled_core_matches_direct_marginal_likelihood(reml: bool) -> None:
     assert result.ussq == pytest.approx(expected["ussq"], abs=1e-12)
     assert result.pwrss == pytest.approx(expected["pwrss"], abs=1e-12)
     assert result.pwrss == pytest.approx(result.wrss + result.ussq, abs=1e-12)
+
+
+@pytest.mark.parametrize("reml", [False, True])
+@pytest.mark.parametrize("cov_type", ["us", "cs", "ar1", "diagonal"])
+def test_cached_optimizer_matches_direct_likelihood(reml: bool, cov_type: str) -> None:
+    matrices = _weighted_random_slope_matrices()
+    structure = matrices.random_structures[0]
+    if cov_type == "diagonal":
+        structure.correlated = False
+        theta_values = ([0.8, 0.45], [0.0, 0.6], [1.2, 0.0])
+    elif cov_type in ("cs", "ar1"):
+        structure.cov_type = cov_type
+        theta_values = ([0.8, -0.25], [0.0, 0.4], [1.2, 0.6])
+    else:
+        theta_values = ([0.8, 0.15, 0.45], [0.0, 0.0, 0.6], [1.2, -0.3, 0.0])
+    optimizer = LMMOptimizer(matrices, REML=reml, use_rust=False)
+
+    for values in (*theta_values, theta_values[0]):
+        theta = np.array(values)
+        expected = _direct_profiled_likelihood(theta, matrices, reml)
+        assert optimizer.objective(theta) == pytest.approx(expected["deviance"], abs=1e-10)
+        beta, sigma, u = optimizer._extract_estimates(theta)
+        assert_allclose(beta, expected["beta"], atol=1e-12)
+        assert sigma == pytest.approx(expected["sigma"], abs=1e-12)
+        assert_allclose(u, expected["u"], atol=1e-12)
+
+
+def test_optimizer_reuses_weighted_products(monkeypatch: pytest.MonkeyPatch) -> None:
+    from mixedlm.estimation import reml
+
+    matrices = _weighted_random_slope_matrices()
+    optimizer = LMMOptimizer(matrices, use_rust=False)
+    theta = np.array([0.8, 0.15, 0.45])
+    expected = optimizer.objective(theta)
+
+    def reject_recomputation(*args, **kwargs):
+        raise AssertionError("weighted products must be reused across parameter evaluations")
+
+    monkeypatch.setattr(reml._LMMCrossproducts, "from_matrices", reject_recomputation)
+    theta[0] = 1.2
+    assert optimizer.objective(theta) != pytest.approx(expected)
+    theta[0] = 0.8
+    assert optimizer.objective(theta) == expected
+    optimizer._extract_estimates(theta)
+
+
+def test_new_optimizer_uses_updated_response_and_weights() -> None:
+    matrices = _weighted_random_slope_matrices()
+    theta = np.array([0.8, 0.15, 0.45])
+    original = LMMOptimizer(matrices, use_rust=False).objective(theta)
+    updated = replace(
+        matrices,
+        y=matrices.y + np.linspace(-0.4, 0.9, matrices.n_obs),
+        weights=matrices.weights[::-1].copy(),
+        offset=matrices.offset * 2.0,
+    )
+    actual = LMMOptimizer(updated, use_rust=False).objective(theta)
+    expected = _direct_profiled_likelihood(theta, updated, reml=True)
+
+    assert actual != pytest.approx(original)
+    assert actual == pytest.approx(expected["deviance"], abs=1e-10)
+
+
+@pytest.mark.parametrize("reml", [False, True])
+def test_fixed_only_optimizer_matches_uncached_deviance(reml: bool) -> None:
+    from scipy import sparse
+
+    matrices = _weighted_random_slope_matrices()
+    matrices = replace(
+        matrices,
+        Z=sparse.csc_matrix((matrices.n_obs, 0)),
+        n_random=0,
+        random_structures=[],
+    )
+    optimizer = LMMOptimizer(matrices, REML=reml, use_rust=False)
+    theta = np.array([])
+
+    assert optimizer.objective(theta) == profiled_deviance(theta, matrices, REML=reml)
 
 
 @pytest.mark.skipif(not _HAS_RUST, reason="Rust extension not available")
