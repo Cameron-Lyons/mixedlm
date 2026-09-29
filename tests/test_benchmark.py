@@ -397,3 +397,40 @@ def test_benchmark_large_leverage(benchmark, large_crossed_sparse_data, kind):
 
     assert values.shape == (len(large_crossed_sparse_data),)
     assert np.all((values >= 0) & (values < 1))
+
+
+@pytest.mark.benchmark(group="result-projection")
+@pytest.mark.parametrize("kind", ["lmm", "glmm"])
+def test_benchmark_large_result_covariance(benchmark, kind):
+    from dataclasses import replace
+
+    from mixedlm.families import Poisson
+    from mixedlm.models.glmer import GlmerResult
+    from mixedlm.models.lmer import LmerResult
+
+    n_groups = 2_048
+    n_obs = 4 * n_groups
+    data = pd.DataFrame({"y": np.ones(n_obs), "group": np.arange(n_obs) % n_groups})
+    formula = parse_formula("y ~ 1 + (1 | group)")
+    matrices = build_model_matrices(formula, data)
+    common = dict(
+        formula=formula,
+        matrices=matrices,
+        theta=np.array([0.8]),
+        beta=np.array([0.3]),
+        u=np.zeros(n_groups),
+        deviance=0.0,
+        converged=True,
+        n_iter=0,
+    )
+    result = (
+        LmerResult(**common, sigma=0.7, REML=True)
+        if kind == "lmm"
+        else GlmerResult(**common, family=Poisson(), nAGQ=1)
+    )
+    actual = benchmark(lambda: replace(result).vcov())
+
+    weight = 1.0 if kind == "lmm" else np.exp(0.3)
+    scale = 0.7**2 if kind == "lmm" else 1.0
+    expected = scale * (1.0 + 4 * weight * 0.8**2) / (n_obs * weight)
+    np.testing.assert_allclose(actual, [[expected]])

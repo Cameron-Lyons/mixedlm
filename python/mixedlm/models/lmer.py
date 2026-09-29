@@ -24,7 +24,7 @@ from mixedlm.models.lmer_types import (
     VarCorrGroup,
 )
 from mixedlm.models.result_mixin import MerResultMixin
-from mixedlm.models.shared_utils import sparse_quadratic_form_diagonal, symmetric_inverse
+from mixedlm.models.shared_utils import _RandomEffectFactor, symmetric_inverse
 from mixedlm.utils import _format_pvalue, _get_signif_code
 
 
@@ -36,9 +36,20 @@ class _WeightedProjection:
     weighted_X: NDArray[np.float64]
     weighted_Z: sparse.csc_matrix
     lambda_matrix: sparse.csc_matrix | None
-    L_V: NDArray[np.float64] | None
-    RZX: NDArray[np.float64]
+    random_factor: _RandomEffectFactor | None
+    spherical_cross: NDArray[np.float64]
+    random_fixed_map: NDArray[np.float64]
     XtVinvX: NDArray[np.float64]
+
+    @property
+    def L_V(self) -> NDArray[np.float64] | None:
+        return self.random_factor.cholesky if self.random_factor is not None else None
+
+    @cached_property
+    def RZX(self) -> NDArray[np.float64]:
+        if self.L_V is None:
+            return self.spherical_cross.copy()
+        return linalg.solve_triangular(self.L_V, self.spherical_cross, lower=True)
 
 
 @dataclass
@@ -138,19 +149,21 @@ class LmerResult(MerResultMixin):
                 weighted_X=weighted_X,
                 weighted_Z=weighted_Z,
                 lambda_matrix=None,
-                L_V=None,
-                RZX=np.zeros((0, self.matrices.n_fixed), dtype=np.float64),
+                random_factor=None,
+                spherical_cross=np.zeros((0, self.matrices.n_fixed), dtype=np.float64),
+                random_fixed_map=np.zeros((0, self.matrices.n_fixed), dtype=np.float64),
                 XtVinvX=np.asarray(information, dtype=np.float64),
             )
 
         lambda_matrix = _build_lambda(self.theta, self.matrices.random_structures)
         ZtWZ = weighted_Z.T @ weighted_Z
         V_factor = lambda_matrix.T @ ZtWZ @ lambda_matrix + sparse.eye(q, format="csc")
-        L_V = linalg.cholesky(V_factor.toarray(), lower=True)
+        random_factor = _RandomEffectFactor(V_factor)
 
         ZtWX = weighted_Z.T @ weighted_X
-        RZX = linalg.solve_triangular(L_V, lambda_matrix.T @ ZtWX, lower=True)
-        information = weighted_X.T @ weighted_X - RZX.T @ RZX
+        spherical_cross = np.asarray(lambda_matrix.T @ ZtWX)
+        random_fixed_map, correction = random_factor.solve_with_crossproduct(spherical_cross)
+        information = weighted_X.T @ weighted_X - correction
         information = (information + information.T) / 2.0
 
         return _WeightedProjection(
@@ -158,8 +171,9 @@ class LmerResult(MerResultMixin):
             weighted_X=weighted_X,
             weighted_Z=weighted_Z,
             lambda_matrix=lambda_matrix,
-            L_V=L_V,
-            RZX=np.asarray(RZX, dtype=np.float64),
+            random_factor=random_factor,
+            spherical_cross=spherical_cross,
+            random_fixed_map=random_fixed_map,
             XtVinvX=np.asarray(information, dtype=np.float64),
         )
 
@@ -526,14 +540,13 @@ class LmerResult(MerResultMixin):
             )
 
         projection = self._weighted_projection
-        assert projection.lambda_matrix is not None and projection.L_V is not None
-        beta_adjustment = linalg.solve_triangular(projection.L_V.T, projection.RZX, lower=False)
+        assert projection.lambda_matrix is not None and projection.random_factor is not None
         vcov_beta = self.vcov()
 
         transformed_Z = (Z_pred @ projection.lambda_matrix).tocsr()
-        adjusted_X = X - np.asarray(transformed_Z @ beta_adjustment)
+        adjusted_X = X - np.asarray(transformed_Z @ projection.random_fixed_map)
         var_fixed = np.sum((adjusted_X @ vcov_beta) * adjusted_X, axis=1)
-        var_random = self._conditional_random_prediction_variance(transformed_Z, projection.L_V)
+        var_random = self.sigma**2 * projection.random_factor.quadratic_diagonal(transformed_Z)
 
         return np.maximum(var_fixed + var_random + prior_var, 0.0)
 
@@ -645,14 +658,6 @@ class LmerResult(MerResultMixin):
         )
         return aligned, prior_var
 
-    def _conditional_random_prediction_variance(
-        self,
-        transformed_Z: sparse.csr_matrix,
-        L_V: NDArray[np.floating],
-    ) -> NDArray[np.floating]:
-        """Evaluate diagonal quadratic forms without materializing an n-by-q matrix."""
-        return self.sigma**2 * sparse_quadratic_form_diagonal(transformed_Z, L_V)
-
     def vcov(self) -> NDArray[np.floating]:
         information_inv = symmetric_inverse(self._weighted_projection.XtVinvX)
         return self.sigma**2 * information_inv
@@ -666,11 +671,10 @@ class LmerResult(MerResultMixin):
             projected_X = projection.weighted_X
             h_random = np.zeros(self.matrices.n_obs, dtype=np.float64)
         else:
-            assert projection.L_V is not None
+            assert projection.random_factor is not None
             B = projection.weighted_Z @ projection.lambda_matrix
-            h_random = sparse_quadratic_form_diagonal(B, projection.L_V)
-            V_inv_BtX = linalg.solve_triangular(projection.L_V.T, projection.RZX, lower=False)
-            projected_X = projection.weighted_X - B @ V_inv_BtX
+            h_random = projection.random_factor.quadratic_diagonal(B)
+            projected_X = projection.weighted_X - B @ projection.random_fixed_map
 
         h_fixed = np.einsum("ij,ij->i", projected_X @ information_inv, projected_X)
         return np.clip(h_fixed + h_random, 0, 1 - 1e-10)
