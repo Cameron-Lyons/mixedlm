@@ -654,6 +654,8 @@ class LmerResult(MerResultMixin):
         return self.sigma**2 * sparse_quadratic_form_diagonal(transformed_Z, L_V)
 
     def vcov(self) -> NDArray[np.floating]:
+        if self.matrices.n_fixed == 0:
+            return np.empty((0, 0), dtype=np.float64)
         information_inv = symmetric_inverse(self._weighted_projection.XtVinvX)
         return self.sigma**2 * information_inv
 
@@ -718,11 +720,15 @@ class LmerResult(MerResultMixin):
 
         A common rule of thumb is that observations with D_i > 4/n or D_i > 1
         may be influential and warrant further investigation.
+        Models without fixed effects return NaN because this normalization
+        divides by the number of fixed-effect parameters.
         """
+        p = self.matrices.n_fixed
+        if p == 0:
+            return np.full(self.matrices.n_obs, np.nan)
         h = self.hatvalues()
         resid = self.residuals(type="response", na_expand=False)
         weighted_resid = np.sqrt(self.matrices.weights) * resid
-        p = self.matrices.n_fixed
 
         h = np.clip(h, 0, 1 - 1e-10)
 

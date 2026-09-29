@@ -241,8 +241,7 @@ def build_fixed_matrix(
     names.extend(term_names)
 
     if not columns:
-        columns.append(np.ones(n, dtype=np.float64))
-        names.append("(Intercept)")
+        return np.empty((n, 0), dtype=np.float64), names
 
     X = np.column_stack(columns)
     return X, names
