@@ -299,6 +299,15 @@ em = mlm.emmeans(model, "treatment", type="response")
 
 **Returns:** Emmeans object
 
+Reference grids are evaluated in batches so averaging over many combinations
+of other factors does not require keeping the complete grid and design matrix
+in memory. All combinations still contribute with equal weight, using the
+fitted categorical encoding. Memory for the returned grid and its coefficient
+matrix scales with the number of requested means. Splitting a large average
+across batches can change floating-point rounding slightly.
+
+Pass `specs=[]` to return a single overall mean, averaged over all factor levels.
+
 **Methods on Emmeans object:**
 
 - `pairs(adjust="tukey")`: Compute all pairwise comparisons

@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 import pytest
-from mixedlm import lmer
+from mixedlm import emmeans, lmer
 from mixedlm._rust import (
     SparseCholeskySymbolic,
     simulate_re_batch,
@@ -397,3 +397,43 @@ def test_benchmark_large_leverage(benchmark, large_crossed_sparse_data, kind):
 
     assert values.shape == (len(large_crossed_sparse_data),)
     assert np.all((values >= 0) & (values < 1))
+
+
+@pytest.mark.benchmark(group="marginal-reference-grid")
+def test_benchmark_streamed_marginal_reference_grid(benchmark):
+    from mixedlm.models.lmer import LmerResult
+
+    rng = np.random.default_rng(713)
+    n_rows = 500
+    data = pd.DataFrame({f"f{i}": rng.integers(0, 7, n_rows).astype(str) for i in range(6)})
+    for name in data:
+        data[name] = pd.Categorical(data[name], categories=list(map(str, range(7))))
+    data["treatment"] = pd.Categorical(np.resize(["C", "A", "B"], n_rows))
+    data["g"] = np.arange(n_rows) % 8
+    data["y"] = rng.normal(size=n_rows)
+    formula = parse_formula(
+        "y ~ treatment + " + " + ".join(f"f{i}" for i in range(6)) + " + (1 | g)"
+    )
+    matrices = build_model_matrices(formula, data)
+    model = LmerResult(
+        formula=formula,
+        matrices=matrices,
+        theta=np.array([0.5]),
+        beta=np.linspace(-0.3, 0.4, matrices.n_fixed),
+        u=np.zeros(matrices.n_random),
+        sigma=0.8,
+        REML=True,
+        deviance=0.0,
+        converged=True,
+        n_iter=0,
+    )
+    model.vcov()
+
+    result = benchmark(emmeans, model, "treatment")
+
+    # Cycling all nuisance factors together gives the same equal-weight mean
+    # for this additive model without constructing the full 3 * 7**6 grid.
+    reference = pd.DataFrame({f"f{i}": list(map(str, range(7))) * 3 for i in range(6)})
+    reference["treatment"] = np.repeat(["A", "B", "C"], 7)
+    expected = model.predict(reference, re_form="~0").reshape(3, 7).mean(axis=1)
+    np.testing.assert_allclose(result.result.emmean, expected, rtol=1e-12, atol=1e-12)

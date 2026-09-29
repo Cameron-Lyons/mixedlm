@@ -3,6 +3,7 @@ from __future__ import annotations
 import itertools
 from collections.abc import Callable
 from dataclasses import dataclass
+from math import prod
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -13,6 +14,58 @@ from scipy import stats
 if TYPE_CHECKING:
     from mixedlm.models.glmer import GlmerResult
     from mixedlm.models.lmer import LmerResult
+
+_MAX_REFERENCE_GRID_ELEMENTS = 1_000_000
+
+
+def _marginal_mean_coefficients(
+    model: LmerResult | GlmerResult,
+    result_names: list[str],
+    levels: dict[str, list[Any]],
+) -> tuple[NDArray[np.float64], pd.DataFrame]:
+    """Average the fitted design over reference dimensions in bounded batches."""
+    averaged_names = [name for name in levels if name not in result_names]
+    all_names = result_names + averaged_names
+    result_grid = pd.DataFrame(
+        itertools.product(*(levels[name] for name in result_names)), columns=result_names
+    )
+    n_results = len(result_grid)
+    n_averaged = prod(len(levels[name]) for name in averaged_names)
+    n_beta = len(model.beta)
+    coefficients = np.empty((n_results, n_beta), dtype=np.float64)
+    if n_results == 0 or n_averaged == 0:
+        coefficients.fill(np.nan)
+        return coefficients, result_grid
+
+    batch_rows = max(1, _MAX_REFERENCE_GRID_ELEMENTS // max(1, len(all_names), n_beta))
+    combinations = itertools.product(*(levels[name] for name in all_names))
+
+    if n_averaged <= batch_rows:
+        # Keep each mean's reference rows together whenever they fit in a batch.
+        results_per_batch = batch_rows // n_averaged
+        for start in range(0, n_results, results_per_batch):
+            count = min(results_per_batch, n_results - start)
+            grid = pd.DataFrame(
+                itertools.islice(combinations, count * n_averaged), columns=all_names
+            )
+            design = model._prediction_fixed_matrix(grid)
+            coefficients[start : start + count] = design.reshape(count, n_averaged, n_beta).mean(
+                axis=1
+            )
+            del grid, design
+    else:
+        # A single mean can span a large Cartesian product of nuisance levels.
+        for result_index in range(n_results):
+            total = np.zeros(n_beta, dtype=np.float64)
+            for start in range(0, n_averaged, batch_rows):
+                count = min(batch_rows, n_averaged - start)
+                grid = pd.DataFrame(itertools.islice(combinations, count), columns=all_names)
+                design = model._prediction_fixed_matrix(grid)
+                total += design.sum(axis=0)
+                del grid, design
+            coefficients[result_index] = total / n_averaged
+
+    return coefficients, result_grid
 
 
 def _rowwise_quadratic_form(
@@ -343,43 +396,8 @@ def emmeans(
 
     spec_levels = [factor_vars[spec] for spec in specs]
 
-    other_factors = {k: v for k, v in factor_vars.items() if k not in specs}
-
-    if other_factors:
-        all_vars = specs + list(other_factors.keys())
-        all_levels = spec_levels + list(other_factors.values())
-    else:
-        all_vars = specs
-        all_levels = spec_levels
-
-    grid_data: dict[str, list[Any]] = {var: [] for var in all_vars}
-    for cov_var in covariate_vars:
-        grid_data[cov_var] = []
-
-    combinations = list(itertools.product(*all_levels))
-    for combo in combinations:
-        for i, var in enumerate(all_vars):
-            grid_data[var].append(combo[i])
-        for cov_var, cov_val in covariate_vars.items():
-            grid_data[cov_var].append(cov_val)
-
-    grid = pd.DataFrame(grid_data)
-
-    X_grid = model._prediction_fixed_matrix(grid)
-
-    spec_combinations = list(itertools.product(*spec_levels))
-    n_emmeans = len(spec_combinations)
-    n_beta = len(beta)
-
-    L = np.zeros((n_emmeans, n_beta), dtype=np.float64)
-
-    for i, spec_combo in enumerate(spec_combinations):
-        mask = np.ones(len(grid), dtype=bool)
-        for j, spec in enumerate(specs):
-            mask &= grid[spec] == spec_combo[j]
-
-        X_subset = X_grid[mask]
-        L[i] = X_subset.mean(axis=0)
+    reference_levels = {**factor_vars, **{var: [value] for var, value in covariate_vars.items()}}
+    L, result_grid = _marginal_mean_coefficients(model, specs, reference_levels)
 
     em_values = L @ beta
     var_em = _rowwise_quadratic_form(L, vcov)
@@ -409,12 +427,6 @@ def emmeans(
         em_values = mu
         lower = np.minimum(lower_response, upper_response)
         upper = np.maximum(lower_response, upper_response)
-
-    result_grid_data: dict[str, list[Any]] = {spec: [] for spec in specs}
-    for spec_combo in spec_combinations:
-        for j, spec in enumerate(specs):
-            result_grid_data[spec].append(spec_combo[j])
-    result_grid = pd.DataFrame(result_grid_data)
 
     result = EmmeanResult(
         emmean=em_values,
