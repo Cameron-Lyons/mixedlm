@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import itertools
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
+from math import prod
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 from scipy import stats
+
+from mixedlm.utils.dataframe import get_categories, get_column_numpy, is_categorical_or_string
 
 if TYPE_CHECKING:
     from mixedlm.models.glmer import GlmerResult
@@ -76,6 +79,7 @@ class ContrastResult:
     t_ratio: NDArray[np.floating]
     p_value: NDArray[np.floating]
     adjust: str
+    grid: pd.DataFrame | None = None
 
     def __str__(self) -> str:
         lines = []
@@ -115,12 +119,50 @@ class Emmeans:
     _df: float
     _specs: list[str]
     _levels: list[list[Any]]
+    _by: list[str] = field(default_factory=list)
+
+    def _grouped_contrasts(self, compute: Callable[[Emmeans], ContrastResult]) -> ContrastResult:
+        """Compare means and adjust p-values independently within each by group."""
+        results: list[ContrastResult] = []
+        grids: list[pd.DataFrame] = []
+        labels: list[str] = []
+        groups = self.result.grid.groupby(self._by, sort=False, observed=True, dropna=False)
+        for indices in groups.indices.values():
+            grid = self.result.grid.iloc[indices].reset_index(drop=True)
+            subset = replace(
+                self.result,
+                emmean=self.result.emmean[indices],
+                se=self.result.se[indices],
+                lower=self.result.lower[indices],
+                upper=self.result.upper[indices],
+                grid=grid,
+            )
+            means = replace(self, result=subset, _L=self._L[indices], _by=[])
+            result = compute(means)
+            values = {name: grid[name].iloc[0] for name in self._by}
+            description = ", ".join(f"{name}={value}" for name, value in values.items())
+            labels.extend(f"{label} | {description}" for label in result.contrast)
+            grids.append(pd.DataFrame([values] * len(result.contrast), columns=self._by))
+            results.append(result)
+
+        return ContrastResult(
+            contrast=labels,
+            estimate=np.concatenate([result.estimate for result in results]),
+            se=np.concatenate([result.se for result in results]),
+            df=self._df,
+            t_ratio=np.concatenate([result.t_ratio for result in results]),
+            p_value=np.concatenate([result.p_value for result in results]),
+            adjust=results[0].adjust,
+            grid=pd.concat(grids, ignore_index=True),
+        )
 
     def pairs(
         self,
         adjust: str = "tukey",
         level: float = 0.95,
     ) -> ContrastResult:
+        if self._by:
+            return self._grouped_contrasts(lambda means: means.pairs(adjust=adjust, level=level))
         n_levels = len(self.result.emmean)
         if n_levels < 2:
             raise ValueError("Need at least 2 levels for pairwise comparisons")
@@ -130,7 +172,7 @@ class Emmeans:
             parts = []
             for spec in self._specs:
                 parts.append(str(self.result.grid.iloc[i][spec]))
-            grid_labels.append(",".join(parts) if len(parts) > 1 else parts[0])
+            grid_labels.append(",".join(parts))
 
         left_indices, right_indices = np.triu_indices(n_levels, k=1)
         contrast_labels = [
@@ -180,12 +222,16 @@ class Emmeans:
         adjust: str = "dunnett",
         level: float = 0.95,
     ) -> ContrastResult:
+        if self._by:
+            return self._grouped_contrasts(
+                lambda means: means._trt_vs_ctrl(ctrl_idx=ctrl_idx, adjust=adjust, level=level)
+            )
         n_levels = len(self.result.emmean)
 
         grid_labels = []
         for i in range(n_levels):
             parts = [str(self.result.grid.iloc[i][spec]) for spec in self._specs]
-            grid_labels.append(",".join(parts) if len(parts) > 1 else parts[0])
+            grid_labels.append(",".join(parts))
 
         treatment_indices = np.delete(np.arange(n_levels), ctrl_idx)
         contrast_labels = [f"{grid_labels[i]} - {grid_labels[ctrl_idx]}" for i in treatment_indices]
@@ -213,6 +259,10 @@ class Emmeans:
         adjust: str = "none",
         level: float = 0.95,
     ) -> ContrastResult:
+        if self._by:
+            return self._grouped_contrasts(
+                lambda means: means._custom_contrast(C, adjust=adjust, level=level)
+            )
         n_contrasts = C.shape[0]
         L_contrast = C @ self._L
         estimates = L_contrast @ self._beta
@@ -286,100 +336,120 @@ def _adjust_pvalues(
         return p
 
 
+def _predictor_names(names: str | list[str], argument: str) -> list[str]:
+    if isinstance(names, str):
+        return [names]
+    if not isinstance(names, (list, tuple)) or any(not isinstance(name, str) for name in names):
+        raise TypeError(f"{argument} must be a predictor name or a sequence of names")
+    if len(set(names)) != len(names):
+        raise ValueError(f"{argument} must not contain duplicate predictor names")
+    return list(names)
+
+
+def _grid_values(values: Any, name: str, *, numeric: bool) -> list[Any]:
+    array = np.asarray(values, dtype=None if numeric else object)
+    if array.ndim == 0:
+        array = array.reshape(1)
+    if array.ndim != 1 or array.size == 0:
+        raise ValueError(f"Reference values for '{name}' must be a nonempty scalar or 1-D sequence")
+    if pd.isna(array).any():
+        raise ValueError(f"Reference values for '{name}' must not contain missing values")
+    if numeric:
+        try:
+            array = array.astype(np.float64)
+        except (TypeError, ValueError):
+            raise ValueError(f"Reference values for '{name}' must be numeric") from None
+        if not np.all(np.isfinite(array)):
+            raise ValueError(f"Reference values for '{name}' must be finite")
+    if pd.Index(array).has_duplicates:
+        raise ValueError(f"Reference values for '{name}' must be distinct")
+    return array.tolist()
+
+
+def _reference_levels(
+    model: LmerResult | GlmerResult,
+    at: dict[str, Any] | None,
+    cov_reduce: Callable[[pd.Series], float],
+) -> dict[str, list[Any]]:
+    frame = model.model_frame()
+    variables = model.terms().fixed_variables
+    if at is not None and not isinstance(at, dict):
+        raise TypeError("at must be a dictionary of predictor names and reference values")
+    overrides = {} if at is None else at
+    if any(not isinstance(name, str) for name in overrides):
+        raise TypeError("Predictor names in at must be strings")
+    unknown = set(overrides) - set(variables)
+    if unknown:
+        raise ValueError(f"Unknown fixed-effect predictor(s) in at: {sorted(unknown)}")
+
+    levels = {}
+    for name in sorted(variables):
+        categorical = is_categorical_or_string(frame, name)
+        if name in overrides:
+            values = overrides[name]
+        elif categorical:
+            values = get_categories(frame, name)
+        else:
+            column = (
+                frame[name]
+                if isinstance(frame, pd.DataFrame)
+                else pd.Series(get_column_numpy(frame, name), name=name)
+            )
+            values = cov_reduce(column)
+        levels[name] = _grid_values(values, name, numeric=not categorical)
+    return levels
+
+
 def emmeans(
     model: LmerResult | GlmerResult,
     specs: str | list[str],
-    _by: str | list[str] | None = None,
+    by: str | list[str] | None = None,
     at: dict[str, Any] | None = None,
     cov_reduce: Callable[[pd.Series], float] = np.mean,
     type: str = "response",
     level: float = 0.95,
+    *,
+    _by: str | list[str] | None = None,
 ) -> Emmeans:
+    """Estimate means over a reference grid, optionally comparing within by groups.
+
+    Numeric predictors use ``cov_reduce`` unless ``at`` supplies reference values.
+    Predictors in ``specs`` or ``by`` identify result rows; all other reference
+    dimensions are averaged with equal weights. Contrasts compare means within
+    each ``by`` group and adjust that group's p-values separately.
+    """
     if type not in {"link", "response"}:
         raise ValueError("type must be 'link' or 'response'")
+    if not np.isfinite(level) or not 0 < level < 1:
+        raise ValueError("level must be a finite number strictly between 0 and 1")
+    if by is not None and _by is not None:
+        raise ValueError("Specify only one of by and _by")
+    if _by is not None:
+        by = _by
 
-    if isinstance(specs, str):
-        specs = [specs]
-
-    frame = model.model_frame()
-    terms = model.terms()
-    beta = model.beta
-    vcov = model.vcov()
-    df_resid = float(model.df_residual())
-
-    factor_vars: dict[str, list[Any]] = {}
-    covariate_vars: dict[str, float] = {}
-
-    for var in terms.fixed_variables:
-        if var not in frame.columns:
-            continue
-        col = frame[var]
-        dtype_str = str(col.dtype)
-        is_string = "string" in dtype_str.lower() or "str" in dtype_str.lower()
-        if col.dtype == object or col.dtype.name == "category" or is_string:
-            if col.dtype.name == "category":
-                levels = col.cat.categories.tolist()
-            else:
-                levels = sorted(col.dropna().unique().tolist())
-            factor_vars[var] = levels
-        else:
-            covariate_vars[var] = float(cov_reduce(col))
-
-    if at is not None:
-        for var, val in at.items():
-            if var in factor_vars:
-                if isinstance(val, list):
-                    factor_vars[var] = val
-                else:
-                    factor_vars[var] = [val]
-            elif var in covariate_vars:
-                covariate_vars[var] = float(val) if not isinstance(val, list) else float(val[0])
-
-    for spec in specs:
-        if spec not in factor_vars:
+    spec_names = _predictor_names(specs, "specs")
+    by_names = _predictor_names([] if by is None else by, "by")
+    result_names = spec_names + [name for name in by_names if name not in spec_names]
+    levels = _reference_levels(model, at, cov_reduce)
+    for name in result_names:
+        if name not in levels:
             raise ValueError(
-                f"Variable '{spec}' must be a factor. Available factors: {list(factor_vars.keys())}"
+                f"Variable '{name}' must name a fixed-effect predictor. "
+                f"Available predictors: {list(levels)}"
             )
 
-    spec_levels = [factor_vars[spec] for spec in specs]
-
-    other_factors = {k: v for k, v in factor_vars.items() if k not in specs}
-
-    if other_factors:
-        all_vars = specs + list(other_factors.keys())
-        all_levels = spec_levels + list(other_factors.values())
-    else:
-        all_vars = specs
-        all_levels = spec_levels
-
-    grid_data: dict[str, list[Any]] = {var: [] for var in all_vars}
-    for cov_var in covariate_vars:
-        grid_data[cov_var] = []
-
-    combinations = list(itertools.product(*all_levels))
-    for combo in combinations:
-        for i, var in enumerate(all_vars):
-            grid_data[var].append(combo[i])
-        for cov_var, cov_val in covariate_vars.items():
-            grid_data[cov_var].append(cov_val)
-
-    grid = pd.DataFrame(grid_data)
-
+    beta = model.beta
+    df_resid = float(model.df_residual())
+    averaged_names = [name for name in levels if name not in result_names]
+    all_names = result_names + averaged_names
+    grid = pd.DataFrame(itertools.product(*(levels[name] for name in all_names)), columns=all_names)
     X_grid = model._prediction_fixed_matrix(grid)
-
-    spec_combinations = list(itertools.product(*spec_levels))
-    n_emmeans = len(spec_combinations)
-    n_beta = len(beta)
-
-    L = np.zeros((n_emmeans, n_beta), dtype=np.float64)
-
-    for i, spec_combo in enumerate(spec_combinations):
-        mask = np.ones(len(grid), dtype=bool)
-        for j, spec in enumerate(specs):
-            mask &= grid[spec] == spec_combo[j]
-
-        X_subset = X_grid[mask]
-        L[i] = X_subset.mean(axis=0)
+    result_grid = pd.DataFrame(
+        itertools.product(*(levels[name] for name in result_names)), columns=result_names
+    )
+    n_averaged = prod(len(levels[name]) for name in averaged_names)
+    L = X_grid.reshape(len(result_grid), n_averaged, len(beta)).mean(axis=1)
+    vcov = model.vcov()
 
     em_values = L @ beta
     var_em = _rowwise_quadratic_form(L, vcov)
@@ -410,12 +480,6 @@ def emmeans(
         lower = np.minimum(lower_response, upper_response)
         upper = np.maximum(lower_response, upper_response)
 
-    result_grid_data: dict[str, list[Any]] = {spec: [] for spec in specs}
-    for spec_combo in spec_combinations:
-        for j, spec in enumerate(specs):
-            result_grid_data[spec].append(spec_combo[j])
-    result_grid = pd.DataFrame(result_grid_data)
-
     result = EmmeanResult(
         emmean=em_values,
         se=se_em,
@@ -432,6 +496,7 @@ def emmeans(
         _vcov=vcov,
         _beta=beta,
         _df=df_resid,
-        _specs=specs,
-        _levels=spec_levels,
+        _specs=[name for name in spec_names if name not in by_names],
+        _levels=[levels[name] for name in spec_names if name not in by_names],
+        _by=by_names,
     )
