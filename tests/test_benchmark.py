@@ -300,3 +300,39 @@ def test_benchmark_random_effect_simulation(benchmark):
         seed=42,
     )
     assert np.asarray(result).shape == (1, 400_000)
+
+
+@pytest.mark.benchmark(group="leverage")
+@pytest.mark.parametrize("kind", ["lmm", "glmm"])
+def test_benchmark_large_leverage(benchmark, large_crossed_sparse_data, kind):
+    from mixedlm.families import Poisson
+    from mixedlm.models.glmer import GlmerResult
+    from mixedlm.models.lmer import LmerResult
+
+    formula = parse_formula("y ~ x + (1 | group1) + (1 | group2)")
+    matrices = build_model_matrices(formula, large_crossed_sparse_data)
+    common = dict(
+        formula=formula,
+        matrices=matrices,
+        theta=np.array([1.0, 0.6]),
+        beta=np.array([0.2, 0.1]),
+        u=np.zeros(matrices.n_random),
+        deviance=0.0,
+        converged=True,
+        n_iter=0,
+    )
+    result = (
+        LmerResult(**common, sigma=0.25, REML=True)
+        if kind == "lmm"
+        else GlmerResult(**common, family=Poisson(), nAGQ=1)
+    )
+    result.vcov()
+
+    def compute_leverage():
+        result.__dict__.pop("_hat_values", None)
+        return result.hatvalues()
+
+    values = benchmark(compute_leverage)
+
+    assert values.shape == (len(large_crossed_sparse_data),)
+    assert np.all((values >= 0) & (values < 1))

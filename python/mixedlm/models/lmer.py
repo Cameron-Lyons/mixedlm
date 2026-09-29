@@ -24,7 +24,7 @@ from mixedlm.models.lmer_types import (
     VarCorrGroup,
 )
 from mixedlm.models.result_mixin import MerResultMixin
-from mixedlm.models.shared_utils import symmetric_inverse
+from mixedlm.models.shared_utils import sparse_quadratic_form_diagonal, symmetric_inverse
 from mixedlm.utils import _format_pvalue, _get_signif_code
 
 
@@ -662,17 +662,7 @@ class LmerResult(MerResultMixin):
         L_V: NDArray[np.floating],
     ) -> NDArray[np.floating]:
         """Evaluate diagonal quadratic forms without materializing an n-by-q matrix."""
-        n_rows, q = transformed_Z.shape
-        result = np.empty(n_rows, dtype=np.float64)
-        chunk_size = max(1, 1_000_000 // max(q, 1))
-
-        for start in range(0, n_rows, chunk_size):
-            stop = min(start + chunk_size, n_rows)
-            chunk = transformed_Z[start:stop].toarray()
-            solved = linalg.solve_triangular(L_V, chunk.T, lower=True)
-            result[start:stop] = self.sigma**2 * np.sum(solved**2, axis=0)
-
-        return result
+        return self.sigma**2 * sparse_quadratic_form_diagonal(transformed_Z, L_V)
 
     def vcov(self) -> NDArray[np.floating]:
         information_inv = symmetric_inverse(self._weighted_projection.XtVinvX)
@@ -688,10 +678,9 @@ class LmerResult(MerResultMixin):
             h_random = np.zeros(self.matrices.n_obs, dtype=np.float64)
         else:
             assert projection.L_V is not None
-            B = (projection.weighted_Z @ projection.lambda_matrix).toarray()
-            B_Vinv = linalg.cho_solve((projection.L_V, True), B.T).T
-            h_random = np.einsum("ij,ij->i", B_Vinv, B)
-            V_inv_BtX = linalg.cho_solve((projection.L_V, True), B.T @ projection.weighted_X)
+            B = projection.weighted_Z @ projection.lambda_matrix
+            h_random = sparse_quadratic_form_diagonal(B, projection.L_V)
+            V_inv_BtX = linalg.solve_triangular(projection.L_V.T, projection.RZX, lower=False)
             projected_X = projection.weighted_X - B @ V_inv_BtX
 
         h_fixed = np.einsum("ij,ij->i", projected_X @ information_inv, projected_X)

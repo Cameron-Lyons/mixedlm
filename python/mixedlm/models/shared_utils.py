@@ -4,9 +4,36 @@ from typing import Any
 
 import numpy as np
 from numpy.typing import NDArray
-from scipy import linalg
+from scipy import linalg, sparse
 
 from mixedlm.utils.dataframe import dataframe_length, get_column_numpy, get_columns
+
+_MAX_QUADRATIC_FORM_ELEMENTS = 1_000_000
+
+
+def sparse_quadratic_form_diagonal(
+    design: sparse.spmatrix,
+    factor: NDArray[np.floating],
+) -> NDArray[np.float64]:
+    """Compute diag(A (L L.T)^-1 A.T) with bounded dense solve buffers.
+
+    ``design`` is A and ``factor`` is its precision's lower Cholesky factor L.
+    Each right-hand-side buffer holds at most one million elements, or one
+    row of A if its width exceeds that limit.
+    """
+    design = design.tocsr()
+    n_rows, width = design.shape
+    if width == 0:
+        return np.zeros(n_rows, dtype=np.float64)
+
+    result = np.empty(n_rows, dtype=np.float64)
+    chunk_size = max(1, _MAX_QUADRATIC_FORM_ELEMENTS // width)
+    for start in range(0, n_rows, chunk_size):
+        stop = min(start + chunk_size, n_rows)
+        rhs = design[start:stop].toarray().T
+        solved = linalg.solve_triangular(factor, rhs, lower=True, overwrite_b=True)
+        result[start:stop] = np.einsum("ij,ij->j", solved, solved)
+    return result
 
 
 def symmetric_inverse(matrix: NDArray[np.floating]) -> NDArray[np.float64]:
