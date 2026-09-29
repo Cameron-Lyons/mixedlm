@@ -214,11 +214,17 @@ print(mlm.anova_type3(model))
 
 Compute Satterthwaite denominator degrees of freedom.
 
+The variance calculation uses relative uncertainty so that changing response
+units (for example, milliseconds to seconds) preserves the degrees of freedom
+and p-values, apart from numerical fitting tolerance.
+
 ```python
 df = mlm.satterthwaite_df(model)
 ```
 
-**Returns:** Dictionary mapping coefficient names to degrees of freedom
+**Returns:** `DenomDFResult` containing `df`, `method`, and `param_names`.
+Use `df["coefficient_name"]` to retrieve one value or `df.as_dict()` to obtain a
+dictionary.
 
 ### kenward_roger_df
 

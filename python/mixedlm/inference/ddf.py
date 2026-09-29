@@ -13,7 +13,6 @@ if TYPE_CHECKING:
 
 _NUMERICAL_EPS = 1e-6
 _HESSIAN_EPS = 1e-4
-_GRADIENT_ZERO_THRESHOLD = 1e-10
 _MIN_DF = 1.0
 _CHOLESKY_REGULARIZATION = 1e-6
 
@@ -276,25 +275,25 @@ def satterthwaite_df(
     p = result.matrices.n_fixed
     vcov_grads, theta_covariance = _vcov_derivatives(result)
 
-    df_values = np.zeros(p, dtype=np.float64)
-
-    for i in range(p):
-        var_i = vcov[i, i]
-
-        grad_var_i = np.array([g[i, i] for g in vcov_grads])
-
-        residual_df = result.matrices.n_obs - result.matrices.n_fixed
-        residual_scale_uncertainty = 2.0 * var_i**2 / residual_df
-        variance_of_variance = (
-            float(grad_var_i @ theta_covariance @ grad_var_i) + residual_scale_uncertainty
+    variances = np.diag(vcov)
+    relative_gradients = np.zeros((p, len(vcov_grads)), dtype=np.float64)
+    for k, gradient in enumerate(vcov_grads):
+        np.divide(
+            np.diag(gradient),
+            variances,
+            out=relative_gradients[:, k],
+            where=variances > 0,
         )
 
-        if variance_of_variance > _GRADIENT_ZERO_THRESHOLD:
-            df_values[i] = 2 * var_i**2 / variance_of_variance
-        else:
-            df_values[i] = result.matrices.n_obs - result.matrices.n_fixed
-
-        df_values[i] = max(_MIN_DF, min(df_values[i], result.matrices.n_obs - p))
+    # Divide the Satterthwaite ratio by variance squared before evaluating it.
+    # This avoids a unit-dependent zero cutoff and overflow/underflow when
+    # squaring coefficient variances. Zero variances retain the residual DF.
+    relative_uncertainty = np.einsum(
+        "ij,ij->i", relative_gradients @ theta_covariance, relative_gradients
+    )
+    residual_df = result.matrices.n_obs - p
+    df_values = 2.0 / (np.maximum(relative_uncertainty, 0.0) + 2.0 / residual_df)
+    df_values = np.clip(df_values, _MIN_DF, residual_df)
 
     return DenomDFResult(
         df=df_values,

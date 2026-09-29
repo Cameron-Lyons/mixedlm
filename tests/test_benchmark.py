@@ -157,6 +157,31 @@ def test_benchmark_lmer_random_slope(benchmark, sleepstudy_data):
     benchmark(fit_model)
 
 
+@pytest.mark.benchmark(group="denominator-df")
+def test_benchmark_repeated_ddf_many_coefficients(benchmark):
+    from mixedlm.inference.ddf import satterthwaite_df
+    from mixedlm.models.control import LmerControl
+
+    rng = np.random.default_rng(147)
+    n_levels, n_groups = 128, 16
+    level = np.tile(np.arange(n_levels), n_groups)
+    group = np.repeat(np.arange(n_groups), n_levels)
+    y = rng.normal(size=n_levels)[level] + rng.normal(size=n_groups)[group]
+    y += rng.normal(size=len(level))
+    data = pd.DataFrame({"y": y, "treatment": pd.Categorical(level), "group": group.astype(str)})
+    model = lmer(
+        "y ~ 0 + treatment + (1 | group)",
+        data,
+        control=LmerControl(use_rust=False, em_init=False),
+    )
+    expected = satterthwaite_df(model)
+
+    actual = benchmark(satterthwaite_df, model)
+
+    np.testing.assert_allclose(actual.df, expected.df)
+    assert len(actual.df) == n_levels
+
+
 @pytest.mark.benchmark(group="lmer-large")
 def test_benchmark_lmer_large_data(benchmark, large_data):
     def fit_model():
