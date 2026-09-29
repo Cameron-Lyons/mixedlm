@@ -325,20 +325,13 @@ class MerResultMixin:
 
     def _varcorr_groups(self, scale: float) -> dict[str, VarCorrGroup]:
         """Report every covariance block under a unique, stable name."""
-        from mixedlm.utils.variance import cov2sdcor
+        from mixedlm.utils.variance import _covariance_block_names, cov2sdcor
 
-        reserved_names = {s.grouping_factor for s in self.matrices.random_structures}
-        next_suffix: dict[str, int] = {}
+        names = _covariance_block_names(self.matrices.random_structures)
         groups: dict[str, VarCorrGroup] = {}
-        for struct, cov in self._iter_random_cov_blocks(scale=scale):
-            name = struct.grouping_factor
-            if name in groups:
-                suffix = next_suffix.get(name, 1)
-                while f"{name}.{suffix}" in reserved_names or f"{name}.{suffix}" in groups:
-                    suffix += 1
-                next_suffix[name] = suffix + 1
-                name = f"{name}.{suffix}"
-
+        for name, (struct, cov) in zip(
+            names, self._iter_random_cov_blocks(scale=scale), strict=True
+        ):
             variances = np.diag(cov)
             if struct.correlated or struct.cov_type in ("cs", "ar1"):
                 stddevs, corr = cov2sdcor(cov)
