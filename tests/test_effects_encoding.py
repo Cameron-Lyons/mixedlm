@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import itertools
+from collections import Counter
+from dataclasses import replace
+from importlib import import_module
 
 import numpy as np
 import pandas as pd
@@ -224,3 +227,161 @@ def test_effect_calculations_leave_the_fitted_frame_unchanged():
     effects["treatment"]["treatment"] = "edited_output"
 
     assert_frame_equal(model.matrices.frame, frame)
+
+
+@pytest.mark.parametrize("kind", ["lmm", "glmm"])
+@pytest.mark.parametrize("backend", ["pandas", "polars"])
+@pytest.mark.parametrize("type", ["link", "response"])
+@pytest.mark.parametrize(
+    "options",
+    [
+        {},
+        {"n_points": 4, "level": 0.8, "offset": 0.7},
+        {"at": {"x": 0.5, "treatment": "low"}, "level": 0.99},
+    ],
+)
+def test_shared_effect_setup_matches_independent_grids(kind, backend, type, options):
+    model = _model("helmert", kind, backend)
+
+    actual = allEffects(model, type=type, **options)
+
+    for variable, result in actual.items():
+        expected = ggpredict(model, variable, type=type, **options)
+        assert_frame_equal(result, expected)
+        assert result.attrs == expected.attrs
+
+
+@pytest.mark.parametrize("kind", ["lmm", "glmm"])
+@pytest.mark.parametrize("backend", ["pandas", "polars"])
+def test_all_effects_converts_frame_and_computes_shared_statistics_once(monkeypatch, kind, backend):
+    effects = import_module("mixedlm.inference.effects")
+    model = _model("sum", kind, backend)
+    calls = Counter()
+    original_frame = effects._as_pandas_frame
+    original_reference = effects._reference_value
+    original_vcov = type(model).vcov
+
+    def frame(source):
+        calls["frame"] += 1
+        return original_frame(source)
+
+    def reference(series, levels=None):
+        calls[series.name] += 1
+        return original_reference(series, levels)
+
+    def covariance(self):
+        calls["covariance"] += 1
+        return original_vcov(self)
+
+    monkeypatch.setattr(effects, "_as_pandas_frame", frame)
+    monkeypatch.setattr(effects, "_reference_value", reference)
+    monkeypatch.setattr(type(model), "vcov", covariance)
+
+    result = allEffects(model)
+
+    assert list(result) == ["treatment", "site", "x"]
+    assert calls == {"frame": 1, "covariance": 1, "treatment": 1, "site": 1, "x": 1}
+
+
+def test_all_effects_consumes_each_override_iterable_once():
+    model = _model()
+    expected = allEffects(model, at={"x": [0.5], "site": ["west"]})
+
+    actual = allEffects(model, at={"x": iter([0.5]), "site": iter(["west"])})
+
+    for variable in actual:
+        assert_frame_equal(actual[variable], expected[variable])
+
+
+def test_shared_effect_statistics_are_fresh_on_each_call():
+    model = _model()
+    original = allEffects(model)
+    model.beta = model.beta + 0.2
+    model.sigma *= 1.5
+    model.matrices.frame["x"] = model.matrices.frame.x + 2.0
+
+    actual = allEffects(model)
+
+    for variable in actual:
+        expected = ggpredict(model, variable)
+        assert_frame_equal(actual[variable], expected)
+        assert not np.array_equal(actual[variable].predicted, original[variable].predicted)
+        assert not np.array_equal(actual[variable]["std.error"], original[variable]["std.error"])
+
+
+def _intercept_model():
+    model = _model()
+    formula = parse_formula("y ~ 1 + (1 | g)")
+    matrices = build_model_matrices(formula, model.matrices.frame)
+    return replace(model, formula=formula, matrices=matrices, beta=np.array([0.3]))
+
+
+def test_all_effects_without_predictors_needs_no_covariance(monkeypatch):
+    model = _intercept_model()
+
+    def unexpected_covariance(self):
+        raise AssertionError("an empty effects collection needs no covariance calculation")
+
+    monkeypatch.setattr(type(model), "vcov", unexpected_covariance)
+    assert allEffects(model) == {}
+
+
+@pytest.mark.parametrize("intercept_only", [False, True])
+@pytest.mark.parametrize(
+    ("options", "message"),
+    [
+        ({"type": "unknown"}, "response.*link"),
+        ({"level": np.nan}, "between 0 and 1"),
+        ({"n_points": True}, "at least 2"),
+        ({"offset": np.inf}, "offset must be finite"),
+        ({"at": []}, "at must be a mapping"),
+        ({"at": {"missing": 1}}, "Unknown variable.*missing"),
+    ],
+)
+def test_all_effects_validates_options_before_covariance(
+    monkeypatch, intercept_only, options, message
+):
+    model = _intercept_model() if intercept_only else _model()
+
+    def unexpected_covariance(self):
+        raise AssertionError("invalid options must fail before covariance calculation")
+
+    monkeypatch.setattr(type(model), "vcov", unexpected_covariance)
+    with pytest.raises((TypeError, ValueError), match=message):
+        allEffects(model, **options)
+
+
+def test_all_effects_validates_every_conditioning_grid_before_covariance(monkeypatch):
+    model = _model()
+
+    def unexpected_covariance(self):
+        raise AssertionError("invalid conditioning must fail before covariance calculation")
+
+    monkeypatch.setattr(type(model), "vcov", unexpected_covariance)
+    with pytest.raises(ValueError, match="Non-focal variable 'treatment'.*one value"):
+        allEffects(model, at={"treatment": ["high", "low"]})
+
+
+@pytest.mark.parametrize("function", [ggpredict, allEffects])
+def test_invalid_contrast_overrides_fail_before_covariance(monkeypatch, function):
+    model = _model()
+
+    def unexpected_covariance(self):
+        raise AssertionError("invalid contrast overrides need no covariance calculation")
+
+    monkeypatch.setattr(type(model), "vcov", unexpected_covariance)
+    args = ("treatment",) if function is ggpredict else ()
+    with pytest.raises(ValueError, match="Unknown contrast type"):
+        function(model, *args, contrasts={"treatment": "unknown"})
+
+
+@pytest.mark.parametrize(
+    ("n_points", "expected"),
+    [(2, [-1.5, 2.0]), (3, [-1.5, 0.0, 2.0]), (4, [-1.5, 0.0, 2.0])],
+)
+def test_automatic_numeric_grids_preserve_observed_values_or_use_even_spacing(n_points, expected):
+    model = _model()
+
+    result = allEffects(model, n_points=n_points)
+
+    assert_array_equal(result["x"].x, expected)

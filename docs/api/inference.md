@@ -275,6 +275,18 @@ effects = mlm.allEffects(model, n_points=25)
 days_effect = effects["Days"]
 ```
 
+`allEffects()` prepares the model frame, conditioning values, coefficient
+covariance, and confidence cutoff once per call. It evaluates grids separately,
+so temporary grid storage depends on the largest individual grid. Prepared
+values are discarded after the call; later calls use current model values.
+
+When a model has multiple fixed-effect variables, each variable also conditions
+the other grids. Therefore, `at` must supply just one value per variable, either
+as a scalar or a one-element iterable. Use `ggpredict()` with all relevant terms
+for a joint grid with several values per variable. Invalid options and unknown
+`at` variables raise an error even when the model has no fixed-effect predictors
+and `allEffects()` would otherwise return an empty dictionary.
+
 Both functions are batched, use the fitted fixed-effect covariance matrix, and
 require no plotting package. Prediction grids automatically reuse fitted
 categorical contrasts, category order, and retained fixed-effect columns. Sum,
