@@ -208,16 +208,23 @@ new_groups = result.predict(
 #### simulate
 
 ```python
-result.simulate(nsim=1)
+result.simulate(nsim=1, seed=None, use_re=True, re_form=None)
 ```
 
-Simulate responses from the fitted model.
+Simulate responses from the fitted model, including its offsets and random-effect
+covariance structure (unstructured, diagonal, compound symmetry, or AR(1)). LMM
+residuals have standard deviation `sigma / sqrt(weight)` for each observation.
+These weights do not rescale the random effects.
 
 **Parameters:**
 
 - `nsim`: Number of simulations.
+- `seed`: Optional seed for reproducible draws.
+- `use_re`: Draw new random effects when `True` (the default).
+- `re_form`: Set to `"~0"` or `"NA"` to omit random effects.
 
-**Returns:** Array of shape (n_obs, nsim).
+**Returns:** Array of shape `(n_obs,)` for one simulation, or `(n_obs, nsim)` for
+multiple simulations. Grouped-binomial GLMM simulations return success counts.
 
 #### confint
 

@@ -26,6 +26,7 @@ from mixedlm.models.lmer_types import (
 from mixedlm.models.result_mixin import MerResultMixin
 from mixedlm.models.shared_utils import symmetric_inverse
 from mixedlm.utils import _format_pvalue, _get_signif_code
+from mixedlm.utils.simulation import simulate_random_effects, simulation_parameters
 
 
 @dataclass
@@ -1775,7 +1776,7 @@ class LmerResult(MerResultMixin):
         if not include_re:
             fixed_part = self.matrices.X @ self.beta + self.matrices.offset
             result = np.random.randn(nsim, n).T
-            result *= self.sigma
+            result *= (self.sigma / np.sqrt(self.matrices.weights))[:, None]
             result += fixed_part[:, None]
             return result
 
@@ -1804,10 +1805,10 @@ class LmerResult(MerResultMixin):
 
         n_levels = [s.n_levels for s in self.matrices.random_structures]
         n_terms = [s.n_terms for s in self.matrices.random_structures]
-        correlated = [s.correlated for s in self.matrices.random_structures]
+        theta, correlated = simulation_parameters(self.theta, self.matrices.random_structures)
 
         u_batch = simulate_re_batch(
-            self.theta,
+            theta,
             self.sigma,
             n_levels,
             n_terms,
@@ -1821,7 +1822,7 @@ class LmerResult(MerResultMixin):
         result = np.asarray(Z @ u_batch.T, dtype=np.float64)
         result += fixed_part[:, None]
         noise = np.random.randn(nsim, n).T
-        noise *= self.sigma
+        noise *= (self.sigma / np.sqrt(self.matrices.weights))[:, None]
         result += noise
         return result
 
@@ -1838,39 +1839,10 @@ class LmerResult(MerResultMixin):
         if re_form == "~0" or re_form == "NA" or not use_re or q == 0:
             random_part = np.zeros(n)
         else:
-            u_new = np.zeros(q, dtype=np.float64)
-            u_idx = 0
-            theta_start = 0
-
-            for struct in self.matrices.random_structures:
-                n_levels = struct.n_levels
-                n_terms = struct.n_terms
-
-                n_theta = n_terms * (n_terms + 1) // 2 if struct.correlated else n_terms
-                theta_block = self.theta[theta_start : theta_start + n_theta]
-
-                if struct.correlated:
-                    L = np.zeros((n_terms, n_terms))
-                    idx = 0
-                    for i in range(n_terms):
-                        for j in range(i + 1):
-                            L[i, j] = theta_block[idx]
-                            idx += 1
-                    cov = L @ L.T * self.sigma**2
-                else:
-                    cov = np.diag(theta_block**2) * self.sigma**2
-
-                for g in range(n_levels):
-                    b_g = np.random.multivariate_normal(np.zeros(n_terms), cov)
-                    for j in range(n_terms):
-                        u_new[u_idx + g * n_terms + j] = b_g[j]
-
-                u_idx += n_levels * n_terms
-                theta_start += n_theta
-
+            u_new = simulate_random_effects(self.theta, self.matrices.random_structures, self.sigma)
             random_part = self.matrices.Z @ u_new
 
-        noise = np.random.randn(n) * self.sigma
+        noise = np.random.randn(n) * self.sigma / np.sqrt(self.matrices.weights)
 
         return fixed_part + random_part + noise
 
