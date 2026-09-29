@@ -24,7 +24,7 @@ from mixedlm.models.lmer_types import (
     VarCorrGroup,
 )
 from mixedlm.models.result_mixin import MerResultMixin
-from mixedlm.models.shared_utils import symmetric_inverse
+from mixedlm.models.shared_utils import sparse_quadratic_form_diagonal, symmetric_inverse
 from mixedlm.utils import _get_signif_code
 
 
@@ -488,7 +488,7 @@ class GlmerResult(MerResultMixin):
             )
             return np.clip(diagonal, 0, 1 - 1e-10)
 
-        weighted_z_lambda = (projection.weighted_Z @ projection.Lambda).toarray()
+        weighted_z_lambda = projection.weighted_Z @ projection.Lambda
         random_fixed_map = linalg.solve_triangular(
             projection.random_cholesky.T,
             projection.RZX,
@@ -500,12 +500,7 @@ class GlmerResult(MerResultMixin):
             adjusted_x @ projection.information_inv,
             adjusted_x,
         )
-        solved = linalg.solve_triangular(
-            projection.random_cholesky,
-            weighted_z_lambda.T,
-            lower=True,
-        )
-        diagonal += np.sum(solved * solved, axis=0)
+        diagonal += sparse_quadratic_form_diagonal(weighted_z_lambda, projection.random_cholesky)
         return np.clip(diagonal, 0, 1 - 1e-10)
 
     def hatvalues(self) -> NDArray[np.floating]:
