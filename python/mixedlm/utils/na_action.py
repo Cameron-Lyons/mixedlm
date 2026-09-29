@@ -9,6 +9,7 @@ from numpy.typing import NDArray
 
 from mixedlm.utils.dataframe import (
     _is_polars,
+    _polars_column_numpy,
     dataframe_length,
     get_columns,
 )
@@ -112,7 +113,7 @@ def _get_na_mask_polars(data: Any, variables: list[str]) -> NDArray[np.bool_]:
 
     missing_expr = pl.any_horizontal(*missing_exprs)
     mask_series = data.select(missing_expr.alias("_na_mask")).get_column("_na_mask")
-    return mask_series.to_numpy()
+    return _polars_column_numpy(mask_series)
 
 
 def _get_na_mask_pandas(data: Any, variables: list[str]) -> NDArray[np.bool_]:

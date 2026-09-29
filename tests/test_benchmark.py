@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 import pytest
-from mixedlm import lmer
+from mixedlm import ggpredict, lmer
 from mixedlm._rust import (
     SparseCholeskySymbolic,
     simulate_re_batch,
@@ -397,3 +397,43 @@ def test_benchmark_large_leverage(benchmark, large_crossed_sparse_data, kind):
 
     assert values.shape == (len(large_crossed_sparse_data),)
     assert np.all((values >= 0) & (values < 1))
+
+
+@pytest.mark.benchmark(group="polars-effect-grid")
+def test_benchmark_polars_effect_grid(benchmark):
+    from mixedlm.models.lmer import LmerResult
+
+    pl = pytest.importorskip("polars")
+    rng = np.random.default_rng(983)
+    n_rows = 50_000
+    columns = {f"x{i}": rng.normal(size=n_rows) for i in range(6)}
+    data = pl.DataFrame(
+        {
+            **columns,
+            "treatment": np.resize(["C", "A", "B"], n_rows),
+            "g": np.arange(n_rows) % 8,
+            "y": rng.normal(size=n_rows),
+        }
+    ).with_columns(pl.col("treatment").cast(pl.Enum(["C", "A", "B"])))
+    formula = parse_formula("y ~ treatment + " + " + ".join(columns) + " + (1 | g)")
+    matrices = build_model_matrices(formula, data, contrasts={"treatment": "sum"})
+    model = LmerResult(
+        formula=formula,
+        matrices=matrices,
+        theta=np.array([0.6]),
+        beta=np.linspace(-0.4, 0.5, matrices.n_fixed),
+        u=np.zeros(matrices.n_random),
+        sigma=1.0,
+        REML=True,
+        deviance=0.0,
+        converged=True,
+        n_iter=0,
+    )
+    model.vcov()
+
+    result = benchmark(ggpredict, model, "treatment", contrasts=model.matrices.contrasts)
+
+    grid = pd.DataFrame({"treatment": ["C", "A", "B"]})
+    for name, values in columns.items():
+        grid[name] = values.mean()
+    np.testing.assert_allclose(result.predicted, model.predict(grid, re_form="~0"), atol=1e-12)

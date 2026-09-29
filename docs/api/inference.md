@@ -280,6 +280,15 @@ require no plotting package. If a model was fit with non-default categorical
 contrasts, pass the same mapping with `contrasts=` so the prediction grid uses
 the fitted parameterization.
 
+For Polars models, adjusted prediction grids convert only fixed-effect predictor
+columns through NumPy arrays. This avoids creating Python objects for the whole
+model frame. Contiguous numeric columns without missing values can share their
+underlying storage; floating-point reference reductions retain float64 precision.
+Category order and missing values are preserved, and returned prediction tables
+can be edited independently of the fitted data.
+Extraction also handles Polars 0.20 releases that cannot export categorical
+columns directly to NumPy or return nonnullable Booleans as object arrays.
+
 ### emmeans
 
 Compute estimated marginal means.

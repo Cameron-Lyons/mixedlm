@@ -11,6 +11,7 @@ from scipy import stats
 
 from mixedlm.formula.terms import InteractionTerm, PowerTerm, VariableTerm
 from mixedlm.matrices.design import build_fixed_matrix
+from mixedlm.utils.dataframe import _polars_column_numpy, select_columns
 
 if TYPE_CHECKING:
     from mixedlm.models.glmer import GlmerResult
@@ -20,14 +21,21 @@ if TYPE_CHECKING:
 def _as_pandas_frame(frame: Any) -> pd.DataFrame:
     if isinstance(frame, pd.DataFrame):
         return frame.copy()
-    if "polars" in type(frame).__module__ and hasattr(frame, "to_dict"):
-        result = pd.DataFrame(frame.to_dict(as_series=False))
+    if "polars" in type(frame).__module__ and hasattr(frame, "get_column"):
+        columns: dict[str, Any] = {}
         for name in frame.columns:
             column = frame.get_column(name)
+            values = _polars_column_numpy(column)
+            # Python float lists previously promoted Float32 and nullable small
+            # integers to float64. Keep that precision for reference reductions.
+            if values.dtype.kind == "f" and values.dtype.itemsize < 8:
+                values = values.astype(np.float64)
             if "Categorical" in str(column.dtype) or "Enum" in str(column.dtype):
                 categories = column.cat.get_categories().to_list()
-                result[name] = pd.Categorical(result[name], categories=categories)
-        return result
+                columns[name] = pd.Categorical(values, categories=categories)
+            else:
+                columns[name] = values
+        return pd.DataFrame(columns, copy=False)
     raise TypeError(f"Expected a pandas or Polars model frame, got {type(frame).__name__}")
 
 
@@ -132,11 +140,13 @@ def _prediction_grid(
     n_points: int,
     contrasts: dict[str, str | NDArray[np.floating]] | None,
 ) -> tuple[pd.DataFrame, NDArray[np.float64]]:
+    fixed_variables = _fixed_variable_order(model)
     frame_source = model.matrices.frame
     if frame_source is None:
         frame_source = model.model_frame()
+    if not isinstance(frame_source, pd.DataFrame):
+        frame_source = select_columns(frame_source, fixed_variables)
     frame = _as_pandas_frame(frame_source)
-    fixed_variables = _fixed_variable_order(model)
     available = set(fixed_variables)
 
     missing = [term for term in terms if term not in available]
