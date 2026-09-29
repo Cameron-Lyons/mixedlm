@@ -216,7 +216,7 @@ def anova(
         else:
             chi_sq.append(float(ll_diff))
             chi_df.append(df_diff)
-            p_val = 1 - stats.chi2.cdf(ll_diff, df_diff)
+            p_val = stats.chi2.sf(ll_diff, df_diff)
             p_value.append(float(p_val))
 
     return AnovaResult(
@@ -327,7 +327,7 @@ def anova_type3(
 
         avg_den_df = float(np.mean(ddf_result.df[indices_arr]))
 
-        p_val = 1 - stats.f.cdf(f_stat, num_df, avg_den_df)
+        p_val = stats.f.sf(f_stat, num_df, avg_den_df)
 
         ss = f_stat * num_df * sigma2
         ms = ss / num_df

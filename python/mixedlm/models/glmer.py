@@ -25,7 +25,7 @@ from mixedlm.models.lmer_types import (
 )
 from mixedlm.models.result_mixin import MerResultMixin
 from mixedlm.models.shared_utils import sparse_quadratic_form_diagonal, symmetric_inverse
-from mixedlm.utils import _get_signif_code
+from mixedlm.utils import _format_pvalue, _get_signif_code
 
 
 @dataclass
@@ -1702,10 +1702,11 @@ class GlmerResult(MerResultMixin):
         lines.append("             Estimate  Std. Error  z value  Pr(>|z|)")
         for i, name in enumerate(self.matrices.fixed_names):
             z_val = self.beta[i] / se[i] if se[i] > 0 else np.nan
-            p_val = 2 * (1 - stats.norm.cdf(np.abs(z_val)))
+            p_val = 2 * stats.norm.sf(np.abs(z_val))
             sig = _get_signif_code(p_val)
             lines.append(
-                f"{name:12} {self.beta[i]:10.4f}  {se[i]:10.4f}  {z_val:7.3f}  {p_val:.4f} {sig}"
+                f"{name:12} {self.beta[i]:10.4f}  {se[i]:10.4f}  {z_val:7.3f}  "
+                f"{_format_pvalue(p_val):>10} {sig}"
             )
 
         lines.append("---")

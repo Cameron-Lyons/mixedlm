@@ -304,6 +304,11 @@ em = mlm.emmeans(model, "treatment", type="response")
 - `pairs(adjust="tukey")`: Compute all pairwise comparisons
 - `contrast(method, adjust="none")`: Compute pairwise, treatment-vs-control, or custom contrasts
 
+Contrast tests retain very small p-values when computing two-sided Student's
+t probabilities. Holm and FDR adjustments preserve the input comparison order
+and keep undefined p-values as `NaN`; the adjustment count includes all
+comparisons in the supplied family.
+
 **Example:**
 
 ```python
