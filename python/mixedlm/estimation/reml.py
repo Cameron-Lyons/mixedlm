@@ -75,6 +75,7 @@ class _DevianceCoreResult:
     wrss: float
     ussq: float
     pwrss: float
+    fixed_information: NDArray[np.floating]
 
 
 def _build_cs_cholesky(q: int, rho: float) -> NDArray[np.floating]:
@@ -333,6 +334,7 @@ def _profiled_deviance_core(
             wrss=float(wrss),
             ussq=0.0,
             pwrss=float(wrss),
+            fixed_information=XtWX,
         )
 
     if crossproducts is None:
@@ -402,6 +404,7 @@ def _profiled_deviance_core(
         wrss=float(wrss),
         ussq=float(ussq),
         pwrss=float(pwrss),
+        fixed_information=XtVinvX,
     )
 
 

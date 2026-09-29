@@ -165,6 +165,23 @@ def test_benchmark_lmer_large_data(benchmark, large_data):
     benchmark(fit_model)
 
 
+@pytest.mark.benchmark(group="denominator-df")
+def test_benchmark_satterthwaite_df(benchmark, large_data):
+    from mixedlm.inference.ddf import clear_vcov_grad_cache, satterthwaite_df
+
+    model = lmer("y ~ x + (x | group)", data=large_data)
+    model.vcov()
+
+    def compute_df():
+        clear_vcov_grad_cache()
+        return satterthwaite_df(model)
+
+    result = benchmark(compute_df)
+
+    assert result.df.shape == (2,)
+    assert np.all((result.df >= 1) & (result.df <= len(large_data) - 2))
+
+
 @pytest.mark.benchmark(group="lmm-crossproducts")
 @pytest.mark.parametrize("cached", [False, True], ids=["uncached", "cached"])
 def test_benchmark_python_lmm_objective(benchmark, large_data, cached):
