@@ -193,6 +193,10 @@ covariance among correlated random slopes, and covariance across crossed structu
 unseen group accepted with `allow_new_levels=True`, the fitted prior covariance is added while
 the predicted random effect remains zero. Prediction intervals add residual variance to the
 mean-prediction variance; `se_fit` continues to report the standard error of the mean.
+The covariance calculation uses the fitted prior weights. In-sample prediction intervals
+add residual variance `sigma**2 / weight`, while new-data prediction intervals assume
+unit residual weights. Repeated uncertainty calculations reuse the fitted weighted
+factorization.
 
 ```python
 mean_ci = result.predict(newdata, interval="confidence", level=0.95)

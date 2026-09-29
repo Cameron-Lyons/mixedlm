@@ -193,6 +193,32 @@ def test_benchmark_large_crossed_sparse_design_build(benchmark, large_crossed_sp
     assert matrices.Z.nnz == 2 * len(large_crossed_sparse_data)
 
 
+@pytest.mark.benchmark(group="prediction-uncertainty")
+def test_benchmark_repeated_prediction_uncertainty(benchmark, large_crossed_sparse_data):
+    from mixedlm.models.lmer import LmerResult
+
+    formula = parse_formula("y ~ x + (1 | group1) + (1 | group2)")
+    matrices = build_model_matrices(formula, large_crossed_sparse_data)
+    result = LmerResult(
+        formula=formula,
+        matrices=matrices,
+        theta=np.array([1.0, 0.6]),
+        beta=np.array([2.0, 0.5]),
+        sigma=0.25,
+        u=np.zeros(matrices.n_random),
+        deviance=0.0,
+        REML=True,
+        converged=True,
+        n_iter=0,
+    )
+    newdata = large_crossed_sparse_data.iloc[:20]
+    expected = result.predict(newdata, se_fit=True)
+
+    actual = benchmark(result.predict, newdata, se_fit=True)
+
+    np.testing.assert_allclose(actual.se_fit, expected.se_fit)
+
+
 @pytest.mark.benchmark(group="sparse-design")
 def test_benchmark_large_nested_sparse_design_build(benchmark, large_crossed_sparse_data):
     formula = parse_formula("y ~ x + (1 | group1/group2)")

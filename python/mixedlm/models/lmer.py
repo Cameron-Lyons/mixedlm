@@ -391,6 +391,12 @@ class LmerResult(MerResultMixin):
         -------
         NDArray or PredictResult
             Predictions. Returns PredictResult if se_fit=True or interval!="none".
+
+        Notes
+        -----
+        Prediction uncertainty uses the prior weights from the fitted model.
+        In-sample prediction intervals add residual variance ``sigma**2 / weight``;
+        new-data prediction intervals assume unit residual weights.
         """
         valid_intervals = ("none", "confidence", "prediction")
         if interval not in valid_intervals:
@@ -519,32 +525,15 @@ class LmerResult(MerResultMixin):
                 pred_matrices, allow_new_levels
             )
 
-        Lambda = _build_lambda(self.theta, self.matrices.random_structures)
-        Zt = self.matrices.Zt
-        V = Lambda.T @ (Zt @ self.matrices.Z) @ Lambda
-        V = V + sparse.eye(q, format="csc")
-        V_dense = V.toarray() if sparse.issparse(V) else np.asarray(V)
-        L_V = linalg.cholesky(V_dense, lower=True)
+        projection = self._weighted_projection
+        assert projection.lambda_matrix is not None and projection.L_V is not None
+        beta_adjustment = linalg.solve_triangular(projection.L_V.T, projection.RZX, lower=False)
+        vcov_beta = self.vcov()
 
-        Lambdat_ZtX = Lambda.T @ (Zt @ self.matrices.X)
-        beta_adjustment = linalg.cho_solve((L_V, True), Lambdat_ZtX)
-        fixed_information = self.matrices.X.T @ self.matrices.X
-        fixed_information -= Lambdat_ZtX.T @ beta_adjustment
-        fixed_information = (fixed_information + fixed_information.T) / 2.0
-        try:
-            L_fixed = linalg.cholesky(fixed_information, lower=True)
-            vcov_beta = self.sigma**2 * linalg.cho_solve(
-                (L_fixed, True), np.eye(fixed_information.shape[0])
-            )
-        except linalg.LinAlgError:
-            vcov_beta = self.sigma**2 * linalg.solve(
-                fixed_information, np.eye(fixed_information.shape[0])
-            )
-
-        transformed_Z = (Z_pred @ Lambda).tocsr()
+        transformed_Z = (Z_pred @ projection.lambda_matrix).tocsr()
         adjusted_X = X - np.asarray(transformed_Z @ beta_adjustment)
         var_fixed = np.sum((adjusted_X @ vcov_beta) * adjusted_X, axis=1)
-        var_random = self._conditional_random_prediction_variance(transformed_Z, L_V)
+        var_random = self._conditional_random_prediction_variance(transformed_Z, projection.L_V)
 
         return np.maximum(var_fixed + var_random + prior_var, 0.0)
 
