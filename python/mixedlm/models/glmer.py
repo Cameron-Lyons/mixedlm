@@ -62,6 +62,16 @@ class GlmerVarCorr:
 
 
 @dataclass(frozen=True)
+class _GLMMRandomSystem:
+    """Final working weights and sparse random-effect information."""
+
+    weights: NDArray[np.floating]
+    Lambda: sparse.csc_matrix
+    weighted_Z: sparse.csc_matrix
+    precision: sparse.csc_matrix
+
+
+@dataclass(frozen=True)
 class _GLMMProjection:
     weights: NDArray[np.floating]
     Lambda: sparse.csc_matrix
@@ -104,14 +114,11 @@ class GlmerResult(MerResultMixin):
         if q == 0:
             return {}
 
-        projection = self._working_projection
-        weighted_z = self.matrices.Z.multiply(np.sqrt(projection.weights)[:, np.newaxis])
-        ztwz = weighted_z.T @ weighted_z
-        precision = projection.Lambda.T @ ztwz @ projection.Lambda + sparse.eye(q, format="csc")
+        system = self._working_random_system
 
         return _conditional_variance_blocks(
-            precision,
-            projection.Lambda,
+            system.precision,
+            system.Lambda,
             self.matrices.random_structures,
             include_cov=include_cov,
         )
@@ -231,10 +238,8 @@ class GlmerResult(MerResultMixin):
         return fixed_part + random_part + self.matrices.offset
 
     @cached_property
-    def _working_projection(self) -> _GLMMProjection:
-        """Final PIRLS projection in spherical random-effect coordinates."""
-        X = self.matrices.X
-        q = self.matrices.n_random
+    def _working_random_system(self) -> _GLMMRandomSystem:
+        """Build sparse random-effect information without a dense factorization."""
         mu = self.family.link.inverse(self._linear_predictor)
         mu = self.family.clamp_mu(mu)
         weights = np.clip(
@@ -242,11 +247,24 @@ class GlmerResult(MerResultMixin):
             1e-10,
             1e10,
         )
+        weighted_Z = self.matrices.Z.multiply(np.sqrt(weights)[:, None]).tocsc()
+        Lambda = _build_lambda(self.theta, self.matrices.random_structures)
+        precision = Lambda.T @ (weighted_Z.T @ weighted_Z) @ Lambda
+        precision = (precision + sparse.eye(self.matrices.n_random, format="csc")).tocsc()
+        return _GLMMRandomSystem(weights, Lambda, weighted_Z, precision)
+
+    @cached_property
+    def _working_projection(self) -> _GLMMProjection:
+        """Final PIRLS projection in spherical random-effect coordinates."""
+        X = self.matrices.X
+        q = self.matrices.n_random
+        system = self._working_random_system
+        weights = system.weights
         sqrt_weights = np.sqrt(weights)
         WX = sqrt_weights[:, None] * X
-        WZ = self.matrices.Z.multiply(sqrt_weights[:, None]).tocsc()
+        WZ = system.weighted_Z
         XtWX = WX.T @ WX
-        Lambda = _build_lambda(self.theta, self.matrices.random_structures)
+        Lambda = system.Lambda
 
         if q == 0:
             return _GLMMProjection(
@@ -260,9 +278,7 @@ class GlmerResult(MerResultMixin):
                 information_inv=symmetric_inverse(XtWX),
             )
 
-        ZtWZ = WZ.T @ WZ
-        random_information = Lambda.T @ ZtWZ @ Lambda + sparse.eye(q, format="csc")
-        random_information_dense = random_information.toarray()
+        random_information_dense = system.precision.toarray()
         try:
             random_cholesky = linalg.cholesky(random_information_dense, lower=True)
         except linalg.LinAlgError:
