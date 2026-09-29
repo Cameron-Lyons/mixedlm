@@ -276,9 +276,24 @@ days_effect = effects["Days"]
 ```
 
 Both functions are batched, use the fitted fixed-effect covariance matrix, and
-require no plotting package. If a model was fit with non-default categorical
-contrasts, pass the same mapping with `contrasts=` so the prediction grid uses
-the fitted parameterization.
+require no plotting package. Prediction grids automatically reuse fitted
+categorical contrasts, category order, and retained fixed-effect columns. Sum,
+Helmert, polynomial, and custom contrasts need no repeated configuration. Factors
+outside the requested grid are held at the first fitted category, including when
+their source data uses a different category order.
+
+The optional `contrasts=` mapping remains available as an explicit override; it
+should match the fitted coefficient parameterization. For example:
+
+```python
+model = mlm.lmer("yield ~ treatment * dose + (1 | block)", data,
+                 contrasts={"treatment": "sum"})
+predictions = mlm.ggpredict(model, "treatment")
+effects = mlm.allEffects(model)
+```
+
+Grid calculations read the fitted pandas frame without copying or modifying it.
+Returned prediction tables are independent of that frame.
 
 ### emmeans
 

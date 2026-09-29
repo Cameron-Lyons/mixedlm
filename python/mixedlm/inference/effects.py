@@ -10,7 +10,6 @@ from numpy.typing import NDArray
 from scipy import stats
 
 from mixedlm.formula.terms import InteractionTerm, PowerTerm, VariableTerm
-from mixedlm.matrices.design import build_fixed_matrix
 
 if TYPE_CHECKING:
     from mixedlm.models.glmer import GlmerResult
@@ -18,8 +17,9 @@ if TYPE_CHECKING:
 
 
 def _as_pandas_frame(frame: Any) -> pd.DataFrame:
+    """Access the model frame for read-only reference-value calculations."""
     if isinstance(frame, pd.DataFrame):
-        return frame.copy()
+        return frame
     if "polars" in type(frame).__module__ and hasattr(frame, "to_dict"):
         result = pd.DataFrame(frame.to_dict(as_series=False))
         for name in frame.columns:
@@ -74,9 +74,11 @@ def _coerce_values(value: Any, name: str) -> list[Any]:
     return values
 
 
-def _validate_values(series: pd.Series, values: list[Any]) -> list[Any]:
-    if _is_factor(series):
-        levels = _factor_levels(series)
+def _validate_values(
+    series: pd.Series, values: list[Any], levels: list[Any] | None = None
+) -> list[Any]:
+    if levels is not None or _is_factor(series):
+        levels = _factor_levels(series) if levels is None else levels
         unknown = [value for value in values if value not in levels]
         if unknown:
             raise ValueError(
@@ -92,7 +94,9 @@ def _validate_values(series: pd.Series, values: list[Any]) -> list[Any]:
     return numeric.tolist()
 
 
-def _default_values(series: pd.Series, n_points: int) -> list[Any]:
+def _default_values(series: pd.Series, n_points: int, levels: list[Any] | None = None) -> list[Any]:
+    if levels is not None:
+        return levels
     clean = series.dropna()
     if clean.empty:
         raise ValueError(f"Variable '{series.name}' has no non-missing values")
@@ -105,7 +109,9 @@ def _default_values(series: pd.Series, n_points: int) -> list[Any]:
     return np.linspace(float(clean.min()), float(clean.max()), n_points).tolist()
 
 
-def _reference_value(series: pd.Series) -> Any:
+def _reference_value(series: pd.Series, levels: list[Any] | None = None) -> Any:
+    if levels is not None:
+        return levels[0]
     clean = series.dropna()
     if clean.empty:
         raise ValueError(f"Variable '{series.name}' has no non-missing values")
@@ -151,18 +157,24 @@ def _prediction_grid(
 
     grid_values: list[list[Any]] = []
     for term in terms:
+        levels = model.matrices.category_levels.get(term)
         values = (
-            _coerce_values(at[term], term) if term in at else _default_values(frame[term], n_points)
+            _coerce_values(at[term], term)
+            if term in at
+            else _default_values(frame[term], n_points, levels)
         )
-        grid_values.append(_validate_values(frame[term], values))
+        grid_values.append(_validate_values(frame[term], values, levels))
 
     grid = pd.DataFrame(list(itertools.product(*grid_values)), columns=terms)
 
     for variable in fixed_variables:
         if variable in terms:
             continue
+        levels = model.matrices.category_levels.get(variable)
         if variable in at:
-            values = _validate_values(frame[variable], _coerce_values(at[variable], variable))
+            values = _validate_values(
+                frame[variable], _coerce_values(at[variable], variable), levels
+            )
             if len(values) != 1:
                 raise ValueError(
                     f"Non-focal variable '{variable}' must have one value in at; "
@@ -170,24 +182,18 @@ def _prediction_grid(
                 )
             grid[variable] = values[0]
         else:
-            grid[variable] = _reference_value(frame[variable])
+            grid[variable] = _reference_value(frame[variable], levels)
 
     for variable in fixed_variables:
         source = frame[variable]
-        if _is_factor(source):
-            levels = _factor_levels(source)
+        levels = model.matrices.category_levels.get(variable)
+        if levels is not None or _is_factor(source):
+            levels = _factor_levels(source) if levels is None else levels
             ordered = bool(isinstance(source.dtype, pd.CategoricalDtype) and source.dtype.ordered)
             grid[variable] = pd.Categorical(grid[variable], categories=levels, ordered=ordered)
 
-    X_grid, fixed_names = build_fixed_matrix(model.formula, grid, contrasts=contrasts)
-    column_indices = {name: index for index, name in enumerate(fixed_names)}
-    try:
-        fitted_indices = [column_indices[name] for name in model.matrices.fixed_names]
-    except KeyError as exc:
-        raise ValueError(
-            f"Prediction grid is missing fitted fixed-effect column '{exc.args[0]}'"
-        ) from None
-    return grid, np.asarray(X_grid[:, fitted_indices], dtype=np.float64)
+    X_grid = model._prediction_fixed_matrix(grid, contrasts=contrasts)
+    return grid, np.asarray(X_grid, dtype=np.float64)
 
 
 def ggpredict(
@@ -226,8 +232,8 @@ def ggpredict(
     offset : float, default 0.0
         Constant offset added to the linear predictor.
     contrasts : dict, optional
-        Contrast specification used when fitting the model. Supply this for
-        non-default categorical contrasts.
+        Defaults to the fitted categorical contrasts. An explicit mapping
+        overrides them and should match the fitted coefficient parameterization.
 
     Returns
     -------

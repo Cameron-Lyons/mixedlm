@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 import pytest
-from mixedlm import lmer
+from mixedlm import allEffects, lmer
 from mixedlm._rust import (
     SparseCholeskySymbolic,
     simulate_re_batch,
@@ -397,3 +397,47 @@ def test_benchmark_large_leverage(benchmark, large_crossed_sparse_data, kind):
 
     assert values.shape == (len(large_crossed_sparse_data),)
     assert np.all((values >= 0) & (values < 1))
+
+
+@pytest.mark.benchmark(group="adjusted-effects")
+def test_benchmark_adjusted_effect_grids(benchmark):
+    from mixedlm.models.lmer import LmerResult
+
+    rng = np.random.default_rng(642)
+    n_rows = 20_000
+    data = pd.DataFrame({f"x{i}": rng.normal(size=n_rows) for i in range(8)})
+    data["treatment"] = pd.Categorical(
+        np.resize(["C", "A", "B"], n_rows), categories=["C", "A", "B"]
+    )
+    data["g"] = np.arange(n_rows) % 8
+    data["y"] = rng.normal(size=n_rows)
+    formula = parse_formula(
+        "y ~ treatment + " + " + ".join(f"x{i}" for i in range(8)) + " + (1 | g)"
+    )
+    matrices = build_model_matrices(formula, data, contrasts={"treatment": "sum"})
+    model = LmerResult(
+        formula=formula,
+        matrices=matrices,
+        theta=np.array([0.6]),
+        beta=np.linspace(-0.4, 0.5, matrices.n_fixed),
+        u=np.zeros(matrices.n_random),
+        sigma=1.0,
+        REML=True,
+        deviance=0.0,
+        converged=True,
+        n_iter=0,
+    )
+    model.vcov()
+
+    result = benchmark(allEffects, model, n_points=5, contrasts=model.matrices.contrasts)
+
+    assert list(result) == ["treatment", *(f"x{i}" for i in range(8))]
+    for name, frame in result.items():
+        grid = frame[[name]].copy()
+        for i in range(8):
+            if f"x{i}" != name:
+                grid[f"x{i}"] = data[f"x{i}"].mean()
+        if name != "treatment":
+            grid["treatment"] = "C"
+        expected = model.predict(grid, re_form="~0")
+        np.testing.assert_allclose(frame.predicted, expected, atol=1e-12)
