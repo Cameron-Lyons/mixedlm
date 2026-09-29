@@ -136,6 +136,19 @@ def test_benchmark_lmer_simple(benchmark, sleepstudy_data):
     benchmark(fit_model)
 
 
+@pytest.mark.benchmark(group="em-reml")
+def test_benchmark_em_reml_iterations(benchmark, large_crossed_sparse_data):
+    from mixedlm.estimation.em_reml import em_reml_simple
+
+    matrices = build_model_matrices(
+        parse_formula("y ~ x + (1 | group1) + (1 | group2)"), large_crossed_sparse_data
+    )
+    result = benchmark(em_reml_simple, matrices, max_iter=3, min_iter_converge=10)
+
+    assert result.n_iter == 3
+    assert np.isfinite(result.final_loglik)
+
+
 @pytest.mark.benchmark(group="lmer")
 def test_benchmark_lmer_random_slope(benchmark, sleepstudy_data):
     def fit_model():

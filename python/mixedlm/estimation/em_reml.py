@@ -86,19 +86,20 @@ def _init_sigma_k(
     return np.eye(q, dtype=np.float64) * init_var
 
 
-def _build_block_diag_D_inv(
+def _add_random_precision(
+    precision: NDArray[np.floating],
     structures: list[RandomEffectStructure],
     sigma_list: list[NDArray[np.floating]],
-) -> NDArray[np.floating]:
-    """Build block-diagonal D_inv = block_diag(kron(I_{n_k}, inv(Sigma_k)))."""
-    blocks: list[NDArray[np.floating]] = []
+) -> None:
+    """Add each repeated prior-precision block in place without expanding it."""
+    offset = 0
     for struct, sigma_k in zip(structures, sigma_list, strict=True):
         q = struct.n_terms
-        n_levels = struct.n_levels
         sigma_k_inv = _safe_inverse(sigma_k) if q > 1 else np.array([[1.0 / sigma_k[0, 0]]])
-        block = np.kron(np.eye(n_levels), sigma_k_inv)
-        blocks.append(block)
-    return linalg.block_diag(*blocks)
+        level_starts = offset + np.arange(struct.n_levels) * q
+        indices = level_starts[:, None] + np.arange(q)
+        precision[indices[:, :, None], indices[:, None, :]] += sigma_k_inv
+        offset += struct.n_levels * q
 
 
 def _weighted_crossproducts(
@@ -158,11 +159,8 @@ def _m_step_update_sigma(
     U = u_block.reshape(n_levels, q)
     S = U.T @ U
 
-    var_sum = np.zeros((q, q), dtype=np.float64)
-    for i in range(n_levels):
-        start = i * q
-        end = start + q
-        var_sum += Var_u_block[start:end, start:end]
+    # Split the two axes into level/term pairs and sum only matching levels.
+    var_sum = np.einsum("ijik->jk", Var_u_block.reshape(n_levels, q, n_levels, q))
 
     Sigma_new = (S + var_sum) / n_levels
 
@@ -363,20 +361,24 @@ def em_reml_simple(
         y_adj,
         weights,
     )
+    logdet_weights = float(np.sum(np.log(weights)))
+    system_size = p + Z.shape[1]
+    LHS = np.empty((system_size, system_size), dtype=np.float64)
+    XtWX = LHS[:p, :p]
+    XtWZ = LHS[:p, p:]
+    random_precision = LHS[p:, p:]
 
     for iteration in range(max_iter):
         inverse_sigma2_e = 1.0 / sigma2_e
-        XtWX = XtWX_base * inverse_sigma2_e
-        XtWZ = XtWZ_base * inverse_sigma2_e
-        ZtWZ = ZtWZ_base * inverse_sigma2_e
-        D_inv = _build_block_diag_D_inv(structures, sigma_list)
+        np.multiply(XtWX_base, inverse_sigma2_e, out=XtWX)
+        np.multiply(XtWZ_base, inverse_sigma2_e, out=XtWZ)
+        LHS[p:, :p] = XtWZ.T
+        np.multiply(ZtWZ_base, inverse_sigma2_e, out=random_precision)
+        _add_random_precision(random_precision, structures, sigma_list)
 
         XtWy = XtWy_base * inverse_sigma2_e
         ZtWy = ZtWy_base * inverse_sigma2_e
 
-        LHS_top = np.hstack([XtWX, XtWZ])
-        LHS_bot = np.hstack([XtWZ.T, ZtWZ + D_inv])
-        LHS = np.vstack([LHS_top, LHS_bot])
         RHS = np.concatenate([XtWy, ZtWy])
 
         try:
@@ -389,10 +391,10 @@ def em_reml_simple(
 
         try:
             XtWX_inv_XtWZ = linalg.solve(XtWX, XtWZ, assume_a="pos")
-            schur_complement = (ZtWZ + D_inv) - XtWZ.T @ XtWX_inv_XtWZ
+            schur_complement = random_precision - XtWZ.T @ XtWX_inv_XtWZ
             Var_u = _safe_inverse(schur_complement)
         except linalg.LinAlgError:
-            Var_u = _safe_inverse(ZtWZ + D_inv)
+            Var_u = _safe_inverse(random_precision)
 
         sigma_list_new: list[NDArray[np.floating]] = []
         for k, struct in enumerate(structures):
@@ -406,15 +408,16 @@ def em_reml_simple(
 
         residuals = y_adj - X @ beta_new - Z @ u_hat
         wrss = float(np.sum(weights * residuals**2))
-        uncertainty_term = float(np.trace(ZtWZ_base @ Var_u))
+        # trace(A @ B) = sum_ij A_ij B_ji, without a cubic matrix product.
+        uncertainty_term = float(np.einsum("ij,ji->", ZtWZ_base, Var_u))
         sigma2_e_new = max((wrss + uncertainty_term) / n, variance_floor)
 
         loglik = -0.5 * (
             (n - p) * np.log(2 * np.pi * sigma2_e_new)
             + wrss / sigma2_e_new
-            + _positive_definite_logdet(ZtWZ + D_inv)
+            + _positive_definite_logdet(random_precision)
             + _positive_definite_logdet(XtWX)
-            - np.sum(np.log(weights))
+            - logdet_weights
         )
 
         if not np.isfinite(loglik):
