@@ -299,6 +299,15 @@ em = mlm.emmeans(model, "treatment", type="response")
 
 **Returns:** Emmeans object
 
+GLMM intervals and comparisons use an asymptotic normal reference, reported as
+`df=inf`. Their comparison tables label the statistic `z.ratio`; the result's
+`t_ratio` array retains its existing name. LMM comparisons use Student's t
+reference with residual degrees of freedom. GLMM contrasts remain on the link
+scale even when `type="response"` displays back-transformed marginal means.
+
+Undefined comparison p-values print as `nan`. Small p-values use scientific
+notation or `< 2e-16`, as in model summaries.
+
 **Methods on Emmeans object:**
 
 - `pairs(adjust="tukey")`: Compute all pairwise comparisons
