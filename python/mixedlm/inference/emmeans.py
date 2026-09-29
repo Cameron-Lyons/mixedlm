@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pandas as pd
-from numpy.typing import NDArray
+from numpy.typing import ArrayLike, NDArray
 from scipy import stats
 
 from mixedlm.utils.dataframe import get_categories, get_column_numpy, is_categorical_or_string
@@ -120,6 +120,7 @@ class Emmeans:
     _specs: list[str]
     _levels: list[list[Any]]
     _by: list[str] = field(default_factory=list)
+    _offset: NDArray[np.floating] | None = None
 
     def _grouped_contrasts(self, compute: Callable[[Emmeans], ContrastResult]) -> ContrastResult:
         """Compare means and adjust p-values independently within each by group."""
@@ -137,7 +138,13 @@ class Emmeans:
                 upper=self.result.upper[indices],
                 grid=grid,
             )
-            means = replace(self, result=subset, _L=self._L[indices], _by=[])
+            means = replace(
+                self,
+                result=subset,
+                _L=self._L[indices],
+                _by=[],
+                _offset=None if self._offset is None else self._offset[indices],
+            )
             result = compute(means)
             values = {name: grid[name].iloc[0] for name in self._by}
             description = ", ".join(f"{name}={value}" for name, value in values.items())
@@ -182,6 +189,8 @@ class Emmeans:
         L_contrast = self._L[left_indices] - self._L[right_indices]
 
         estimates = L_contrast @ self._beta
+        if self._offset is not None:
+            estimates += self._offset[left_indices] - self._offset[right_indices]
         var_contrast = _rowwise_quadratic_form(L_contrast, self._vcov)
         se_contrast = np.sqrt(np.maximum(var_contrast, 0))
 
@@ -237,6 +246,8 @@ class Emmeans:
         contrast_labels = [f"{grid_labels[i]} - {grid_labels[ctrl_idx]}" for i in treatment_indices]
         L_contrast = self._L[treatment_indices] - self._L[ctrl_idx]
         estimates = L_contrast @ self._beta
+        if self._offset is not None:
+            estimates += self._offset[treatment_indices] - self._offset[ctrl_idx]
         var_contrast = _rowwise_quadratic_form(L_contrast, self._vcov)
         se_contrast = np.sqrt(np.maximum(var_contrast, 0))
         t_ratio = estimates / se_contrast
@@ -266,6 +277,8 @@ class Emmeans:
         n_contrasts = C.shape[0]
         L_contrast = C @ self._L
         estimates = L_contrast @ self._beta
+        if self._offset is not None:
+            estimates += C @ self._offset
         var_contrast = _rowwise_quadratic_form(L_contrast, self._vcov)
         se_contrast = np.sqrt(np.maximum(var_contrast, 0))
         t_ratio = estimates / se_contrast
@@ -400,6 +413,29 @@ def _reference_levels(
     return levels
 
 
+def _reference_offsets(
+    model: LmerResult | GlmerResult,
+    offset: ArrayLike | None,
+    n_means: int,
+) -> NDArray[np.floating]:
+    """Resolve known offsets on the link scale, in result-grid row order."""
+    if offset is None:
+        offset = np.mean(model.matrices.offset)
+    if np.iscomplexobj(offset):
+        raise ValueError("offset must contain real numeric values")
+    try:
+        values = np.asarray(offset, dtype=np.float64)
+    except (TypeError, ValueError):
+        raise ValueError("offset must be a finite numeric scalar or 1-D sequence") from None
+    if values.ndim == 0:
+        values = np.full(n_means, values.item(), dtype=np.float64)
+    elif values.ndim != 1 or len(values) != n_means:
+        raise ValueError(f"offset must be a scalar or a 1-D sequence with {n_means} values")
+    if not np.all(np.isfinite(values)):
+        raise ValueError("offset must contain only finite values")
+    return values.copy()
+
+
 def emmeans(
     model: LmerResult | GlmerResult,
     specs: str | list[str],
@@ -409,6 +445,7 @@ def emmeans(
     type: str = "response",
     level: float = 0.95,
     *,
+    offset: ArrayLike | None = None,
     _by: str | list[str] | None = None,
 ) -> Emmeans:
     """Estimate means over a reference grid, optionally comparing within by groups.
@@ -417,6 +454,12 @@ def emmeans(
     Predictors in ``specs`` or ``by`` identify result rows; all other reference
     dimensions are averaged with equal weights. Contrasts compare means within
     each ``by`` group and adjust that group's p-values separately.
+
+    ``offset=None`` uses the unweighted mean of the fitted link-scale offsets
+    after missing-value omission. A finite scalar or one value per result-grid
+    row overrides that reference offset. Use ``offset=0`` for per-unit rates
+    in a count model fitted with a log-exposure offset. Offsets also enter
+    contrasts but contribute no additional coefficient uncertainty.
     """
     if type not in {"link", "response"}:
         raise ValueError("type must be 'link' or 'response'")
@@ -447,11 +490,12 @@ def emmeans(
     result_grid = pd.DataFrame(
         itertools.product(*(levels[name] for name in result_names)), columns=result_names
     )
+    offsets = _reference_offsets(model, offset, len(result_grid))
     n_averaged = prod(len(levels[name]) for name in averaged_names)
     L = X_grid.reshape(len(result_grid), n_averaged, len(beta)).mean(axis=1)
     vcov = model.vcov()
 
-    em_values = L @ beta
+    em_values = L @ beta + offsets
     var_em = _rowwise_quadratic_form(L, vcov)
     se_em = np.sqrt(np.maximum(var_em, 0))
 
@@ -499,4 +543,5 @@ def emmeans(
         _specs=[name for name in spec_names if name not in by_names],
         _levels=[levels[name] for name in spec_names if name not in by_names],
         _by=by_names,
+        _offset=offsets,
     )

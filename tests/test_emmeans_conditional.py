@@ -70,6 +70,152 @@ def _direct_rows(model, result_grid, at=None):
 
 @pytest.mark.parametrize("kind", ["lmm", "glmm"])
 @pytest.mark.parametrize("backend", ["pandas", "polars"])
+def test_fitted_offsets_shift_means_on_the_link_scale(kind, backend):
+    model = _model(kind, backend)
+    baseline = emmeans(model, "treatment", type="link").result
+    model.matrices.offset = np.log(np.linspace(2.0, 15.0, model.matrices.n_obs))
+    reference_offset = np.mean(model.matrices.offset)
+
+    actual = emmeans(model, "treatment", type="link").result
+
+    assert_allclose(actual.emmean, baseline.emmean + reference_offset)
+    assert_allclose(actual.lower, baseline.lower + reference_offset)
+    assert_allclose(actual.upper, baseline.upper + reference_offset)
+    assert_array_equal(actual.se, baseline.se)
+    assert actual.df == baseline.df
+
+
+@pytest.mark.parametrize("offset", [None, 1.2, [0.3, 1.4, -0.5]])
+@pytest.mark.parametrize("kind", ["lmm", "glmm"])
+def test_offset_transforms_response_means_intervals_and_standard_errors(kind, offset):
+    model = _model(kind)
+    model.matrices.offset[:] = np.log(4.0)
+    expected_offset = np.log(4.0) if offset is None else np.asarray(offset)
+    baseline = emmeans(model, "treatment", offset=0, type="link").result
+
+    result = emmeans(model, "treatment", offset=offset).result
+
+    if kind == "glmm":
+        assert_allclose(result.emmean, np.exp(baseline.emmean + expected_offset))
+        assert_allclose(result.lower, np.exp(baseline.lower + expected_offset))
+        assert_allclose(result.upper, np.exp(baseline.upper + expected_offset))
+        assert_allclose(result.se, baseline.se * result.emmean)
+    else:
+        assert_allclose(result.emmean, baseline.emmean + expected_offset)
+        assert_allclose(result.lower, baseline.lower + expected_offset)
+        assert_allclose(result.upper, baseline.upper + expected_offset)
+        assert_array_equal(result.se, baseline.se)
+
+
+@pytest.mark.parametrize("kind", ["lmm", "glmm"])
+@pytest.mark.parametrize("grouped", [False, True])
+@pytest.mark.parametrize("method", ["pairwise", "trt.vs.ctrl", "custom"])
+def test_offsets_enter_contrasts_without_changing_their_uncertainty(kind, grouped, method):
+    model = _model(kind)
+    by = "site" if grouped else None
+    baseline = emmeans(model, "treatment", by=by, offset=0, type="link")
+    offsets = np.linspace(-0.4, 1.8, len(baseline.result.grid)) ** 2
+    # Response-scale display must still produce link-scale contrasts.
+    means = emmeans(model, "treatment", by=by, offset=offsets)
+    matrices = {
+        "pairwise": np.array([[1, -1, 0], [1, 0, -1], [0, 1, -1]]),
+        "trt.vs.ctrl": np.array([[-1, 1, 0], [-1, 0, 1]]),
+        # Include an identity row to check nonzero-sum contrasts.
+        "custom": np.array([[1, 0, 0], [-1, 0.5, 0.5]]),
+    }
+    coefficients = matrices[method]
+    actual = (
+        means.pairs(adjust="none")
+        if method == "pairwise"
+        else means.contrast(coefficients if method == "custom" else method, adjust="none")
+    )
+    groups = [np.array([0, 2, 4]), np.array([1, 3, 5])] if grouped else [np.arange(3)]
+    rows = np.vstack([coefficients @ baseline._L[indices] for indices in groups])
+    expected = rows @ model.beta + np.concatenate(
+        [coefficients @ offsets[indices] for indices in groups]
+    )
+    variance = np.diag(rows @ model.vcov() @ rows.T)
+    ratios = expected / np.sqrt(variance)
+
+    assert_allclose(actual.estimate, expected, atol=1e-14)
+    assert_allclose(actual.se, np.sqrt(variance), atol=1e-14)
+    assert_allclose(actual.t_ratio, ratios, atol=1e-13)
+    assert_allclose(actual.p_value, 2 * stats.t.sf(np.abs(ratios), actual.df), atol=1e-14)
+
+
+@pytest.mark.parametrize("method", ["pairwise", "trt.vs.ctrl", "custom"])
+def test_large_common_offsets_cancel_before_computing_contrasts(method):
+    model = _model()
+    baseline = emmeans(model, "treatment", by="site", offset=0)
+    shifted = emmeans(model, "treatment", by="site", offset=1e20)
+    method_arg = np.array([[1.0, -1.0, 0.0]]) if method == "custom" else method
+
+    expected = baseline.contrast(method_arg)
+    actual = shifted.contrast(method_arg)
+
+    assert_array_equal(actual.estimate, expected.estimate)
+    assert_array_equal(actual.se, expected.se)
+    assert_array_equal(actual.p_value, expected.p_value)
+    assert np.any(actual.estimate != 0)
+
+
+def test_offset_override_is_copied_for_later_grouped_contrasts():
+    offset = np.linspace(0.0, 1.0, 6)
+    means = emmeans(_model(), "treatment", by="site", offset=offset)
+    expected = means.pairs(adjust="none").estimate.copy()
+
+    offset[:] = 100.0
+
+    assert_array_equal(means.pairs(adjust="none").estimate, expected)
+
+
+@pytest.mark.parametrize(
+    ("offset", "message"),
+    [
+        ([], "3 values"),
+        ([1.0], "3 values"),
+        ([1.0, 2.0], "3 values"),
+        ([[1.0, 2.0, 3.0]], "1-D"),
+        (np.nan, "finite"),
+        (np.inf, "finite"),
+        ([0.0, np.inf, 1.0], "finite"),
+        ([0.0, None, 1.0], "finite"),
+        ("exposure", "numeric"),
+        (1j, "real numeric"),
+    ],
+)
+def test_invalid_offsets_fail_before_covariance_work(monkeypatch, offset, message):
+    model = _model()
+
+    def unexpected_covariance(self):
+        raise AssertionError("invalid offsets must fail before covariance work")
+
+    monkeypatch.setattr(type(model), "vcov", unexpected_covariance)
+    with pytest.raises(ValueError, match=message):
+        emmeans(model, "treatment", offset=offset)
+
+
+def test_default_offset_uses_only_retained_rows_after_missing_value_omission():
+    rng = np.random.default_rng(462)
+    data = pd.DataFrame({"x": np.tile([-1.0, 0.0, 1.0], 20), "g": np.repeat(np.arange(10), 6)})
+    offset = np.linspace(-1.0, 2.0, len(data))
+    data["y"] = 2.0 + data.x + offset + rng.normal(size=10)[data.g] + rng.normal(size=60)
+    data.loc[[0, 59], "y"] = np.nan
+    offset[[0, 59]] = 100.0
+    weights = np.linspace(0.5, 3.0, len(data))
+    model = lmer("y ~ x + (1 | g)", data, offset=offset, weights=weights, na_action="omit")
+
+    actual = emmeans(model, "x", at={"x": [-1.0, 2.0]})
+    reference = float(np.mean(offset[1:-1]))
+    grid = pd.DataFrame({"x": [-1.0, 2.0]})
+    expected = model.predict(grid, re_form="~0", offset=reference)
+
+    assert_allclose(actual.result.emmean, expected)
+    assert_allclose(actual._offset, reference)
+
+
+@pytest.mark.parametrize("kind", ["lmm", "glmm"])
+@pytest.mark.parametrize("backend", ["pandas", "polars"])
 @pytest.mark.parametrize("container", [list, tuple, np.array, pd.Index, pd.Series])
 def test_all_numeric_reference_values_are_averaged(kind, backend, container):
     model = _model(kind, backend)
