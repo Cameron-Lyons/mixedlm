@@ -20,9 +20,9 @@ from mixedlm.models.lmer_types import (
     PredictResult,
     RanefResult,
     RePCA,
-    RePCAGroup,
     VarCorrGroup,
 )
+from mixedlm.models.lmer_types import RePCAGroup as RePCAGroup
 from mixedlm.models.result_mixin import MerResultMixin
 from mixedlm.models.shared_utils import sparse_quadratic_form_diagonal, symmetric_inverse
 from mixedlm.utils import _format_pvalue, _get_signif_code
@@ -777,32 +777,7 @@ class LmerResult(MerResultMixin):
         }
 
     def VarCorr(self) -> VarCorr:
-        groups: dict[str, VarCorrGroup] = {}
-
-        for struct, cov in self._iter_random_cov_blocks(scale=self.sigma**2):
-            if struct.correlated or struct.cov_type in ("cs", "ar1"):
-                stddevs = np.sqrt(np.diag(cov))
-                with np.errstate(divide="ignore", invalid="ignore"):
-                    corr = cov / np.outer(stddevs, stddevs)
-                    corr = np.where(np.isfinite(corr), corr, 0.0)
-                    np.fill_diagonal(corr, 1.0)
-            else:
-                corr = None
-
-            diag_cov = np.diag(cov)
-            variance = {term: diag_cov[i] for i, term in enumerate(struct.term_names)}
-            stddev = {term: np.sqrt(diag_cov[i]) for i, term in enumerate(struct.term_names)}
-
-            groups[struct.grouping_factor] = VarCorrGroup(
-                name=struct.grouping_factor,
-                term_names=list(struct.term_names),
-                variance=variance,
-                stddev=stddev,
-                cov=cov,
-                corr=corr,
-            )
-
-        return VarCorr(groups=groups, residual=self.sigma**2)
+        return VarCorr(groups=self._varcorr_groups(scale=self.sigma**2), residual=self.sigma**2)
 
     def rePCA(self) -> RePCA:
         """Perform PCA on the random effects covariance matrix.
@@ -832,31 +807,7 @@ class LmerResult(MerResultMixin):
         >>> print(pca)
         >>> pca.is_singular()  # Check if any components are near-zero
         """
-        groups: dict[str, RePCAGroup] = {}
-
-        for struct, cov in self._iter_random_cov_blocks(scale=self.sigma**2):
-            q = struct.n_terms
-
-            eigenvalues = linalg.eigvalsh(cov)
-            eigenvalues = np.sort(eigenvalues)[::-1]
-            eigenvalues = np.maximum(eigenvalues, 0)
-
-            sdev = np.sqrt(eigenvalues)
-            total_var = np.sum(eigenvalues)
-
-            proportion = eigenvalues / total_var if total_var > 0 else np.zeros(q)
-
-            cumulative = np.cumsum(proportion)
-
-            groups[struct.grouping_factor] = RePCAGroup(
-                name=struct.grouping_factor,
-                n_terms=q,
-                sdev=sdev,
-                proportion=proportion,
-                cumulative=cumulative,
-            )
-
-        return RePCA(groups=groups)
+        return self._random_effect_pca(scale=self.sigma**2)
 
     def dotplot(
         self,
