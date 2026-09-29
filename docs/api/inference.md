@@ -284,6 +284,12 @@ the fitted parameterization.
 
 Compute estimated marginal means.
 
+Factors outside `specs` are averaged equally over their reference-grid levels;
+`at` can restrict those levels. Grid reduction preserves the order of `specs`
+and each factor's levels. Pairwise, treatment-versus-control, and custom
+comparisons evaluate coefficient projections in bounded batches. The returned
+comparison arrays and labels still grow with the number of comparisons.
+
 ```python
 em = mlm.emmeans(model, "treatment", type="response")
 ```
