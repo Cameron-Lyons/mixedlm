@@ -32,8 +32,9 @@ def _make_result(
     theta: NDArray[np.floating],
     *,
     sigma: float = 0.8,
+    weights: NDArray[np.floating] | None = None,
 ) -> LmerResult:
-    matrices = build_model_matrices(formula, data)
+    matrices = build_model_matrices(formula, data, weights=weights)
     return LmerResult(
         formula=formula,
         matrices=matrices,
@@ -48,22 +49,26 @@ def _make_result(
     )
 
 
-@pytest.fixture
-def slope_result() -> LmerResult:
+@pytest.fixture(params=[False, True], ids=["unweighted", "weighted"])
+def slope_result(request: pytest.FixtureRequest) -> LmerResult:
     formula = parse_formula("y ~ x + (x | group)")
-    return _make_result(formula, _prediction_data(), np.array([1.1, 0.35, 0.7]))
+    data = _prediction_data()
+    weights = np.geomspace(0.1, 5.0, len(data)) if request.param else None
+    return _make_result(formula, data, np.array([1.1, 0.35, 0.7]), weights=weights)
 
 
 def _joint_covariance(result: LmerResult) -> tuple[NDArray[np.floating], NDArray[np.floating]]:
     matrices = result.matrices
     lambda_matrix = _build_lambda(result.theta, matrices.random_structures).toarray()
     transformed_Z = matrices.Z @ lambda_matrix
+    weighted_X = matrices.weights[:, None] * matrices.X
+    weighted_Z = matrices.weights[:, None] * transformed_Z
     precision = np.block(
         [
-            [matrices.X.T @ matrices.X, matrices.X.T @ transformed_Z],
+            [matrices.X.T @ weighted_X, matrices.X.T @ weighted_Z],
             [
-                transformed_Z.T @ matrices.X,
-                transformed_Z.T @ transformed_Z + np.eye(matrices.n_random),
+                transformed_Z.T @ weighted_X,
+                transformed_Z.T @ weighted_Z + np.eye(matrices.n_random),
             ],
         ]
     )
@@ -188,6 +193,54 @@ def test_confidence_and_prediction_intervals_use_correct_variance(
     )
 
 
+def test_in_sample_prediction_intervals_use_prior_weights(slope_result: LmerResult) -> None:
+    prediction = _assert_prediction_result(slope_result.predict(interval="prediction"))
+    assert prediction.lower is not None and prediction.upper is not None
+    covariance, lambda_matrix = _joint_covariance(slope_result)
+    design = np.hstack([slope_result.matrices.X, slope_result.matrices.Z @ lambda_matrix])
+    expected = np.sum((design @ covariance) * design, axis=1)
+    expected += slope_result.sigma**2 / slope_result.matrices.weights
+    critical = stats.norm.ppf(0.975)
+    actual = ((prediction.upper - prediction.lower) / (2 * critical)) ** 2
+
+    np.testing.assert_allclose(actual, expected, rtol=1e-11, atol=1e-12)
+
+
+def test_uncertainty_is_invariant_to_equivalent_weight_scaling(slope_result: LmerResult) -> None:
+    scale = 25.0
+    scaled = _make_result(
+        slope_result.formula,
+        slope_result.matrices.frame,
+        slope_result.theta / np.sqrt(scale),
+        sigma=slope_result.sigma * np.sqrt(scale),
+        weights=slope_result.matrices.weights * scale,
+    )
+    baseline = _assert_prediction_result(slope_result.predict(interval="prediction"))
+    actual = _assert_prediction_result(scaled.predict(interval="prediction"))
+
+    np.testing.assert_allclose(actual.se_fit, baseline.se_fit, rtol=1e-11, atol=1e-12)
+    np.testing.assert_allclose(actual.lower, baseline.lower, rtol=1e-11, atol=1e-12)
+    np.testing.assert_allclose(actual.upper, baseline.upper, rtol=1e-11, atol=1e-12)
+
+
+def test_prediction_reuses_weighted_random_factorization(
+    slope_result: LmerResult, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    slope_result.vcov()
+    original_cholesky = linalg.cholesky
+
+    def reject_random_refactor(matrix, *args, **kwargs):
+        if matrix.shape == (slope_result.matrices.n_random,) * 2:
+            raise AssertionError("prediction should reuse the weighted random factorization")
+        return original_cholesky(matrix, *args, **kwargs)
+
+    monkeypatch.setattr(linalg, "cholesky", reject_random_refactor)
+
+    first = _assert_prediction_result(slope_result.predict(se_fit=True))
+    second = _assert_prediction_result(slope_result.predict(se_fit=True))
+    np.testing.assert_array_equal(first.se_fit, second.se_fit)
+
+
 def test_random_interaction_uncertainty_uses_encoded_design() -> None:
     data = _prediction_data()
     data["z"] = np.tile([0.5, -1.0, 1.5, 0.25], 6)
@@ -209,13 +262,15 @@ def test_random_interaction_uncertainty_uses_encoded_design() -> None:
     np.testing.assert_allclose(predicted.se_fit**2, expected, rtol=1e-11, atol=1e-12)
 
 
-def test_crossed_structure_uncertainty_includes_conditional_cross_covariance() -> None:
+@pytest.mark.parametrize("weighted", [False, True])
+def test_crossed_structure_uncertainty_includes_conditional_cross_covariance(weighted) -> None:
     g = np.repeat([f"g{i}" for i in range(4)], 5)
     h = np.tile([f"h{i}" for i in range(5)], 4)
     x = np.linspace(-1.0, 1.0, len(g))
     data = pd.DataFrame({"y": 1.0 + x, "x": x, "g": g, "h": h})
     formula = parse_formula("y ~ x + (1 | g) + (1 | h)")
-    result = _make_result(formula, data, np.array([0.9, 0.6]))
+    weights = np.geomspace(0.1, 5.0, len(data)) if weighted else None
+    result = _make_result(formula, data, np.array([0.9, 0.6]), weights=weights)
     covariance, lambda_matrix = _joint_covariance(result)
     design = np.hstack([result.matrices.X, result.matrices.Z @ lambda_matrix])
     expected = np.sum((design @ covariance) * design, axis=1)
@@ -225,9 +280,12 @@ def test_crossed_structure_uncertainty_includes_conditional_cross_covariance() -
     np.testing.assert_allclose(predicted.se_fit**2, expected, rtol=1e-11, atol=1e-12)
 
 
-def test_structured_new_level_uncertainty_uses_structured_covariance() -> None:
+@pytest.mark.parametrize("weighted", [False, True])
+def test_structured_new_level_uncertainty_uses_structured_covariance(weighted) -> None:
     formula = set_cov_type("y ~ x + (x | group)", "ar1")
-    result = _make_result(formula, _prediction_data(), np.array([1.2, 0.4]))
+    data = _prediction_data()
+    weights = np.geomspace(0.1, 5.0, len(data)) if weighted else None
+    result = _make_result(formula, data, np.array([1.2, 0.4]), weights=weights)
     covariance, lambda_matrix = _joint_covariance(result)
     p = result.matrices.n_fixed
     newdata = pd.DataFrame({"y": [0.0], "x": [1.3], "group": ["new"]})
