@@ -210,6 +210,28 @@ def test_benchmark_sdcor2cov(benchmark, covariance_data):
     np.testing.assert_allclose(cov, expected)
 
 
+@pytest.mark.benchmark(group="covariance-factor")
+@pytest.mark.parametrize("n_levels", [100, 10_000])
+def test_benchmark_covariance_factor(benchmark, n_levels):
+    from mixedlm.estimation.reml import _build_lambda
+    from mixedlm.matrices.design import RandomEffectStructure
+
+    structure = RandomEffectStructure(
+        grouping_factor="group",
+        term_names=["intercept", "x", "z"],
+        n_levels=n_levels,
+        n_terms=3,
+        correlated=True,
+        level_map={},
+    )
+    theta = np.array([1.0, -0.2, 0.7, 0.0, 0.3, 0.4])
+
+    factor = benchmark(_build_lambda, theta, [structure])
+
+    assert factor.shape == (3 * n_levels, 3 * n_levels)
+    assert factor.nnz == 5 * n_levels
+
+
 @pytest.mark.benchmark(group="covariance-conversion")
 def test_benchmark_cov2sdcor(benchmark, covariance_data):
     expected_sd, expected_corr, cov = covariance_data

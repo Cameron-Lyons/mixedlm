@@ -106,67 +106,71 @@ def _build_ar1_cholesky(q: int, rho: float) -> NDArray[np.floating]:
         return linalg.cholesky(R, lower=True)
 
 
-def _build_lambda(
+def _build_lambda_blocks(
     theta: NDArray[np.floating],
     structures: list[RandomEffectStructure],
-) -> sparse.csc_matrix:
-    blocks: list[sparse.csc_matrix] = []
+) -> list[NDArray[np.floating]]:
+    """Build one relative covariance factor per random-effect structure."""
+    blocks: list[NDArray[np.floating]] = []
     theta_idx = 0
 
     for struct in structures:
         q = struct.n_terms
-        n_levels = struct.n_levels
         cov_type = getattr(struct, "cov_type", "us")
 
-        if cov_type == "cs":
+        if cov_type in ("cs", "ar1"):
             sigma_rel = theta[theta_idx]
             rho = theta[theta_idx + 1] if q > 1 else 0.0
             theta_idx += 2 if q > 1 else 1
-            L_corr = _build_cs_cholesky(q, rho)
-            L_block = sigma_rel * L_corr
-            block = sparse.kron(
-                sparse.eye(n_levels, format="csc"),
-                sparse.csc_matrix(L_block),
-            )
-        elif cov_type == "ar1":
-            sigma_rel = theta[theta_idx]
-            rho = theta[theta_idx + 1] if q > 1 else 0.0
-            theta_idx += 2 if q > 1 else 1
-            L_corr = _build_ar1_cholesky(q, rho)
-            L_block = sigma_rel * L_corr
-            block = sparse.kron(
-                sparse.eye(n_levels, format="csc"),
-                sparse.csc_matrix(L_block),
-            )
+            build_correlation = _build_cs_cholesky if cov_type == "cs" else _build_ar1_cholesky
+            L_block = sigma_rel * build_correlation(q, rho)
         elif struct.correlated:
             n_theta = q * (q + 1) // 2
             theta_block = theta[theta_idx : theta_idx + n_theta]
             theta_idx += n_theta
-
             L_block = np.zeros((q, q), dtype=np.float64)
             row_indices, col_indices = np.tril_indices(q)
             L_block[row_indices, col_indices] = theta_block
-
-            block = sparse.kron(
-                sparse.eye(n_levels, format="csc"),
-                sparse.csc_matrix(L_block),
-            )
         else:
-            theta_block = theta[theta_idx : theta_idx + q]
+            L_block = np.diag(theta[theta_idx : theta_idx + q])
             theta_idx += q
 
-            L_diag = np.diag(theta_block)
-            block = sparse.kron(
-                sparse.eye(n_levels, format="csc"),
-                sparse.csc_matrix(L_diag),
-            )
+        blocks.append(L_block)
 
-        blocks.append(block)
+    return blocks
 
-    if not blocks:
+
+def _build_lambda(
+    theta: NDArray[np.floating],
+    structures: list[RandomEffectStructure],
+) -> sparse.csc_matrix:
+    """Assemble repeated covariance factors directly in column-compressed form."""
+    data_blocks: list[NDArray[np.floating]] = []
+    row_blocks: list[NDArray[np.intp]] = []
+    column_counts: list[NDArray[np.intp]] = []
+    offset = 0
+
+    for struct, factor in zip(structures, _build_lambda_blocks(theta, structures), strict=True):
+        # Transposing before nonzero orders entries by column, then by row.
+        columns, rows = np.nonzero(factor.T)
+        level_offsets = offset + np.arange(struct.n_levels) * struct.n_terms
+        row_blocks.append((level_offsets[:, None] + rows).ravel())
+        data_blocks.append(np.tile(factor[rows, columns], struct.n_levels))
+        counts = np.bincount(columns, minlength=struct.n_terms)
+        column_counts.append(np.tile(counts, struct.n_levels))
+        offset += struct.n_levels * struct.n_terms
+
+    if not structures:
         return sparse.csc_matrix((0, 0), dtype=np.float64)
 
-    return sparse.block_diag(blocks, format="csc")
+    indptr = np.empty(offset + 1, dtype=np.intp)
+    indptr[0] = 0
+    np.cumsum(np.concatenate(column_counts), out=indptr[1:])
+    return sparse.csc_matrix(
+        (np.concatenate(data_blocks), np.concatenate(row_blocks), indptr),
+        shape=(offset, offset),
+        dtype=np.float64,
+    )
 
 
 def _count_theta(structures: list[RandomEffectStructure]) -> int:
