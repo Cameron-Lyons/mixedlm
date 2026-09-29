@@ -223,6 +223,38 @@ def test_benchmark_sdcor2cov(benchmark, covariance_data):
     np.testing.assert_allclose(cov, expected)
 
 
+@pytest.mark.benchmark(group="categorical-prediction")
+def test_benchmark_categorical_prediction(benchmark):
+    from mixedlm.models.lmer import LmerResult
+
+    n_obs = 100_000
+    data = pd.DataFrame(
+        {
+            "y": np.ones(n_obs),
+            "category": np.take([f"c{i}" for i in range(20)], np.arange(n_obs) % 20),
+            "group": np.arange(n_obs) % 100,
+        }
+    )
+    formula = parse_formula("y ~ category + (1 | group)")
+    matrices = build_model_matrices(formula, data)
+    result = LmerResult(
+        formula=formula,
+        matrices=matrices,
+        theta=np.array([0.8]),
+        beta=np.linspace(0.1, 0.3, matrices.n_fixed),
+        sigma=0.6,
+        u=np.linspace(-0.5, 0.5, matrices.n_random),
+        deviance=0.0,
+        REML=True,
+        converged=True,
+        n_iter=0,
+    )
+
+    predicted = benchmark(result.predict, data)
+
+    np.testing.assert_allclose(predicted, matrices.X @ result.beta + matrices.Z @ result.u)
+
+
 @pytest.mark.benchmark(group="covariance-factor")
 @pytest.mark.parametrize("n_levels", [100, 10_000])
 def test_benchmark_covariance_factor(benchmark, n_levels):
