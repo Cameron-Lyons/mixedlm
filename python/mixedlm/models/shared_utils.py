@@ -48,6 +48,12 @@ class _RandomEffectFactor:
             return self._dense_factor
         return linalg.cholesky(self.precision.toarray(), lower=True)
 
+    @cached_property
+    def logdet(self) -> float:
+        if self._sparse_factor is not None:
+            return float(np.sum(np.log(np.abs(self._sparse_factor.U.diagonal()))))
+        return float(2.0 * np.sum(np.log(np.diag(self.cholesky))))
+
     def solve(self, rhs: NDArray[np.floating]) -> NDArray[np.float64]:
         if rhs.size == 0:
             return np.asarray(rhs, dtype=np.float64).copy()

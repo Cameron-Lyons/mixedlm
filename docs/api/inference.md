@@ -365,12 +365,18 @@ results do not have a separately estimated residual scale.
 
 ## Profile Likelihood
 
+LMM fixed-effect profiles hold the fitted covariance parameters (`theta`) fixed
+while recomputing the remaining fixed effects and residual scale. The
+one-parameter curves and two-parameter slices reuse the fitted precision
+solver. Large random-effect systems stay sparse, including calculations in
+parallel workers.
+
 ### plot_profiles
 
 Plot 1D profile likelihood curves.
 
 ```python
-profiles = model.profile(data)
+profiles = model.profile()
 mlm.plot_profiles(profiles)
 ```
 
@@ -491,13 +497,15 @@ print(ci)
 model = mlm.lmer("Reaction ~ Days + (Days | Subject)", data)
 
 # Compute profiles
-profiles = model.profile(data)
+profiles = model.profile()
 
 # Plot
 mlm.plot_profiles(profiles)
 
 # Profile-based CIs
-ci = profiles.confint()
+from mixedlm.inference import confint_profile
+
+ci = confint_profile(profiles)
 print(ci)
 ```
 
@@ -505,7 +513,7 @@ print(ci)
 
 ```python
 # Examine relationship between two parameters
-profile_2d = mlm.slice2D(model, "sigma", "theta1", n_points=20)
+profile_2d = mlm.slice2D(model, "(Intercept)", "Days", n_points=20)
 profile_2d.plot()
 ```
 

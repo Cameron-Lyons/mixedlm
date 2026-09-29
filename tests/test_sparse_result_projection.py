@@ -115,13 +115,16 @@ def test_sparse_projection_keeps_lazy_rzx_and_pickle_compatibility(kind, monkeyp
 
 
 @pytest.mark.parametrize("keep", [[], [0]])
-def test_profile_can_materialize_dense_factor_after_sparse_projection(keep, monkeypatch):
+def test_profile_reuses_sparse_factor_without_materializing_cholesky(keep, monkeypatch):
     monkeypatch.setattr(shared_utils, "_SPARSE_PROJECTION_MIN_RANDOM", 0)
     result = _result("lmm")
     sparse_covariance = result.vcov()
     projection = _ProfileProjection.from_result(result, keep)
+    assert projection.random_factor is result._weighted_projection.random_factor
+    assert "cholesky" not in projection.random_factor.__dict__
     adjusted_y = result.matrices.y - 0.2
     actual = projection.deviance(adjusted_y)
+    assert "cholesky" not in projection.random_factor.__dict__
 
     monkeypatch.setattr(shared_utils, "_SPARSE_PROJECTION_MIN_RANDOM", np.inf)
     reference = _result("lmm")

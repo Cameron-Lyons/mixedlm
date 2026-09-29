@@ -434,3 +434,49 @@ def test_benchmark_large_result_covariance(benchmark, kind):
     scale = 0.7**2 if kind == "lmm" else 1.0
     expected = scale * (1.0 + 4 * weight * 0.8**2) / (n_obs * weight)
     np.testing.assert_allclose(actual, [[expected]])
+
+
+@pytest.mark.benchmark(group="result-profile")
+@pytest.mark.parametrize("dimension", [1, 2])
+def test_benchmark_large_fixed_effect_profile(benchmark, dimension):
+    from dataclasses import replace
+
+    from mixedlm.inference.profile import profile_lmer, slice2D
+    from mixedlm.models.lmer import LmerResult
+
+    n_groups = 1_024
+    n_obs = 4 * n_groups
+    rng = np.random.default_rng(301)
+    x = np.tile([-1.0, -0.3, 0.2, 1.2], n_groups)
+    data = pd.DataFrame(
+        {
+            "y": 1.0 + 0.4 * x + rng.normal(size=n_obs),
+            "x": x,
+            "group": np.repeat(np.arange(n_groups), 4),
+        }
+    )
+    formula = parse_formula("y ~ x + (1 | group)")
+    matrices = build_model_matrices(formula, data)
+    result = LmerResult(
+        formula=formula,
+        matrices=matrices,
+        theta=np.array([0.8]),
+        beta=np.array([1.0, 0.4]),
+        sigma=0.7,
+        u=np.zeros(n_groups),
+        deviance=0.0,
+        REML=True,
+        converged=True,
+        n_iter=0,
+    )
+
+    def compute_profile():
+        fresh = replace(result)
+        if dimension == 1:
+            return profile_lmer(fresh, which="x", n_points=9)["x"]
+        return slice2D(fresh, "(Intercept)", "x", n_points=9)
+
+    actual = benchmark(compute_profile)
+
+    assert actual.zeta.shape == ((9,) if dimension == 1 else (9, 9))
+    assert np.all(np.isfinite(actual.zeta))

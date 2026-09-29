@@ -315,7 +315,8 @@ Extract model components.
 
 Requesting `"RZX"` materializes a dense random-effect Cholesky factor on demand.
 It retains the original coefficient order and is cached for subsequent calls.
-Likelihood profiling also requires this dense factor.
+LMM fixed-effect profiling reuses the precision solver without requesting this
+dense factor.
 
 #### is_singular
 
