@@ -591,53 +591,12 @@ def getL(
     >>> len(L_blocks)  # One block per grouping factor
     1
     """
-    from mixedlm.estimation.reml import _build_lambda
+    from mixedlm.estimation.reml import _build_lambda, _build_lambda_blocks
 
     theta = np.asarray(theta)
-
-    if not as_blocks:
-        Lambda = _build_lambda(theta, structures)
-        return Lambda
-
-    blocks = []
-    theta_idx = 0
-
-    for struct in structures:
-        q = struct.n_terms
-        cov_type = getattr(struct, "cov_type", "us")
-
-        if cov_type == "cs":
-            sigma_rel = theta[theta_idx]
-            rho = theta[theta_idx + 1] if q > 1 else 0.0
-            theta_idx += 2 if q > 1 else 1
-            from mixedlm.estimation.reml import _build_cs_cholesky
-
-            L_corr = _build_cs_cholesky(q, rho)
-            L_block = sigma_rel * L_corr * sigma
-        elif cov_type == "ar1":
-            sigma_rel = theta[theta_idx]
-            rho = theta[theta_idx + 1] if q > 1 else 0.0
-            theta_idx += 2 if q > 1 else 1
-            from mixedlm.estimation.reml import _build_ar1_cholesky
-
-            L_corr = _build_ar1_cholesky(q, rho)
-            L_block = sigma_rel * L_corr * sigma
-        elif struct.correlated:
-            n_theta = q * (q + 1) // 2
-            theta_block = theta[theta_idx : theta_idx + n_theta]
-            theta_idx += n_theta
-            L_block = np.zeros((q, q), dtype=np.float64)
-            row_indices, col_indices = np.tril_indices(q)
-            L_block[row_indices, col_indices] = theta_block
-            L_block = L_block * sigma
-        else:
-            theta_block = theta[theta_idx : theta_idx + q]
-            theta_idx += q
-            L_block = np.diag(theta_block) * sigma
-
-        blocks.append(L_block)
-
-    return blocks
+    if as_blocks:
+        return [factor * sigma for factor in _build_lambda_blocks(theta, structures)]
+    return _build_lambda(theta, structures)
 
 
 def condVar(
