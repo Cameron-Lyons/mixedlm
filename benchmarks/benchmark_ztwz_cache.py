@@ -35,7 +35,7 @@ def benchmark_dataset(name: str, data, formula: str, n_evals: int = 100):
 
     print(f"\nResults ({n_evals} evaluations):")
     print(
-        f"  Python (no cache): {time_python:.4f}s ({time_python / n_evals * 1000:.4f}ms per eval)"
+        f"  Python (with cache): {time_python:.4f}s ({time_python / n_evals * 1000:.4f}ms per eval)"
     )
     print(f"  Rust (with cache): {time_rust:.4f}s ({time_rust / n_evals * 1000:.4f}ms per eval)")
     print(f"  Speedup: {speedup:.2f}x")

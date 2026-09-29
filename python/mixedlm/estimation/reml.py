@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from functools import cached_property
 from typing import Any
 
 import numpy as np
@@ -241,10 +242,48 @@ def _scale_sparse_rows(
     return Z.multiply(row_scale[:, None]).tocsc()
 
 
+@dataclass
+class _LMMCrossproducts:
+    """Weighted products for one fixed set of model data, independent of theta."""
+
+    weights: NDArray[np.float64]
+    y_adj: NDArray[np.floating]
+    logdet_w: float
+    XtWX: NDArray[np.floating]
+    XtWy: NDArray[np.floating]
+    ZtWZ: sparse.csc_matrix | NDArray[np.floating]
+    ZtWX: NDArray[np.floating]
+    ZtWy: NDArray[np.floating]
+
+    @classmethod
+    def from_matrices(cls, matrices: ModelMatrices) -> _LMMCrossproducts:
+        weights = validate_prior_weights(matrices.weights, matrices.n_obs)
+        y_adj = matrices.y - matrices.offset
+        sqrt_w = np.sqrt(weights)
+        WX = sqrt_w[:, None] * matrices.X
+        WZ = (
+            _scale_sparse_rows(matrices.Z, sqrt_w)
+            if sparse.issparse(matrices.Z)
+            else sqrt_w[:, None] * matrices.Z
+        )
+        return cls(
+            weights=weights,
+            y_adj=y_adj,
+            logdet_w=float(np.sum(np.log(weights))),
+            XtWX=WX.T @ WX,
+            XtWy=WX.T @ (sqrt_w * y_adj),
+            ZtWZ=WZ.T @ WZ,
+            ZtWX=matrices.Zt @ (weights[:, None] * matrices.X),
+            ZtWy=matrices.Zt @ (weights * y_adj),
+        )
+
+
 def _profiled_deviance_core(
     theta: NDArray[np.floating],
     matrices: ModelMatrices,
     REML: bool = True,
+    *,
+    crossproducts: _LMMCrossproducts | None = None,
 ) -> _DevianceCoreResult | None:
     """Core deviance computation returning all components.
 
@@ -256,12 +295,11 @@ def _profiled_deviance_core(
     p = matrices.n_fixed
     q = matrices.n_random
 
-    w = validate_prior_weights(matrices.weights, n)
-    logdet_w = float(np.sum(np.log(w)))
-    y_adj = matrices.y - matrices.offset
-    sqrt_w = np.sqrt(w)
-
     if q == 0:
+        w = validate_prior_weights(matrices.weights, n)
+        logdet_w = float(np.sum(np.log(w)))
+        y_adj = matrices.y - matrices.offset
+        sqrt_w = np.sqrt(w)
         WX = sqrt_w[:, None] * matrices.X
         Wy = sqrt_w * y_adj
         XtWX = WX.T @ WX
@@ -293,16 +331,12 @@ def _profiled_deviance_core(
             pwrss=float(wrss),
         )
 
+    if crossproducts is None:
+        crossproducts = _LMMCrossproducts.from_matrices(matrices)
+    w = crossproducts.weights
+    y_adj = crossproducts.y_adj
     Lambda = _build_lambda(theta, matrices.random_structures)
-
-    Zt = matrices.Zt
-    WZ = (
-        sqrt_w[:, None] * matrices.Z
-        if not sparse.issparse(matrices.Z)
-        else _scale_sparse_rows(matrices.Z, sqrt_w)
-    )
-    ZtWZ = WZ.T @ WZ
-    LambdatZtWZLambda = Lambda.T @ ZtWZ @ Lambda
+    LambdatZtWZLambda = Lambda.T @ crossproducts.ZtWZ @ Lambda
 
     I_q = sparse.eye(q, format="csc")
     V_factor = LambdatZtWZLambda + I_q
@@ -315,20 +349,14 @@ def _profiled_deviance_core(
 
     ldL2 = 2.0 * np.sum(np.log(np.diag(L_V)))
 
-    ZtWy = Zt @ (w * y_adj)
-    cu = Lambda.T @ ZtWy
+    cu = Lambda.T @ crossproducts.ZtWy
     cu_star = linalg.solve_triangular(L_V, cu, lower=True)
 
-    WX = sqrt_w[:, None] * matrices.X
-    ZtWX = Zt @ (w[:, None] * matrices.X)
-    Lambdat_ZtWX = Lambda.T @ ZtWX
+    Lambdat_ZtWX = Lambda.T @ crossproducts.ZtWX
     RZX = linalg.solve_triangular(L_V, Lambdat_ZtWX, lower=True)
 
-    XtWX = WX.T @ WX
-    XtWy = WX.T @ (sqrt_w * y_adj)
-
     RZX_tRZX = RZX.T @ RZX
-    XtVinvX = XtWX - RZX_tRZX
+    XtVinvX = crossproducts.XtWX - RZX_tRZX
 
     try:
         L_XtVinvX = linalg.cholesky(XtVinvX, lower=True)
@@ -338,12 +366,12 @@ def _profiled_deviance_core(
     ldRX2 = 2.0 * np.sum(np.log(np.diag(L_XtVinvX)))
 
     cu_star_RZX_beta_term = RZX.T @ cu_star
-    Xty_adj = XtWy - cu_star_RZX_beta_term
+    Xty_adj = crossproducts.XtWy - cu_star_RZX_beta_term
     beta = linalg.cho_solve((L_XtVinvX, True), Xty_adj)
 
     marginal_resid = y_adj - matrices.X @ beta
 
-    Zt_resid = Zt @ (w * marginal_resid)
+    Zt_resid = matrices.Zt @ (w * marginal_resid)
     Lambda_t_Zt_resid = Lambda.T @ Zt_resid
     u_star = linalg.cho_solve((L_V, True), Lambda_t_Zt_resid)
 
@@ -356,7 +384,7 @@ def _profiled_deviance_core(
     denom = n - p if REML else n
     sigma2 = pwrss / denom
 
-    dev = denom * (1.0 + np.log(2.0 * np.pi * sigma2)) + ldL2 - logdet_w
+    dev = denom * (1.0 + np.log(2.0 * np.pi * sigma2)) + ldL2 - crossproducts.logdet_w
     if REML:
         dev += ldRX2
 
@@ -521,6 +549,8 @@ def profiled_reml(
 
 
 class LMMOptimizer:
+    """Optimize theta for fixed model data; construct a new optimizer when data change."""
+
     def __init__(
         self,
         matrices: ModelMatrices,
@@ -684,16 +714,29 @@ class LMMOptimizer:
 
         return theta_struct
 
+    @cached_property
+    def _crossproducts(self) -> _LMMCrossproducts:
+        return _LMMCrossproducts.from_matrices(self.matrices)
+
+    def _evaluate_core(self, theta: NDArray[np.floating]) -> _DevianceCoreResult | None:
+        return _profiled_deviance_core(
+            theta,
+            self.matrices,
+            self.REML,
+            crossproducts=self._crossproducts if self.matrices.n_random else None,
+        )
+
     def objective(self, theta: NDArray[np.floating]) -> float:
         if self.use_rust and self._rust_cache is not None:
             return _profiled_deviance_rust_cached(theta, self._rust_cache, self.REML)
-        return profiled_deviance(theta, self.matrices, self.REML)
+        result = self._evaluate_core(theta)
+        return 1e10 if result is None else result.deviance
 
     def _extract_estimates(
         self, theta: NDArray[np.floating]
     ) -> tuple[NDArray[np.floating], float, NDArray[np.floating]]:
         """Extract beta, sigma, and u from fitted theta."""
-        result = _profiled_deviance_core(theta, self.matrices, self.REML)
+        result = self._evaluate_core(theta)
         if result is None:
             return np.zeros(self.matrices.n_fixed), 1.0, np.zeros(self.matrices.n_random)
         return result.beta, result.sigma, result.u
@@ -743,7 +786,7 @@ class LMMOptimizer:
         )
 
         theta_opt = result.x
-        core_result = _profiled_deviance_core(theta_opt, self.matrices, self.REML)
+        core_result = self._evaluate_core(theta_opt)
 
         gradient_norm = None
         if result.jac is not None:
