@@ -278,8 +278,14 @@ print(contrasts)
 
 ```python
 contrasts = em.pairs(adjust="bonferroni")
-# Options: "none", "bonferroni", "holm", "tukey"
+# Options include "none", "bonferroni", "holm", "fdr" (or "BH"), and "tukey"
+
+# Explicitly request unadjusted pairwise tests
+unadjusted = em.contrast("pairwise", adjust="none")
 ```
+
+`em.pairs()` and `em.contrast("pairwise")` default to Tukey adjustment.
+Unknown adjustment names raise an error; names are case-insensitive.
 
 ## Profile Likelihood
 

@@ -121,6 +121,7 @@ class Emmeans:
         adjust: str = "tukey",
         level: float = 0.95,
     ) -> ContrastResult:
+        adjust = _normalize_adjustment(adjust)
         n_levels = len(self.result.emmean)
         if n_levels < 2:
             raise ValueError("Need at least 2 levels for pairwise comparisons")
@@ -161,12 +162,19 @@ class Emmeans:
     def contrast(
         self,
         method: str | NDArray[np.floating] = "pairwise",
-        adjust: str = "none",
+        adjust: str | None = None,
         level: float = 0.95,
     ) -> ContrastResult:
+        """Compute contrasts with Tukey as the default for pairwise comparisons.
+
+        Other contrast methods default to no adjustment. Pass ``adjust="none"``
+        explicitly for unadjusted pairwise tests; ``None`` selects the default.
+        """
+        if adjust is None:
+            adjust = "tukey" if isinstance(method, str) and method == "pairwise" else "none"
         if isinstance(method, str):
             if method == "pairwise":
-                return self.pairs(adjust=adjust if adjust != "none" else "tukey", level=level)
+                return self.pairs(adjust=adjust, level=level)
             elif method == "trt.vs.ctrl":
                 return self._trt_vs_ctrl(adjust=adjust, level=level)
             else:
@@ -180,6 +188,7 @@ class Emmeans:
         adjust: str = "dunnett",
         level: float = 0.95,
     ) -> ContrastResult:
+        adjust = _normalize_adjustment(adjust)
         n_levels = len(self.result.emmean)
 
         grid_labels = []
@@ -213,6 +222,7 @@ class Emmeans:
         adjust: str = "none",
         level: float = 0.95,
     ) -> ContrastResult:
+        adjust = _normalize_adjustment(adjust)
         n_contrasts = C.shape[0]
         L_contrast = C @ self._L
         estimates = L_contrast @ self._beta
@@ -241,6 +251,21 @@ class Emmeans:
         return f"Emmeans(specs={self._specs}, n={len(self.result.emmean)})"
 
 
+_ADJUSTMENT_METHODS = ("none", "bonferroni", "holm", "fdr", "tukey", "dunnett")
+
+
+def _normalize_adjustment(method: str) -> str:
+    if not isinstance(method, str):
+        raise TypeError("adjust must be a string naming a p-value adjustment")
+    normalized = method.strip().lower()
+    if normalized == "bh":
+        normalized = "fdr"
+    if normalized not in _ADJUSTMENT_METHODS:
+        choices = ", ".join(_ADJUSTMENT_METHODS)
+        raise ValueError(f"Unknown p-value adjustment: {method!r}. Choose from {choices}, or BH.")
+    return normalized
+
+
 def _adjust_pvalues(
     p: NDArray[np.floating],
     method: str,
@@ -248,6 +273,7 @@ def _adjust_pvalues(
     df: float,
     t_ratio: NDArray[np.floating] | None = None,
 ) -> NDArray[np.floating]:
+    method = _normalize_adjustment(method)
     if method == "none":
         return p
     elif method == "bonferroni":
@@ -277,13 +303,12 @@ def _adjust_pvalues(
         return adjusted
     elif method == "tukey":
         if t_ratio is None:
-            return p
+            raise ValueError("t_ratio is required for Tukey adjustment")
         q = np.abs(t_ratio) * np.sqrt(2)
         return stats.studentized_range.sf(q, n_groups, df)
-    elif method == "dunnett":
-        return np.minimum(p * (n_groups - 1), 1.0)
-    else:
-        return p
+
+    # The remaining supported method, dunnett, retains its Bonferroni approximation.
+    return np.minimum(p * (n_groups - 1), 1.0)
 
 
 def emmeans(
