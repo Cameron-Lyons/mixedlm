@@ -78,7 +78,10 @@ Extract random effects (BLUPs).
 - `condVar`: If True, return a `RanefResult` containing the random effects and
   their per-level conditional variances. The calculation uses sparse block
   extraction, so it does not materialize the full random-effect covariance
-  matrix.
+  matrix. For GLMMs, it uses the final working weights (including prior weights)
+  and sparse random-effect information without computing the dense fixed-effect
+  projection. This sparse setup is reused if coefficient covariance or leverage
+  is requested later.
 
 **Returns:** A nested dictionary of random-effect arrays, or a `RanefResult`
 when `condVar=True`.

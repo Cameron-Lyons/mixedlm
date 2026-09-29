@@ -1,9 +1,13 @@
 import warnings
 
 import numpy as np
+import pandas as pd
+import pytest
 from mixedlm import condVar, families, glmer, lmer
 from mixedlm.estimation.reml import _build_lambda
-from mixedlm.matrices.design import RandomEffectStructure
+from mixedlm.formula.parser import parse_formula, set_cov_type
+from mixedlm.matrices.design import RandomEffectStructure, build_model_matrices
+from mixedlm.models.glmer import GlmerResult
 from mixedlm.utils.variance import _conditional_variance_blocks
 from scipy import linalg, sparse
 
@@ -154,3 +158,117 @@ def test_large_condvar_extraction_never_densifies_full_system(monkeypatch) -> No
     actual = _conditional_variance_blocks(precision, lambda_factor, [structure])
 
     np.testing.assert_allclose(actual["group"]["(Intercept)"], 1.0 / diagonal)
+
+
+def _glmm_result(family, formula, theta, n_groups=6):
+    rng = np.random.default_rng(382)
+    n = 5 * n_groups
+    x = rng.normal(size=n)
+    data = pd.DataFrame(
+        {"y": np.arange(n) % 2, "x": x, "group": np.arange(n) % n_groups, "item": np.arange(n) % 5}
+    )
+    matrices = build_model_matrices(
+        formula, data, weights=np.geomspace(0.2, 3.0, n), offset=np.linspace(-0.2, 0.2, n)
+    )
+    return GlmerResult(
+        formula=formula,
+        matrices=matrices,
+        family=family,
+        theta=np.asarray(theta, dtype=np.float64),
+        beta=np.array([0.3, 0.1]),
+        u=rng.normal(scale=0.2, size=matrices.n_random),
+        deviance=0.0,
+        converged=True,
+        n_iter=0,
+        nAGQ=1,
+    )
+
+
+@pytest.mark.parametrize("family_type", [families.Binomial, families.Poisson, families.Gamma])
+@pytest.mark.parametrize(
+    "formula,theta",
+    [
+        (parse_formula("y ~ x + (x | group)"), [0.8, -0.2, 0.5]),
+        (parse_formula("y ~ x + (x | group) + (1 | item)"), [0.8, -0.2, 0.5, 0.4]),
+        (parse_formula("y ~ x + (x | group)"), [0.8, -0.2, 0.0]),
+        (set_cov_type("y ~ x + (x | group)", "ar1"), [0.8, 0.4]),
+    ],
+    ids=["slope", "crossed", "boundary", "ar1"],
+)
+def test_glmm_condvar_needs_no_fixed_effect_projection(
+    family_type, formula, theta, monkeypatch
+) -> None:
+    result = _glmm_result(family_type(), formula, theta)
+    expected = _dense_condvar_reference(result)
+
+    def reject_projection(self):
+        raise AssertionError("conditional variance should use only the sparse random system")
+
+    monkeypatch.setattr(GlmerResult, "_working_projection", property(reject_projection))
+
+    _assert_condvar_equal(condVar(result), expected)
+    expected_variances = {
+        group: {term: values for term, values in terms.items() if term != "_cov"}
+        for group, terms in expected.items()
+    }
+    _assert_condvar_equal(result.ranef(condVar=True).condVar, expected_variances)
+
+
+def test_large_glmm_condvar_never_densifies_full_system(monkeypatch) -> None:
+    q = 2048
+    result = _glmm_result(
+        families.Poisson(), parse_formula("y ~ x + (1 | group)"), [0.8], n_groups=q
+    )
+    working_weights = result.family.weights(result.fitted(na_expand=False))
+    working_weights *= result.matrices.weights
+    structure = result.matrices.random_structures[0]
+    expected = 0.8**2 / (
+        1.0 + 0.8**2 * np.bincount(structure.level_indices, weights=working_weights)
+    )
+
+    for matrix_class in (sparse.csc_matrix, sparse.csr_matrix):
+        original_toarray = matrix_class.toarray
+
+        def guarded_toarray(matrix, *args, original_toarray=original_toarray, **kwargs):
+            if matrix.shape == (q, q):
+                raise AssertionError("conditional variance densified the full random system")
+            return original_toarray(matrix, *args, **kwargs)
+
+        monkeypatch.setattr(matrix_class, "toarray", guarded_toarray)
+
+    actual = condVar(result)["group"]["(Intercept)"]
+
+    np.testing.assert_allclose(actual, expected, rtol=1e-12, atol=1e-12)
+
+
+def test_glmm_diagnostics_reuse_working_weights(monkeypatch) -> None:
+    result = _glmm_result(
+        families.Binomial(), parse_formula("y ~ x + (x | group)"), [0.8, -0.2, 0.5]
+    )
+    expected = _dense_condvar_reference(result)
+    original_weights = result.family.weights
+    calls = 0
+
+    def count_weights(mu):
+        nonlocal calls
+        calls += 1
+        return original_weights(mu)
+
+    monkeypatch.setattr(result.family, "weights", count_weights)
+
+    _assert_condvar_equal(condVar(result), expected)
+    assert np.all(np.isfinite(result.vcov()))
+    assert np.all(np.isfinite(result.hatvalues()))
+    _assert_condvar_equal(condVar(result), expected)
+    assert calls == 1
+
+
+def test_fixed_only_glmm_has_no_conditional_variances() -> None:
+    result = _glmm_result(families.Binomial(), parse_formula("y ~ x"), [])
+    mu = result.family.link.inverse(result.linear_predictor())
+    weights = result.family.weights(mu) * result.matrices.weights
+    X = result.matrices.X
+    expected_vcov = linalg.inv(X.T @ (weights[:, None] * X))
+
+    assert condVar(result) == {}
+    np.testing.assert_allclose(result.vcov(), expected_vcov, rtol=1e-12, atol=1e-12)

@@ -289,6 +289,41 @@ def test_benchmark_large_district_school_sparse_design_build(benchmark, large_ne
     assert matrices.Z.nnz == len(large_nested_sparse_data)
 
 
+@pytest.mark.benchmark(group="conditional-variance")
+def test_benchmark_glmm_conditional_variance(benchmark):
+    from dataclasses import replace
+
+    from mixedlm import condVar
+    from mixedlm.families import Poisson
+    from mixedlm.models.glmer import GlmerResult
+
+    n_groups = 1_000
+    n_obs = 5 * n_groups
+    data = pd.DataFrame({"y": np.ones(n_obs), "group": np.arange(n_obs) % n_groups})
+    formula = parse_formula("y ~ 1 + (1 | group)")
+    matrices = build_model_matrices(formula, data)
+    result = GlmerResult(
+        formula=formula,
+        matrices=matrices,
+        family=Poisson(),
+        theta=np.array([0.8]),
+        beta=np.array([0.3]),
+        u=np.zeros(n_groups),
+        deviance=0.0,
+        converged=True,
+        n_iter=0,
+        nAGQ=1,
+    )
+
+    def compute_condvar():
+        return condVar(replace(result))
+
+    actual = benchmark(compute_condvar)
+
+    expected = 0.8**2 / (1.0 + 5 * np.exp(0.3) * 0.8**2)
+    np.testing.assert_allclose(actual["group"]["(Intercept)"], expected)
+
+
 @pytest.mark.benchmark(group="rust-sparse-cholesky")
 def test_benchmark_sparse_cholesky_solve(benchmark, sparse_spd_system):
     data, indices, indptr, shape, rhs = sparse_spd_system
