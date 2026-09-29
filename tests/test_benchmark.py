@@ -136,6 +136,27 @@ def test_benchmark_lmer_simple(benchmark, sleepstudy_data):
     benchmark(fit_model)
 
 
+@pytest.mark.benchmark(group="contrast-encoding")
+@pytest.mark.parametrize("with_unknown", [False, True])
+@pytest.mark.parametrize("n_obs", [128, 100_000])
+def test_benchmark_categorical_contrast_encoding(benchmark, with_unknown, n_obs):
+    from mixedlm.utils.contrasts import apply_contrasts_array
+
+    categories = [f"c{i}" for i in range(40)]
+    codes = np.arange(n_obs) % len(categories)
+    values = np.asarray(categories, dtype=object)[codes]
+    contrasts = np.arange(40 * 39, dtype=np.float64).reshape(40, 39)
+    expected = contrasts[codes]
+    if with_unknown:
+        values[::31] = None
+        expected[::31] = np.nan
+
+    columns, names = benchmark(apply_contrasts_array, values, "factor", contrasts, categories)
+
+    assert len(names) == contrasts.shape[1]
+    np.testing.assert_array_equal(np.column_stack(columns), expected)
+
+
 @pytest.mark.benchmark(group="em-reml")
 def test_benchmark_em_reml_iterations(benchmark, large_crossed_sparse_data):
     from mixedlm.estimation.em_reml import em_reml_simple
