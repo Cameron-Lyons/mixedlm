@@ -275,6 +275,17 @@ model = mlm.nlmer(
 
 ## Convergence Issues
 
+During optimization, a failed trial evaluation receives a finite penalty so the
+optimizer can try other parameter values. If the final evaluation fails,
+`nlmer()` and `refit()` raise `RuntimeError` with the evaluation's failure reason.
+They also reject nonfinite or incorrectly shaped estimates and a nonpositive
+residual scale. The failure penalty is never returned as a fitted deviance.
+
+A valid final evaluation can still have `converged=False` if the optimizer did
+not meet its stopping criteria; inspect that flag before using the result.
+`bootstrap_nlmer()` and `bootMer()` count refits that raise an error as failed
+replicates and exclude them from their confidence intervals.
+
 NLMMs are particularly sensitive to:
 
 ### Starting Values
