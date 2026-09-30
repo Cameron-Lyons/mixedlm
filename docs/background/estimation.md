@@ -94,6 +94,22 @@ mixedlm uses a profiled deviance approach for optimization efficiency. Given var
 
 The optimization is then over just the variance parameters \(\boldsymbol{\theta}\), reducing dimensionality.
 
+For a fixed design and prior weights, the native evaluator prepares
+\(\mathbf{X}^T\mathbf{W}\mathbf{X}\),
+\(\mathbf{Z}^T\mathbf{W}\mathbf{X}\), and
+\(\mathbf{Z}^T\mathbf{W}\mathbf{Z}\) once per fit. Covariance evaluations
+reuse these products. Linear bootstrap refits also share them across responses,
+preparing a separate workspace in each parallel worker. Response-dependent
+products are recomputed for each replicate, and each refit starts from the
+original fitted covariance parameters.
+
+At the estimation API level, `LMMOptimizer.with_response(y)` creates an
+independent optimizer sharing the prepared design on either backend. It copies
+the new response and retains the optimizer's ML/REML setting. Design matrices,
+weights, and offsets must remain unchanged while the optimizers are in use;
+construct a new optimizer when those inputs change. Large Python random-effect
+systems retain sparse crossproducts.
+
 ## Generalized Linear Mixed Models
 
 ### The Model

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from copy import copy
+from dataclasses import dataclass, replace
 from functools import cached_property
 from typing import Any
 
@@ -286,6 +287,8 @@ class _LMMCrossproducts:
     """Weighted products for one fixed set of model data, independent of theta."""
 
     weights: NDArray[np.float64]
+    sqrt_weights: NDArray[np.floating]
+    weighted_X: NDArray[np.floating]
     y_adj: NDArray[np.floating]
     logdet_w: float
     XtWX: NDArray[np.floating]
@@ -309,6 +312,8 @@ class _LMMCrossproducts:
         ZtWZ = WZ.T @ WZ
         return cls(
             weights=weights,
+            sqrt_weights=sqrt_w,
+            weighted_X=WX,
             y_adj=y_adj,
             logdet_w=float(np.sum(np.log(weights))),
             XtWX=WX.T @ WX,
@@ -317,6 +322,15 @@ class _LMMCrossproducts:
             ZtWX=matrices.Zt @ (weights[:, None] * matrices.X),
             ZtWy=matrices.Zt @ (weights * y_adj),
             ZtWZ_diagonal=_diagonal_entries(ZtWZ),
+        )
+
+    def with_response(self, matrices: ModelMatrices) -> _LMMCrossproducts:
+        y_adj = matrices.y - matrices.offset
+        return replace(
+            self,
+            y_adj=y_adj,
+            XtWy=self.weighted_X.T @ (self.sqrt_weights * y_adj),
+            ZtWy=matrices.Zt @ (self.weights * y_adj),
         )
 
 
@@ -339,15 +353,17 @@ def _profiled_deviance_core(
     p = matrices.n_fixed
     q = matrices.n_random
 
+    if crossproducts is None:
+        crossproducts = _LMMCrossproducts.from_matrices(matrices)
+    w = crossproducts.weights
+    y_adj = crossproducts.y_adj
+
     if q == 0:
-        w = validate_prior_weights(matrices.weights, n)
-        logdet_w = float(np.sum(np.log(w)))
-        y_adj = matrices.y - matrices.offset
-        sqrt_w = np.sqrt(w)
-        WX = sqrt_w[:, None] * matrices.X
-        Wy = sqrt_w * y_adj
-        XtWX = WX.T @ WX
-        XtWy = WX.T @ Wy
+        logdet_w = crossproducts.logdet_w
+        WX = crossproducts.weighted_X
+        Wy = crossproducts.sqrt_weights * y_adj
+        XtWX = crossproducts.XtWX
+        XtWy = crossproducts.XtWy
         try:
             beta = linalg.solve(XtWX, XtWy, assume_a="pos")
         except linalg.LinAlgError:
@@ -376,10 +392,6 @@ def _profiled_deviance_core(
             fixed_information=XtWX,
         )
 
-    if crossproducts is None:
-        crossproducts = _LMMCrossproducts.from_matrices(matrices)
-    w = crossproducts.weights
-    y_adj = crossproducts.y_adj
     diagonal_factor = (
         _diagonal_covariance_factor(theta, matrices.random_structures)
         if crossproducts.ZtWZ_diagonal is not None
@@ -525,57 +537,34 @@ def profiled_deviance_components(
     )
 
 
-if _HAS_RUST:
-    from mixedlm._rust import SparseCholeskySymbolic
-else:
-    SparseCholeskySymbolic = None
-
-
 @dataclass
 class _RustMatrixCache:
-    """Cached data for Rust profiled_deviance calls."""
+    """Owned native design and response products, independent of theta."""
 
-    y: NDArray[np.floating]
-    X: NDArray[np.floating]
-    z_data: NDArray[np.floating]
-    z_indices: NDArray[np.int64]
-    z_indptr: NDArray[np.int64]
-    z_shape: tuple[int, int]
-    weights: NDArray[np.floating]
-    offset: NDArray[np.floating]
-    n_levels: list[int]
-    n_terms: list[int]
-    correlated: list[bool]
-    ztwz: NDArray[np.floating] | None
-    symbolic_cache: SparseCholeskySymbolic | None = None
+    design: Any
+    response: Any
 
     @classmethod
     def from_matrices(cls, matrices: ModelMatrices) -> _RustMatrixCache:
-        from mixedlm._rust import compute_ztwz
+        from mixedlm._rust import LmmDesign
 
         z_csc = matrices.Z.tocsc()
-        z_data = np.ascontiguousarray(z_csc.data)
-        z_indices = np.ascontiguousarray(z_csc.indices.astype(np.int64))
-        z_indptr = np.ascontiguousarray(z_csc.indptr.astype(np.int64))
-        z_shape = (z_csc.shape[0], z_csc.shape[1])
-        weights = np.ascontiguousarray(matrices.weights)
-
-        ztwz = compute_ztwz(z_data, z_indices, z_indptr, z_shape, weights)
-
-        return cls(
-            y=np.ascontiguousarray(matrices.y),
-            X=np.ascontiguousarray(matrices.X),
-            z_data=z_data,
-            z_indices=z_indices,
-            z_indptr=z_indptr,
-            z_shape=z_shape,
-            weights=weights,
-            offset=np.ascontiguousarray(matrices.offset),
-            n_levels=[s.n_levels for s in matrices.random_structures],
-            n_terms=[s.n_terms for s in matrices.random_structures],
-            correlated=[s.correlated for s in matrices.random_structures],
-            ztwz=ztwz,
+        design = LmmDesign(
+            matrices.X,
+            np.ascontiguousarray(z_csc.data),
+            np.ascontiguousarray(z_csc.indices, dtype=np.int64),
+            np.ascontiguousarray(z_csc.indptr, dtype=np.int64),
+            z_csc.shape,
+            matrices.weights,
+            matrices.offset,
+            [s.n_levels for s in matrices.random_structures],
+            [s.n_terms for s in matrices.random_structures],
+            [s.correlated for s in matrices.random_structures],
         )
+        return cls(design, design.with_response(matrices.y))
+
+    def with_response(self, response: NDArray[np.floating]) -> _RustMatrixCache:
+        return type(self)(self.design, self.design.with_response(response))
 
 
 def _profiled_deviance_rust_cached(
@@ -583,24 +572,7 @@ def _profiled_deviance_rust_cached(
     cache: _RustMatrixCache,
     REML: bool = True,
 ) -> float:
-    from mixedlm._rust import profiled_deviance_cached
-
-    return profiled_deviance_cached(
-        theta,
-        cache.y,
-        cache.X,
-        cache.z_data,
-        cache.z_indices,
-        cache.z_indptr,
-        cache.z_shape,
-        cache.weights,
-        cache.offset,
-        cache.n_levels,
-        cache.n_terms,
-        cache.correlated,
-        REML,
-        cache.ztwz,
-    )
+    return cache.response.deviance(theta, REML)
 
 
 def _profiled_deviance_rust(
@@ -631,7 +603,12 @@ def profiled_reml(
 
 
 class LMMOptimizer:
-    """Optimize theta for fixed model data; construct a new optimizer when data change."""
+    """Optimize theta for a fixed design, optionally sharing it with new responses.
+
+    Treat the design matrices, weights and offsets as immutable for the lifetime
+    of this optimizer and any optimizers returned by :meth:`with_response`.
+    Construct a new optimizer if any of those inputs change.
+    """
 
     def __init__(
         self,
@@ -653,6 +630,22 @@ class LMMOptimizer:
         self._rust_cache: _RustMatrixCache | None = None
         if self.use_rust:
             self._rust_cache = _RustMatrixCache.from_matrices(matrices)
+
+    def with_response(self, response: NDArray[np.floating]) -> LMMOptimizer:
+        """Create an independent fit sharing this optimizer's prepared design.
+
+        Only response-dependent products are rebuilt. The response is copied;
+        starting values and optimization results are not shared between fits.
+        """
+        validate_finite_real("response", response, (self.matrices.n_obs,))
+        matrices = replace(self.matrices, y=np.array(response, dtype=np.float64, copy=True))
+        matrices.Zt = self.matrices.Zt
+        optimizer = copy(self)
+        optimizer.matrices = matrices
+        optimizer._crossproducts = self._crossproducts.with_response(matrices)
+        if self._rust_cache is not None:
+            optimizer._rust_cache = self._rust_cache.with_response(matrices.y)
+        return optimizer
 
     def get_start_theta(self) -> NDArray[np.floating]:
         theta_list: list[float] = []
@@ -805,7 +798,7 @@ class LMMOptimizer:
             theta,
             self.matrices,
             self.REML,
-            crossproducts=self._crossproducts if self.matrices.n_random else None,
+            crossproducts=self._crossproducts,
         )
 
     def objective(self, theta: NDArray[np.floating]) -> float:
