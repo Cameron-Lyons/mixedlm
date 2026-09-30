@@ -11,6 +11,7 @@ from scipy import stats
 
 from mixedlm.formula.terms import InteractionTerm, PowerTerm, VariableTerm
 from mixedlm.matrices.design import build_fixed_matrix
+from mixedlm.utils.validation import _validate_confidence_level
 
 if TYPE_CHECKING:
     from mixedlm.models.glmer import GlmerResult
@@ -237,8 +238,7 @@ def ggpredict(
     """
     if type not in {"response", "link"}:
         raise ValueError("type must be 'response' or 'link'")
-    if not 0.0 < level < 1.0:
-        raise ValueError("level must be between 0 and 1")
+    level = _validate_confidence_level(level)
     if isinstance(n_points, bool) or not isinstance(n_points, int) or n_points < 2:
         raise ValueError("n_points must be an integer of at least 2")
     try:
@@ -261,10 +261,10 @@ def ggpredict(
 
     is_glmm = bool(hasattr(model, "isGLMM") and model.isGLMM())
     if is_glmm:
-        critical = float(stats.norm.ppf(1.0 - (1.0 - level) / 2.0))
+        critical = float(stats.norm.isf((1.0 - level) / 2.0))
     else:
         df = float(model.df_residual())
-        critical = float(stats.t.ppf(1.0 - (1.0 - level) / 2.0, df))
+        critical = float(stats.t.isf((1.0 - level) / 2.0, df))
 
     lower_eta = eta - critical * se_eta
     upper_eta = eta + critical * se_eta
@@ -313,6 +313,7 @@ def allEffects(
     contrasts: dict[str, str | NDArray[np.floating]] | None = None,
 ) -> dict[str, pd.DataFrame]:
     """Compute a one-variable adjusted prediction grid for every fixed effect."""
+    level = _validate_confidence_level(level)
     variables = _fixed_variable_order(model)
     return {
         variable: ggpredict(

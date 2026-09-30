@@ -416,13 +416,13 @@ def linear_hypothesis(
                 raise TypeError("denominator_df must be numeric.") from None
         if not np.isfinite(denominator_df) or denominator_df <= 0:
             raise ValueError("denominator_df must be a positive finite number.")
-        critical = stats.t.ppf(0.5 + level / 2, denominator_df)
+        critical = stats.t.isf((1 - level) / 2, denominator_df)
         row_statistic = difference / std_error
         row_p_value = 2 * stats.t.sf(np.abs(row_statistic), denominator_df)
     else:
         if denominator_df is not None:
             raise ValueError("denominator_df is only valid for an F test.")
-        critical = stats.norm.ppf(0.5 + level / 2)
+        critical = stats.norm.isf((1 - level) / 2)
         row_statistic = difference / std_error
         row_p_value = 2 * stats.norm.sf(np.abs(row_statistic))
 

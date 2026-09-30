@@ -10,6 +10,8 @@ import pandas as pd
 from numpy.typing import NDArray
 from scipy import stats
 
+from mixedlm.utils.validation import _validate_confidence_level
+
 if TYPE_CHECKING:
     from mixedlm.models.glmer import GlmerResult
     from mixedlm.models.lmer import LmerResult
@@ -295,6 +297,7 @@ def emmeans(
     type: str = "response",
     level: float = 0.95,
 ) -> Emmeans:
+    level = _validate_confidence_level(level)
     if type not in {"link", "response"}:
         raise ValueError("type must be 'link' or 'response'")
 
@@ -389,9 +392,9 @@ def emmeans(
     alpha = 1 - level
 
     if family is not None:
-        critical_value = stats.norm.ppf(1 - alpha / 2)
+        critical_value = stats.norm.isf(alpha / 2)
     else:
-        critical_value = stats.t.ppf(1 - alpha / 2, df_resid)
+        critical_value = stats.t.isf(alpha / 2, df_resid)
 
     lower = em_values - critical_value * se_em
     upper = em_values + critical_value * se_em

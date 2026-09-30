@@ -193,11 +193,11 @@ def _fixed_effect_rows(
     dfs, p_values = _fixed_effect_inference(model, names, statistics, ddf_method)
 
     if conf_int:
-        alpha = 1.0 - conf_level
+        alpha = 1.0 - float(conf_level)
         critical = np.where(
             np.isfinite(dfs),
-            stats.t.ppf(1.0 - alpha / 2.0, dfs),
-            stats.norm.ppf(1.0 - alpha / 2.0),
+            stats.t.isf(alpha / 2.0, dfs),
+            stats.norm.isf(alpha / 2.0),
         )
         lower = estimates - critical * standard_errors
         upper = estimates + critical * standard_errors

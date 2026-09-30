@@ -2,6 +2,14 @@
 
 This page documents functions for statistical inference, hypothesis testing, and confidence intervals.
 
+Confidence levels must lie strictly between zero and one. Marginal means,
+adjusted effects, parameter intervals, prediction intervals, and profile builders
+validate finite real levels before model calculations or resampling. Normal and
+Student's t interval cutoffs use the tail probability directly, preserving finite
+cutoffs for valid levels close to one. A finite cutoff does not guarantee finite
+endpoints when the model itself has undefined uncertainty or a response
+transformation overflows.
+
 ## Linear Hypotheses
 
 ### linear_hypothesis

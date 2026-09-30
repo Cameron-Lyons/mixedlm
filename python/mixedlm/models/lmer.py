@@ -26,6 +26,7 @@ from mixedlm.models.lmer_types import (
 from mixedlm.models.result_mixin import MerResultMixin
 from mixedlm.models.shared_utils import sparse_quadratic_form_diagonal, symmetric_inverse
 from mixedlm.utils import _format_pvalue, _get_signif_code
+from mixedlm.utils.validation import _validate_confidence_level
 
 
 @dataclass
@@ -403,8 +404,7 @@ class LmerResult(MerResultMixin):
             raise ValueError(
                 f"Unknown interval type: {interval}. Use 'none', 'confidence', or 'prediction'."
             )
-        if not np.isfinite(level) or not 0 < level < 1:
-            raise ValueError("level must be a finite number strictly between 0 and 1")
+        level = _validate_confidence_level(level)
 
         include_re = re_form != "NA" and re_form != "~0"
         pred_matrices: ModelMatrices | None = None
@@ -463,7 +463,7 @@ class LmerResult(MerResultMixin):
         if interval == "none":
             return PredictResult(fit=pred, se_fit=se, interval="none", level=level)
 
-        z_crit = stats.norm.ppf(1 - (1 - level) / 2)
+        z_crit = stats.norm.isf((1 - level) / 2)
 
         if interval == "confidence":
             lower = pred - z_crit * se
@@ -1697,6 +1697,7 @@ class LmerResult(MerResultMixin):
         from mixedlm.inference.bootstrap import bootstrap_lmer
         from mixedlm.inference.profile import profile_lmer
 
+        level = _validate_confidence_level(level)
         if parm is None:
             parm = self.matrices.fixed_names
         elif isinstance(parm, str):
@@ -1705,7 +1706,7 @@ class LmerResult(MerResultMixin):
         if method == "Wald":
             vcov = self.vcov()
             alpha = 1 - level
-            z_crit = stats.norm.ppf(1 - alpha / 2)
+            z_crit = stats.norm.isf(alpha / 2)
 
             result: dict[str, tuple[float, float]] = {}
             for p in parm:

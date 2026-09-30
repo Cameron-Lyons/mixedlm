@@ -157,7 +157,7 @@ def _binomial_score_interval(
 ) -> tuple[float, float]:
     """Compute a Wilson score interval for a binomial proportion."""
     proportion = n_successes / n_trials
-    z_critical = float(stats.norm.ppf(1.0 - alpha / 2.0))
+    z_critical = float(stats.norm.isf(float(alpha) / 2.0))
     z_squared = z_critical**2
     denominator = 1.0 + z_squared / n_trials
     center = (proportion + z_squared / (2.0 * n_trials)) / denominator

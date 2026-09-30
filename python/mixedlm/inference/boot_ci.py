@@ -153,7 +153,7 @@ def _interval_rows(
 ) -> list[dict[str, Any]]:
     alpha = 1.0 - level
     quantiles = np.array([alpha / 2.0, 1.0 - alpha / 2.0])
-    z_value = float(stats.norm.ppf(1.0 - alpha / 2.0))
+    z_value = float(stats.norm.isf(alpha / 2.0)) if "normal" in methods else None
     rows: list[dict[str, Any]] = []
 
     for index, name in enumerate(block.names):
@@ -182,6 +182,7 @@ def _interval_rows(
                 lower = 2.0 * estimate - upper_quantile
                 upper = 2.0 * estimate - lower_quantile
             else:
+                assert z_value is not None
                 center = estimate - bias
                 lower = center - z_value * standard_error
                 upper = center + z_value * standard_error
