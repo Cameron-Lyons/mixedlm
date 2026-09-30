@@ -330,7 +330,7 @@ notation or `< 2e-16`, as in model summaries.
 **Methods on Emmeans object:**
 
 - `pairs(adjust="tukey")`: Compute all pairwise comparisons
-- `contrast(method, adjust="none")`: Compute pairwise, treatment-vs-control, or custom contrasts
+- `contrast(method, adjust=None)`: Compute pairwise, treatment-vs-control, or custom contrasts
 
 Contrast tests retain very small p-values when computing two-sided Student's
 t probabilities. Holm and FDR adjustments preserve the input comparison order
@@ -345,6 +345,15 @@ em = mlm.emmeans(model, "treatment")
 print(em)
 print(em.pairs())
 ```
+
+Omitting `adjust` or passing `None` to `contrast()` uses Tukey for `"pairwise"`
+and no adjustment for the other contrast methods. An explicit `adjust="none"`
+always requests unadjusted p-values. `pairs()` continues to default to Tukey.
+
+Adjustment names ignore case and surrounding whitespace. Supported names are
+`"none"`, `"bonferroni"`, `"holm"`, `"fdr"`, `"tukey"`, and `"dunnett"`;
+`"BH"` is an alias for `"fdr"`. Results report the canonical name. The existing
+`"dunnett"` option uses a Bonferroni approximation. Unknown names raise an error.
 
 ## Bootstrap
 
