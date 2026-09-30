@@ -1636,14 +1636,15 @@ def test_benchmark_modular_glmm_joint(benchmark, order, size):
 @pytest.mark.parametrize("kind", ["gaussian", "binomial", "poisson"])
 @pytest.mark.parametrize("layout", ["intercept", "slope"])
 @pytest.mark.parametrize("mode_only", [False, True])
-def test_benchmark_glmm_working_buffers(benchmark, kind, layout, mode_only):
+@pytest.mark.parametrize("n", [33, 2048, 8193])
+def test_benchmark_glmm_working_buffers(benchmark, kind, layout, mode_only, n):
     from dataclasses import replace
 
     from mixedlm.estimation.laplace import _prepare_native_glmm
 
     from tests.test_glmm_final_state import mode_problem
 
-    matrices, family, theta = mode_problem(kind, layout, n_obs=2048, n_groups=64)
+    matrices, family, theta = mode_problem(kind, layout, n_obs=n, n_groups=min(n, 64))
     if mode_only:
         matrices = replace(matrices, X=np.empty((matrices.n_obs, 0)), n_fixed=0, fixed_names=[])
     problem = _prepare_native_glmm(matrices, family)
