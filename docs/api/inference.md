@@ -37,8 +37,19 @@ test.table        # Row-level estimates, SEs, intervals, and p-values
 
 Numeric arrays are interpreted in `model.matrices.fixed_names` order. A pandas
 DataFrame can instead use coefficient names as columns and row labels as its
-index. Constraint rows must be finite, nonzero, linearly independent, and
+index. Constraint rows must be finite, real, nonzero, linearly independent, and
 estimable from the fitted covariance matrix.
+
+The calculation scales restriction equations and coefficient uncertainty
+internally, preserving the test when equivalent equations use different units.
+Unused coefficient columns are omitted from the calculation, and a single
+restriction avoids matrix rank checks and factorization. Complex-valued inputs
+and masked elements are rejected before covariance calculation.
+
+Returned estimates, differences, standard errors, confidence limits, and covariance
+use the original restriction units. At extreme scales, an output value can
+underflow to zero or overflow to infinity while the row and joint tests remain
+finite. Scaling cannot recover precision already lost in the supplied arrays.
 
 The default joint test is an F test for linear mixed models and a chi-square
 test for generalized linear mixed models. An F test uses residual denominator
