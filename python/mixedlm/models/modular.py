@@ -177,7 +177,7 @@ class LmerDevfun:
 class GlmerDevfun:
     """Deviance function for generalized linear mixed models.
 
-    This class wraps the Laplace approximation deviance function
+    This class wraps the Laplace or adaptive-quadrature deviance function
     and provides methods for evaluation and optimization.
 
     Attributes
@@ -202,7 +202,7 @@ class GlmerDevfun:
         Returns
         -------
         float
-            The Laplace approximation to the deviance.
+            The deviance approximation at the configured quadrature setting.
         """
         return self.optimizer.objective(theta)
 
@@ -243,6 +243,9 @@ class OptimizeResult:
         Number of iterations.
     message : str
         Optimization message.
+    nAGQ : int, optional
+        Quadrature setting recorded by optimizeGlmer; omitted for linear models
+        and custom optimization results unless supplied explicitly.
     """
 
     theta: NDArray[np.floating]
@@ -250,6 +253,7 @@ class OptimizeResult:
     converged: bool
     n_iter: int
     message: str
+    nAGQ: int | None = None
 
 
 def lFormula(
@@ -445,11 +449,13 @@ def mkGlmerDevfun(
     parsed: GlmerParsedFormula,
     verbose: int = 0,
     control: GlmerControl | None = None,
+    *,
+    nAGQ: int = 1,
 ) -> GlmerDevfun:
     """Create the deviance function for a generalized linear mixed model.
 
     This is the second step in the modular interface for GLMMs. It creates
-    the objective function (Laplace approximation) that will be minimized.
+    the Laplace or adaptive-quadrature objective that will be minimized.
 
     Parameters
     ----------
@@ -459,6 +465,9 @@ def mkGlmerDevfun(
         Verbosity level for optimization output.
     control : GlmerControl, optional
         Control parameters for the optimizer.
+    nAGQ : int, default 1
+        Positive number of quadrature points. Values above one require a single
+        random-effect term with one coefficient per group.
 
     Returns
     -------
@@ -487,6 +496,7 @@ def mkGlmerDevfun(
         parsed.matrices,
         parsed.family,
         verbose=verbose,
+        nAGQ=nAGQ,
     )
 
     return GlmerDevfun(parsed=parsed, optimizer=optimizer)
@@ -610,6 +620,10 @@ def optimizeGlmer(
     """
     from scipy.optimize import minimize
 
+    from mixedlm.estimation.laplace import _validate_quadrature
+
+    _validate_quadrature(devfun.optimizer.nAGQ, devfun.parsed.matrices)
+
     if start is None:
         start = devfun.get_start()
 
@@ -637,6 +651,7 @@ def optimizeGlmer(
         converged=result.success,
         n_iter=result.nit,
         message=result.message if hasattr(result, "message") else "",
+        nAGQ=devfun.optimizer.nAGQ,
     )
 
 
@@ -698,7 +713,7 @@ def mkLmerMod(
 def mkGlmerMod(
     devfun: GlmerDevfun,
     opt: OptimizeResult,
-    nAGQ: int = 1,
+    nAGQ: int | None = None,
 ) -> GlmerResult:
     """Create a GlmerResult from optimization results.
 
@@ -710,8 +725,10 @@ def mkGlmerMod(
         Deviance function from mkGlmerDevfun.
     opt : OptimizeResult
         Optimization result from optimizeGlmer.
-    nAGQ : int, default 1
-        Number of adaptive Gauss-Hermite quadrature points used.
+    nAGQ : int, optional
+        Must match the quadrature used for optimization. By default, inherit
+        the optimization result's setting, or the deviance function's setting
+        for a custom optimization result without quadrature metadata.
 
     Returns
     -------
@@ -733,13 +750,19 @@ def mkGlmerMod(
     mkGlmerDevfun : Create deviance function.
     optimizeGlmer : Optimize deviance.
     """
-    from mixedlm.estimation.laplace import laplace_deviance
+    from mixedlm.estimation.laplace import _validate_quadrature, adaptive_gh_deviance_fast
     from mixedlm.models.glmer import GlmerResult
 
-    _, beta, u = laplace_deviance(
-        opt.theta,
-        devfun.parsed.matrices,
-        devfun.parsed.family,
+    fitted_nAGQ = opt.nAGQ if opt.nAGQ is not None else devfun.optimizer.nAGQ
+    nAGQ = fitted_nAGQ if nAGQ is None else nAGQ
+    _validate_quadrature(nAGQ, devfun.parsed.matrices)
+    if nAGQ != fitted_nAGQ:
+        raise ValueError(
+            "nAGQ must match the setting used for optimization; "
+            "create a deviance function with the requested nAGQ and optimize it again"
+        )
+    deviance, beta, u = adaptive_gh_deviance_fast(
+        opt.theta, devfun.parsed.matrices, devfun.parsed.family, nAGQ=nAGQ
     )
 
     return GlmerResult(
@@ -749,7 +772,7 @@ def mkGlmerMod(
         theta=opt.theta,
         beta=beta,
         u=u,
-        deviance=opt.deviance,
+        deviance=deviance,
         converged=opt.converged,
         n_iter=opt.n_iter,
         nAGQ=nAGQ,

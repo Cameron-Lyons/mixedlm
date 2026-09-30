@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [1.2.0] - 2026-08-18
 
 ### Added
+- Modular GLMM fitting accepts `nAGQ` when creating the deviance function and carries the quadrature setting through optimization and result construction
 - Arbitrary linear fixed-effect hypothesis tests with named or matrix constraints
 - Grouped-binomial `successes / trials` responses with automatic trial weights and validation
 - Configurable named links and documented family/link helper APIs
@@ -31,6 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Consolidated duplicate CI and security checks while preserving coverage
 
 ### Fixed
+- GLMM quadrature validates positive integer orders and rejects unsupported random-effect structures; modular results cannot relabel a fit with a different quadrature order
 - Poisson and other unbounded GLMM families no longer clamp fitted means below one
 - Unsupported family and link combinations no longer route through the native fast path
 
