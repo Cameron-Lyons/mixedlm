@@ -22,6 +22,7 @@ from mixedlm.families.binomial import Binomial
 from mixedlm.families.gaussian import Gaussian
 from mixedlm.families.poisson import Poisson
 from mixedlm.matrices.design import ModelMatrices, RandomEffectStructure
+from mixedlm.utils.quadrature import _positive_integer, hermite_rule
 
 _ETA_CLIP_MIN = -30.0
 _ETA_CLIP_MAX = 30.0
@@ -410,11 +411,8 @@ def laplace_deviance(
 
 
 def _get_gh_nodes_weights(n: int) -> tuple[NDArray[np.floating], NDArray[np.floating]]:
-    """Get Gauss-Hermite quadrature nodes and weights."""
-    from numpy.polynomial.hermite import hermgauss
-
-    nodes, weights = hermgauss(n)
-    return np.asarray(nodes), np.asarray(weights)
+    """Get a shared, immutable Gauss-Hermite quadrature rule."""
+    return hermite_rule(n)
 
 
 def _compute_group_quadrature(
@@ -433,6 +431,9 @@ def _compute_group_quadrature(
     sqrt2 = np.sqrt(2.0)
     log_terms = np.empty(len(nodes), dtype=np.float64)
     for i, (node, weight) in enumerate(zip(nodes, weights, strict=True)):
+        if weight == 0:
+            log_terms[i] = -np.inf
+            continue
         spherical_quad = spherical_mode + sqrt2 * scale * node
         eta_quad = eta_fixed + z_values * (relative_scale * spherical_quad)
         mu_quad = family.link.inverse(eta_quad)
@@ -854,6 +855,8 @@ def GQdk(d: int, k: int) -> tuple[NDArray[np.floating], NDArray[np.floating]]:
     For d > 1, the total number of nodes is k^d, which grows exponentially.
     For high dimensions, consider sparse grids or other methods.
     """
+    d = _positive_integer(d, "d")
+    k = _positive_integer(k, "k")
     nodes_1d, weights_1d = _get_gh_nodes_weights(k)
 
     nodes_1d = nodes_1d * np.sqrt(2)
