@@ -333,6 +333,34 @@ The distribution family used.
 
 The result object returned by `nlmer()`. Has similar methods to LmerResult.
 
+### simulate
+
+```python
+import numpy as np
+
+draws = nlmm_result.simulate(nsim=100, seed=42)
+
+stream = np.random.default_rng(42)
+first = nlmm_result.simulate(seed=stream)
+more = nlmm_result.simulate(nsim=10, seed=stream)
+```
+
+Nonlinear simulation accepts an integer seed, NumPy `RandomState`, or NumPy
+`Generator`. Integer seeds retain the previous draw sequence. A supplied stream
+advances across calls; omitting `seed` creates an independent stream. These
+calls do not reset or consume NumPy's global random state. Use `seed` or an
+explicit stream for reproducibility instead of calling `np.random.seed()`.
+
+`nsim` must be a nonnegative integer. One draw returns shape `(n_obs,)`, multiple
+draws return `(n_obs, nsim)`, and zero draws return `(n_obs, 0)`. Simulation
+preserves fitted offsets and inverse-weight residual variances. `use_re=False`,
+`re_form="NA"`, and `re_form="~0"` exclude random effects.
+
+Multi-draw calls reuse the random-effect covariance transform, group row
+lookups, offsets, and residual scales. Fixed-only calls evaluate the nonlinear
+mean once. This setup is local to each call, so changes to a result are reflected
+in the next simulation.
+
 ## VarCorr
 
 Variance-covariance structure of random effects.

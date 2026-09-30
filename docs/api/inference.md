@@ -345,6 +345,11 @@ ci = boot.ci()
 print(ci)
 ```
 
+Nonlinear bootstrap (`bootstrap_nlmer()`, `bootMer()` on an `NlmerResult`, and
+`NlmerResult.confint(method="boot")`) uses a local random stream shared across
+replicates. Integer seeds retain the previous simulation sequence without
+changing NumPy's global random state. Supply `seed` for reproducibility.
+
 ### bootCI
 
 Create tidy confidence intervals for fixed effects, variance parameters, and
