@@ -9,6 +9,7 @@ from numpy.typing import NDArray
 from scipy import linalg, sparse
 
 from mixedlm.models.shared_utils import _RandomEffectFactor
+from mixedlm.utils.names import _check_unique_coefficient_names
 
 if TYPE_CHECKING:
     from mixedlm.estimation.reml import _LMMCrossproducts
@@ -237,10 +238,16 @@ class DenomDFResult:
     param_names: list[str]
 
     def __getitem__(self, key: str) -> float:
+        _check_unique_coefficient_names(
+            self.param_names, [key], alternative="Use df with param_names to select by position."
+        )
         idx = self.param_names.index(key)
         return float(self.df[idx])
 
     def as_dict(self) -> dict[str, float]:
+        _check_unique_coefficient_names(
+            self.param_names, alternative="Use df with param_names to inspect every coefficient."
+        )
         return dict(zip(self.param_names, self.df, strict=False))
 
 
@@ -398,6 +405,9 @@ def pvalues_with_ddf(
     """
     from scipy import stats
 
+    _check_unique_coefficient_names(
+        result.matrices.fixed_names, alternative="Use tidy() for inference in coefficient order."
+    )
     normalized_method = method.strip().lower().replace("_", "-")
     if normalized_method in ("satterthwaite", "satt"):
         ddf_result = satterthwaite_df(result)
@@ -410,12 +420,9 @@ def pvalues_with_ddf(
     beta = result.beta
     se = np.sqrt(np.diag(vcov))
 
-    results: dict[str, tuple[float, float, float]] = {}
-
-    for i, name in enumerate(result.matrices.fixed_names):
-        t_val = beta[i] / se[i] if se[i] > 0 else np.nan
-        df = ddf_result.df[i]
-        p_val = 2 * stats.t.sf(np.abs(t_val), df)
-        results[name] = (float(beta[i]), float(t_val), float(p_val))
-
-    return results
+    statistics = np.divide(beta, se, out=np.full_like(beta, np.nan, dtype=np.float64), where=se > 0)
+    p_values = 2 * stats.t.sf(np.abs(statistics), ddf_result.df)
+    return {
+        name: (float(beta[i]), float(statistics[i]), float(p_values[i]))
+        for i, name in enumerate(result.matrices.fixed_names)
+    }

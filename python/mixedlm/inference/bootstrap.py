@@ -9,6 +9,7 @@ import numpy as np
 from numpy.typing import NDArray
 from scipy import stats
 
+from mixedlm.utils.names import _check_unique_coefficient_names
 from mixedlm.utils.simulation import simulate_random_effects
 
 if TYPE_CHECKING:
@@ -47,6 +48,9 @@ def _bootstrap_ci(
     method: str,
 ) -> dict[str, tuple[float, float]]:
     _validate_ci_options(level, method)
+    _check_unique_coefficient_names(
+        names, alternative="Use bootCI() for one row per parameter in sample-column order."
+    )
     alpha = 1.0 - float(level)
     lower_percentile = 100.0 * alpha / 2.0
     upper_percentile = 100.0 * (1.0 - alpha / 2.0)
@@ -91,6 +95,9 @@ def _bootstrap_se(
     samples: NDArray[np.floating],
     names: list[str],
 ) -> dict[str, float]:
+    _check_unique_coefficient_names(
+        names, alternative="Use bootCI() for standard errors in sample-column order."
+    )
     result: dict[str, float] = {}
     for i, name in enumerate(names):
         parameter_samples = _finite_bootstrap_samples(samples, i)

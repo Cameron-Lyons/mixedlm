@@ -48,6 +48,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Formula matrix construction now reuses base-factor encodings and streams fixed-effect interaction columns into a single output matrix
 
 - Prediction reuses an already aligned fixed-effect matrix without copying every column
+
+- LMM summaries reuse one denominator-DF calculation and evaluate coefficient p-values together
 - Multi-draw GLMM simulation now batches random effects and response generation
 - EM-REML algorithm generalized from single random intercept to arbitrary unstructured covariance models
 - Replaced the Py-BOBYQA dependency and default optimizer with SciPy COBYQA
@@ -58,6 +60,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - New-data LMM and GLMM predictions preserve distinct fixed-effect columns with colliding display names, including after rank reduction and refitting
+
+- Fixed-effect tables and summaries preserve repeated coefficient names and keep inference aligned by position; ambiguous named selections and dictionary results raise clear errors
 - Poisson and other unbounded GLMM families no longer clamp fitted means below one
 - Unsupported family and link combinations no longer route through the native fast path
 

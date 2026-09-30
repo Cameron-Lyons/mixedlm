@@ -1380,6 +1380,14 @@ class GlmerResult(MerResultMixin):
         elif isinstance(parm, str):
             parm = [parm]
 
+        from mixedlm.utils.names import _check_unique_coefficient_names
+
+        _check_unique_coefficient_names(
+            self.matrices.fixed_names,
+            None if method == "boot" else parm,
+            alternative="Use tidy(conf_int=True) for intervals in coefficient order.",
+        )
+
         if method == "Wald":
             vcov = self.vcov()
             alpha = 1 - level
