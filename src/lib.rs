@@ -6,6 +6,7 @@ mod blocked_chol;
 mod covariance;
 mod csc;
 mod glmm;
+mod glmm_sparse;
 mod linalg;
 mod lmm;
 mod nlmm;

@@ -8,7 +8,7 @@ use faer::sparse::linalg::cholesky::{
     factorize_symbolic_cholesky,
 };
 use faer::sparse::{SparseColMatRef, SymbolicSparseColMatRef};
-use faer::{Conj, Mat, Par, Side};
+use faer::{Conj, Mat, MatMut, Par, Side};
 
 use crate::csc::CscMatrix;
 use crate::linalg::LinalgError;
@@ -25,6 +25,19 @@ pub struct SymbolicCholeskyCache {
 
 impl SymbolicCholeskyCache {
     pub fn new(indices: &[usize], indptr: &[usize], n: usize) -> Result<Self, LinalgError> {
+        Self::with_ordering(indices, indptr, n, SymmetricOrdering::Identity)
+    }
+
+    pub fn new_amd(indices: &[usize], indptr: &[usize], n: usize) -> Result<Self, LinalgError> {
+        Self::with_ordering(indices, indptr, n, SymmetricOrdering::Amd)
+    }
+
+    fn with_ordering(
+        indices: &[usize],
+        indptr: &[usize],
+        n: usize,
+        ordering: SymmetricOrdering<'_, usize>,
+    ) -> Result<Self, LinalgError> {
         let pattern_values = vec![1.0; indices.len()];
         let mat = build_csc_matrix(&pattern_values, indices, indptr, n)?;
         let upper = mat.self_adjoint_upper_from_lower();
@@ -38,10 +51,7 @@ impl SymbolicCholeskyCache {
         let symbolic = factorize_symbolic_cholesky(
             matrix_ref(&upper).symbolic(),
             Side::Upper,
-            // Match the previous sparse backends' natural ordering. Model
-            // matrices are assembled in a structure-aware order already, and
-            // avoiding a fresh AMD permutation makes repeated refactors cheap.
-            SymmetricOrdering::Identity,
+            ordering,
             params,
         )
         .map_err(|error| LinalgError::InvalidSparseFormat(format!("{error:?}")))?;
@@ -145,6 +155,10 @@ impl SymbolicCholeskyCache {
     pub fn n(&self) -> usize {
         self.n
     }
+
+    pub fn factor_nonzeros(&self) -> usize {
+        self.symbolic.len_val()
+    }
 }
 
 pub struct NumericFactorization {
@@ -156,6 +170,54 @@ pub struct NumericFactorization {
 impl NumericFactorization {
     pub fn n(&self) -> usize {
         self.n
+    }
+
+    /// Whiten by D^(-1/2) L^(-1) P for P A P^T = L D L^T.
+    pub fn solve_lower_in_place(&self, mut rhs: MatMut<'_, f64>) {
+        let SymbolicCholeskyRaw::Simplicial(symbolic) = self.symbolic.raw() else {
+            unreachable!("symbolic factorization is forced to be simplicial")
+        };
+        if let Some(permutation) = self.symbolic.perm() {
+            let input = rhs.as_ref().to_owned();
+            faer::perm::permute_rows(rhs.as_mut(), input.as_ref(), permutation);
+        }
+        let lower =
+            matrix_ref_from_parts(self.n, symbolic.col_ptr(), symbolic.row_idx(), &self.values);
+        faer::sparse::linalg::triangular_solve::solve_unit_lower_triangular_in_place(
+            lower,
+            Conj::No,
+            rhs.as_mut(),
+            Par::Seq,
+        );
+        for column in 0..rhs.ncols() {
+            for row in 0..self.n {
+                rhs[(row, column)] /= self.values[symbolic.col_ptr()[row]].sqrt();
+            }
+        }
+    }
+
+    /// Apply P^T L^(-T) D^(-1/2), returning to the original model order.
+    pub fn solve_upper_in_place(&self, mut rhs: MatMut<'_, f64>) {
+        let SymbolicCholeskyRaw::Simplicial(symbolic) = self.symbolic.raw() else {
+            unreachable!("symbolic factorization is forced to be simplicial")
+        };
+        for column in 0..rhs.ncols() {
+            for row in 0..self.n {
+                rhs[(row, column)] /= self.values[symbolic.col_ptr()[row]].sqrt();
+            }
+        }
+        let lower =
+            matrix_ref_from_parts(self.n, symbolic.col_ptr(), symbolic.row_idx(), &self.values);
+        faer::sparse::linalg::triangular_solve::solve_unit_lower_triangular_transpose_in_place(
+            lower,
+            Conj::No,
+            rhs.as_mut(),
+            Par::Seq,
+        );
+        if let Some(permutation) = self.symbolic.perm() {
+            let input = rhs.as_ref().to_owned();
+            faer::perm::permute_rows(rhs, input.as_ref(), permutation.inverse());
+        }
     }
 
     pub fn solve(&self, b: &[f64]) -> Result<Vec<f64>, LinalgError> {
@@ -222,6 +284,37 @@ fn matrix_ref_from_parts<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sparse_whitening_and_backsolve_match_dense_cholesky() {
+        let data = vec![4.0, 1.0, -0.5, 3.0, 0.25, 2.0];
+        let indices = vec![0, 1, 2, 1, 2, 2];
+        let offsets = vec![0, 3, 5, 6];
+        let symbolic = SymbolicCholeskyCache::new(&indices, &offsets, 3).unwrap();
+        let factor = symbolic.factor(&data, &indices, &offsets).unwrap();
+        let matrix = Mat::from_fn(3, 3, |i, j| {
+            [[4.0, 1.0, -0.5], [1.0, 3.0, 0.25], [-0.5, 0.25, 2.0]][i][j]
+        });
+        let dense = faer::linalg::solvers::Llt::new(matrix.as_ref(), Side::Lower).unwrap();
+        for columns in [0, 1, 7] {
+            let rhs = Mat::from_fn(3, columns, |i, j| (i + 2 * j) as f64 - 4.0);
+            let mut actual = rhs.clone();
+            factor.solve_lower_in_place(actual.as_mut());
+            let whitened = dense.L() * &actual;
+            for j in 0..columns {
+                for i in 0..3 {
+                    assert!((whitened[(i, j)] - rhs[(i, j)]).abs() < 1e-12);
+                }
+            }
+            factor.solve_upper_in_place(actual.as_mut());
+            let reconstructed = &matrix * &actual;
+            for j in 0..columns {
+                for i in 0..3 {
+                    assert!((reconstructed[(i, j)] - rhs[(i, j)]).abs() < 1e-12);
+                }
+            }
+        }
+    }
 
     #[test]
     fn test_symbolic_cache_basic() {

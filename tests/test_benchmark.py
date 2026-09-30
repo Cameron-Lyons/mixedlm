@@ -474,3 +474,52 @@ def test_benchmark_large_leverage(benchmark, large_crossed_sparse_data, kind):
 
     assert values.shape == (len(large_crossed_sparse_data),)
     assert np.all((values >= 0) & (values < 1))
+
+
+@pytest.mark.benchmark(group="native-sparse-glmm")
+@pytest.mark.parametrize("groups", [128, 1000, 20_000])
+def test_benchmark_native_sparse_glmm(benchmark, groups):
+    from mixedlm import _rust
+
+    n = 3 * groups
+    rows = np.arange(n)
+    group = rows % groups
+    x = np.column_stack((np.ones(n), np.sin(rows)))
+    weights = 0.5 + (rows % 7) / 4.0
+    offset = 0.1 * np.cos(rows)
+    y = x @ np.array([0.3, -0.2]) + offset + 0.2 * np.sin(group) + 0.1 * np.cos(rows / groups)
+    theta = 0.65
+    z = sparse.coo_matrix((np.ones(n), (rows, group)), shape=(n, groups)).tocsc()
+    diagonal = 1 + theta**2 * np.bincount(group, weights=weights, minlength=groups)
+    cross = theta * np.column_stack(
+        [np.bincount(group, weights=weights * column, minlength=groups) for column in x.T]
+    )
+    response = theta * np.bincount(group, weights=weights * (y - offset), minlength=groups)
+    beta = np.linalg.solve(
+        x.T @ (weights[:, None] * x) - cross.T @ (cross / diagonal[:, None]),
+        x.T @ (weights * (y - offset)) - cross.T @ (response / diagonal),
+    )
+    spherical = (response - cross @ beta) / diagonal
+    residual = y - offset - x @ beta - theta * spherical[group]
+    expected = np.dot(weights * residual, residual) + np.dot(spherical, spherical)
+    expected += np.log(diagonal).sum()
+    actual = benchmark(
+        _rust.laplace_deviance,
+        y,
+        x,
+        z.data,
+        z.indices.astype(np.int64),
+        z.indptr.astype(np.int64),
+        z.shape,
+        weights,
+        offset,
+        np.array([theta]),
+        [groups],
+        [1],
+        [True],
+        "gaussian",
+        "identity",
+    )
+    np.testing.assert_allclose(actual[0], expected, rtol=1e-11, atol=1e-9)
+    np.testing.assert_allclose(actual[1], beta, rtol=1e-11, atol=1e-11)
+    np.testing.assert_allclose(actual[2], theta * spherical, rtol=1e-11, atol=1e-11)
