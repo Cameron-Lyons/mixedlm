@@ -1107,13 +1107,13 @@ mod quadrature_tests {
         let hessian = 1.0 + relative_scale * relative_scale * 1.75;
         let score = -2.0 * relative_scale;
         let spherical = DVector::from_fn(2, |i| if i == 0 { score / hessian } else { 0.0 });
-        let (nodes, weights) = gauss_hermite_nodes_weights(9);
+        let rule = gauss_hermite_nodes_weights(9);
         let integral = compute_group_log_integral(
             0,
             &spherical,
             relative_scale,
-            &nodes,
-            &weights,
+            &rule.nodes,
+            &rule.weights,
             &y,
             &z,
             &eta_fixed,
@@ -1129,8 +1129,8 @@ mod quadrature_tests {
                 1,
                 &spherical,
                 relative_scale,
-                &nodes,
-                &weights,
+                &rule.nodes,
+                &rule.weights,
                 &y,
                 &z,
                 &eta_fixed,
