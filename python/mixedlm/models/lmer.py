@@ -366,6 +366,7 @@ class LmerResult(MerResultMixin):
         interval: str = "none",
         level: float = 0.95,
         offset: ArrayLike | str | None = None,
+        weights: ArrayLike | str | None = None,
     ) -> NDArray[np.floating] | PredictResult:
         """Generate predictions from the fitted model.
 
@@ -386,6 +387,13 @@ class LmerResult(MerResultMixin):
         offset : array-like, scalar, or str, optional
             Offset for new-data predictions. A string selects a column from
             ``newdata``. Scalars are broadcast to every row.
+        weights : array-like, scalar, or str, optional
+            Positive finite residual precision weights for new-data prediction
+            intervals. A string selects a column from ``newdata``; scalars are
+            broadcast to every row. Requires ``newdata`` and
+            ``interval="prediction"``. Residual variance is ``sigma**2 / weights``;
+            omitted weights default to one. These weights use the same scale as
+            the fitted prior weights and do not change mean standard errors.
 
         Returns
         -------
@@ -396,7 +404,7 @@ class LmerResult(MerResultMixin):
         -----
         Prediction uncertainty uses the prior weights from the fitted model.
         In-sample prediction intervals add residual variance ``sigma**2 / weight``;
-        new-data prediction intervals assume unit residual weights.
+        new-data prediction intervals use the supplied ``weights``, defaulting to one.
         """
         valid_intervals = ("none", "confidence", "prediction")
         if interval not in valid_intervals:
@@ -405,6 +413,18 @@ class LmerResult(MerResultMixin):
             )
         if not np.isfinite(level) or not 0 < level < 1:
             raise ValueError("level must be a finite number strictly between 0 and 1")
+
+        prediction_weights: float | NDArray[np.floating] = 1.0
+        if weights is not None:
+            if newdata is None:
+                raise ValueError("Prediction weights can only be supplied with newdata.")
+            if interval != "prediction":
+                raise ValueError("Prediction weights require interval='prediction'.")
+            prediction_weights = self._prediction_vector(
+                newdata, weights, name="weights", default=1.0
+            )
+            if np.any(prediction_weights <= 0):
+                raise ValueError("Prediction weights must be strictly positive.")
 
         include_re = re_form != "NA" and re_form != "~0"
         pred_matrices: ModelMatrices | None = None
@@ -476,7 +496,7 @@ class LmerResult(MerResultMixin):
             if newdata is None:
                 residual_var = self.sigma**2 / self.matrices.weights
             else:
-                residual_var = self.sigma**2
+                residual_var = self.sigma**2 / prediction_weights
             var_pred = var_fit + residual_var
             se_pred = np.sqrt(var_pred)
             lower = pred - z_crit * se_pred

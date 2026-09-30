@@ -161,6 +161,7 @@ lmm_result.predict(
     interval="none",
     level=0.95,
     offset=None,
+    weights=None,
 )
 glmm_result.predict(
     newdata=None,
@@ -183,6 +184,9 @@ Generate predictions.
 - `type`: For GLMMs, `"response"` or `"link"`.
 - `offset`: Numeric offset for new rows, a scalar, or the name of an offset
   column in `newdata`. GLMM offsets are applied on the link scale.
+- `weights`: LMM residual precision weights for new-data prediction intervals.
+  Accepts a positive finite scalar, an array in row order, or a column name.
+  Requires `newdata` and `interval="prediction"`; defaults to one.
 - `allow_new_levels`: Allow unseen grouping levels and center their random effects at zero.
 - `se_fit`: Return pointwise standard errors for the predicted mean.
 - `interval`: For LMMs, `"none"`, `"confidence"`, or `"prediction"`.
@@ -197,13 +201,20 @@ unseen group accepted with `allow_new_levels=True`, the fitted prior covariance 
 the predicted random effect remains zero. Prediction intervals add residual variance to the
 mean-prediction variance; `se_fit` continues to report the standard error of the mean.
 The covariance calculation uses the fitted prior weights. In-sample prediction intervals
-add residual variance `sigma**2 / weight`, while new-data prediction intervals assume
-unit residual weights. Repeated uncertainty calculations reuse the fitted weighted
+add residual variance `sigma**2 / weight`. New-data prediction intervals add
+`sigma**2 / weights`, using the supplied prediction weights or one by default.
+Prediction weights must use the same scale as the fitted prior weights. They change
+the residual variance in prediction intervals; predicted means and their `se_fit`
+values are unaffected. Repeated uncertainty calculations reuse the fitted weighted
 factorization.
 
 ```python
 mean_ci = result.predict(newdata, interval="confidence", level=0.95)
 future_pi = result.predict(newdata, interval="prediction", level=0.95)
+
+# Allow different residual variances for future observations.
+# newdata["precision"] contains positive weights on the training-weight scale.
+weighted_pi = result.predict(newdata, interval="prediction", weights="precision")
 
 new_groups = result.predict(
     new_group_data,

@@ -148,42 +148,48 @@ class MerResultMixin:
         newdata: pd.DataFrame,
         offset: ArrayLike | str | None,
     ) -> NDArray[np.floating]:
-        from mixedlm.utils.dataframe import (
-            dataframe_length,
-            ensure_dataframe,
-            get_column_numpy,
-            get_columns,
-        )
+        return self._prediction_vector(newdata, offset, name="offset", default=0.0)
+
+    def _prediction_vector(
+        self,
+        newdata: pd.DataFrame,
+        value: ArrayLike | str | None,
+        *,
+        name: str,
+        default: float,
+    ) -> NDArray[np.float64]:
+        """Resolve and validate a scalar, array, or named column for prediction rows."""
+        from mixedlm.utils.dataframe import dataframe_length, ensure_dataframe
 
         data = ensure_dataframe(newdata)
         n_rows = dataframe_length(data)
-        if offset is None:
-            return np.zeros(n_rows, dtype=np.float64)
+        if value is None:
+            return np.full(n_rows, default, dtype=np.float64)
 
-        raw_offset: ArrayLike
-        if isinstance(offset, str):
-            if offset not in get_columns(data):
-                raise ValueError(f"New data is missing offset column '{offset}'.")
-            raw_offset = get_column_numpy(data, offset)
+        raw_value: ArrayLike
+        if isinstance(value, str):
+            if value not in get_columns(data):
+                raise ValueError(f"New data is missing {name} column '{value}'.")
+            raw_value = get_column_numpy(data, value)
         else:
-            raw_offset = offset
+            raw_value = value
 
         try:
-            values = np.asarray(raw_offset, dtype=np.float64)
+            values = np.asarray(raw_value, dtype=np.float64)
         except (TypeError, ValueError):
-            raise ValueError("Prediction offset must contain numeric values.") from None
+            raise ValueError(f"Prediction {name} must contain numeric values.") from None
 
         if values.ndim == 0:
             values = np.full(n_rows, float(values), dtype=np.float64)
         elif values.ndim != 1:
-            raise ValueError("Prediction offset must be a scalar or one-dimensional array.")
+            raise ValueError(f"Prediction {name} must be a scalar or one-dimensional array.")
         elif len(values) != n_rows:
             raise ValueError(
-                f"Prediction offset has length {len(values)}; expected {n_rows} for new data."
+                f"Prediction {name} has length {len(values)}; expected {n_rows} for new data."
             )
 
         if not np.all(np.isfinite(values)):
-            raise ValueError("Prediction offset must contain only finite values.")
+            raise ValueError(f"Prediction {name} must contain only finite values.")
         return values
 
     def _model_frame(self) -> Any:
