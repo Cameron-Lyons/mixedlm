@@ -682,7 +682,7 @@ class NlmerResult:
             - "boot": Bootstrap (recommended for NLMMs)
             - "Wald": Wald intervals based on vcov (less accurate)
         n_boot : int, default 1000
-            Number of bootstrap samples (if method="boot").
+            Positive integer number of bootstrap samples (if method="boot").
         seed : int, optional
             Random seed.
 
@@ -690,6 +690,12 @@ class NlmerResult:
         -------
         dict
             Dictionary mapping parameter names to (lower, upper) tuples.
+
+        Notes
+        -----
+        Bootstrap intervals exclude failed samples. If every sample fails,
+        the bounds are NaN. Use ``bootstrap_nlmer()`` to inspect sample arrays
+        and the failure count before interpreting the intervals.
         """
         from scipy import stats
 
@@ -724,33 +730,12 @@ class NlmerResult:
             return result
 
         elif method == "boot":
-            if seed is not None:
-                np.random.seed(seed)
+            from mixedlm.inference.bootstrap import _validate_ci_options, bootstrap_nlmer
 
-            n_params = len(self.phi)
-            boot_samples = np.zeros((n_boot, n_params), dtype=np.float64)
-
-            for i in range(n_boot):
-                y_sim = self.simulate(nsim=1, use_re=True)
-                try:
-                    fit_i = self.refit(y_sim)
-                    boot_samples[i, :] = fit_i.phi
-                except Exception:
-                    boot_samples[i, :] = self.phi
-
-            alpha = 1 - level
-            lower_pct = alpha / 2 * 100
-            upper_pct = (1 - alpha / 2) * 100
-
-            result = {}
-            for p in parm:
-                if p not in self.model.param_names:
-                    continue
-                idx = self.model.param_names.index(p)
-                lower = float(np.percentile(boot_samples[:, idx], lower_pct))
-                upper = float(np.percentile(boot_samples[:, idx], upper_pct))
-                result[p] = (lower, upper)
-            return result
+            _validate_ci_options(level, "percentile")
+            boot = bootstrap_nlmer(self, n_boot=n_boot, seed=seed)
+            intervals = boot.ci(level=level)
+            return {p: intervals[p] for p in parm if p in intervals}
 
         else:
             raise ValueError(f"Unknown method: {method}. Use 'Wald' or 'boot'.")
