@@ -8,7 +8,10 @@ import numpy as np
 from numpy.typing import NDArray
 from scipy import linalg, sparse
 
+from mixedlm.models.shared_utils import _RandomEffectFactor
+
 if TYPE_CHECKING:
+    from mixedlm.estimation.reml import _LMMCrossproducts
     from mixedlm.models.lmer import LmerResult
 
 _NUMERICAL_EPS = 1e-6
@@ -16,13 +19,6 @@ _HESSIAN_EPS = 1e-4
 _GRADIENT_ZERO_THRESHOLD = 1e-10
 _MIN_DF = 1.0
 _CHOLESKY_REGULARIZATION = 1e-6
-
-
-@dataclass
-class _WeightedCrossproducts:
-    XtWX: NDArray[np.float64]
-    ZtWZ: sparse.csc_matrix
-    ZtWX: NDArray[np.float64]
 
 
 @dataclass
@@ -57,22 +53,17 @@ def _matrix_inverse(A: NDArray[np.floating]) -> NDArray[np.floating]:
     return _solve_linear_system(A, np.eye(A.shape[0], dtype=np.float64))
 
 
-def _weighted_crossproducts(result: LmerResult) -> _WeightedCrossproducts:
-    """Build the weighted cross-products shared by covariance perturbations."""
-    sqrt_weights = np.sqrt(result.matrices.weights)
-    weighted_X = sqrt_weights[:, None] * result.matrices.X
-    weighted_Z = result.matrices.Z.multiply(sqrt_weights[:, None]).tocsc()
-    return _WeightedCrossproducts(
-        XtWX=np.asarray(weighted_X.T @ weighted_X, dtype=np.float64),
-        ZtWZ=(weighted_Z.T @ weighted_Z).tocsc(),
-        ZtWX=np.asarray(weighted_Z.T @ weighted_X, dtype=np.float64),
-    )
+def _weighted_crossproducts(result: LmerResult) -> _LMMCrossproducts:
+    """Build the weighted products shared by all covariance perturbations."""
+    from mixedlm.estimation.reml import _LMMCrossproducts
+
+    return _LMMCrossproducts.from_matrices(result.matrices)
 
 
 def _xt_vinv_x_from_theta(
     result: LmerResult,
     theta: NDArray[np.floating],
-    crossproducts: _WeightedCrossproducts | None = None,
+    crossproducts: _LMMCrossproducts | None = None,
     sigma: float | None = None,
 ) -> NDArray[np.floating]:
     """Compute X'V^-1X without materializing the n x n marginal covariance."""
@@ -89,17 +80,10 @@ def _xt_vinv_x_from_theta(
     Lambda = _build_lambda(theta, result.matrices.random_structures)
     lambdat_ztz_lambda = Lambda.T @ crossproducts.ZtWZ @ Lambda
     v_factor = lambdat_ztz_lambda + sparse.eye(q, format="csc")
-    v_factor_dense = v_factor.toarray() if sparse.issparse(v_factor) else v_factor
-
-    try:
-        chol = linalg.cholesky(v_factor_dense, lower=True)
-    except linalg.LinAlgError:
-        v_factor_dense += _CHOLESKY_REGULARIZATION * np.eye(q, dtype=np.float64)
-        chol = linalg.cholesky(v_factor_dense, lower=True)
+    factor = _RandomEffectFactor(v_factor, jitter=_CHOLESKY_REGULARIZATION)
 
     lambdat_ztx = Lambda.T @ crossproducts.ZtWX
-    rzx = linalg.solve_triangular(chol, lambdat_ztx, lower=True)
-    information = crossproducts.XtWX - rzx.T @ rzx
+    information = crossproducts.XtWX - factor.crossproduct(lambdat_ztx)
     return (information + information.T) / (2.0 * residual_scale**2)
 
 
@@ -110,13 +94,20 @@ def _finite_difference_step(value: float) -> float:
 def _vcov_from_theta(
     result: LmerResult,
     theta: NDArray[np.floating],
-    crossproducts: _WeightedCrossproducts,
+    crossproducts: _LMMCrossproducts,
 ) -> NDArray[np.floating]:
     from mixedlm.estimation.reml import _profiled_deviance_core
 
-    profiled = _profiled_deviance_core(theta, result.matrices, REML=result.REML)
-    sigma = result.sigma if profiled is None else profiled.sigma
-    information = _xt_vinv_x_from_theta(result, theta, crossproducts, sigma=sigma)
+    profiled = _profiled_deviance_core(
+        theta, result.matrices, REML=result.REML, crossproducts=crossproducts
+    )
+    if profiled is None:
+        information = _xt_vinv_x_from_theta(result, theta, crossproducts)
+    else:
+        # Profiling already computed this Schur complement; reuse it instead
+        # of rebuilding and factoring the random-effect system a second time.
+        information = profiled.fixed_information
+        information = (information + information.T) / (2.0 * profiled.sigma**2)
     return _matrix_inverse(information)
 
 
@@ -132,17 +123,27 @@ def _discard_vcov_grad_cache_entry(
 def _profiled_theta_covariance(
     result: LmerResult,
     theta: NDArray[np.float64],
+    crossproducts: _LMMCrossproducts | None = None,
 ) -> NDArray[np.float64]:
     """Approximate covariance of relative covariance parameters from deviance curvature."""
-    from mixedlm.estimation.reml import profiled_deviance
+    from mixedlm.estimation.reml import _profiled_deviance_core
 
     n_theta = len(theta)
     if n_theta == 0:
         return np.zeros((0, 0), dtype=np.float64)
 
+    if crossproducts is None:
+        crossproducts = _weighted_crossproducts(result)
+
+    def evaluate(parameters: NDArray[np.float64]) -> float:
+        profiled = _profiled_deviance_core(
+            parameters, result.matrices, REML=result.REML, crossproducts=crossproducts
+        )
+        return 1e10 if profiled is None else profiled.deviance
+
     steps = _HESSIAN_EPS * np.maximum(1.0, np.abs(theta))
     hessian = np.zeros((n_theta, n_theta), dtype=np.float64)
-    base_deviance = profiled_deviance(theta, result.matrices, REML=result.REML)
+    base_deviance = evaluate(theta)
 
     for i in range(n_theta):
         theta_plus = theta.copy()
@@ -150,9 +151,7 @@ def _profiled_theta_covariance(
         theta_plus[i] += steps[i]
         theta_minus[i] -= steps[i]
         hessian[i, i] = (
-            profiled_deviance(theta_plus, result.matrices, REML=result.REML)
-            - 2.0 * base_deviance
-            + profiled_deviance(theta_minus, result.matrices, REML=result.REML)
+            evaluate(theta_plus) - 2.0 * base_deviance + evaluate(theta_minus)
         ) / steps[i] ** 2
 
         for j in range(i):
@@ -169,10 +168,7 @@ def _profiled_theta_covariance(
             theta_mm[i] -= steps[i]
             theta_mm[j] -= steps[j]
             mixed_derivative = (
-                profiled_deviance(theta_pp, result.matrices, REML=result.REML)
-                - profiled_deviance(theta_pm, result.matrices, REML=result.REML)
-                - profiled_deviance(theta_mp, result.matrices, REML=result.REML)
-                + profiled_deviance(theta_mm, result.matrices, REML=result.REML)
+                evaluate(theta_pp) - evaluate(theta_pm) - evaluate(theta_mp) + evaluate(theta_mm)
             ) / (4.0 * steps[i] * steps[j])
             hessian[i, j] = mixed_derivative
             hessian[j, i] = mixed_derivative
@@ -217,7 +213,7 @@ def _vcov_derivatives(
         theta_minus[k] -= step
         vcov_minus = _vcov_from_theta(result, theta_minus, crossproducts)
         gradients.append((vcov_plus - vcov_minus) / (2.0 * step))
-    theta_covariance = _profiled_theta_covariance(result, theta)
+    theta_covariance = _profiled_theta_covariance(result, theta, crossproducts)
 
     if len(_vcov_grad_cache) >= _VCOV_GRAD_CACHE_MAX_SIZE:
         _vcov_grad_cache.pop(next(iter(_vcov_grad_cache)))

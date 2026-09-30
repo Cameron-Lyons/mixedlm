@@ -136,6 +136,27 @@ def test_benchmark_lmer_simple(benchmark, sleepstudy_data):
     benchmark(fit_model)
 
 
+@pytest.mark.benchmark(group="contrast-encoding")
+@pytest.mark.parametrize("with_unknown", [False, True])
+@pytest.mark.parametrize("n_obs", [128, 100_000])
+def test_benchmark_categorical_contrast_encoding(benchmark, with_unknown, n_obs):
+    from mixedlm.utils.contrasts import apply_contrasts_array
+
+    categories = [f"c{i}" for i in range(40)]
+    codes = np.arange(n_obs) % len(categories)
+    values = np.asarray(categories, dtype=object)[codes]
+    contrasts = np.arange(40 * 39, dtype=np.float64).reshape(40, 39)
+    expected = contrasts[codes]
+    if with_unknown:
+        values[::31] = None
+        expected[::31] = np.nan
+
+    columns, names = benchmark(apply_contrasts_array, values, "factor", contrasts, categories)
+
+    assert len(names) == contrasts.shape[1]
+    np.testing.assert_array_equal(np.column_stack(columns), expected)
+
+
 @pytest.mark.benchmark(group="em-reml")
 def test_benchmark_em_reml_iterations(benchmark, large_crossed_sparse_data):
     from mixedlm.estimation.em_reml import em_reml_simple
@@ -163,6 +184,23 @@ def test_benchmark_lmer_large_data(benchmark, large_data):
         return lmer("y ~ x + (1 | group)", data=large_data)
 
     benchmark(fit_model)
+
+
+@pytest.mark.benchmark(group="denominator-df")
+def test_benchmark_satterthwaite_df(benchmark, large_data):
+    from mixedlm.inference.ddf import clear_vcov_grad_cache, satterthwaite_df
+
+    model = lmer("y ~ x + (x | group)", data=large_data)
+    model.vcov()
+
+    def compute_df():
+        clear_vcov_grad_cache()
+        return satterthwaite_df(model)
+
+    result = benchmark(compute_df)
+
+    assert result.df.shape == (2,)
+    assert np.all((result.df >= 1) & (result.df <= len(large_data) - 2))
 
 
 @pytest.mark.benchmark(group="lmm-crossproducts")
@@ -240,6 +278,20 @@ def test_benchmark_large_crossed_sparse_adaptive_start(benchmark, large_crossed_
     assert theta.shape == (2,)
 
 
+@pytest.mark.benchmark(group="sparse-likelihood")
+def test_benchmark_sparse_python_likelihood(benchmark, large_crossed_sparse_data):
+    formula = parse_formula("y ~ x + (1 | group1) + (1 | group2)")
+    matrices = build_model_matrices(formula, large_crossed_sparse_data)
+    optimizer = LMMOptimizer(matrices, use_rust=False)
+    theta = np.array([0.8, 0.5])
+    expected = optimizer.objective(theta)
+
+    actual = benchmark(optimizer.objective, theta)
+
+    assert np.isfinite(actual)
+    assert actual == pytest.approx(expected)
+
+
 @pytest.mark.benchmark(group="covariance-conversion")
 def test_benchmark_sdcor2cov(benchmark, covariance_data):
     sd, corr, expected = covariance_data
@@ -247,6 +299,38 @@ def test_benchmark_sdcor2cov(benchmark, covariance_data):
     cov = benchmark(sdcor2cov, sd, corr)
 
     np.testing.assert_allclose(cov, expected)
+
+
+@pytest.mark.benchmark(group="categorical-prediction")
+def test_benchmark_categorical_prediction(benchmark):
+    from mixedlm.models.lmer import LmerResult
+
+    n_obs = 100_000
+    data = pd.DataFrame(
+        {
+            "y": np.ones(n_obs),
+            "category": np.take([f"c{i}" for i in range(20)], np.arange(n_obs) % 20),
+            "group": np.arange(n_obs) % 100,
+        }
+    )
+    formula = parse_formula("y ~ category + (1 | group)")
+    matrices = build_model_matrices(formula, data)
+    result = LmerResult(
+        formula=formula,
+        matrices=matrices,
+        theta=np.array([0.8]),
+        beta=np.linspace(0.1, 0.3, matrices.n_fixed),
+        sigma=0.6,
+        u=np.linspace(-0.5, 0.5, matrices.n_random),
+        deviance=0.0,
+        REML=True,
+        converged=True,
+        n_iter=0,
+    )
+
+    predicted = benchmark(result.predict, data)
+
+    np.testing.assert_allclose(predicted, matrices.X @ result.beta + matrices.Z @ result.u)
 
 
 @pytest.mark.benchmark(group="covariance-factor")
@@ -410,3 +494,118 @@ def test_benchmark_large_leverage(benchmark, large_crossed_sparse_data, kind):
 
     assert values.shape == (len(large_crossed_sparse_data),)
     assert np.all((values >= 0) & (values < 1))
+
+
+@pytest.mark.benchmark(group="result-projection")
+@pytest.mark.parametrize("kind", ["lmm", "glmm"])
+def test_benchmark_large_result_covariance(benchmark, kind):
+    from dataclasses import replace
+
+    from mixedlm.families import Poisson
+    from mixedlm.models.glmer import GlmerResult
+    from mixedlm.models.lmer import LmerResult
+
+    n_groups = 2_048
+    n_obs = 4 * n_groups
+    data = pd.DataFrame({"y": np.ones(n_obs), "group": np.arange(n_obs) % n_groups})
+    formula = parse_formula("y ~ 1 + (1 | group)")
+    matrices = build_model_matrices(formula, data)
+    common = dict(
+        formula=formula,
+        matrices=matrices,
+        theta=np.array([0.8]),
+        beta=np.array([0.3]),
+        u=np.zeros(n_groups),
+        deviance=0.0,
+        converged=True,
+        n_iter=0,
+    )
+    result = (
+        LmerResult(**common, sigma=0.7, REML=True)
+        if kind == "lmm"
+        else GlmerResult(**common, family=Poisson(), nAGQ=1)
+    )
+    actual = benchmark(lambda: replace(result).vcov())
+
+    weight = 1.0 if kind == "lmm" else np.exp(0.3)
+    scale = 0.7**2 if kind == "lmm" else 1.0
+    expected = scale * (1.0 + 4 * weight * 0.8**2) / (n_obs * weight)
+    np.testing.assert_allclose(actual, [[expected]])
+
+
+@pytest.mark.benchmark(group="result-profile")
+@pytest.mark.parametrize("dimension", [1, 2])
+def test_benchmark_large_fixed_effect_profile(benchmark, dimension):
+    from dataclasses import replace
+
+    from mixedlm.inference.profile import profile_lmer, slice2D
+    from mixedlm.models.lmer import LmerResult
+
+    n_groups = 1_024
+    n_obs = 4 * n_groups
+    rng = np.random.default_rng(301)
+    x = np.tile([-1.0, -0.3, 0.2, 1.2], n_groups)
+    data = pd.DataFrame(
+        {
+            "y": 1.0 + 0.4 * x + rng.normal(size=n_obs),
+            "x": x,
+            "group": np.repeat(np.arange(n_groups), 4),
+        }
+    )
+    formula = parse_formula("y ~ x + (1 | group)")
+    matrices = build_model_matrices(formula, data)
+    result = LmerResult(
+        formula=formula,
+        matrices=matrices,
+        theta=np.array([0.8]),
+        beta=np.array([1.0, 0.4]),
+        sigma=0.7,
+        u=np.zeros(n_groups),
+        deviance=0.0,
+        REML=True,
+        converged=True,
+        n_iter=0,
+    )
+
+    def compute_profile():
+        fresh = replace(result)
+        if dimension == 1:
+            return profile_lmer(fresh, which="x", n_points=9)["x"]
+        return slice2D(fresh, "(Intercept)", "x", n_points=9)
+
+    actual = benchmark(compute_profile)
+
+    assert actual.zeta.shape == ((9,) if dimension == 1 else (9, 9))
+    assert np.all(np.isfinite(actual.zeta))
+
+
+@pytest.mark.benchmark(group="ddf-information")
+@pytest.mark.parametrize("cached", [False, True])
+def test_benchmark_large_ddf_information(benchmark, large_crossed_sparse_data, cached):
+    from mixedlm.inference.ddf import _weighted_crossproducts, _xt_vinv_x_from_theta
+    from mixedlm.models.lmer import LmerResult
+
+    formula = parse_formula("y ~ x + (1 | group1) + (1 | group2)")
+    matrices = build_model_matrices(
+        formula,
+        large_crossed_sparse_data,
+        weights=np.linspace(0.4, 2.0, len(large_crossed_sparse_data)),
+    )
+    result = LmerResult(
+        formula=formula,
+        matrices=matrices,
+        theta=np.array([0.8, 0.5]),
+        beta=np.array([0.2, 0.1]),
+        sigma=0.7,
+        u=np.zeros(matrices.n_random),
+        deviance=0.0,
+        REML=True,
+        converged=True,
+        n_iter=0,
+    )
+    expected = np.linalg.inv(result.vcov())
+    crossproducts = _weighted_crossproducts(result) if cached else None
+
+    actual = benchmark(_xt_vinv_x_from_theta, result, result.theta, crossproducts)
+
+    np.testing.assert_allclose(actual, expected, rtol=1e-12, atol=1e-12)

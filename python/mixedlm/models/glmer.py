@@ -20,12 +20,13 @@ from mixedlm.models.lmer_types import (
     PredictResult,
     RanefResult,
     RePCA,
-    RePCAGroup,
     VarCorrGroup,
 )
+from mixedlm.models.lmer_types import RePCAGroup as RePCAGroup
 from mixedlm.models.result_mixin import MerResultMixin
-from mixedlm.models.shared_utils import sparse_quadratic_form_diagonal, symmetric_inverse
+from mixedlm.models.shared_utils import _RandomEffectFactor, symmetric_inverse
 from mixedlm.utils import _format_pvalue, _get_signif_code
+from mixedlm.utils.simulation import simulate_random_effects, simulation_parameters
 
 
 @dataclass
@@ -75,12 +76,25 @@ class _GLMMRandomSystem:
 class _GLMMProjection:
     weights: NDArray[np.floating]
     Lambda: sparse.csc_matrix
-    random_cholesky: NDArray[np.floating]
-    RZX: NDArray[np.floating]
+    random_factor: _RandomEffectFactor | None
+    spherical_cross: NDArray[np.float64]
+    random_fixed_map: NDArray[np.float64]
     fixed_information: NDArray[np.floating]
     weighted_X: NDArray[np.float64]
     weighted_Z: sparse.csc_matrix
     information_inv: NDArray[np.float64]
+
+    @property
+    def random_cholesky(self) -> NDArray[np.float64]:
+        if self.random_factor is None:
+            return np.empty((0, 0), dtype=np.float64)
+        return self.random_factor.cholesky
+
+    @cached_property
+    def RZX(self) -> NDArray[np.float64]:
+        if self.random_factor is None:
+            return self.spherical_cross.copy()
+        return linalg.solve_triangular(self.random_cholesky, self.spherical_cross, lower=True)
 
 
 @dataclass
@@ -270,33 +284,30 @@ class GlmerResult(MerResultMixin):
             return _GLMMProjection(
                 weights=weights,
                 Lambda=Lambda,
-                random_cholesky=np.empty((0, 0), dtype=np.float64),
-                RZX=np.empty((0, X.shape[1]), dtype=np.float64),
+                random_factor=None,
+                spherical_cross=np.empty((0, X.shape[1]), dtype=np.float64),
+                random_fixed_map=np.empty((0, X.shape[1]), dtype=np.float64),
                 fixed_information=np.asarray(XtWX),
                 weighted_X=np.asarray(WX),
                 weighted_Z=WZ,
                 information_inv=symmetric_inverse(XtWX),
             )
 
-        random_information_dense = system.precision.toarray()
-        try:
-            random_cholesky = linalg.cholesky(random_information_dense, lower=True)
-        except linalg.LinAlgError:
-            random_information_dense += 1e-6 * np.eye(q)
-            random_cholesky = linalg.cholesky(random_information_dense, lower=True)
+        random_factor = _RandomEffectFactor(system.precision, jitter=1e-6)
 
         XtWZ = WX.T @ WZ
         XtWZ_dense = XtWZ.toarray() if sparse.issparse(XtWZ) else np.asarray(XtWZ)
         spherical_cross = np.asarray(Lambda.T @ XtWZ_dense.T)
-        RZX = linalg.solve_triangular(random_cholesky, spherical_cross, lower=True)
-        fixed_information = np.asarray(XtWX - RZX.T @ RZX)
+        random_fixed_map, correction = random_factor.solve_with_crossproduct(spherical_cross)
+        fixed_information = np.asarray(XtWX - correction)
         fixed_information = 0.5 * (fixed_information + fixed_information.T)
 
         return _GLMMProjection(
             weights=weights,
             Lambda=Lambda,
-            random_cholesky=random_cholesky,
-            RZX=RZX,
+            random_factor=random_factor,
+            spherical_cross=spherical_cross,
+            random_fixed_map=random_fixed_map,
             fixed_information=fixed_information,
             weighted_X=np.asarray(WX),
             weighted_Z=WZ,
@@ -505,18 +516,14 @@ class GlmerResult(MerResultMixin):
             return np.clip(diagonal, 0, 1 - 1e-10)
 
         weighted_z_lambda = projection.weighted_Z @ projection.Lambda
-        random_fixed_map = linalg.solve_triangular(
-            projection.random_cholesky.T,
-            projection.RZX,
-            lower=False,
-        )
-        adjusted_x = projection.weighted_X - weighted_z_lambda @ random_fixed_map
+        assert projection.random_factor is not None
+        adjusted_x = projection.weighted_X - weighted_z_lambda @ projection.random_fixed_map
         diagonal = np.einsum(
             "ij,ij->i",
             adjusted_x @ projection.information_inv,
             adjusted_x,
         )
-        diagonal += sparse_quadratic_form_diagonal(weighted_z_lambda, projection.random_cholesky)
+        diagonal += projection.random_factor.quadratic_diagonal(weighted_z_lambda)
         return np.clip(diagonal, 0, 1 - 1e-10)
 
     def hatvalues(self) -> NDArray[np.floating]:
@@ -593,30 +600,7 @@ class GlmerResult(MerResultMixin):
         }
 
     def VarCorr(self) -> GlmerVarCorr:
-        groups: dict[str, VarCorrGroup] = {}
-        for struct, cov in self._iter_random_cov_blocks(scale=1.0):
-            if struct.correlated or struct.cov_type in ("cs", "ar1"):
-                stddevs = np.sqrt(np.diag(cov))
-                with np.errstate(divide="ignore", invalid="ignore"):
-                    corr = cov / np.outer(stddevs, stddevs)
-                    corr = np.where(np.isfinite(corr), corr, 0.0)
-                    np.fill_diagonal(corr, 1.0)
-            else:
-                corr = None
-
-            variance = {term: cov[i, i] for i, term in enumerate(struct.term_names)}
-            stddev = {term: np.sqrt(cov[i, i]) for i, term in enumerate(struct.term_names)}
-
-            groups[struct.grouping_factor] = VarCorrGroup(
-                name=struct.grouping_factor,
-                term_names=list(struct.term_names),
-                variance=variance,
-                stddev=stddev,
-                cov=cov,
-                corr=corr,
-            )
-
-        return GlmerVarCorr(groups=groups)
+        return GlmerVarCorr(groups=self._varcorr_groups(scale=1.0))
 
     def rePCA(self) -> RePCA:
         """Perform PCA on the random effects covariance matrix.
@@ -639,30 +623,7 @@ class GlmerResult(MerResultMixin):
         (singular or near-singular). Use the `is_singular()` method on the
         result to check for this condition.
         """
-        groups: dict[str, RePCAGroup] = {}
-        for struct, cov in self._iter_random_cov_blocks(scale=1.0):
-            q = struct.n_terms
-
-            eigenvalues = linalg.eigvalsh(cov)
-            eigenvalues = np.sort(eigenvalues)[::-1]
-            eigenvalues = np.maximum(eigenvalues, 0)
-
-            sdev = np.sqrt(eigenvalues)
-            total_var = np.sum(eigenvalues)
-
-            proportion = eigenvalues / total_var if total_var > 0 else np.zeros(q)
-
-            cumulative = np.cumsum(proportion)
-
-            groups[struct.grouping_factor] = RePCAGroup(
-                name=struct.grouping_factor,
-                n_terms=q,
-                sdev=sdev,
-                proportion=proportion,
-                cumulative=cumulative,
-            )
-
-        return RePCA(groups=groups)
+        return self._random_effect_pca(scale=1.0)
 
     def dotplot(
         self,
@@ -1495,12 +1456,13 @@ class GlmerResult(MerResultMixin):
     ) -> NDArray[np.floating]:
         fixed_eta = self.matrices.X @ self.beta + self.matrices.offset
         structures = self.matrices.random_structures
+        theta, correlated = simulation_parameters(self.theta, structures)
         u_batch = simulate_re_batch(
-            self.theta,
+            theta,
             1.0,
             [structure.n_levels for structure in structures],
             [structure.n_terms for structure in structures],
-            [structure.correlated for structure in structures],
+            correlated,
             nsim,
             seed,
         )
@@ -1518,38 +1480,7 @@ class GlmerResult(MerResultMixin):
         eta = self.matrices.X @ self.beta + self.matrices.offset
 
         if re_form != "~0" and re_form != "NA" and use_re and q > 0:
-            u_new = np.zeros(q, dtype=np.float64)
-            u_idx = 0
-            theta_start = 0
-
-            for struct in self.matrices.random_structures:
-                n_levels = struct.n_levels
-                n_terms = struct.n_terms
-
-                n_theta = n_terms * (n_terms + 1) // 2 if struct.correlated else n_terms
-                theta_block = self.theta[theta_start : theta_start + n_theta]
-
-                if struct.correlated:
-                    L = np.zeros((n_terms, n_terms))
-                    idx = 0
-                    for i in range(n_terms):
-                        for j in range(i + 1):
-                            L[i, j] = theta_block[idx]
-                            idx += 1
-                    cov = L @ L.T
-                else:
-                    cov = np.diag(theta_block**2)
-
-                for g in range(n_levels):
-                    b_g = np.random.multivariate_normal(
-                        np.zeros(n_terms), cov + 1e-8 * np.eye(n_terms)
-                    )
-                    for j in range(n_terms):
-                        u_new[u_idx + g * n_terms + j] = b_g[j]
-
-                u_idx += n_levels * n_terms
-                theta_start += n_theta
-
+            u_new = simulate_random_effects(self.theta, self.matrices.random_structures)
             eta += self.matrices.Z @ u_new
 
         return self._simulate_response(self.family.link.inverse(eta))

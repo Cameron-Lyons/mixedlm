@@ -20,12 +20,13 @@ from mixedlm.models.lmer_types import (
     PredictResult,
     RanefResult,
     RePCA,
-    RePCAGroup,
     VarCorrGroup,
 )
+from mixedlm.models.lmer_types import RePCAGroup as RePCAGroup
 from mixedlm.models.result_mixin import MerResultMixin
-from mixedlm.models.shared_utils import sparse_quadratic_form_diagonal, symmetric_inverse
+from mixedlm.models.shared_utils import _RandomEffectFactor, symmetric_inverse
 from mixedlm.utils import _format_pvalue, _get_signif_code
+from mixedlm.utils.simulation import simulate_random_effects, simulation_parameters
 
 
 @dataclass
@@ -36,9 +37,20 @@ class _WeightedProjection:
     weighted_X: NDArray[np.float64]
     weighted_Z: sparse.csc_matrix
     lambda_matrix: sparse.csc_matrix | None
-    L_V: NDArray[np.float64] | None
-    RZX: NDArray[np.float64]
+    random_factor: _RandomEffectFactor | None
+    spherical_cross: NDArray[np.float64]
+    random_fixed_map: NDArray[np.float64]
     XtVinvX: NDArray[np.float64]
+
+    @property
+    def L_V(self) -> NDArray[np.float64] | None:
+        return self.random_factor.cholesky if self.random_factor is not None else None
+
+    @cached_property
+    def RZX(self) -> NDArray[np.float64]:
+        if self.L_V is None:
+            return self.spherical_cross.copy()
+        return linalg.solve_triangular(self.L_V, self.spherical_cross, lower=True)
 
 
 @dataclass
@@ -138,19 +150,21 @@ class LmerResult(MerResultMixin):
                 weighted_X=weighted_X,
                 weighted_Z=weighted_Z,
                 lambda_matrix=None,
-                L_V=None,
-                RZX=np.zeros((0, self.matrices.n_fixed), dtype=np.float64),
+                random_factor=None,
+                spherical_cross=np.zeros((0, self.matrices.n_fixed), dtype=np.float64),
+                random_fixed_map=np.zeros((0, self.matrices.n_fixed), dtype=np.float64),
                 XtVinvX=np.asarray(information, dtype=np.float64),
             )
 
         lambda_matrix = _build_lambda(self.theta, self.matrices.random_structures)
         ZtWZ = weighted_Z.T @ weighted_Z
         V_factor = lambda_matrix.T @ ZtWZ @ lambda_matrix + sparse.eye(q, format="csc")
-        L_V = linalg.cholesky(V_factor.toarray(), lower=True)
+        random_factor = _RandomEffectFactor(V_factor)
 
         ZtWX = weighted_Z.T @ weighted_X
-        RZX = linalg.solve_triangular(L_V, lambda_matrix.T @ ZtWX, lower=True)
-        information = weighted_X.T @ weighted_X - RZX.T @ RZX
+        spherical_cross = np.asarray(lambda_matrix.T @ ZtWX)
+        random_fixed_map, correction = random_factor.solve_with_crossproduct(spherical_cross)
+        information = weighted_X.T @ weighted_X - correction
         information = (information + information.T) / 2.0
 
         return _WeightedProjection(
@@ -158,8 +172,9 @@ class LmerResult(MerResultMixin):
             weighted_X=weighted_X,
             weighted_Z=weighted_Z,
             lambda_matrix=lambda_matrix,
-            L_V=L_V,
-            RZX=np.asarray(RZX, dtype=np.float64),
+            random_factor=random_factor,
+            spherical_cross=spherical_cross,
+            random_fixed_map=random_fixed_map,
             XtVinvX=np.asarray(information, dtype=np.float64),
         )
 
@@ -366,6 +381,7 @@ class LmerResult(MerResultMixin):
         interval: str = "none",
         level: float = 0.95,
         offset: ArrayLike | str | None = None,
+        weights: ArrayLike | str | None = None,
     ) -> NDArray[np.floating] | PredictResult:
         """Generate predictions from the fitted model.
 
@@ -386,6 +402,13 @@ class LmerResult(MerResultMixin):
         offset : array-like, scalar, or str, optional
             Offset for new-data predictions. A string selects a column from
             ``newdata``. Scalars are broadcast to every row.
+        weights : array-like, scalar, or str, optional
+            Positive finite residual precision weights for new-data prediction
+            intervals. A string selects a column from ``newdata``; scalars are
+            broadcast to every row. Requires ``newdata`` and
+            ``interval="prediction"``. Residual variance is ``sigma**2 / weights``;
+            omitted weights default to one. These weights use the same scale as
+            the fitted prior weights and do not change mean standard errors.
 
         Returns
         -------
@@ -396,7 +419,7 @@ class LmerResult(MerResultMixin):
         -----
         Prediction uncertainty uses the prior weights from the fitted model.
         In-sample prediction intervals add residual variance ``sigma**2 / weight``;
-        new-data prediction intervals assume unit residual weights.
+        new-data prediction intervals use the supplied ``weights``, defaulting to one.
         """
         valid_intervals = ("none", "confidence", "prediction")
         if interval not in valid_intervals:
@@ -405,6 +428,18 @@ class LmerResult(MerResultMixin):
             )
         if not np.isfinite(level) or not 0 < level < 1:
             raise ValueError("level must be a finite number strictly between 0 and 1")
+
+        prediction_weights: float | NDArray[np.floating] = 1.0
+        if weights is not None:
+            if newdata is None:
+                raise ValueError("Prediction weights can only be supplied with newdata.")
+            if interval != "prediction":
+                raise ValueError("Prediction weights require interval='prediction'.")
+            prediction_weights = self._prediction_vector(
+                newdata, weights, name="weights", default=1.0
+            )
+            if np.any(prediction_weights <= 0):
+                raise ValueError("Prediction weights must be strictly positive.")
 
         include_re = re_form != "NA" and re_form != "~0"
         pred_matrices: ModelMatrices | None = None
@@ -476,7 +511,7 @@ class LmerResult(MerResultMixin):
             if newdata is None:
                 residual_var = self.sigma**2 / self.matrices.weights
             else:
-                residual_var = self.sigma**2
+                residual_var = self.sigma**2 / prediction_weights
             var_pred = var_fit + residual_var
             se_pred = np.sqrt(var_pred)
             lower = pred - z_crit * se_pred
@@ -526,14 +561,13 @@ class LmerResult(MerResultMixin):
             )
 
         projection = self._weighted_projection
-        assert projection.lambda_matrix is not None and projection.L_V is not None
-        beta_adjustment = linalg.solve_triangular(projection.L_V.T, projection.RZX, lower=False)
+        assert projection.lambda_matrix is not None and projection.random_factor is not None
         vcov_beta = self.vcov()
 
         transformed_Z = (Z_pred @ projection.lambda_matrix).tocsr()
-        adjusted_X = X - np.asarray(transformed_Z @ beta_adjustment)
+        adjusted_X = X - np.asarray(transformed_Z @ projection.random_fixed_map)
         var_fixed = np.sum((adjusted_X @ vcov_beta) * adjusted_X, axis=1)
-        var_random = self._conditional_random_prediction_variance(transformed_Z, projection.L_V)
+        var_random = self.sigma**2 * projection.random_factor.quadratic_diagonal(transformed_Z)
 
         return np.maximum(var_fixed + var_random + prior_var, 0.0)
 
@@ -645,14 +679,6 @@ class LmerResult(MerResultMixin):
         )
         return aligned, prior_var
 
-    def _conditional_random_prediction_variance(
-        self,
-        transformed_Z: sparse.csr_matrix,
-        L_V: NDArray[np.floating],
-    ) -> NDArray[np.floating]:
-        """Evaluate diagonal quadratic forms without materializing an n-by-q matrix."""
-        return self.sigma**2 * sparse_quadratic_form_diagonal(transformed_Z, L_V)
-
     def vcov(self) -> NDArray[np.floating]:
         information_inv = symmetric_inverse(self._weighted_projection.XtVinvX)
         return self.sigma**2 * information_inv
@@ -666,11 +692,10 @@ class LmerResult(MerResultMixin):
             projected_X = projection.weighted_X
             h_random = np.zeros(self.matrices.n_obs, dtype=np.float64)
         else:
-            assert projection.L_V is not None
+            assert projection.random_factor is not None
             B = projection.weighted_Z @ projection.lambda_matrix
-            h_random = sparse_quadratic_form_diagonal(B, projection.L_V)
-            V_inv_BtX = linalg.solve_triangular(projection.L_V.T, projection.RZX, lower=False)
-            projected_X = projection.weighted_X - B @ V_inv_BtX
+            h_random = projection.random_factor.quadratic_diagonal(B)
+            projected_X = projection.weighted_X - B @ projection.random_fixed_map
 
         h_fixed = np.einsum("ij,ij->i", projected_X @ information_inv, projected_X)
         return np.clip(h_fixed + h_random, 0, 1 - 1e-10)
@@ -777,32 +802,7 @@ class LmerResult(MerResultMixin):
         }
 
     def VarCorr(self) -> VarCorr:
-        groups: dict[str, VarCorrGroup] = {}
-
-        for struct, cov in self._iter_random_cov_blocks(scale=self.sigma**2):
-            if struct.correlated or struct.cov_type in ("cs", "ar1"):
-                stddevs = np.sqrt(np.diag(cov))
-                with np.errstate(divide="ignore", invalid="ignore"):
-                    corr = cov / np.outer(stddevs, stddevs)
-                    corr = np.where(np.isfinite(corr), corr, 0.0)
-                    np.fill_diagonal(corr, 1.0)
-            else:
-                corr = None
-
-            diag_cov = np.diag(cov)
-            variance = {term: diag_cov[i] for i, term in enumerate(struct.term_names)}
-            stddev = {term: np.sqrt(diag_cov[i]) for i, term in enumerate(struct.term_names)}
-
-            groups[struct.grouping_factor] = VarCorrGroup(
-                name=struct.grouping_factor,
-                term_names=list(struct.term_names),
-                variance=variance,
-                stddev=stddev,
-                cov=cov,
-                corr=corr,
-            )
-
-        return VarCorr(groups=groups, residual=self.sigma**2)
+        return VarCorr(groups=self._varcorr_groups(scale=self.sigma**2), residual=self.sigma**2)
 
     def rePCA(self) -> RePCA:
         """Perform PCA on the random effects covariance matrix.
@@ -832,31 +832,7 @@ class LmerResult(MerResultMixin):
         >>> print(pca)
         >>> pca.is_singular()  # Check if any components are near-zero
         """
-        groups: dict[str, RePCAGroup] = {}
-
-        for struct, cov in self._iter_random_cov_blocks(scale=self.sigma**2):
-            q = struct.n_terms
-
-            eigenvalues = linalg.eigvalsh(cov)
-            eigenvalues = np.sort(eigenvalues)[::-1]
-            eigenvalues = np.maximum(eigenvalues, 0)
-
-            sdev = np.sqrt(eigenvalues)
-            total_var = np.sum(eigenvalues)
-
-            proportion = eigenvalues / total_var if total_var > 0 else np.zeros(q)
-
-            cumulative = np.cumsum(proportion)
-
-            groups[struct.grouping_factor] = RePCAGroup(
-                name=struct.grouping_factor,
-                n_terms=q,
-                sdev=sdev,
-                proportion=proportion,
-                cumulative=cumulative,
-            )
-
-        return RePCA(groups=groups)
+        return self._random_effect_pca(scale=self.sigma**2)
 
     def dotplot(
         self,
@@ -1753,7 +1729,7 @@ class LmerResult(MerResultMixin):
         if not include_re:
             fixed_part = self.matrices.X @ self.beta + self.matrices.offset
             result = np.random.randn(nsim, n).T
-            result *= self.sigma
+            result *= (self.sigma / np.sqrt(self.matrices.weights))[:, None]
             result += fixed_part[:, None]
             return result
 
@@ -1782,10 +1758,10 @@ class LmerResult(MerResultMixin):
 
         n_levels = [s.n_levels for s in self.matrices.random_structures]
         n_terms = [s.n_terms for s in self.matrices.random_structures]
-        correlated = [s.correlated for s in self.matrices.random_structures]
+        theta, correlated = simulation_parameters(self.theta, self.matrices.random_structures)
 
         u_batch = simulate_re_batch(
-            self.theta,
+            theta,
             self.sigma,
             n_levels,
             n_terms,
@@ -1799,7 +1775,7 @@ class LmerResult(MerResultMixin):
         result = np.asarray(Z @ u_batch.T, dtype=np.float64)
         result += fixed_part[:, None]
         noise = np.random.randn(nsim, n).T
-        noise *= self.sigma
+        noise *= (self.sigma / np.sqrt(self.matrices.weights))[:, None]
         result += noise
         return result
 
@@ -1816,39 +1792,10 @@ class LmerResult(MerResultMixin):
         if re_form == "~0" or re_form == "NA" or not use_re or q == 0:
             random_part = np.zeros(n)
         else:
-            u_new = np.zeros(q, dtype=np.float64)
-            u_idx = 0
-            theta_start = 0
-
-            for struct in self.matrices.random_structures:
-                n_levels = struct.n_levels
-                n_terms = struct.n_terms
-
-                n_theta = n_terms * (n_terms + 1) // 2 if struct.correlated else n_terms
-                theta_block = self.theta[theta_start : theta_start + n_theta]
-
-                if struct.correlated:
-                    L = np.zeros((n_terms, n_terms))
-                    idx = 0
-                    for i in range(n_terms):
-                        for j in range(i + 1):
-                            L[i, j] = theta_block[idx]
-                            idx += 1
-                    cov = L @ L.T * self.sigma**2
-                else:
-                    cov = np.diag(theta_block**2) * self.sigma**2
-
-                for g in range(n_levels):
-                    b_g = np.random.multivariate_normal(np.zeros(n_terms), cov)
-                    for j in range(n_terms):
-                        u_new[u_idx + g * n_terms + j] = b_g[j]
-
-                u_idx += n_levels * n_terms
-                theta_start += n_theta
-
+            u_new = simulate_random_effects(self.theta, self.matrices.random_structures, self.sigma)
             random_part = self.matrices.Z @ u_new
 
-        noise = np.random.randn(n) * self.sigma
+        noise = np.random.randn(n) * self.sigma / np.sqrt(self.matrices.weights)
 
         return fixed_part + random_part + noise
 

@@ -285,10 +285,11 @@ contrasts = em.pairs(adjust="bonferroni")
 
 ### Computing Profiles
 
-Profile likelihood for all parameters:
+Compute profiles for the fixed-effect coefficients. For LMMs, these hold
+`theta` fixed and recompute the other fixed effects and residual scale:
 
 ```python
-profiles = model.profile(data)
+profiles = model.profile()
 ```
 
 ### Visualizing Profiles
@@ -299,7 +300,8 @@ from mixedlm import plot_profiles
 plot_profiles(profiles)
 ```
 
-Well-behaved profiles should be approximately parabolic (quadratic).
+Near the optimum, the default signed square-root deviance (`zeta`) plot is
+approximately linear.
 
 ### 2D Profile Slices
 
@@ -308,14 +310,16 @@ Examine the relationship between two parameters:
 ```python
 from mixedlm import slice2D
 
-profile_2d = slice2D(model, "sigma", "theta1", n_points=20)
+profile_2d = slice2D(model, "(Intercept)", "Days", n_points=20)
 profile_2d.plot()
 ```
 
 ### Profile-Based CIs
 
 ```python
-ci = profiles.confint()
+from mixedlm.inference import confint_profile
+
+ci = confint_profile(profiles)
 print(ci)
 ```
 
@@ -408,6 +412,7 @@ if not conv.ok:
 
 ```python
 import mixedlm as mlm
+from mixedlm.inference import confint_profile
 
 # Load data
 data = mlm.load_sleepstudy()
@@ -421,8 +426,8 @@ print(model.summary())
 
 # 2. Profile confidence intervals
 print("\n=== Profile CIs ===")
-profiles = model.profile(data)
-print(profiles.confint())
+profiles = model.profile()
+print(confint_profile(profiles))
 
 # 3. Compare to simpler model
 print("\n=== Model Comparison ===")

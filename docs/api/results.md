@@ -41,6 +41,12 @@ rows from several fits can be concatenated directly.
 
 The result object returned by `lmer()`.
 
+Fixed-effect covariance (`vcov()`), prediction standard errors, and leverage
+(`hatvalues()`) reuse a factored random-effect precision system. Large systems
+use sparse solves, and pointwise variances use bounded batches instead of a
+full dense observation-by-random-effect matrix. GLMM covariance and leverage
+use the same approach with the final working weights.
+
 ### Methods
 
 #### summary
@@ -95,6 +101,16 @@ result.VarCorr()
 Extract variance-covariance components of random effects.
 
 **Returns:** VarCorr object with variance, standard deviation, and correlation information.
+
+Every random-effect term has its own covariance block. When terms share a
+grouping factor, entries receive unique names such as `group`, `group.1`, and
+`group.2`; generated names skip any existing grouping-factor names. Each entry's
+`grouping_factor` attribute retains the original factor name.
+
+For example, `(1 | group) + (0 + x | group)` produces two covariance entries.
+`rePCA()` instead returns one entry for `group`, including the principal
+components from both independent blocks. This retains zero-variance components
+when checking PCA singularity.
 
 Compound-symmetry and AR(1) structures are reported on their exact fitted covariance scale.
 The same structured covariance is used by `rePCA()`, `isSingular()`, and the parameter bounds
@@ -161,6 +177,7 @@ lmm_result.predict(
     interval="none",
     level=0.95,
     offset=None,
+    weights=None,
 )
 glmm_result.predict(
     newdata=None,
@@ -176,6 +193,12 @@ glmm_result.predict(
 
 Generate predictions.
 
+Conditional predictions use the fitted coding for random-effect terms, including
+interactions, powers, categorical slopes, and custom contrasts. Supply all random-effect
+predictors and grouping columns in `newdata`, or use `re_form="NA"` for fixed effects only.
+`allow_new_levels=True` accepts unseen grouping levels with zero random effects; unseen
+categories of a random-effect predictor still require a fitted encoding and are rejected.
+
 **Parameters:**
 
 - `newdata`: New data for prediction. If None, uses original data.
@@ -183,6 +206,9 @@ Generate predictions.
 - `type`: For GLMMs, `"response"` or `"link"`.
 - `offset`: Numeric offset for new rows, a scalar, or the name of an offset
   column in `newdata`. GLMM offsets are applied on the link scale.
+- `weights`: LMM residual precision weights for new-data prediction intervals.
+  Accepts a positive finite scalar, an array in row order, or a column name.
+  Requires `newdata` and `interval="prediction"`; defaults to one.
 - `allow_new_levels`: Allow unseen grouping levels and center their random effects at zero.
 - `se_fit`: Return pointwise standard errors for the predicted mean.
 - `interval`: For LMMs, `"none"`, `"confidence"`, or `"prediction"`.
@@ -197,13 +223,20 @@ unseen group accepted with `allow_new_levels=True`, the fitted prior covariance 
 the predicted random effect remains zero. Prediction intervals add residual variance to the
 mean-prediction variance; `se_fit` continues to report the standard error of the mean.
 The covariance calculation uses the fitted prior weights. In-sample prediction intervals
-add residual variance `sigma**2 / weight`, while new-data prediction intervals assume
-unit residual weights. Repeated uncertainty calculations reuse the fitted weighted
+add residual variance `sigma**2 / weight`. New-data prediction intervals add
+`sigma**2 / weights`, using the supplied prediction weights or one by default.
+Prediction weights must use the same scale as the fitted prior weights. They change
+the residual variance in prediction intervals; predicted means and their `se_fit`
+values are unaffected. Repeated uncertainty calculations reuse the fitted weighted
 factorization.
 
 ```python
 mean_ci = result.predict(newdata, interval="confidence", level=0.95)
 future_pi = result.predict(newdata, interval="prediction", level=0.95)
+
+# Allow different residual variances for future observations.
+# newdata["precision"] contains positive weights on the training-weight scale.
+weighted_pi = result.predict(newdata, interval="prediction", weights="precision")
 
 new_groups = result.predict(
     new_group_data,
@@ -215,16 +248,23 @@ new_groups = result.predict(
 #### simulate
 
 ```python
-result.simulate(nsim=1)
+result.simulate(nsim=1, seed=None, use_re=True, re_form=None)
 ```
 
-Simulate responses from the fitted model.
+Simulate responses from the fitted model, including its offsets and random-effect
+covariance structure (unstructured, diagonal, compound symmetry, or AR(1)). LMM
+residuals have standard deviation `sigma / sqrt(weight)` for each observation.
+These weights do not rescale the random effects.
 
 **Parameters:**
 
 - `nsim`: Number of simulations.
+- `seed`: Optional seed for reproducible draws.
+- `use_re`: Draw new random effects when `True` (the default).
+- `re_form`: Set to `"~0"` or `"NA"` to omit random effects.
 
-**Returns:** Array of shape (n_obs, nsim).
+**Returns:** Array of shape `(n_obs,)` for one simulation, or `(n_obs, nsim)` for
+multiple simulations. Grouped-binomial GLMM simulations return success counts.
 
 #### confint
 
@@ -307,6 +347,11 @@ Extract model components.
 
 **Returns:** The requested component.
 
+Requesting `"RZX"` materializes a dense random-effect Cholesky factor on demand.
+It retains the original coefficient order and is cached for subsequent calls.
+LMM fixed-effect profiling reuses the precision solver without requesting this
+dense factor.
+
 #### is_singular
 
 ```python
@@ -339,10 +384,18 @@ Variance-covariance structure of random effects.
 
 ### Attributes
 
-- `groups`: List of grouping factors
-- `variance`: Variance estimates
-- `stddev`: Standard deviation estimates
-- `corr`: Correlation matrices
+- `groups`: Dictionary mapping unique report names to `VarCorrGroup` entries
+- `residual`: Residual variance for LMMs
+
+Each `VarCorrGroup` entry contains:
+
+- `name`: Unique report name
+- `grouping_factor`: Original grouping factor, before any report-name suffix
+- `term_names`: Ordered random-effect coefficient names
+- `variance`: Dictionary of coefficient variances
+- `stddev`: Dictionary of coefficient standard deviations
+- `cov`: Covariance matrix for this term
+- `corr`: Correlation matrix, or `None` for independent coefficients
 
 ### String Representation
 

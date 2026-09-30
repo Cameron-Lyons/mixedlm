@@ -17,6 +17,25 @@ if TYPE_CHECKING:
 _CONDVAR_BATCH_COLUMNS = 64
 
 
+def _covariance_block_names(structures: list[RandomEffectStructure]) -> list[str]:
+    """Name every covariance block without colliding with original group names."""
+    reserved_names = {struct.grouping_factor for struct in structures}
+    used_names: set[str] = set()
+    next_suffix: dict[str, int] = {}
+    names: list[str] = []
+    for struct in structures:
+        name = struct.grouping_factor
+        if name in used_names:
+            suffix = next_suffix.get(name, 1)
+            while f"{name}.{suffix}" in reserved_names or f"{name}.{suffix}" in used_names:
+                suffix += 1
+            next_suffix[name] = suffix + 1
+            name = f"{name}.{suffix}"
+        names.append(name)
+        used_names.add(name)
+    return names
+
+
 def _dense_condvar_solver(
     precision: NDArray[np.floating],
 ) -> Callable[[NDArray[np.floating]], NDArray[np.floating]]:
@@ -517,7 +536,8 @@ def vec2STlist(
     """Convert a vector to a list of lower-triangular matrices.
 
     Each dimension specifies the size of a lower-triangular matrix.
-    The vector contains the lower-triangular elements in column-major order.
+    The vector contains the lower-triangular elements in row order, matching
+    fitted theta parameters: L[0, 0], L[1, 0], L[1, 1], L[2, 0], ....
 
     Parameters
     ----------

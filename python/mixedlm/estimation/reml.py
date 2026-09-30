@@ -8,6 +8,7 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 from scipy import linalg, sparse
+from scipy.sparse import linalg as sparse_linalg
 
 from mixedlm.estimation.optimizers import run_optimizer
 from mixedlm.matrices.design import ModelMatrices, RandomEffectStructure, validate_prior_weights
@@ -18,6 +19,9 @@ try:
     _HAS_RUST = True
 except ImportError:
     _HAS_RUST = False
+
+
+_SPARSE_PROFILE_MIN_RANDOM = 256
 
 
 @dataclass
@@ -75,6 +79,7 @@ class _DevianceCoreResult:
     wrss: float
     ussq: float
     pwrss: float
+    fixed_information: NDArray[np.floating]
 
 
 def _build_cs_cholesky(q: int, rho: float) -> NDArray[np.floating]:
@@ -293,7 +298,8 @@ def _profiled_deviance_core(
 
     This unified function computes the profiled deviance and all intermediate
     values needed for both the deviance itself and for extracting estimates.
-    Returns None if the Cholesky decomposition fails.
+    Large sparse random-effect systems retain their sparse representation.
+    Returns None if a factorization fails.
     """
     n = matrices.n_obs
     p = matrices.n_fixed
@@ -333,6 +339,7 @@ def _profiled_deviance_core(
             wrss=float(wrss),
             ussq=0.0,
             pwrss=float(wrss),
+            fixed_information=XtWX,
         )
 
     if crossproducts is None:
@@ -345,22 +352,37 @@ def _profiled_deviance_core(
     I_q = sparse.eye(q, format="csc")
     V_factor = LambdatZtWZLambda + I_q
 
-    try:
-        V_factor_dense = V_factor.toarray() if sparse.issparse(V_factor) else V_factor
-        L_V = linalg.cholesky(V_factor_dense, lower=True)
-    except linalg.LinAlgError:
-        return None
-
-    ldL2 = 2.0 * np.sum(np.log(np.diag(L_V)))
-
     cu = Lambda.T @ crossproducts.ZtWy
-    cu_star = linalg.solve_triangular(L_V, cu, lower=True)
-
     Lambdat_ZtWX = Lambda.T @ crossproducts.ZtWX
-    RZX = linalg.solve_triangular(L_V, Lambdat_ZtWX, lower=True)
+    solve_random: Callable[[NDArray[np.floating]], NDArray[np.floating]]
+    if sparse.issparse(V_factor) and q >= _SPARSE_PROFILE_MIN_RANDOM:
+        try:
+            factor = sparse_linalg.splu(V_factor.tocsc())
+        except RuntimeError:
+            return None
+        solve_random = factor.solve
+        # The precision is positive definite. Permutation signs do not affect
+        # its log determinant, obtained from the absolute LU diagonal.
+        ldL2 = np.sum(np.log(np.abs(factor.U.diagonal())))
+        solved = solve_random(np.column_stack((cu, Lambdat_ZtWX)))
+        XtVinvX = crossproducts.XtWX - Lambdat_ZtWX.T @ solved[:, 1:]
+        XtVinvX = (XtVinvX + XtVinvX.T) * 0.5
+        Xty_adj = crossproducts.XtWy - Lambdat_ZtWX.T @ solved[:, 0]
+    else:
+        try:
+            V_factor_dense = V_factor.toarray() if sparse.issparse(V_factor) else V_factor
+            L_V = linalg.cholesky(V_factor_dense, lower=True)
+        except linalg.LinAlgError:
+            return None
 
-    RZX_tRZX = RZX.T @ RZX
-    XtVinvX = crossproducts.XtWX - RZX_tRZX
+        def solve_random(rhs: NDArray[np.floating]) -> NDArray[np.floating]:
+            return linalg.cho_solve((L_V, True), rhs)
+
+        ldL2 = 2.0 * np.sum(np.log(np.diag(L_V)))
+        cu_star = linalg.solve_triangular(L_V, cu, lower=True)
+        RZX = linalg.solve_triangular(L_V, Lambdat_ZtWX, lower=True)
+        XtVinvX = crossproducts.XtWX - RZX.T @ RZX
+        Xty_adj = crossproducts.XtWy - RZX.T @ cu_star
 
     try:
         L_XtVinvX = linalg.cholesky(XtVinvX, lower=True)
@@ -369,15 +391,13 @@ def _profiled_deviance_core(
 
     ldRX2 = 2.0 * np.sum(np.log(np.diag(L_XtVinvX)))
 
-    cu_star_RZX_beta_term = RZX.T @ cu_star
-    Xty_adj = crossproducts.XtWy - cu_star_RZX_beta_term
     beta = linalg.cho_solve((L_XtVinvX, True), Xty_adj)
 
     marginal_resid = y_adj - matrices.X @ beta
 
     Zt_resid = matrices.Zt @ (w * marginal_resid)
     Lambda_t_Zt_resid = Lambda.T @ Zt_resid
-    u_star = linalg.cho_solve((L_V, True), Lambda_t_Zt_resid)
+    u_star = solve_random(Lambda_t_Zt_resid)
 
     u = np.asarray(Lambda @ u_star).reshape(-1)
     conditional_resid = marginal_resid - matrices.Z @ u
@@ -402,6 +422,7 @@ def _profiled_deviance_core(
         wrss=float(wrss),
         ussq=float(ussq),
         pwrss=float(pwrss),
+        fixed_information=XtVinvX,
     )
 
 
