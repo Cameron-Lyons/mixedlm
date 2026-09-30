@@ -27,6 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Root-level CHANGELOG.md
 
 ### Changed
+- LMM summaries reuse one denominator-DF calculation and evaluate coefficient p-values together
 - Multi-draw GLMM simulation now batches random effects and response generation
 - Vectorized grouping-level factorization and nested-key construction for sparse designs
 - EM-REML algorithm generalized from single random intercept to arbitrary unstructured covariance models
@@ -37,6 +38,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Consolidated duplicate CI and security checks while preserving coverage
 
 ### Fixed
+- Fixed-effect tables and summaries preserve repeated coefficient names and keep inference aligned by position; ambiguous named selections and dictionary results raise clear errors
 - Poisson and other unbounded GLMM families no longer clamp fitted means below one
 - Unsupported family and link combinations no longer route through the native fast path
 

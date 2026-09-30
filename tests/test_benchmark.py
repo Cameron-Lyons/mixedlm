@@ -397,3 +397,26 @@ def test_benchmark_large_leverage(benchmark, large_crossed_sparse_data, kind):
 
     assert values.shape == (len(large_crossed_sparse_data),)
     assert np.all((values >= 0) & (values < 1))
+
+
+@pytest.mark.benchmark(group="coefficient-reporting")
+@pytest.mark.parametrize("method", ["Satterthwaite", "Kenward-Roger"])
+def test_benchmark_wide_lmm_summary(benchmark, method):
+    from mixedlm import lmerControl
+
+    rng = np.random.default_rng(893)
+    n, p = 960, 32
+    data = pd.DataFrame(rng.normal(size=(n, p)), columns=[f"x{i}" for i in range(p)])
+    rhs = " + ".join(data.columns)
+    groups = np.arange(n) % 40
+    data["group"] = groups
+    data["y"] = (
+        1
+        + data["x0"] * 0.4
+        + rng.normal(scale=0.8, size=40)[groups]
+        + rng.normal(scale=0.7, size=n)
+    )
+    model = lmer(f"y ~ {rhs} + (1 | group)", data, control=lmerControl(check_singular=False))
+    report = benchmark(model.summary, ddf_method=method)
+    assert "Fixed effects:" in report
+    assert "x31" in report

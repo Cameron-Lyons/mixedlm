@@ -9,6 +9,8 @@ import pandas as pd
 from numpy.typing import ArrayLike, NDArray
 from scipy import linalg, stats
 
+from mixedlm.utils.names import _check_unique_coefficient_names
+
 if TYPE_CHECKING:
     from mixedlm.models.glmer import GlmerResult
     from mixedlm.models.lmer import LmerResult
@@ -134,6 +136,11 @@ def _rows_to_matrix(
     rows: Sequence[ConstraintRow],
     coefficient_names: tuple[str, ...],
 ) -> NDArray[np.float64]:
+    _check_unique_coefficient_names(
+        coefficient_names,
+        (name for row in rows for name in row),
+        alternative="Use a numeric constraint matrix in fitted coefficient order.",
+    )
     name_to_index = {name: index for index, name in enumerate(coefficient_names)}
     matrix = np.zeros((len(rows), len(coefficient_names)), dtype=np.float64)
 
@@ -197,6 +204,11 @@ def _coerce_constraints(
                 f"Available coefficients: {list(coefficient_names)}"
             )
         matrix = np.zeros((len(hypothesis), len(coefficient_names)), dtype=np.float64)
+        _check_unique_coefficient_names(
+            coefficient_names,
+            hypothesis.columns,
+            alternative="Use a numeric constraint matrix in fitted coefficient order.",
+        )
         name_to_index = {name: index for index, name in enumerate(coefficient_names)}
         for name in hypothesis.columns:
             try:
@@ -323,7 +335,9 @@ def linear_hypothesis(
         defines one row, for example ``{"x": 1, "z": -1}``. A nested mapping
         defines labeled rows. A DataFrame uses coefficient names as columns and
         its index as labels. Numeric matrices must follow the fitted coefficient
-        order in ``model.matrices.fixed_names``.
+        order in ``model.matrices.fixed_names``. If coefficient names repeat,
+        named specifications reject ambiguous selections; use a numeric matrix
+        to select those columns by position.
     rhs : float or array-like, default 0
         Null value or one null value per constraint row.
     labels : sequence of str, optional

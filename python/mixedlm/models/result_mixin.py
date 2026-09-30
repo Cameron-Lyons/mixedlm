@@ -51,6 +51,12 @@ class MerResultMixin:
         raise NotImplementedError
 
     def _fixef_dict(self, beta: NDArray[np.floating]) -> dict[str, float]:
+        from mixedlm.utils.names import _check_unique_coefficient_names
+
+        _check_unique_coefficient_names(
+            self.matrices.fixed_names,
+            alternative="Use tidy() or beta to inspect coefficients in fitted column order.",
+        )
         return dict(zip(self.matrices.fixed_names, beta, strict=False))
 
     def _ranef_values_from_u(

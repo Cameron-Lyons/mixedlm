@@ -418,6 +418,12 @@ def lmList(
         raise ValueError(f"Grouping variable '{group}' not found in data")
 
     matrices = build_model_matrices(parsed_formula, data, na_action="omit")
+    from mixedlm.utils.names import _check_unique_coefficient_names
+
+    _check_unique_coefficient_names(
+        matrices.fixed_names,
+        alternative="Rename colliding formula variables before using lmList().",
+    )
     group_values = data[group].to_numpy()
     if matrices.na_info is not None and matrices.na_info.n_omitted:
         keep = np.ones(len(data), dtype=bool)

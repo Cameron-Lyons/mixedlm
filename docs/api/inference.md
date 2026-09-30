@@ -363,6 +363,10 @@ mean, bias, sample standard error, confidence bounds, and successful replicate
 count. `component="sigma"` is available for linear and nonlinear models; GLMM
 results do not have a separately estimated residual scale.
 
+Repeated coefficient labels remain separate rows in `bootCI`, in sample-column
+order. Bootstrap dictionary methods (`ci()` and `se()`) reject repeated labels
+because a dictionary cannot represent both coefficients under one key.
+
 ## Profile Likelihood
 
 ### plot_profiles

@@ -174,9 +174,18 @@ def _fixed_effect_rows(
     conf_level: float,
     ddf_method: str | None,
 ) -> list[dict[str, Any]]:
-    fixed = model.fixef()
-    names = list(fixed)
-    estimates = np.asarray(list(fixed.values()), dtype=np.float64)
+    if hasattr(model, "matrices") and hasattr(model, "beta"):
+        names = list(model.matrices.fixed_names)
+        estimates = np.asarray(model.beta, dtype=np.float64)
+    elif hasattr(model, "model") and hasattr(model, "phi"):
+        names = list(model.model.param_names)
+        estimates = np.asarray(model.phi, dtype=np.float64)
+    else:
+        fixed = model.fixef()
+        names = list(fixed)
+        estimates = np.asarray(list(fixed.values()), dtype=np.float64)
+    if estimates.shape != (len(names),):
+        raise ValueError(f"Fixed estimates have shape {estimates.shape}; expected {(len(names),)}")
     covariance = np.asarray(model.vcov(), dtype=np.float64)
     if covariance.shape != (len(names), len(names)):
         raise ValueError(
@@ -244,7 +253,9 @@ def _fixed_effect_inference(
                 f"Unknown ddf_method '{ddf_method}'. Use 'Satterthwaite', "
                 "'Kenward-Roger', or 'normal'."
             )
-        dfs = np.asarray([ddf[name] for name in names], dtype=np.float64)
+        dfs = np.asarray(ddf.df, dtype=np.float64)
+        if dfs.shape != (len(names),):
+            raise ValueError(f"Denominator degrees of freedom must have shape {(len(names),)}")
         return dfs, 2.0 * stats.t.sf(np.abs(statistics), dfs)
 
     if _model_flag(model, "isNLMM"):

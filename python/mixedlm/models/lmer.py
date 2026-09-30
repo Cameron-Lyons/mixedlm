@@ -1702,6 +1702,14 @@ class LmerResult(MerResultMixin):
         elif isinstance(parm, str):
             parm = [parm]
 
+        from mixedlm.utils.names import _check_unique_coefficient_names
+
+        _check_unique_coefficient_names(
+            self.matrices.fixed_names,
+            None if method == "boot" else parm,
+            alternative="Use tidy(conf_int=True) for intervals in coefficient order.",
+        )
+
         if method == "Wald":
             vcov = self.vcov()
             alpha = 1 - level
@@ -2036,7 +2044,7 @@ class LmerResult(MerResultMixin):
         se = np.sqrt(np.diag(vcov))
 
         if ddf_method is not None:
-            from mixedlm.inference.ddf import kenward_roger_df, pvalues_with_ddf, satterthwaite_df
+            from mixedlm.inference.ddf import kenward_roger_df, satterthwaite_df
 
             if ddf_method == "Satterthwaite":
                 ddf_result = satterthwaite_df(self)
@@ -2048,16 +2056,19 @@ class LmerResult(MerResultMixin):
                     "Use 'Satterthwaite', 'Kenward-Roger', or None."
                 )
 
-            pval_dict = pvalues_with_ddf(self, method=ddf_method)
+            statistics = np.divide(
+                self.beta, se, out=np.full_like(self.beta, np.nan, dtype=np.float64), where=se > 0
+            )
+            p_values = 2 * stats.t.sf(np.abs(statistics), ddf_result.df)
 
             lines.append(
                 f"{'':12} {'Estimate':>10}  {'Std.Error':>10}  {'df':>8}  "
                 f"{'t value':>8}  {'Pr(>|t|)':>10}"
             )
             for i, name in enumerate(self.matrices.fixed_names):
-                t_val = self.beta[i] / se[i] if se[i] > 0 else np.nan
+                t_val = statistics[i]
                 df = ddf_result.df[i]
-                _, _, p_val = pval_dict[name]
+                p_val = p_values[i]
                 sig = _get_signif_code(p_val)
                 lines.append(
                     f"{name:12} {self.beta[i]:10.4f}  {se[i]:10.4f}  {df:8.2f}  "
