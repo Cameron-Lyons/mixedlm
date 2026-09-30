@@ -93,6 +93,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - GLMM quadrature validates positive integer orders and rejects unsupported random-effect structures; modular results cannot relabel a fit with a different quadrature order
 - Adaptive quadrature includes observations with zero random-effect design rows and rejects overlapping group designs that cannot be integrated independently
 - Python quadrature uses stable high-order rules shared by `GHrule`, `GQN`, and `GQdk`; invalid orders and tensor dimensions raise clear errors
+- Native GLMM starting coefficients use weighted response means on the link scale with offsets removed, preventing large Poisson counts from exhausting PIRLS iterations or overflowing; nonfinite PIRLS estimates no longer report convergence
 - Poisson and other unbounded GLMM families no longer clamp fitted means below one
 - Unsupported family and link combinations no longer route through the native fast path
 

@@ -1153,3 +1153,19 @@ def test_benchmark_repeated_quadrature_rule(benchmark, backend, order):
     nodes, weights = benchmark(evaluate, order)
     assert len(nodes) == len(weights) == order
     assert np.sum(weights) == pytest.approx(np.sqrt(np.pi))
+
+
+@pytest.mark.benchmark(group="native-poisson-initialization")
+@pytest.mark.parametrize("mean", [10, 50, 100, 1000])
+def test_benchmark_poisson_starting_values(benchmark, mean):
+    from mixedlm.estimation.laplace import laplace_deviance_fast
+    from mixedlm.families import Poisson
+
+    pytest.importorskip("mixedlm._rust")
+    group = np.repeat(np.arange(50), 20)
+    counts = np.tile([mean - 2, mean, mean + 2, mean], len(group) // 4)
+    data = pd.DataFrame({"y": counts, "g": group})
+    matrices = build_model_matrices(parse_formula("y ~ 1 + (1 | g)"), data)
+    deviance, beta, _ = benchmark(laplace_deviance_fast, np.array([0.5]), matrices, Poisson())
+    assert np.isfinite(deviance)
+    assert beta[0] == pytest.approx(np.log(mean), abs=1e-7)
