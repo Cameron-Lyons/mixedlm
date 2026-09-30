@@ -15,6 +15,33 @@ from mixedlm.utils.variance import cov2sdcor, sdcor2cov
 from scipy import sparse
 
 
+@pytest.mark.benchmark(group="diagonal-lmm-likelihood")
+@pytest.mark.parametrize("n_groups", [8, 255, 256, 4096])
+def test_benchmark_diagonal_lmm_likelihood(benchmark, n_groups):
+    rng = np.random.default_rng(704)
+    rows = np.arange(4 * n_groups)
+    x = rng.normal(size=len(rows))
+    group = rows % n_groups
+    data = pd.DataFrame(
+        {
+            "y": 0.8 + 0.3 * x + rng.normal(size=n_groups)[group] + rng.normal(size=len(rows)),
+            "x": x,
+            "g": group,
+        }
+    )
+    matrices = build_model_matrices(
+        parse_formula("y ~ x + (1 | g)"),
+        data,
+        weights=np.geomspace(0.5, 2.0, len(rows)),
+        offset=0.1 * np.cos(rows),
+    )
+    optimizer = LMMOptimizer(matrices, use_rust=False)
+    theta = np.array([0.7])
+    optimizer.objective(theta)
+    actual = benchmark(optimizer.objective, theta)
+    assert np.isfinite(actual)
+
+
 @pytest.mark.benchmark(group="native-glmm-crossproducts")
 @pytest.mark.parametrize(
     ("layout", "n_obs", "n_groups"),
