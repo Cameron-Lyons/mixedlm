@@ -41,13 +41,15 @@ def backend_patch(optimizer, mode, evaluation=None, error=None):
     kwargs = {"side_effect": error} if error is not None else {"return_value": evaluation}
     if mode == "linear":
         return patch.object(optimizer, "_evaluate_core", **kwargs)
+    if evaluation is not None and len(evaluation) == 3:
+        kwargs = {"return_value": (*evaluation, True)}
     name = (
-        "_adaptive_gh_deviance_rust"
-        if mode == "agq_native"
+        "_native_deviance_with_status"
+        if mode.endswith("native")
         else (
-            "_laplace_deviance_rust"
-            if mode == "laplace_native"
-            else ("adaptive_gh_deviance" if mode == "agq_python" else "laplace_deviance")
+            "_adaptive_gh_deviance_with_status"
+            if mode == "agq_python"
+            else "_laplace_deviance_with_status"
         )
     )
     return patch.object(laplace, name, **kwargs)
@@ -232,7 +234,9 @@ def test_invalid_refits_raise_and_bootstrap_counts_failures(data, kind):
         patch.object(reml.LMMOptimizer, "_evaluate_core", return_value=None)
         if kind == "linear"
         else patch.object(
-            laplace, "laplace_deviance_fast", return_value=(12.0, np.full(2, np.nan), np.zeros(4))
+            laplace,
+            "glmm_deviance_with_status",
+            return_value=(12.0, np.full(2, np.nan), np.zeros(4), True),
         )
     )
     with target:

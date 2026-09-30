@@ -254,6 +254,7 @@ class OptimizeResult:
     n_iter: int
     message: str
     nAGQ: int | None = None
+    pirls_converged: bool | None = None
 
 
 def lFormula(
@@ -645,12 +646,17 @@ def optimizeGlmer(
         callback=callback,
     )
 
+    deviance, _, _, pirls_converged = devfun.optimizer._final_evaluation_with_status(result.x)
+    message = str(result.message) if hasattr(result, "message") else ""
+    if not pirls_converged:
+        message += "; inner PIRLS solver did not converge"
     return OptimizeResult(
         theta=result.x,
-        deviance=result.fun,
-        converged=result.success,
+        deviance=deviance,
+        converged=bool(result.success and pirls_converged),
+        pirls_converged=pirls_converged,
         n_iter=result.nit,
-        message=result.message if hasattr(result, "message") else "",
+        message=message,
         nAGQ=devfun.optimizer.nAGQ,
     )
 
@@ -761,7 +767,9 @@ def mkGlmerMod(
             "nAGQ must match the setting used for optimization; "
             "create a deviance function with the requested nAGQ and optimize it again"
         )
-    deviance, beta, u = devfun.optimizer._final_evaluation(opt.theta, nAGQ=nAGQ)
+    deviance, beta, u, pirls_converged = devfun.optimizer._final_evaluation_with_status(
+        opt.theta, nAGQ=nAGQ
+    )
 
     return GlmerResult(
         formula=devfun.parsed.formula,
@@ -771,7 +779,8 @@ def mkGlmerMod(
         beta=beta,
         u=u,
         deviance=deviance,
-        converged=opt.converged,
+        converged=bool(opt.converged and pirls_converged),
+        pirls_converged=pirls_converged,
         n_iter=opt.n_iter,
         nAGQ=nAGQ,
     )

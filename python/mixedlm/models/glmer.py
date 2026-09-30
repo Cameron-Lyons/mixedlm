@@ -116,6 +116,7 @@ class GlmerResult(MerResultMixin):
     converged: bool
     n_iter: int
     nAGQ: int
+    pirls_converged: bool = True
 
     def fixef(self) -> dict[str, float]:
         return self._fixef_dict(self.beta)
@@ -1535,6 +1536,7 @@ class GlmerResult(MerResultMixin):
             converged=opt_result.converged,
             n_iter=opt_result.n_iter,
             nAGQ=self.nAGQ,
+            pirls_converged=opt_result.pirls_converged,
         )
 
     def refitML(self) -> GlmerResult:
@@ -1664,7 +1666,13 @@ class GlmerResult(MerResultMixin):
             lines.append(f"convergence: yes ({self.n_iter} iterations)")
         else:
             lines.append(f"convergence: no ({self.n_iter} iterations)")
-            lines.append("  optimizer did not converge; try allFit() to compare optimizers")
+            if not self.pirls_converged:
+                lines.append(
+                    "  inner PIRLS solver did not converge; "
+                    "inspect the response and model specification"
+                )
+            else:
+                lines.append("  optimizer did not converge; try allFit() to compare optimizers")
         if self.isSingular():
             lines.append("  boundary (singular) fit: some random-effect variances are near zero")
             lines.append("  consider simplifying the random-effects structure")
