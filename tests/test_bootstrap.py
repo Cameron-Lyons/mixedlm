@@ -237,14 +237,19 @@ class TestBootstrapLmer:
         assert np.all(np.isfinite(boot.beta_samples))
 
     def test_bootstrap_does_not_rebuild_validated_design(self, monkeypatch, lmer_result):
-        def fail_rebuild(*args, **kwargs):
-            raise AssertionError("bootstrap should reuse the fitted design matrices")
+        from unittest.mock import Mock
 
-        monkeypatch.setattr("mixedlm.models.lmer_fit.build_model_matrices", fail_rebuild)
+        from mixedlm.inference import bootstrap
+
+        rebuild = Mock(side_effect=AssertionError("bootstrap should reuse the fitted design"))
+        refit = Mock(wraps=bootstrap._refit_lmer_response)
+        monkeypatch.setattr("mixedlm.models.lmer_fit.build_model_matrices", rebuild)
+        monkeypatch.setattr(bootstrap, "_refit_lmer_response", refit)
 
         boot = bootstrap_lmer(lmer_result, n_boot=2, seed=42)
 
-        assert boot.n_failed == 0
+        assert boot.n_boot == refit.call_count == 2
+        rebuild.assert_not_called()
 
     def test_parallel_payload_reuses_validated_matrices(self, lmer_result):
         payload = _prepare_lmer_worker_data(lmer_result)
@@ -329,7 +334,9 @@ class TestBootstrapGlmer:
         assert boot.n_failed == 0
         assert np.isfinite(boot.beta_samples).all()
 
-    def test_grouped_binomial_bootstrap_uses_proportion_scale(self):
+    def test_grouped_binomial_bootstrap_uses_proportion_scale(self, monkeypatch):
+        from mixedlm.inference import bootstrap
+
         data = load_cbpp()
         result = glmer("incidence / size ~ period + (1 | herd)", data, family=Binomial())
 
@@ -341,10 +348,25 @@ class TestBootstrapGlmer:
         assert np.all((simulated >= 0.0) & (simulated <= 1.0))
         assert_allclose(simulated * trials, np.round(simulated * trials))
 
-        boot = bootstrap_glmer(result, n_boot=2, seed=42)
+        refit = bootstrap._refit_glmer_response
+        refits = []
 
-        assert boot.n_failed == 0
-        assert np.isfinite(boot.beta_samples).all()
+        def record_refit(*args, **kwargs):
+            fitted = refit(*args, **kwargs)
+            refits.append(fitted)
+            return fitted
+
+        monkeypatch.setattr(bootstrap, "_refit_glmer_response", record_refit)
+        boot = bootstrap_glmer(result, n_boot=2, seed=42)
+        successful = np.array([fit.converged and fit.pirls_converged for fit in refits])
+
+        assert len(refits) == 2
+        assert boot.n_failed == np.count_nonzero(~successful)
+        assert np.isnan(boot.beta_samples[~successful]).all()
+        assert np.isnan(boot.theta_samples[~successful]).all()
+        for row in np.flatnonzero(successful):
+            assert_allclose(boot.beta_samples[row], refits[row].beta)
+            assert_allclose(boot.theta_samples[row], refits[row].theta)
 
     def test_bootstrap_does_not_rebuild_validated_design(self, monkeypatch, glmer_result):
         def fail_rebuild(*args, **kwargs):
