@@ -1519,3 +1519,34 @@ def test_benchmark_nonlinear_bootstrap_workers(benchmark, n_jobs):
     assert actual.n_failed == expected.n_failed
     for field in ("phi_samples", "theta_samples", "sigma_samples"):
         np.testing.assert_array_equal(getattr(actual, field), getattr(expected, field))
+
+
+@pytest.mark.benchmark(group="nonlinear-simulation-preparation")
+@pytest.mark.parametrize("groups", [4, 128])
+@pytest.mark.parametrize("operation", ["fitted", "simulate", "stream"])
+def test_benchmark_nonlinear_simulation_preparation(benchmark, groups, operation):
+    from mixedlm.inference.bootstrap import _nlmer_bootstrap_responses
+
+    from tests.test_nonlinear_simulation_streams import make_result
+
+    result = make_result((0, 1), n_groups=groups, per_group=32)
+    if operation == "fitted":
+        evaluate = result.fitted
+    elif operation == "simulate":
+
+        def evaluate():
+            return result.simulate(seed=42)
+    else:
+
+        def evaluate():
+            return np.column_stack(
+                [
+                    response
+                    for _, response in _nlmer_bootstrap_responses(
+                        result, 8, np.random.RandomState(42)
+                    )
+                ]
+            )
+
+    expected = evaluate()
+    np.testing.assert_array_equal(benchmark(evaluate), expected)

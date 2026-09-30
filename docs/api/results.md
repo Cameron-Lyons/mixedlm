@@ -528,10 +528,11 @@ draws return `(n_obs, nsim)`, and zero draws return `(n_obs, 0)`. Simulation
 preserves fitted offsets and inverse-weight residual variances. `use_re=False`,
 `re_form="NA"`, and `re_form="~0"` exclude random effects.
 
-Multi-draw calls reuse the random-effect covariance transform, group row
-lookups, offsets, and residual scales. Fixed-only calls evaluate the nonlinear
-mean once. This setup is local to each call, so changes to a result are reflected
-in the next simulation.
+For many groups, simulation prepares group rows with one stable ordering
+instead of repeatedly scanning all observations for every group. Multi-draw
+calls reuse these rows, the random-effect covariance transform, offsets, and residual scales.
+Fixed-only calls evaluate the nonlinear mean once. This setup is local to each
+call, so changes to a result are reflected in the next simulation.
 
 ## VarCorr
 
