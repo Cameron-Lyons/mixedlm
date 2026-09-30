@@ -9,6 +9,8 @@ import numpy as np
 from numpy.typing import NDArray
 from scipy import stats
 
+from mixedlm.utils.random import RandomSeed, random_seeds, random_stream, validate_simulation_count
+
 if TYPE_CHECKING:
     from mixedlm.estimation.laplace import GLMMOptimizationResult
     from mixedlm.estimation.reml import OptimizationResult
@@ -206,10 +208,10 @@ def _lmer_bootstrap_worker(
         REML,
     ) = args
 
-    np.random.seed(seed)
+    rng = np.random.RandomState(seed)
 
     try:
-        y_sim = _simulate_lmer_components(matrices, beta, theta, sigma)
+        y_sim = _simulate_lmer_components(matrices, beta, theta, sigma, rng)
         boot_result = _refit_lmer_response(matrices, y_sim, theta, REML)
 
         return (boot_idx, boot_result.beta.copy(), boot_result.theta.copy(), boot_result.sigma)
@@ -228,10 +230,10 @@ def _glmer_bootstrap_worker(args: tuple[Any, ...]) -> tuple[int, NDArray | None,
         nAGQ,
     ) = args
 
-    np.random.seed(seed)
+    rng = np.random.RandomState(seed)
 
     try:
-        y_sim = _simulate_glmer_components(matrices, beta, theta, family)
+        y_sim = _simulate_glmer_components(matrices, beta, theta, family, rng)
         boot_result = _refit_glmer_response(matrices, y_sim, theta, family, nAGQ)
 
         return (boot_idx, boot_result.beta.copy(), boot_result.theta.copy())
@@ -262,10 +264,11 @@ def _prepare_glmer_worker_data(result: GlmerResult) -> dict[str, Any]:
 def bootstrap_lmer(
     result: LmerResult,
     n_boot: int = 1000,
-    seed: int | None = None,
+    seed: RandomSeed = None,
     n_jobs: int = 1,
     verbose: bool = False,
 ) -> BootstrapResult:
+    validate_simulation_count(n_boot, "n_boot")
     p = result.matrices.n_fixed
     n_theta = len(result.theta)
 
@@ -273,8 +276,8 @@ def bootstrap_lmer(
     theta_samples = np.full((n_boot, n_theta), np.nan)
     sigma_samples = np.full(n_boot, np.nan)
 
-    rng = np.random.default_rng(seed)
-    seeds = rng.integers(0, 2**31, size=n_boot)
+    rng = random_stream(seed, legacy=False)
+    seeds = random_seeds(rng, n_boot)
 
     if n_jobs == 1:
         n_failed = 0
@@ -283,10 +286,10 @@ def bootstrap_lmer(
             if verbose and (b + 1) % 100 == 0:
                 print(f"Bootstrap iteration {b + 1}/{n_boot}")
 
-            np.random.seed(int(seeds[b]))
+            simulation_rng = np.random.RandomState(int(seeds[b]))
 
             try:
-                y_sim = _simulate_lmer(result)
+                y_sim = _simulate_lmer(result, simulation_rng)
                 boot_result = _refit_lmer_response(
                     result.matrices,
                     y_sim,
@@ -352,8 +355,8 @@ def bootstrap_lmer(
     )
 
 
-def _simulate_lmer(result: LmerResult) -> NDArray[np.floating]:
-    return _simulate_lmer_components(result.matrices, result.beta, result.theta, result.sigma)
+def _simulate_lmer(result: LmerResult, rng: Any | None = None) -> NDArray[np.floating]:
+    return _simulate_lmer_components(result.matrices, result.beta, result.theta, result.sigma, rng)
 
 
 def _simulate_lmer_components(
@@ -361,7 +364,9 @@ def _simulate_lmer_components(
     beta: NDArray[np.floating],
     theta: NDArray[np.floating],
     sigma: float,
+    rng: Any | None = None,
 ) -> NDArray[np.floating]:
+    rng = np.random if rng is None else rng
     n = matrices.n_obs
     q = matrices.n_random
 
@@ -388,7 +393,7 @@ def _simulate_lmer_components(
             else:
                 cov = np.diag(theta_block**2) * sigma**2
 
-            b_all = np.random.multivariate_normal(np.zeros(n_terms), cov, size=n_levels)
+            b_all = rng.multivariate_normal(np.zeros(n_terms), cov, size=n_levels)
             u_new[u_idx : u_idx + n_levels * n_terms] = b_all.ravel()
             u_idx += n_levels * n_terms
             theta_start += n_theta
@@ -397,7 +402,7 @@ def _simulate_lmer_components(
     else:
         random_part = np.zeros(n)
 
-    noise = np.random.randn(n) * sigma / np.sqrt(matrices.weights)
+    noise = rng.standard_normal(n) * sigma / np.sqrt(matrices.weights)
 
     return fixed_part + random_part + noise
 
@@ -405,18 +410,19 @@ def _simulate_lmer_components(
 def bootstrap_glmer(
     result: GlmerResult,
     n_boot: int = 1000,
-    seed: int | None = None,
+    seed: RandomSeed = None,
     n_jobs: int = 1,
     verbose: bool = False,
 ) -> BootstrapResult:
+    validate_simulation_count(n_boot, "n_boot")
     p = result.matrices.n_fixed
     n_theta = len(result.theta)
 
     beta_samples = np.full((n_boot, p), np.nan)
     theta_samples = np.full((n_boot, n_theta), np.nan)
 
-    rng = np.random.default_rng(seed)
-    seeds = rng.integers(0, 2**31, size=n_boot)
+    rng = random_stream(seed, legacy=False)
+    seeds = random_seeds(rng, n_boot)
 
     if n_jobs == 1:
         n_failed = 0
@@ -425,10 +431,10 @@ def bootstrap_glmer(
             if verbose and (b + 1) % 100 == 0:
                 print(f"Bootstrap iteration {b + 1}/{n_boot}")
 
-            np.random.seed(int(seeds[b]))
+            simulation_rng = np.random.RandomState(int(seeds[b]))
 
             try:
-                y_sim = _simulate_glmer(result)
+                y_sim = _simulate_glmer(result, simulation_rng)
                 boot_result = _refit_glmer_response(
                     result.matrices,
                     y_sim,
@@ -493,8 +499,10 @@ def bootstrap_glmer(
     )
 
 
-def _simulate_glmer(result: GlmerResult) -> NDArray[np.floating]:
-    return _simulate_glmer_components(result.matrices, result.beta, result.theta, result.family)
+def _simulate_glmer(result: GlmerResult, rng: Any | None = None) -> NDArray[np.floating]:
+    return _simulate_glmer_components(
+        result.matrices, result.beta, result.theta, result.family, rng
+    )
 
 
 def _simulate_glmer_components(
@@ -502,7 +510,9 @@ def _simulate_glmer_components(
     beta: NDArray[np.floating],
     theta: NDArray[np.floating],
     family: Family,
+    rng: Any | None = None,
 ) -> NDArray[np.floating]:
+    rng = np.random if rng is None else rng
     q = matrices.n_random
 
     if q > 0:
@@ -526,7 +536,7 @@ def _simulate_glmer_components(
             else:
                 cov = np.diag(theta_block**2)
 
-            b_all = np.random.multivariate_normal(
+            b_all = rng.multivariate_normal(
                 np.zeros(n_terms), cov + 1e-8 * np.eye(n_terms), size=n_levels
             )
             u_new[u_idx : u_idx + n_levels * n_terms] = b_all.ravel()
@@ -541,9 +551,9 @@ def _simulate_glmer_components(
     if family.__class__.__name__ == "Binomial" and matrices.trials is not None:
         mu = family.clamp_mu(mu, eps=1e-6)
         trials = matrices.trials.astype(np.int64)
-        successes = np.random.binomial(trials, mu).astype(np.float64)
+        successes = rng.binomial(trials, mu).astype(np.float64)
         return successes / trials
-    return family.simulate(mu)
+    return family.simulate(mu, rng=rng)
 
 
 def bootMer(

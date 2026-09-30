@@ -243,7 +243,7 @@ class TestInference:
     def test_lmer_simulate_rejects_nonpositive_nsim(self) -> None:
         result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
 
-        with pytest.raises(ValueError, match="nsim must be at least 1"):
+        with pytest.raises(ValueError, match="nsim must be a positive integer"):
             result.simulate(nsim=0)
 
     def test_lmer_simulate_no_re(self) -> None:
@@ -296,7 +296,7 @@ class TestInference:
     def test_glmer_simulate_rejects_nonpositive_nsim(self) -> None:
         result = glmer("y ~ period + (1 | herd)", CBPP, family=families.Binomial())
 
-        with pytest.raises(ValueError, match="nsim must be at least 1"):
+        with pytest.raises(ValueError, match="nsim must be a positive integer"):
             result.simulate(nsim=0)
 
     def test_glmer_simulate_uses_family_subclasses(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -391,7 +391,7 @@ class TestWeightsOffset:
         data = pd.DataFrame({"y": y, "x": x, "group": group.astype(str)})
         result = lmer("y ~ x + (1 | group)", data, offset=offset)
 
-        monkeypatch.setattr(np.random, "randn", lambda *shape: np.zeros(shape))
+        monkeypatch.setattr(result, "sigma", 0.0)
         simulated = result.simulate(nsim=3, use_re=False)
 
         expected = result.matrices.X @ result.beta + offset
@@ -465,7 +465,7 @@ class TestWeightsOffset:
             offset=offset,
         )
 
-        monkeypatch.setattr(np.random, "poisson", lambda lam: np.asarray(lam))
+        monkeypatch.setattr(result.family, "simulate", lambda mu, rng=None: np.asarray(mu))
         simulated = result.simulate(nsim=3, use_re=False)
 
         eta = result.matrices.X @ result.beta + offset
