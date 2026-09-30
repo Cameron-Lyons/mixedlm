@@ -642,75 +642,50 @@ pub fn laplace_deviance_impl(
 #[allow(clippy::too_many_arguments)]
 fn compute_group_log_integral(
     g: usize,
-    n_terms: usize,
     spherical: &DVector<f64>,
-    h: &DMatrix<f64>,
-    lambda: &DMatrix<f64>,
+    relative_scale: f64,
     nodes: &[f64],
     weights: &[f64],
     y: &DVector<f64>,
-    x: &DMatrix<f64>,
     z: &CscMatrix,
-    beta: &DVector<f64>,
-    offset: &DVector<f64>,
+    eta_fixed: &DVector<f64>,
+    working_weights: &DVector<f64>,
     prior_weights: &[f64],
     family: FamilyType,
     link: LinkFunction,
 ) -> f64 {
-    let sqrt2 = std::f64::consts::SQRT_2;
-    let q = z.ncols();
-
-    let idx_start = g * n_terms;
-
-    let spherical_mode = spherical.subrows(idx_start, n_terms).to_owned();
-
-    let h_block = h.submatrix(idx_start, idx_start, n_terms, n_terms);
-
-    let scale = if n_terms == 1 {
-        1.0 / (h_block[(0, 0)] + 1e-10).sqrt()
-    } else {
-        match Llt::new(h_block, Side::Lower) {
-            Ok(chol) => 1.0 / chol.L()[(0, 0)],
-            Err(_) => 1.0 / (h_block[(0, 0)] + 1e-10).sqrt(),
-        }
-    };
-
-    let col_start = z.col_offsets()[idx_start];
-    let col_end = z.col_offsets()[idx_start + 1];
-    let group_rows = &z.row_indices()[col_start..col_end];
-    if group_rows.is_empty() {
+    let start = z.col_offsets()[g];
+    let end = z.col_offsets()[g + 1];
+    let entries: Vec<(usize, f64)> = (start..end)
+        .filter(|&i| z.values()[i] != 0.0)
+        .map(|i| (z.row_indices()[i], z.values()[i]))
+        .collect();
+    if entries.is_empty() {
         return 0.0;
     }
-
+    let curvature: f64 = entries
+        .iter()
+        .map(|&(row, value)| value * working_weights[row] * value)
+        .sum();
+    let hessian = (relative_scale * curvature) * relative_scale + 1.0;
+    let scale = 1.0 / (hessian + 1e-10).sqrt();
+    let spherical_mode = spherical[g];
+    let group_y = DVector::from_fn(entries.len(), |i| y[entries[i].0]);
+    let group_weights: Vec<f64> = entries.iter().map(|&(row, _)| prior_weights[row]).collect();
+    let mut eta_quad = DVector::zeros(entries.len());
     let mut log_terms = Vec::with_capacity(nodes.len());
     for (node, weight) in nodes.iter().zip(weights.iter()) {
-        let mut spherical_quad = spherical.clone();
-        for i in 0..n_terms {
-            spherical_quad[idx_start + i] = spherical_mode[i] + sqrt2 * scale * node;
+        let spherical_quad = spherical_mode + std::f64::consts::SQRT_2 * scale * node;
+        let random_effect = relative_scale * spherical_quad;
+        for (i, &(row, value)) in entries.iter().enumerate() {
+            eta_quad[i] = eta_fixed[row] + value * random_effect;
         }
-        let random_effects = lambda * &spherical_quad;
-
-        let mut eta_quad = x * beta + offset;
-        for j in 0..q {
-            let col_start = z.col_offsets()[j];
-            let col_end = z.col_offsets()[j + 1];
-            for idx in col_start..col_end {
-                let i = z.row_indices()[idx];
-                eta_quad[i] += z.values()[idx] * random_effects[j];
-            }
-        }
-
         let mut mu_quad = link.inverse(&eta_quad);
         family.clamp_mu(&mut mu_quad, 1e-10);
-
-        let dev_resids = family.deviance_resids_rows(y, &mu_quad, prior_weights, group_rows);
-        let log_lik_y = -0.5 * dev_resids;
-
-        let spherical_block: DVector<f64> = spherical_quad.subrows(idx_start, n_terms).to_owned();
-        let log_prior = -0.5 * spherical_block.squared_norm_l2();
+        let log_lik_y = -0.5 * family.deviance_resids(&group_y, &mu_quad, &group_weights);
+        let log_prior = -0.5 * spherical_quad * spherical_quad;
         log_terms.push(weight.ln() + log_lik_y + log_prior + node * node);
     }
-
     let max_log = log_terms.iter().copied().fold(f64::NEG_INFINITY, f64::max);
     let log_sum = max_log
         + log_terms
@@ -735,19 +710,19 @@ pub fn adaptive_gh_deviance_impl(
     n_agq: usize,
     beta_start: Option<&DVector<f64>>,
     u_start: Option<&DVector<f64>>,
-) -> (f64, DVector<f64>, DVector<f64>) {
+) -> PyResult<(f64, DVector<f64>, DVector<f64>)> {
     let q = z.ncols();
 
     if n_agq <= 1 || q == 0 {
-        return laplace_deviance_impl(
+        return Ok(laplace_deviance_impl(
             y, x, z, weights, offset, theta, structures, family, link, beta_start, u_start,
-        );
+        ));
     }
 
     if structures.len() != 1 {
-        return laplace_deviance_impl(
+        return Ok(laplace_deviance_impl(
             y, x, z, weights, offset, theta, structures, family, link, beta_start, u_start,
-        );
+        ));
     }
 
     let first_struct = &structures[0];
@@ -755,9 +730,21 @@ pub fn adaptive_gh_deviance_impl(
     let n_levels_first = first_struct.n_levels;
 
     if n_terms_first > 1 {
-        return laplace_deviance_impl(
+        return Ok(laplace_deviance_impl(
             y, x, z, weights, offset, theta, structures, family, link, beta_start, u_start,
-        );
+        ));
+    }
+
+    let mut active_rows = vec![false; y.nrows()];
+    for (&row, &value) in z.row_indices().iter().zip(z.values().iter()) {
+        if value != 0.0 {
+            if active_rows[row] {
+                return Err(PyValueError::new_err(
+                    "Adaptive quadrature requires at most one nonzero random-effect coefficient per observation",
+                ));
+            }
+            active_rows[row] = true;
+        }
     }
 
     let result = pirls_impl(
@@ -781,9 +768,10 @@ pub fn adaptive_gh_deviance_impl(
     let spherical = result.spherical;
 
     let n = y.nrows();
-    let lambda = build_lambda_dense(theta, structures);
+    let relative_scale = theta[0];
 
-    let mut eta = x * &beta + offset;
+    let eta_fixed = x * &beta + offset;
+    let mut eta = eta_fixed.clone();
     for j in 0..q {
         let col_start = z.col_offsets()[j];
         let col_end = z.col_offsets()[j + 1];
@@ -801,41 +789,6 @@ pub fn adaptive_gh_deviance_impl(
         w_vec[i] = (w_vec[i] * weights[i]).max(1e-10);
     }
 
-    let mut ztwz = DMatrix::zeros(q, q);
-    for j1 in 0..q {
-        let col1_start = z.col_offsets()[j1];
-        let col1_end = z.col_offsets()[j1 + 1];
-
-        for j2 in 0..=j1 {
-            let col2_start = z.col_offsets()[j2];
-            let col2_end = z.col_offsets()[j2 + 1];
-
-            let mut sum = 0.0;
-            let mut idx1 = col1_start;
-            let mut idx2 = col2_start;
-
-            while idx1 < col1_end && idx2 < col2_end {
-                let row1 = z.row_indices()[idx1];
-                let row2 = z.row_indices()[idx2];
-
-                if row1 == row2 {
-                    sum += z.values()[idx1] * w_vec[row1] * z.values()[idx2];
-                    idx1 += 1;
-                    idx2 += 1;
-                } else if row1 < row2 {
-                    idx1 += 1;
-                } else {
-                    idx2 += 1;
-                }
-            }
-
-            ztwz[(j1, j2)] = sum;
-            ztwz[(j2, j1)] = sum;
-        }
-    }
-
-    let h = lambda.transpose() * &ztwz * &lambda + DMatrix::<f64>::identity(q, q);
-
     let (nodes, gh_weights) = gauss_hermite_nodes_weights(n_agq);
 
     #[cfg(miri)]
@@ -846,17 +799,14 @@ pub fn adaptive_gh_deviance_impl(
         .map(|g| {
             compute_group_log_integral(
                 g,
-                n_terms_first,
                 &spherical,
-                &h,
-                &lambda,
+                relative_scale,
                 &nodes,
                 &gh_weights,
                 y,
-                x,
                 z,
-                &beta,
-                offset,
+                &eta_fixed,
+                &w_vec,
                 weights,
                 family,
                 link,
@@ -864,9 +814,15 @@ pub fn adaptive_gh_deviance_impl(
         })
         .sum();
 
-    let deviance = -2.0 * log_integral;
+    let fixed_rows: Vec<usize> = active_rows
+        .iter()
+        .enumerate()
+        .filter_map(|(row, &active)| if active { None } else { Some(row) })
+        .collect();
+    let fixed_deviance = family.deviance_resids_rows(y, &mu, weights, &fixed_rows);
+    let deviance = -2.0 * log_integral + fixed_deviance;
 
-    (deviance, beta, u)
+    Ok((deviance, beta, u))
 }
 
 #[pyfunction]
@@ -1115,11 +1071,63 @@ pub fn adaptive_gh_deviance<'py>(
         n_agq,
         None,
         None,
-    );
+    )?;
 
     Ok((
         deviance,
         beta.iter().cloned().collect(),
         u.iter().cloned().collect(),
     ))
+}
+
+#[cfg(test)]
+mod quadrature_tests {
+    use super::*;
+
+    #[test]
+    fn local_gaussian_integral_and_empty_group() {
+        let z = csc_from_scipy(&[1.0, -0.5], &[0, 2], &[0, 2, 2], (3, 2)).unwrap();
+        let y = DVector::from_fn(3, |i| [1.0, 4.0, 2.0][i]);
+        let eta_fixed = DVector::from_fn(3, |i| [0.0, 1.0, 0.0][i]);
+        let prior_weights = [1.0, 2.0, 3.0];
+        let working_weights = DVector::from_fn(3, |i| prior_weights[i]);
+        let relative_scale = 0.7;
+        let hessian = 1.0 + relative_scale * relative_scale * 1.75;
+        let score = -2.0 * relative_scale;
+        let spherical = DVector::from_fn(2, |i| if i == 0 { score / hessian } else { 0.0 });
+        let (nodes, weights) = gauss_hermite_nodes_weights(9);
+        let integral = compute_group_log_integral(
+            0,
+            &spherical,
+            relative_scale,
+            &nodes,
+            &weights,
+            &y,
+            &z,
+            &eta_fixed,
+            &working_weights,
+            &prior_weights,
+            FamilyType::Gaussian,
+            LinkFunction::Identity,
+        );
+        let expected = -0.5 * (13.0 - score * score / hessian + hessian.ln());
+        assert!((integral - expected).abs() < 1e-12);
+        assert_eq!(
+            compute_group_log_integral(
+                1,
+                &spherical,
+                relative_scale,
+                &nodes,
+                &weights,
+                &y,
+                &z,
+                &eta_fixed,
+                &working_weights,
+                &prior_weights,
+                FamilyType::Gaussian,
+                LinkFunction::Identity,
+            ),
+            0.0
+        );
+    }
 }

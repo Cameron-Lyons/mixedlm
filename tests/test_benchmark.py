@@ -397,3 +397,25 @@ def test_benchmark_large_leverage(benchmark, large_crossed_sparse_data, kind):
 
     assert values.shape == (len(large_crossed_sparse_data),)
     assert np.all((values >= 0) & (values < 1))
+
+
+@pytest.mark.benchmark(group="adaptive-quadrature")
+@pytest.mark.parametrize("backend", ["python", "native"])
+@pytest.mark.parametrize("n_groups", [10, 100])
+@pytest.mark.parametrize("n_agq", [5, 15])
+def test_benchmark_group_quadrature(benchmark, backend, n_groups, n_agq):
+    from mixedlm.estimation.laplace import adaptive_gh_deviance, adaptive_gh_deviance_fast
+    from mixedlm.families import Poisson
+
+    if backend == "native":
+        pytest.importorskip("mixedlm._rust")
+
+    rng = np.random.default_rng(142)
+    groups = np.repeat(np.arange(n_groups), 20)
+    x = rng.normal(size=len(groups))
+    eta = 0.3 + 0.2 * x + rng.normal(0, 0.3, n_groups)[groups]
+    data = pd.DataFrame({"y": rng.poisson(np.exp(eta)), "x": x, "g": groups})
+    matrices = build_model_matrices(parse_formula("y ~ x + (1 | g)"), data)
+    evaluate = adaptive_gh_deviance if backend == "python" else adaptive_gh_deviance_fast
+    result = benchmark(evaluate, np.array([0.7]), matrices, Poisson(), nAGQ=n_agq)
+    assert np.isfinite(result[0])
