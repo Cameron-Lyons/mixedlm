@@ -244,6 +244,12 @@ Laplace correction. Python's serial and threaded paths share the same group
 calculations, and threaded updates reuse the covariance inverse. This avoids
 repeated full-data group scans and retaining one full-length mask per group.
 
+The inner penalized nonlinear least-squares loop checks changes in both the
+fixed parameters and every group-specific random effect. Each change is
+measured against the preceding iteration before deciding whether to stop;
+stationary fixed parameters alone do not establish convergence. The iteration
+limit still bounds the work for problems that do not converge.
+
 ## EM-REML Initialization
 
 ### The Algorithm
