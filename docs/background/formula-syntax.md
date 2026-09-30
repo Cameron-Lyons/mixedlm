@@ -82,6 +82,25 @@ Use `I()` with a non-negative integer exponent to include raw polynomial columns
 "y ~ x - 1"
 ```
 
+You can also omit all fixed effects:
+
+```python
+# Random intercepts with no fixed intercept
+"y ~ 0 + (1 | group)"
+"y ~ -1 + (1 | group)"
+
+# Only a known offset, or a zero linear predictor when no offset is supplied
+"y ~ 0"
+```
+
+Both `lmer` and `glmer` preserve the empty fixed-effect design. Their `fixef()`
+result is `{}`, and `vcov()` has shape `(0, 0)`. Conditional predictions still
+include random effects and any supplied offset. With `re_form="NA"`, predictions
+use only the offset, transformed through the inverse link for generalized models.
+Cook's distance is `NaN` because its normalization divides by the number of fixed
+coefficients. Models without random effects evaluate the likelihood directly
+without running a covariance-parameter optimizer.
+
 ### Removing Terms
 
 Use `-` to remove individual terms or terms introduced by `*`. Operations are

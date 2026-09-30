@@ -267,8 +267,10 @@ def satterthwaite_df(
     DenomDFResult
         Object containing denominator degrees of freedom for each parameter.
     """
-    vcov = result.vcov()
     p = result.matrices.n_fixed
+    if p == 0:
+        return DenomDFResult(df=np.empty(0), method="Satterthwaite", param_names=[])
+    vcov = result.vcov()
     vcov_grads, theta_covariance = _vcov_derivatives(result)
 
     variances = np.diag(vcov)
@@ -320,8 +322,10 @@ def kenward_roger_df(
     DenomDFResult
         Object containing denominator degrees of freedom for each parameter.
     """
-    vcov = result.vcov()
     p = result.matrices.n_fixed
+    if p == 0:
+        return DenomDFResult(df=np.empty(0), method="Kenward-Roger", param_names=[])
+    vcov = result.vcov()
     n = result.matrices.n_obs
     n_theta = len(result.theta)
 

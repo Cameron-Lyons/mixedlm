@@ -291,7 +291,7 @@ def _pirls_state(
         else:
             spherical_new = spherical
 
-        delta_beta = np.max(np.abs(beta_new - beta))
+        delta_beta = np.max(np.abs(beta_new - beta), initial=0.0)
         delta_u = np.max(np.abs(spherical_new - spherical)) if q > 0 else 0.0
 
         beta = beta_new

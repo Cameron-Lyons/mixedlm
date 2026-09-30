@@ -630,6 +630,23 @@ def run_optimizer(
     options = options or {}
 
     method_lower = method.lower()
+    if method not in ALL_OPTIMIZERS and method_lower not in {"bobyqa", "cobyqa", "nlminb"}:
+        raise ValueError(
+            f"Unknown optimizer '{method}'. Valid options: {', '.join(sorted(ALL_OPTIMIZERS))}"
+        )
+
+    if x0.size == 0:
+        x = np.asarray(x0, dtype=np.float64).copy()
+        value = float(fun(x))
+        return OptimizeResult(
+            x=x,
+            fun=value,
+            success=bool(np.isfinite(value)),
+            nit=0,
+            message="No parameters to optimize.",
+            jac=np.empty(0, dtype=np.float64),
+            nfev=1,
+        )
 
     if method_lower == "bobyqa":
         warnings.warn(
@@ -656,9 +673,4 @@ def run_optimizer(
                 f"nlopt is required for '{method}'. Install it with: pip install nlopt"
             )
         return _optimize_nlopt(fun, x0, bounds, options, algorithm)
-    elif method in SCIPY_OPTIMIZERS:
-        return _optimize_scipy(fun, x0, method, bounds, options, callback)
-    else:
-        raise ValueError(
-            f"Unknown optimizer '{method}'. Valid options: {', '.join(sorted(ALL_OPTIMIZERS))}"
-        )
+    return _optimize_scipy(fun, x0, method, bounds, options, callback)
