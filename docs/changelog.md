@@ -37,6 +37,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Consolidated duplicate CI and security checks while preserving coverage
 
 ### Fixed
+- Nonlinear fitting and refitting preserve custom prediction and gradient methods instead of selecting a built-in native formula by display name
 - Poisson and other unbounded GLMM families no longer clamp fitted means below one
 - Unsupported family and link combinations no longer route through the native fast path
 
