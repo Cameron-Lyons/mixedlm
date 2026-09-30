@@ -3,6 +3,7 @@ use numpy::{PyArray1, PyArray2, PyArrayLike1, PyArrayLike2};
 use pyo3::prelude::*;
 
 mod blocked_chol;
+mod covariance;
 mod csc;
 mod glmm;
 mod linalg;

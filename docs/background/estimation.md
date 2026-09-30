@@ -240,6 +240,14 @@ using direct dot products for fully populated matrices. Linear and generalized
 linear models share this implementation. The GLMM random-effect system is still factored
 as a dense matrix, so large numbers of random-effect coefficients can remain costly.
 
+The native solver stores one small covariance factor per random-effect
+structure and applies it across the grouping levels. It transforms weighted
+crossproducts in place, preserving contributions between levels and grouping
+factors without constructing a full block-diagonal covariance factor during
+normal fitting. The penalized random-effect system and its Cholesky factor
+remain dense, so their storage still grows quadratically with the number of
+random-effect coefficients.
+
 The random effects are solved in spherical coordinates,
 
 \[
