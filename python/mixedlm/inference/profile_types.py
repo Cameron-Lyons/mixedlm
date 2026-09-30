@@ -116,7 +116,7 @@ class ProfileResult:
             ax.axvline(self.mle, color="red", linestyle="--", alpha=0.7, label="MLE")
 
         if show_ci:
-            z_crit = stats.norm.ppf((1 + self.level) / 2)
+            z_crit = stats.norm.isf((1 - float(self.level)) / 2)
             ax.axhline(z_crit, color="green", linestyle=":", alpha=0.7)
             ax.axhline(-z_crit, color="green", linestyle=":", alpha=0.7)
             ax.axvline(self.ci_lower, color="green", linestyle=":", alpha=0.5)

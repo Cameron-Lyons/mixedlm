@@ -47,10 +47,10 @@ def _bootstrap_ci(
     method: str,
 ) -> dict[str, tuple[float, float]]:
     _validate_ci_options(level, method)
-    alpha = 1.0 - level
+    alpha = 1.0 - float(level)
     lower_percentile = 100.0 * alpha / 2.0
     upper_percentile = 100.0 * (1.0 - alpha / 2.0)
-    z_critical = stats.norm.ppf(1.0 - alpha / 2.0) if method == "normal" else None
+    z_critical = stats.norm.isf(alpha / 2.0) if method == "normal" else None
     result: dict[str, tuple[float, float]] = {}
 
     for i, name in enumerate(names):

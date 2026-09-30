@@ -11,6 +11,7 @@ from scipy import stats
 
 from mixedlm.formula.terms import InteractionTerm, PowerTerm, VariableTerm
 from mixedlm.utils.dataframe import _polars_column_numpy, select_columns
+from mixedlm.utils.validation import _validate_confidence_level
 
 if TYPE_CHECKING:
     from mixedlm.models.glmer import GlmerResult
@@ -244,8 +245,7 @@ def _validate_prediction_options(
 ) -> float:
     if type not in {"response", "link"}:
         raise ValueError("type must be 'response' or 'link'")
-    if not 0.0 < level < 1.0:
-        raise ValueError("level must be between 0 and 1")
+    _validate_confidence_level(level)
     if isinstance(n_points, bool) or not isinstance(n_points, int) or n_points < 2:
         raise ValueError("n_points must be an integer of at least 2")
     try:
@@ -275,9 +275,9 @@ class _EffectPrediction:
         if is_glmm and type == "response" and self.family is None:
             raise TypeError("Generalized linear mixed model must define a family")
         self.critical = float(
-            stats.norm.ppf(1.0 - (1.0 - level) / 2.0)
+            stats.norm.isf((1.0 - level) / 2.0)
             if is_glmm
-            else stats.t.ppf(1.0 - (1.0 - level) / 2.0, float(model.df_residual()))
+            else stats.t.isf((1.0 - level) / 2.0, float(model.df_residual()))
         )
 
     def predict(
@@ -364,6 +364,7 @@ def ggpredict(
         Grid variables followed by ``predicted``, ``std.error``, ``conf.low``,
         and ``conf.high`` columns.
     """
+    level = _validate_confidence_level(level)
     offset_value = _validate_prediction_options(model, type, level, n_points, offset)
     normalized_terms = _normalize_terms(terms)
     builder = _EffectGrid(model, at, n_points)
@@ -391,6 +392,7 @@ def allEffects(
     ``at`` must supply one value per variable because each also conditions the
     other grids.
     """
+    level = _validate_confidence_level(level)
     offset_value = _validate_prediction_options(model, type, level, n_points, offset)
     builder = _EffectGrid(model, at, n_points)
     for variable in builder.variables:

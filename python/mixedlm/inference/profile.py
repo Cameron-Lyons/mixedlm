@@ -13,6 +13,7 @@ from scipy.optimize import brentq
 
 from mixedlm.inference.profile_types import Profile2DResult, ProfileResult
 from mixedlm.models.shared_utils import _RandomEffectFactor
+from mixedlm.utils.validation import _validate_confidence_level
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -298,6 +299,7 @@ def profile_lmer(
     level: float = 0.95,
     n_jobs: int = 1,
 ) -> dict[str, ProfileResult]:
+    level = _validate_confidence_level(level)
     if which is None:
         which = result.matrices.fixed_names
     elif isinstance(which, str):
@@ -305,7 +307,7 @@ def profile_lmer(
 
     profiles: dict[str, ProfileResult] = {}
     alpha = 1 - level
-    z_crit = stats.norm.ppf(1 - alpha / 2)
+    z_crit = stats.norm.isf(alpha / 2)
 
     vcov = result.vcov()
 
@@ -749,6 +751,7 @@ def profile_glmer(
     n_points: int = 20,
     level: float = 0.95,
 ) -> dict[str, ProfileResult]:
+    level = _validate_confidence_level(level)
     if which is None:
         which = result.matrices.fixed_names
     elif isinstance(which, str):
@@ -756,7 +759,7 @@ def profile_glmer(
 
     profiles: dict[str, ProfileResult] = {}
     alpha = 1 - level
-    z_crit = stats.norm.ppf(1 - alpha / 2)
+    z_crit = stats.norm.isf(alpha / 2)
 
     vcov = result.vcov()
 
@@ -975,11 +978,13 @@ def confint_profile(
     """
     import pandas as pd
 
+    if level is not None:
+        level = _validate_confidence_level(level)
     rows = []
     for param, profile in profiles.items():
         if level is not None and level != profile.level:
             alpha = 1 - level
-            z_crit = stats.norm.ppf(1 - alpha / 2)
+            z_crit = stats.norm.isf(alpha / 2)
 
             from scipy.interpolate import interp1d
 
@@ -994,7 +999,7 @@ def confint_profile(
                 ci_lower = float(f(-z_crit))
                 ci_upper = float(f(z_crit))
             except Exception:
-                z_scale = 2 * stats.norm.ppf((1 + profile.level) / 2)
+                z_scale = 2 * stats.norm.isf((1 - float(profile.level)) / 2)
                 se = (profile.ci_upper - profile.ci_lower) / z_scale
                 ci_lower = profile.mle - z_crit * se
                 ci_upper = profile.mle + z_crit * se
