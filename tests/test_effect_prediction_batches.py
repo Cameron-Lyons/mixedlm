@@ -266,15 +266,15 @@ def test_interaction_buffers_are_released_without_cyclic_garbage_collection(
     monkeypatch, kind, limit
 ):
     model = _model(kind)
-    original = design._encode_interaction
+    original = design._factor_columns
     references = []
 
     def encode(*args, **kwargs):
-        columns, names = original(*args, **kwargs)
-        references.extend(weakref.ref(column) for column in columns)
-        return columns, names
+        for column in original(*args, **kwargs):
+            references.append(weakref.ref(column))
+            yield column
 
-    monkeypatch.setattr(design, "_encode_interaction", encode)
+    monkeypatch.setattr(design, "_factor_columns", encode)
     monkeypatch.setattr(effects, "_MAX_EFFECT_MATRIX_ELEMENTS", limit, raising=False)
     collecting = gc.isenabled()
     gc.disable()
