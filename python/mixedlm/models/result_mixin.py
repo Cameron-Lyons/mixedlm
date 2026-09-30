@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator, Sequence
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 import numpy as np
@@ -178,13 +179,49 @@ class MerResultMixin:
             contrasts=self.matrices.contrasts if contrasts is None else contrasts,
             category_levels=self.matrices.category_levels,
         )
-        column_indices = {name: index for index, name in enumerate(fixed_names)}
-        try:
-            fitted_indices = [column_indices[name] for name in self.matrices.fixed_names]
-        except KeyError as exc:
-            raise ValueError(
-                f"New data is missing fitted fixed-effect column '{exc.args[0]}'."
-            ) from None
+        return self._align_prediction_columns(X, fixed_names)
+
+    def _align_prediction_columns(
+        self, X: NDArray[np.floating], fixed_names: list[str]
+    ) -> NDArray[np.floating]:
+        """Align by fitted positions when available, without copying an aligned matrix."""
+        fitted_names = self.matrices.fixed_names
+        source_indices = self.matrices.fixed_column_indices
+        fitted_indices: Sequence[int]
+        if source_indices is not None and self.matrices.fixed_source_names == tuple(fixed_names):
+            if (
+                any(index < 0 or index >= len(fixed_names) for index in source_indices)
+                or [fixed_names[index] for index in source_indices] != fitted_names
+            ):
+                raise ValueError(
+                    "Fitted fixed-effect column positions do not match the model schema."
+                )
+            fitted_indices = source_indices
+        elif source_indices is None and fixed_names == fitted_names:
+            return X
+        else:
+            column_indices = {}
+            ambiguous = set()
+            for index, name in enumerate(fixed_names):
+                if name in column_indices:
+                    ambiguous.add(name)
+                column_indices[name] = index
+            try:
+                fitted_indices = [column_indices[name] for name in fitted_names]
+            except KeyError as exc:
+                raise ValueError(
+                    f"New data is missing fitted fixed-effect column '{exc.args[0]}'."
+                ) from None
+            requested = set()
+            for name in fitted_names:
+                if name in ambiguous or name in requested:
+                    raise ValueError(
+                        f"Cannot align ambiguous fixed-effect column name '{name}' with the fitted "
+                        "model. Refit the model or use the fitted contrast schema."
+                    )
+                requested.add(name)
+        if tuple(fitted_indices) == tuple(range(X.shape[1])):
+            return X
         return X[:, fitted_indices]
 
     def _prediction_offset(
@@ -492,23 +529,7 @@ class MerResultMixin:
         return arr
 
     def _clone_matrices_with_response_base(self, y: NDArray[np.floating]) -> ModelMatrices:
-        return ModelMatrices(
-            y=y,
-            X=self.matrices.X,
-            Z=self.matrices.Z,
-            fixed_names=self.matrices.fixed_names,
-            random_structures=self.matrices.random_structures,
-            n_obs=self.matrices.n_obs,
-            n_fixed=self.matrices.n_fixed,
-            n_random=self.matrices.n_random,
-            weights=self.matrices.weights,
-            offset=self.matrices.offset,
-            frame=self.matrices.frame,
-            na_info=self.matrices.na_info,
-            trials=self.matrices.trials,
-            category_levels=self.matrices.category_levels,
-            contrasts=self.matrices.contrasts,
-        )
+        return replace(self.matrices, y=y)
 
     def coef(self) -> dict[str, dict[str, NDArray[np.floating]]]:
         ranef_result = self.ranef()
