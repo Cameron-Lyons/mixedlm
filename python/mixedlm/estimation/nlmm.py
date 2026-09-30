@@ -510,6 +510,7 @@ class NLMMOptimizer:
         self._start_b = np.zeros((self.n_groups, self.n_random), dtype=np.float64)
         self._start_sigma = _weighted_standard_deviation(self.y, self.weights)
         self._last_theta: NDArray[np.floating] | None = None
+        self._last_failure: str | None = None
         self._last_evaluation: (
             tuple[
                 float,
@@ -547,55 +548,69 @@ class NLMMOptimizer:
         if self._start_phi is None:
             self._start_phi = self.get_start_phi()
 
-        invalid_evaluation: tuple[
-            float,
-            NDArray[np.floating],
-            NDArray[np.floating],
-            float,
-        ] = (
-            _INVALID_OBJECTIVE,
-            self._start_phi.copy(),
-            self._start_b.copy(),
-            self._start_sigma,
-        )
+        self._last_failure = None
+        try:
+            if not np.all(np.isfinite(theta)):
+                raise ValueError("variance parameters must be finite")
+            with np.errstate(divide="raise", invalid="raise", over="raise"):
+                if self.use_rust:
+                    evaluation = _nlmm_deviance_rust(
+                        theta,
+                        self.y,
+                        self.x,
+                        self.groups,
+                        self.model,
+                        self._start_phi,
+                        self._start_b,
+                        self.random_params,
+                        self._start_sigma,
+                        self.weights,
+                    )
+                else:
+                    evaluation = nlmm_deviance(
+                        theta,
+                        self.y,
+                        self.x,
+                        self.groups,
+                        self.model,
+                        self._start_phi,
+                        self._start_b,
+                        self.random_params,
+                        self._start_sigma,
+                        n_jobs=self.n_jobs,
+                        weights=self.weights,
+                    )
 
-        if not np.all(np.isfinite(theta)):
-            evaluation = invalid_evaluation
-        else:
-            try:
-                with np.errstate(divide="raise", invalid="raise", over="raise"):
-                    if self.use_rust:
-                        evaluation = _nlmm_deviance_rust(
-                            theta,
-                            self.y,
-                            self.x,
-                            self.groups,
-                            self.model,
-                            self._start_phi,
-                            self._start_b,
-                            self.random_params,
-                            self._start_sigma,
-                            self.weights,
-                        )
-                    else:
-                        evaluation = nlmm_deviance(
-                            theta,
-                            self.y,
-                            self.x,
-                            self.groups,
-                            self.model,
-                            self._start_phi,
-                            self._start_b,
-                            self.random_params,
-                            self._start_sigma,
-                            n_jobs=self.n_jobs,
-                            weights=self.weights,
-                        )
-            except (FloatingPointError, OverflowError, ValueError, linalg.LinAlgError):
-                evaluation = invalid_evaluation
-
-        if not np.isfinite(evaluation[0]):
-            evaluation = invalid_evaluation
+            deviance, phi, b, sigma = evaluation
+            for name, values, shape in (
+                ("deviance", deviance, ()),
+                ("fixed parameters", phi, (self.model.n_params,)),
+                ("random effects", b, (self.n_groups, self.n_random)),
+                ("residual scale", sigma, ()),
+            ):
+                array = np.asarray(values)
+                if array.shape != shape:
+                    raise ValueError(f"{name} has shape {array.shape}, expected {shape}")
+                if not np.isrealobj(array) or not np.all(np.isfinite(array)):
+                    raise ValueError(f"{name} must contain finite real values")
+            if deviance == _INVALID_OBJECTIVE:
+                raise ValueError("deviance evaluation returned the failure penalty")
+            if sigma <= 0:
+                raise ValueError("residual scale must be strictly positive")
+        except (
+            FloatingPointError,
+            OverflowError,
+            TypeError,
+            ValueError,
+            linalg.LinAlgError,
+        ) as exc:
+            self._last_failure = f"{type(exc).__name__}: {exc}"
+            evaluation = (
+                _INVALID_OBJECTIVE,
+                self._start_phi.copy(),
+                self._start_b.copy(),
+                self._start_sigma,
+            )
 
         self._last_theta = theta.copy()
         self._last_evaluation = evaluation
@@ -637,6 +652,7 @@ class NLMMOptimizer:
         self._start_sigma = max(sigma, np.sqrt(_MIN_VARIANCE))
         self._last_theta = None
         self._last_evaluation = None
+        self._last_failure = None
 
         bounds: list[tuple[float | None, float | None]] = [(None, None)] * self.n_theta
         idx = 0
@@ -661,6 +677,10 @@ class NLMMOptimizer:
         )
 
         deviance, phi, b, sigma = self._evaluate(result.x)
+        if self._last_failure is not None:
+            raise RuntimeError(
+                f"Nonlinear optimization did not produce a valid fit: {self._last_failure}"
+            )
 
         return NLMMOptimizationResult(
             phi=phi,

@@ -100,6 +100,10 @@ result = mlm.nlmer(formula, data, start, control=None)
 
 **Returns:** NlmerResult object
 
+**Raises:** `RuntimeError` if optimization ends at an invalid nonlinear
+evaluation, including the underlying numerical or model error when available.
+A valid result retains the optimizer's convergence status in `converged`.
+
 **Example:**
 
 ```python
