@@ -447,6 +447,19 @@ def test_benchmark_random_effect_simulation(benchmark):
     assert np.asarray(result).shape == (1, 400_000)
 
 
+@pytest.mark.benchmark(group="multiplicity-adjustment")
+@pytest.mark.parametrize("method", ["holm", "fdr"])
+def test_benchmark_large_pvalue_adjustment(benchmark, method):
+    from mixedlm.inference.emmeans import _adjust_pvalues
+
+    p = np.random.default_rng(120).uniform(size=100_000) ** 8
+    adjusted = benchmark(_adjust_pvalues, p, method, len(p), 100.0)
+
+    assert adjusted.shape == p.shape
+    assert np.all(adjusted >= p - 1e-15)
+    assert np.all(adjusted <= 1.0)
+
+
 @pytest.mark.benchmark(group="leverage")
 @pytest.mark.parametrize("kind", ["lmm", "glmm"])
 def test_benchmark_large_leverage(benchmark, large_crossed_sparse_data, kind):

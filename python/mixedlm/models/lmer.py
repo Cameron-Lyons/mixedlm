@@ -1868,7 +1868,7 @@ class LmerResult(MerResultMixin):
         >>> # Now can compare likelihoods
         >>> from scipy import stats
         >>> lr_stat = -2 * (m1_ml.logLik().value - m2_ml.logLik().value)
-        >>> p_value = 1 - stats.chi2.cdf(lr_stat, df=1)
+        >>> p_value = stats.chi2.sf(lr_stat, df=1)
 
         See Also
         --------

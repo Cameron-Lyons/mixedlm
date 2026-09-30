@@ -145,7 +145,7 @@ class Emmeans:
 
         t_ratio = estimates / se_contrast
 
-        raw_p = 2 * (1 - stats.t.cdf(np.abs(t_ratio), self._df))
+        raw_p = 2 * stats.t.sf(np.abs(t_ratio), self._df)
         p_adjusted = _adjust_pvalues(raw_p, adjust, n_levels, self._df, t_ratio)
 
         return ContrastResult(
@@ -194,7 +194,7 @@ class Emmeans:
         var_contrast = _rowwise_quadratic_form(L_contrast, self._vcov)
         se_contrast = np.sqrt(np.maximum(var_contrast, 0))
         t_ratio = estimates / se_contrast
-        raw_p = 2 * (1 - stats.t.cdf(np.abs(t_ratio), self._df))
+        raw_p = 2 * stats.t.sf(np.abs(t_ratio), self._df)
         p_adjusted = _adjust_pvalues(raw_p, adjust, n_levels, self._df, t_ratio)
 
         return ContrastResult(
@@ -219,7 +219,7 @@ class Emmeans:
         var_contrast = _rowwise_quadratic_form(L_contrast, self._vcov)
         se_contrast = np.sqrt(np.maximum(var_contrast, 0))
         t_ratio = estimates / se_contrast
-        raw_p = 2 * (1 - stats.t.cdf(np.abs(t_ratio), self._df))
+        raw_p = 2 * stats.t.sf(np.abs(t_ratio), self._df)
         p_adjusted = _adjust_pvalues(raw_p, adjust, n_contrasts, self._df, t_ratio)
 
         contrast_labels = [f"C{i + 1}" for i in range(n_contrasts)]
@@ -252,28 +252,22 @@ def _adjust_pvalues(
         return p
     elif method == "bonferroni":
         return np.minimum(p * len(p), 1.0)
-    elif method == "holm":
+    elif method in ("holm", "fdr"):
         n = len(p)
         sorted_idx = np.argsort(p)
-        sorted_p = p[sorted_idx]
-        adjusted = np.zeros(n)
-        cummax = 0.0
-        for i, idx in enumerate(sorted_idx):
-            adj_p = sorted_p[i] * (n - i)
-            cummax = max(cummax, adj_p)
-            adjusted[idx] = min(cummax, 1.0)
-        return adjusted
-    elif method == "fdr":
-        n = len(p)
-        sorted_idx = np.argsort(p)[::-1]
-        sorted_p = p[sorted_idx]
-        adjusted = np.zeros(n)
-        cummin = 1.0
-        for i, idx in enumerate(sorted_idx):
-            rank = n - i
-            adj_p = sorted_p[i] * n / rank
-            cummin = min(cummin, adj_p)
-            adjusted[idx] = min(cummin, 1.0)
+        ranked = np.asarray(p[sorted_idx], dtype=np.float64)
+        if method == "holm":
+            ranked *= np.arange(n, 0, -1)
+            np.maximum.accumulate(ranked, out=ranked)
+        else:
+            ranked *= n
+            ranked /= np.arange(1, n + 1)
+            # NaNs sort last: ignore them when accumulating backwards while
+            # retaining the full comparison count and their undefined outputs.
+            np.fmin.accumulate(ranked[::-1], out=ranked[::-1])
+        np.minimum(ranked, 1.0, out=ranked)
+        adjusted = np.empty(n, dtype=np.float64)
+        adjusted[sorted_idx] = ranked
         return adjusted
     elif method == "tukey":
         if t_ratio is None:

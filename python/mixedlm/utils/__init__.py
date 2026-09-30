@@ -53,7 +53,7 @@ def _get_signif_code(p: float) -> str:
 
 
 def _format_pvalue(p: float) -> str:
-    if p < 2.2e-16:
+    if p < 2e-16:
         return "< 2e-16"
     elif p < 0.001:
         return f"{p:.2e}"
