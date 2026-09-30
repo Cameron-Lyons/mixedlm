@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from numbers import Integral
 from typing import TYPE_CHECKING, cast
 
 import numpy as np
@@ -102,6 +103,8 @@ class NlmerResult:
         self,
         phi: NDArray[np.floating] | None = None,
         random_effects: NDArray[np.floating] | None = None,
+        *,
+        group_rows: Sequence[NDArray] | None = None,
     ) -> NDArray[np.floating]:
         """Evaluate the nonlinear mean without the observation offset."""
         base_params = self.phi if phi is None else phi
@@ -109,11 +112,11 @@ class NlmerResult:
         pred = np.zeros(len(self.y), dtype=np.float64)
 
         for group_idx in range(len(self.group_levels)):
-            mask = self.groups == group_idx
+            rows = self.groups == group_idx if group_rows is None else group_rows[group_idx]
             params = base_params.copy()
             for effect_idx, param_idx in enumerate(self.random_params):
                 params[param_idx] += effects[group_idx, effect_idx]
-            pred[mask] = self.model.predict(params, self.x[mask])
+            pred[rows] = self.model.predict(params, self.x[rows])
 
         return pred
 
@@ -391,7 +394,7 @@ class NlmerResult:
     def simulate(
         self,
         nsim: int = 1,
-        seed: int | None = None,
+        seed: int | np.random.RandomState | np.random.Generator | None = None,
         use_re: bool = True,
         re_form: str | None = None,
     ) -> NDArray[np.floating]:
@@ -400,9 +403,12 @@ class NlmerResult:
         Parameters
         ----------
         nsim : int, default 1
-            Number of simulations.
-        seed : int, optional
-            Random seed for reproducibility.
+            Nonnegative integer number of simulations.
+        seed : int, RandomState, or Generator, optional
+            Local random seed or stream. Integer seeds preserve the legacy
+            draw sequence. A supplied stream advances across calls. None
+            creates an independent stream without changing NumPy's global
+            random state.
         use_re : bool, default True
             If True, simulate new random effects. If False, use fixed effects only.
         re_form : str, optional
@@ -413,44 +419,50 @@ class NlmerResult:
         NDArray
             Simulated responses. Shape (n,) if nsim=1, else (n, nsim).
         """
-        if seed is not None:
-            np.random.seed(seed)
-
+        if isinstance(nsim, bool | np.bool_) or not isinstance(nsim, Integral):
+            raise TypeError("nsim must be a nonnegative integer")
+        if nsim < 0:
+            raise ValueError("nsim must be a nonnegative integer")
         n = len(self.y)
-
-        if nsim == 1:
-            return self._simulate_once(use_re, re_form)
-
-        result = np.zeros((n, nsim), dtype=np.float64)
-        for i in range(nsim):
-            result[:, i] = self._simulate_once(use_re, re_form)
-
-        return result
-
-    def _simulate_once(
-        self,
-        use_re: bool = True,
-        re_form: str | None = None,
-    ) -> NDArray[np.floating]:
-        """Simulate a single response vector."""
-        n = len(self.y)
+        if nsim == 0:
+            return np.empty((n, 0), dtype=np.float64)
+        rng = (
+            seed
+            if isinstance(seed, np.random.RandomState | np.random.Generator)
+            else np.random.RandomState(seed)
+        )
         n_groups = len(self.group_levels)
         n_random = len(self.random_params)
+        include_re = use_re and re_form not in ("~0", "NA") and n_random > 0
+        offset = self.offset(copy=False)
+        residual_scale = self.sigma / np.sqrt(self.weights(copy=False))
+        group_rows = []
 
-        include_re = use_re and re_form not in ("~0", "NA")
-
-        if include_re and n_random > 0:
+        if include_re:
             Psi = _build_psi_matrix(self.theta, n_random)
             cov = Psi * self.sigma**2
             cov = cov + _COV_REGULARIZATION * np.eye(n_random)
-            b_new = np.random.multivariate_normal(np.zeros(n_random), cov, size=n_groups)
+            # Match RandomState.multivariate_normal's transform and draw order.
+            _, singular_values, vectors = np.linalg.svd(cov)
+            factor = np.sqrt(singular_values)[:, None] * vectors
+            if nsim > 1:
+                for group_idx in range(n_groups):
+                    rows = np.flatnonzero(self.groups == group_idx)
+                    group_rows.append(rows)
         else:
-            b_new = np.zeros((n_groups, n_random))
+            mean = self._conditional_mean(random_effects=np.zeros((n_groups, n_random))) + offset
 
-        pred = self._conditional_mean(random_effects=b_new) + self.offset(copy=False)
-        residual_scale = self.sigma / np.sqrt(self.weights(copy=False))
-        noise = np.random.randn(n) * residual_scale
-        return pred + noise
+        simulations = np.empty((n, nsim), dtype=np.float64)
+        for i in range(nsim):
+            if include_re:
+                b_new = rng.standard_normal((n_groups, n_random)) @ factor
+                mean = (
+                    self._conditional_mean(random_effects=b_new, group_rows=group_rows or None)
+                    + offset
+                )
+            simulations[:, i] = mean + rng.standard_normal(n) * residual_scale
+
+        return simulations[:, 0] if nsim == 1 else simulations
 
     def refit(
         self,
