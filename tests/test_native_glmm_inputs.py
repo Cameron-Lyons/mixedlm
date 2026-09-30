@@ -10,7 +10,7 @@ from numpy.testing import assert_array_equal
 from tests.test_glmm_final_state import mode_problem
 
 native = pytest.importorskip("mixedlm._rust")
-FUNCTIONS = ["pirls", "laplace_deviance", "adaptive_gh_deviance", "glmm_deviance"]
+FUNCTIONS = ["pirls", "laplace_deviance", "adaptive_gh_deviance", "glmm_deviance", "prepared"]
 KEYS = (
     "y",
     "x",
@@ -35,6 +35,11 @@ def arguments(kind="gaussian", layout="intercept"):
 
 
 def evaluate(function, args, order=1):
+    if function == "prepared":
+        problem = native.GlmmProblem(
+            **{key: value for key, value in args.items() if key != "theta"}
+        )
+        return problem.evaluate(args["theta"], order)
     options = {"n_agq": order} if function in {"adaptive_gh_deviance", "glmm_deviance"} else {}
     return getattr(native, function)(**args, **options)
 

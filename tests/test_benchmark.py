@@ -1567,3 +1567,30 @@ def test_benchmark_native_glmm_final_state(benchmark, kind, layout, order):
     assert np.isfinite(actual[1]).all()
     assert np.isfinite(actual[2]).all()
     assert actual[3]
+
+
+@pytest.mark.benchmark(group="prepared-glmm")
+@pytest.mark.parametrize("joint", [False, True])
+@pytest.mark.parametrize("order", [1, 7])
+@pytest.mark.parametrize("size", ["small", "large"])
+def test_benchmark_prepared_glmm(benchmark, joint, order, size):
+    from mixedlm.estimation.joint_glmm import JointGLMMObjective
+    from mixedlm.estimation.laplace import GLMMOptimizer
+
+    from tests.test_glmm_final_state import mode_problem
+
+    n, groups = (48, 4) if size == "small" else (8192, 64)
+    matrices, family, theta = mode_problem("poisson", "intercept", n_obs=n, n_groups=groups)
+    if joint:
+        objective = JointGLMMObjective(matrices, family, order)
+        parameters = np.r_[theta, np.full(matrices.n_fixed, 0.2)]
+        expected = objective.evaluate(parameters)
+        actual = benchmark(objective.evaluate, parameters)
+        for value, reference in zip(actual, expected, strict=True):
+            np.testing.assert_array_equal(value, reference)
+        assert actual[3]
+    else:
+        optimizer = GLMMOptimizer(matrices, family, nAGQ=order)
+        expected = optimizer.objective(theta)
+        assert benchmark(optimizer.objective, theta) == expected
+    assert np.isfinite(expected[0] if joint else expected)
