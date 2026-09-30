@@ -54,7 +54,7 @@ result = mlm.glmer(formula, data, family, nAGQ=1, control=None)
 - `formula`: Model formula string
 - `data`: DataFrame
 - `family`: Distribution family (e.g., `mlm.families.Binomial()`)
-- `nAGQ`: Number of adaptive Gauss-Hermite quadrature points. 1 = Laplace approximation.
+- `nAGQ`: Positive integer number of quadrature points. 1 = Laplace approximation. Values above one require a single random-effect term with one coefficient per group. Models with no random effects are also supported.
 - `control`: Optional GlmerControl object
 
 **Returns:** GlmerMod result object
@@ -211,7 +211,7 @@ devfun = mlm.mkLmerDevfun(parsed_formula)
 Run the optimizer on the deviance function.
 
 ```python
-opt_result = mlm.optimizeLmer(devfun, control=None)
+opt_result = mlm.optimizeLmer(devfun)
 ```
 
 ### mkLmerMod
@@ -219,8 +219,39 @@ opt_result = mlm.optimizeLmer(devfun, control=None)
 Create the final model object from optimization results.
 
 ```python
-model = mlm.mkLmerMod(parsed_formula, opt_result)
+model = mlm.mkLmerMod(devfun, opt_result)
 ```
+
+
+### Modular generalized models and quadrature
+
+Choose the quadrature setting when creating the generalized deviance function:
+
+```python
+parsed = mlm.glFormula(
+    "incidence / size ~ period + (1 | herd)",
+    mlm.load_cbpp(),
+    family=mlm.families.Binomial(),
+)
+devfun = mlm.mkGlmerDevfun(parsed, nAGQ=5)
+opt_result = mlm.optimizeGlmer(devfun)
+model = mlm.mkGlmerMod(devfun, opt_result)
+assert model.nAGQ == 5
+```
+
+`mkGlmerDevfun()` accepts `nAGQ` as a keyword argument and defaults to 1.
+`optimizeGlmer()` records the setting in `opt_result.nAGQ`. `mkGlmerMod()` inherits
+that recorded value; for a custom `OptimizeResult` without quadrature metadata,
+it uses the deviance function's setting. An explicit `mkGlmerMod(..., nAGQ=...)`
+must agree with the setting used for optimization. To change it, create a new
+deviance function and optimize again.
+
+Quadrature requests must use a positive integer. Values above one require a
+single random-effect term with one coefficient per group (for example, `(1 | g)`
+or `(0 + x | g)`). Multiple random-effect terms and random-intercept/slope blocks
+require `nAGQ=1`. Unsupported requests raise `ValueError` before numerical
+optimization. `nAGQ=0` is not implemented. These checks also apply to direct GLMM
+fitting and the Python quadrature evaluators.
 
 ## Usage Examples
 
