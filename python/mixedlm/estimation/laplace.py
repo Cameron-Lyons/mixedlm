@@ -418,54 +418,29 @@ def _get_gh_nodes_weights(n: int) -> tuple[NDArray[np.floating], NDArray[np.floa
 
 
 def _compute_group_quadrature(
-    g: int,
-    n_terms_first: int,
-    spherical: NDArray[np.floating],
-    H: NDArray[np.floating],
-    Lambda: sparse.csc_matrix,
-    nodes: NDArray[np.floating],
-    weights: NDArray[np.floating],
-    matrices: ModelMatrices,
-    family: Family,
+    spherical_mode: float,
+    scale: float,
+    relative_scale: float,
+    z_values: NDArray[np.floating],
+    y: NDArray[np.floating],
     eta_fixed: NDArray[np.floating],
     prior_weights: NDArray[np.floating],
+    nodes: NDArray[np.floating],
+    weights: NDArray[np.floating],
+    family: Family,
 ) -> float:
-    """Compute quadrature contribution for a single group."""
+    """Integrate one scalar random effect over only the observations it affects."""
     sqrt2 = np.sqrt(2.0)
-
-    idx_start = g * n_terms_first
-    idx_end = idx_start + n_terms_first
-
-    spherical_mode = spherical[idx_start:idx_end].copy()
-    H_block = H[idx_start:idx_end, idx_start:idx_end]
-
-    try:
-        L_block = linalg.cholesky(H_block, lower=True)
-        scale = 1.0 / L_block[0, 0]
-    except linalg.LinAlgError:
-        scale = 1.0 / np.sqrt(H_block[0, 0] + _EIGENVALUE_FLOOR)
-
-    group_rows = matrices.Z[:, idx_start:idx_end].getnnz(axis=1) > 0
-    if not np.any(group_rows):
-        return 0.0
-
     log_terms = np.empty(len(nodes), dtype=np.float64)
-    for i, (node, weight) in enumerate(zip(nodes, weights, strict=False)):
-        spherical_block = spherical_mode + sqrt2 * scale * node
-        spherical[idx_start:idx_end] = spherical_block
-        random_effects = np.asarray(Lambda @ spherical).ravel()
-        eta_quad = eta_fixed + matrices.Z @ random_effects
+    for i, (node, weight) in enumerate(zip(nodes, weights, strict=True)):
+        spherical_quad = spherical_mode + sqrt2 * scale * node
+        eta_quad = eta_fixed + z_values * (relative_scale * spherical_quad)
         mu_quad = family.link.inverse(eta_quad)
         mu_quad = family.clamp_mu(mu_quad, eps=_MU_EPS_STRICT)
-        log_lik_y = -0.5 * np.sum(
-            family.deviance_resids(
-                matrices.y[group_rows], mu_quad[group_rows], prior_weights[group_rows]
-            )
-        )
-        log_prior = -0.5 * np.dot(spherical_block, spherical_block)
+        log_lik_y = -0.5 * np.sum(family.deviance_resids(y, mu_quad, prior_weights))
+        log_prior = -0.5 * spherical_quad**2
         log_terms[i] = np.log(weight) + log_lik_y + log_prior + node**2
 
-    spherical[idx_start:idx_end] = spherical_mode
     return float(np.log(scale) - 0.5 * np.log(np.pi) + special.logsumexp(log_terms))
 
 
@@ -523,33 +498,53 @@ def adaptive_gh_deviance(
         return state.deviance, state.beta, state.random_effects
 
     first_struct = matrices.random_structures[0]
+    Z = matrices.Z.tocsc()
+    if not Z.has_canonical_format or np.any(Z.data == 0):
+        Z = Z.copy()
+        Z.sum_duplicates()
+        Z.eliminate_zeros()
+    row_counts = np.bincount(Z.indices, minlength=matrices.n_obs)
+    if np.any(row_counts > 1):
+        raise ValueError(
+            "Adaptive quadrature requires at most one nonzero random-effect "
+            "coefficient per observation"
+        )
+
     state = _pirls_state(matrices, family, theta, beta_start, u_start)
     beta = state.beta
     spherical = state.spherical
     random_effects = state.random_effects
-    Lambda = _get_lambda_cached(theta, matrices.random_structures)
+    relative_scale = theta[0]
 
     eta_fixed = matrices.X @ beta + offset
-    eta = eta_fixed + matrices.Z @ random_effects
-    mu = family.link.inverse(eta)
-    mu = family.clamp_mu(mu, eps=_MU_EPS_STRICT)
-
+    eta = eta_fixed + Z @ random_effects
+    mu = family.clamp_mu(family.link.inverse(eta), eps=_MU_EPS_STRICT)
     W = np.clip(family.weights(mu) * prior_weights, _WEIGHT_CLIP_MIN, _WEIGHT_CLIP_MAX)
-
-    W_sqrt = np.sqrt(W)
-    WZ = _scale_sparse_rows(matrices.Z, W_sqrt)
-    ZtWZ = WZ.T @ WZ
-    H = _as_dense(Lambda.T @ ZtWZ @ Lambda) + np.eye(q)
-
-    try:
-        linalg.cholesky(H, lower=True)
-    except linalg.LinAlgError:
-        H = H + _CHOLESKY_REGULARIZATION * np.eye(q)
-
-    n_terms_first = first_struct.n_terms
+    sqrt_W = np.sqrt(W)
+    nodes, weights = _get_gh_nodes_weights(nAGQ)
     n_levels_first = first_struct.n_levels
 
-    nodes, weights = _get_gh_nodes_weights(nAGQ)
+    def integrate_group(g: int) -> float:
+        start, end = Z.indptr[g : g + 2]
+        if start == end:
+            return 0.0
+        rows = Z.indices[start:end]
+        z_values = Z.data[start:end]
+        weighted_z = z_values * sqrt_W[rows]
+        hessian = (relative_scale * np.dot(weighted_z, weighted_z)) * relative_scale + 1.0
+        scale = 1.0 / np.sqrt(hessian)
+        return _compute_group_quadrature(
+            spherical[g],
+            scale,
+            relative_scale,
+            z_values,
+            matrices.y[rows],
+            eta_fixed[rows],
+            prior_weights[rows],
+            nodes,
+            weights,
+            family,
+        )
 
     if n_jobs == -1:
         import os
@@ -558,44 +553,22 @@ def adaptive_gh_deviance(
 
     if n_jobs > 1 and n_levels_first > 2:
         with ThreadPoolExecutor(max_workers=min(n_jobs, n_levels_first)) as executor:
-            futures = [
-                executor.submit(
-                    _compute_group_quadrature,
-                    g,
-                    n_terms_first,
-                    spherical.copy(),
-                    H,
-                    Lambda,
-                    nodes,
-                    weights,
-                    matrices,
-                    family,
-                    eta_fixed,
-                    prior_weights,
-                )
-                for g in range(n_levels_first)
-            ]
-            log_integral = sum(f.result() for f in futures)
+            log_integral = sum(executor.map(integrate_group, range(n_levels_first)))
     else:
-        log_integral = 0.0
-        for g in range(n_levels_first):
-            log_integral += _compute_group_quadrature(
-                g,
-                n_terms_first,
-                spherical,
-                H,
-                Lambda,
-                nodes,
-                weights,
-                matrices,
-                family,
-                eta_fixed,
-                prior_weights,
+        log_integral = sum(integrate_group(g) for g in range(n_levels_first))
+
+    # A zero design row has no random contribution, but its response still contributes.
+    fixed_rows = row_counts == 0
+    fixed_deviance = (
+        np.sum(
+            family.deviance_resids(
+                matrices.y[fixed_rows], mu[fixed_rows], prior_weights[fixed_rows]
             )
-
-    deviance = -2.0 * log_integral
-
-    return float(deviance), beta, random_effects
+        )
+        if np.any(fixed_rows)
+        else 0.0
+    )
+    return float(-2.0 * log_integral + fixed_deviance), beta, random_effects
 
 
 def _laplace_deviance_rust(
