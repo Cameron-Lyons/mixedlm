@@ -1,3 +1,7 @@
+use std::sync::OnceLock;
+
+use faer::Mat;
+
 use crate::linalg::LinalgError;
 
 /// Minimal owned compressed-sparse-column matrix used at the Python boundary.
@@ -11,6 +15,7 @@ pub struct CscMatrix {
     col_offsets: Vec<usize>,
     row_indices: Vec<usize>,
     values: Vec<f64>,
+    rows: OnceLock<RowStorage>,
 }
 
 impl CscMatrix {
@@ -97,6 +102,7 @@ impl CscMatrix {
                 col_offsets: indptr.to_vec(),
                 row_indices: indices.to_vec(),
                 values: data.to_vec(),
+                rows: OnceLock::new(),
             });
         }
 
@@ -137,6 +143,7 @@ impl CscMatrix {
             col_offsets,
             row_indices,
             values,
+            rows: OnceLock::new(),
         })
     }
 
@@ -158,6 +165,75 @@ impl CscMatrix {
 
     pub fn values(&self) -> &[f64] {
         &self.values
+    }
+
+    /// Compute Z' diag(weights) Z, using row accumulation for sparse designs.
+    /// The immutable row layout is built once and reused as PIRLS weights change.
+    pub fn weighted_crossproduct(&self, weights: &[f64]) -> Mat<f64> {
+        assert_eq!(weights.len(), self.nrows);
+        let mut result = Mat::zeros(self.ncols, self.ncols);
+        if self.values.is_empty() {
+            return result;
+        }
+        // At high density, accumulating one column pair at a time avoids
+        // repeatedly updating the output matrix and needs no row workspace.
+        if self.values.len() / self.nrows > self.ncols / 4 {
+            let fully_dense = self.values.len() / self.nrows == self.ncols;
+            for left in 0..self.ncols {
+                let left_end = self.col_offsets[left + 1];
+                for right in 0..=left {
+                    let mut i = self.col_offsets[left];
+                    let mut j = self.col_offsets[right];
+                    let right_end = self.col_offsets[right + 1];
+                    let mut sum = 0.0;
+                    if fully_dense {
+                        // Canonical CSC with n*q entries has every row in every
+                        // column, so no row-index intersections are needed.
+                        sum = self.values[i..left_end]
+                            .iter()
+                            .zip(weights)
+                            .zip(&self.values[j..right_end])
+                            .map(|((&a, &w), &b)| a * w * b)
+                            .sum();
+                    } else {
+                        while i < left_end && j < right_end {
+                            let left_row = self.row_indices[i];
+                            let right_row = self.row_indices[j];
+                            if left_row == right_row {
+                                sum += self.values[i] * weights[left_row] * self.values[j];
+                                i += 1;
+                                j += 1;
+                            } else if left_row < right_row {
+                                i += 1;
+                            } else {
+                                j += 1;
+                            }
+                        }
+                    }
+                    result[(left, right)] = sum;
+                    result[(right, left)] = sum;
+                }
+            }
+            return result;
+        }
+        let rows = self.rows.get_or_init(|| RowStorage::new(self));
+        for (row, &weight) in weights.iter().enumerate() {
+            let start = rows.offsets[row];
+            let end = rows.offsets[row + 1];
+            for left in start..end {
+                let left_column = rows.columns[left];
+                let weighted_left = weight * rows.values[left];
+                for right in left..end {
+                    let right_column = rows.columns[right];
+                    let value = weighted_left * rows.values[right];
+                    result[(left_column, right_column)] += value;
+                    if left_column != right_column {
+                        result[(right_column, left_column)] += value;
+                    }
+                }
+            }
+        }
+        result
     }
 
     /// Materialize the upper triangle of a self-adjoint matrix from its lower
@@ -200,6 +276,45 @@ impl CscMatrix {
             col_offsets,
             row_indices,
             values,
+            rows: OnceLock::new(),
+        }
+    }
+}
+
+/// Row-oriented values for repeated weighted crossproducts. Columns within
+/// each row are sorted because the source CSC is traversed in column order.
+#[derive(Debug, Clone)]
+struct RowStorage {
+    offsets: Vec<usize>,
+    columns: Vec<usize>,
+    values: Vec<f64>,
+}
+
+impl RowStorage {
+    fn new(matrix: &CscMatrix) -> Self {
+        let mut offsets = vec![0; matrix.nrows + 1];
+        for &row in &matrix.row_indices {
+            offsets[row + 1] += 1;
+        }
+        for row in 0..matrix.nrows {
+            offsets[row + 1] += offsets[row];
+        }
+        let mut positions = offsets[..matrix.nrows].to_vec();
+        let mut columns = vec![0; matrix.values.len()];
+        let mut values = vec![0.0; matrix.values.len()];
+        for column in 0..matrix.ncols {
+            for index in matrix.col_offsets[column]..matrix.col_offsets[column + 1] {
+                let row = matrix.row_indices[index];
+                let position = positions[row];
+                columns[position] = column;
+                values[position] = matrix.values[index];
+                positions[row] += 1;
+            }
+        }
+        Self {
+            offsets,
+            columns,
+            values,
         }
     }
 }
@@ -215,6 +330,61 @@ fn checked_i64_to_usize(value: i64, field_name: &str, index: usize) -> Result<us
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn crossproduct_reweights_sparse_and_dense_designs() {
+        // Duplicate, unsorted entries, an explicit zero, and an empty column.
+        for q in [3, 8] {
+            let mut offsets = vec![0, 3, 3];
+            offsets.resize(q + 1, 6);
+            let matrix = CscMatrix::try_from_usize(
+                &[2.0, 1.0, 3.0, 0.0, -2.0, 4.0],
+                &[2, 0, 2, 1, 0, 2],
+                &offsets,
+                (4, q),
+            )
+            .unwrap();
+            let dense = Mat::from_fn(4, q, |row, col| {
+                if col < 3 {
+                    [[1.0, 0.0, -2.0], [0.0; 3], [5.0, 0.0, 4.0], [0.0; 3]][row][col]
+                } else {
+                    0.0
+                }
+            });
+            for weights in [[1.0; 4], [0.25, 2.0, 3.0, 0.5], [2.0, 0.0, 0.5, 4.0]] {
+                let actual = matrix.weighted_crossproduct(&weights);
+                let weighted = Mat::from_fn(4, q, |row, col| weights[row] * dense[(row, col)]);
+                let expected = dense.transpose() * weighted;
+                assert_eq!(actual, expected);
+            }
+        }
+    }
+
+    #[test]
+    fn crossproducts_handle_empty_dimensions() {
+        for (n, q) in [(0, 0), (0, 3), (4, 0), (4, 3)] {
+            let matrix = CscMatrix::try_from_usize(&[], &[], &vec![0; q + 1], (n, q)).unwrap();
+            let weights = vec![1.0; n];
+            assert_eq!(
+                matrix.weighted_crossproduct(&weights),
+                Mat::<f64>::zeros(q, q)
+            );
+        }
+    }
+
+    #[test]
+    fn crossproduct_layout_can_initialize_from_multiple_threads() {
+        let matrix =
+            CscMatrix::try_from_usize(&[1.0, 2.0], &[0, 1], &[0, 2, 2, 2, 2, 2, 2, 2, 2], (2, 8))
+                .unwrap();
+        std::thread::scope(|scope| {
+            let matrix = &matrix;
+            let first = scope.spawn(move || matrix.weighted_crossproduct(&[1.0, 2.0]));
+            let second = scope.spawn(move || matrix.weighted_crossproduct(&[3.0, 4.0]));
+            assert_eq!(first.join().unwrap()[(0, 0)], 9.0);
+            assert_eq!(second.join().unwrap()[(0, 0)], 19.0);
+        });
+    }
 
     #[test]
     fn validates_csc_invariants() {
