@@ -219,6 +219,10 @@ systems retain dense Cholesky solves.
 
 Compute Satterthwaite denominator degrees of freedom.
 
+The variance calculation uses relative uncertainty so that changing response
+units (for example, milliseconds to seconds) preserves the degrees of freedom
+and p-values, apart from numerical fitting tolerance.
+
 ```python
 df = mlm.satterthwaite_df(model)
 by_coefficient = df.as_dict()
