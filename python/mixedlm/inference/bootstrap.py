@@ -9,6 +9,8 @@ import numpy as np
 from numpy.typing import NDArray
 from scipy import stats
 
+from mixedlm.utils.simulation import simulate_random_effects
+
 if TYPE_CHECKING:
     from mixedlm.estimation.laplace import GLMMOptimizationResult
     from mixedlm.estimation.reml import OptimizationResult
@@ -368,31 +370,7 @@ def _simulate_lmer_components(
     fixed_part = matrices.X @ beta + matrices.offset
 
     if q > 0:
-        u_new = np.zeros(q, dtype=np.float64)
-
-        u_idx = 0
-        theta_start = 0
-        for struct in matrices.random_structures:
-            n_levels = struct.n_levels
-            n_terms = struct.n_terms
-
-            n_theta = n_terms * (n_terms + 1) // 2 if struct.correlated else n_terms
-
-            theta_block = theta[theta_start : theta_start + n_theta]
-
-            if struct.correlated:
-                L = np.zeros((n_terms, n_terms))
-                row_indices, col_indices = np.tril_indices(n_terms)
-                L[row_indices, col_indices] = theta_block
-                cov = L @ L.T * sigma**2
-            else:
-                cov = np.diag(theta_block**2) * sigma**2
-
-            b_all = np.random.multivariate_normal(np.zeros(n_terms), cov, size=n_levels)
-            u_new[u_idx : u_idx + n_levels * n_terms] = b_all.ravel()
-            u_idx += n_levels * n_terms
-            theta_start += n_theta
-
+        u_new = simulate_random_effects(theta, matrices.random_structures, sigma)
         random_part = matrices.Z @ u_new
     else:
         random_part = np.zeros(n)
@@ -506,33 +484,7 @@ def _simulate_glmer_components(
     q = matrices.n_random
 
     if q > 0:
-        u_new = np.zeros(q, dtype=np.float64)
-        u_idx = 0
-        theta_start = 0
-
-        for struct in matrices.random_structures:
-            n_levels = struct.n_levels
-            n_terms = struct.n_terms
-
-            n_theta = n_terms * (n_terms + 1) // 2 if struct.correlated else n_terms
-
-            theta_block = theta[theta_start : theta_start + n_theta]
-
-            if struct.correlated:
-                L = np.zeros((n_terms, n_terms))
-                row_indices, col_indices = np.tril_indices(n_terms)
-                L[row_indices, col_indices] = theta_block
-                cov = L @ L.T
-            else:
-                cov = np.diag(theta_block**2)
-
-            b_all = np.random.multivariate_normal(
-                np.zeros(n_terms), cov + 1e-8 * np.eye(n_terms), size=n_levels
-            )
-            u_new[u_idx : u_idx + n_levels * n_terms] = b_all.ravel()
-            u_idx += n_levels * n_terms
-            theta_start += n_theta
-
+        u_new = simulate_random_effects(theta, matrices.random_structures)
         eta = matrices.X @ beta + matrices.Z @ u_new + matrices.offset
     else:
         eta = matrices.X @ beta + matrices.offset
