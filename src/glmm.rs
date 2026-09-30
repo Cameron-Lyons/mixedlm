@@ -1085,6 +1085,15 @@ pub fn adaptive_gh_deviance<'py>(
         })
         .collect();
 
+    if n_agq == 0 {
+        return Err(PyValueError::new_err("n_agq must be a positive integer"));
+    }
+    if n_agq > 1 && z_shape.1 > 0 && (structures.len() != 1 || structures[0].n_terms != 1) {
+        return Err(PyValueError::new_err(
+            "n_agq > 1 requires one random-effect term with one coefficient per group; use n_agq=1 for this model",
+        ));
+    }
+
     let (family_type, link_fn) = parse_family_and_link(family, link)?;
 
     let y_arr = y.as_array();

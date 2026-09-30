@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from numbers import Integral
 from typing import Any
 
 import numpy as np
@@ -38,6 +39,19 @@ _LAMBDA_CACHE_MAX_SIZE = 8
 _NATIVE_FAMILY_LINKS = frozenset(
     {("binomial", "logit"), ("poisson", "log"), ("gaussian", "identity")}
 )
+
+
+def _validate_quadrature(nAGQ: int, matrices: ModelMatrices) -> None:
+    """Reject unavailable quadrature requests before fitting or backend dispatch."""
+    if isinstance(nAGQ, (bool, np.bool_)) or not isinstance(nAGQ, Integral) or nAGQ < 1:
+        raise ValueError("nAGQ must be a positive integer")
+    if nAGQ > 1 and matrices.n_random:
+        structures = matrices.random_structures
+        if len(structures) != 1 or structures[0].n_terms != 1:
+            raise ValueError(
+                "nAGQ > 1 requires one random-effect term with one coefficient per group; "
+                "use nAGQ=1 for this model"
+            )
 
 
 def _scale_sparse_rows(
@@ -495,6 +509,8 @@ def adaptive_gh_deviance(
     u : NDArray
         Random effect estimates.
     """
+    _validate_quadrature(nAGQ, matrices)
+
     if nAGQ == 1:
         return laplace_deviance(theta, matrices, family, beta_start, u_start)
 
@@ -507,9 +523,6 @@ def adaptive_gh_deviance(
         return state.deviance, state.beta, state.random_effects
 
     first_struct = matrices.random_structures[0]
-    if len(matrices.random_structures) != 1 or first_struct.n_terms > 1:
-        return laplace_deviance(theta, matrices, family, beta_start, u_start)
-
     state = _pirls_state(matrices, family, theta, beta_start, u_start)
     beta = state.beta
     spherical = state.spherical
@@ -687,6 +700,8 @@ def adaptive_gh_deviance_fast(
     beta_start: NDArray[np.floating] | None = None,
     u_start: NDArray[np.floating] | None = None,
 ) -> tuple[float, NDArray[np.floating], NDArray[np.floating]]:
+    _validate_quadrature(nAGQ, matrices)
+
     if nAGQ == 1:
         return laplace_deviance_fast(theta, matrices, family, beta_start, u_start)
 
@@ -714,6 +729,7 @@ class GLMMOptimizer:
         verbose: int = 0,
         nAGQ: int = 1,
     ) -> None:
+        _validate_quadrature(nAGQ, matrices)
         self.matrices = matrices
         self.family = family
         self.verbose = verbose
@@ -784,6 +800,7 @@ class GLMMOptimizer:
         maxiter: int = 1000,
         options: dict[str, Any] | None = None,
     ) -> GLMMOptimizationResult:
+        _validate_quadrature(self.nAGQ, self.matrices)
         if start is None:
             start = self.get_start_theta()
 

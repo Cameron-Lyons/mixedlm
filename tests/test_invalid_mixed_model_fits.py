@@ -198,7 +198,7 @@ def test_valid_fits_keep_status_and_use_recomputed_deviance(data, mode, success,
 @pytest.mark.parametrize("n_agq", [1, 5])
 def test_modular_glmm_validates_final_estimates(data, n_agq):
     parsed = modular.glFormula(FORMULA, data, family=Poisson())
-    devfun = modular.mkGlmerDevfun(parsed)
+    devfun = modular.mkGlmerDevfun(parsed, nAGQ=n_agq)
     mode = "laplace_python" if n_agq == 1 else "agq_python"
     evaluation = (12.0, np.full(parsed.n_fixed, np.nan), np.zeros(parsed.n_random))
     with (
@@ -214,7 +214,7 @@ def test_modular_glmm_validates_final_estimates(data, n_agq):
 @pytest.mark.parametrize("n_agq", [1, 5])
 def test_modular_glmm_reports_final_quadrature_deviance(data, n_agq):
     parsed = modular.glFormula(FORMULA, data, family=Poisson())
-    devfun = modular.mkGlmerDevfun(parsed)
+    devfun = modular.mkGlmerDevfun(parsed, nAGQ=n_agq)
     theta = np.ones(1)
     expected = laplace.adaptive_gh_deviance_fast(theta, parsed.matrices, parsed.family, nAGQ=n_agq)
     actual = modular.mkGlmerMod(
