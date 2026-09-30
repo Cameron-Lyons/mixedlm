@@ -128,6 +128,25 @@ def sparse_spd_system():
     )
 
 
+@pytest.fixture(params=["banded", "irregular"])
+def repeated_symbolic_system(request, sparse_spd_system):
+    if request.param == "banded":
+        return sparse_spd_system
+
+    rng = np.random.default_rng(123)
+    size = 100
+    matrix = sparse.random(size, size, density=0.1, format="csc", random_state=rng)
+    matrix = (matrix @ matrix.T + 10.0 * sparse.eye(size, format="csc")).tocsc()
+    matrix.sort_indices()
+    return (
+        matrix.data.astype(np.float64),
+        matrix.indices.astype(np.int64),
+        matrix.indptr.astype(np.int64),
+        matrix.shape,
+        rng.standard_normal((size, 16)),
+    )
+
+
 @pytest.mark.benchmark(group="lmer")
 def test_benchmark_lmer_simple(benchmark, sleepstudy_data):
     def fit_model():
@@ -346,6 +365,31 @@ def test_benchmark_sparse_symbolic_refactor(benchmark, sparse_spd_system):
     numeric = benchmark(symbolic.factor, data)
     result = numeric.solve(rhs[:, :1])
     assert np.asarray(result).shape == (shape[0], 1)
+
+
+@pytest.mark.benchmark(group="rust-sparse-symbolic-repeated")
+@pytest.mark.parametrize("cached", [False, True], ids=["uncached", "cached"])
+@pytest.mark.parametrize("n_rhs", [1, 16])
+def test_benchmark_sparse_symbolic_repeated_factorizations(
+    benchmark, repeated_symbolic_system, cached, n_rhs
+):
+    data, indices, indptr, shape, rhs = repeated_symbolic_system
+    rhs = np.ascontiguousarray(rhs[:, :n_rhs])
+    scales = (0.25, 1.0, 4.0, 0.5, 2.0, 0.75, 3.0, 1.25)
+    values = [data * scale for scale in scales]
+    symbolic = SparseCholeskySymbolic(indices, indptr, shape[0]) if cached else None
+
+    def factor_and_solve():
+        solutions = []
+        for current_data in values:
+            current = symbolic if cached else SparseCholeskySymbolic(indices, indptr, shape[0])
+            solutions.append(current.factor(current_data).solve(rhs))
+        return solutions
+
+    solutions = benchmark(factor_and_solve)
+    matrix = sparse.csc_matrix((data, indices, indptr), shape=shape)
+    for scale, solution in zip(scales, solutions, strict=True):
+        np.testing.assert_allclose(scale * (matrix @ solution), rhs, rtol=1e-11, atol=1e-11)
 
 
 @pytest.mark.benchmark(group="rust-random-effect-simulation")
