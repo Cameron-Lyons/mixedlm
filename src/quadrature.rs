@@ -1,8 +1,63 @@
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex, OnceLock};
+
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
-pub fn gauss_hermite_nodes_weights(n: usize) -> (Vec<f64>, Vec<f64>) {
-    compute_gauss_hermite(n)
+const CACHE_SIZE: usize = 32;
+const MAX_CACHED_ORDER: usize = 1024;
+
+pub struct HermiteRule {
+    pub nodes: Vec<f64>,
+    pub weights: Vec<f64>,
+}
+
+#[derive(Default)]
+struct RuleCache {
+    rules: VecDeque<(usize, Arc<HermiteRule>)>,
+}
+
+impl RuleCache {
+    fn get(&mut self, n: usize) -> Option<Arc<HermiteRule>> {
+        let index = self.rules.iter().position(|(order, _)| *order == n)?;
+        let entry = self.rules.remove(index)?;
+        let rule = Arc::clone(&entry.1);
+        self.rules.push_front(entry);
+        Some(rule)
+    }
+
+    fn insert(&mut self, n: usize, rule: Arc<HermiteRule>) -> Arc<HermiteRule> {
+        if n == 0 || n > MAX_CACHED_ORDER {
+            return rule;
+        }
+        if let Some(existing) = self.get(n) {
+            return existing;
+        }
+        if self.rules.len() == CACHE_SIZE {
+            self.rules.pop_back();
+        }
+        self.rules.push_front((n, Arc::clone(&rule)));
+        rule
+    }
+}
+
+pub fn gauss_hermite_nodes_weights(n: usize) -> Arc<HermiteRule> {
+    static CACHE: OnceLock<Mutex<RuleCache>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(RuleCache::default()));
+    if n > 0 && n <= MAX_CACHED_ORDER {
+        let mut guard = cache.lock().unwrap_or_else(|error| error.into_inner());
+        if let Some(rule) = guard.get(n) {
+            return rule;
+        }
+    }
+
+    // Compute outside the lock so unrelated cache hits are not delayed.
+    let (nodes, weights) = compute_gauss_hermite(n);
+    let rule = Arc::new(HermiteRule { nodes, weights });
+    cache
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .insert(n, rule)
 }
 
 fn compute_gauss_hermite(n: usize) -> (Vec<f64>, Vec<f64>) {
@@ -164,7 +219,8 @@ fn implicit_ql(diagonal: &mut [f64], off_diagonal: &mut [f64], transformed: &mut
 
 #[pyfunction]
 pub fn gauss_hermite(n: usize) -> (Vec<f64>, Vec<f64>) {
-    gauss_hermite_nodes_weights(n)
+    let rule = gauss_hermite_nodes_weights(n);
+    (rule.nodes.clone(), rule.weights.clone())
 }
 
 #[pyfunction]
@@ -212,7 +268,51 @@ pub fn adaptive_gauss_hermite_1d(
 
 #[cfg(test)]
 mod tests {
-    use super::compute_gauss_hermite;
+    use super::*;
+
+    #[test]
+    fn repeated_requests_share_rule_storage() {
+        let first = gauss_hermite_nodes_weights(67);
+        let second = gauss_hermite_nodes_weights(67);
+        assert!(Arc::ptr_eq(&first, &second));
+    }
+
+    #[test]
+    fn cache_bounds_storage_and_evicts_least_recently_used() {
+        let mut cache = RuleCache::default();
+        let rule = Arc::new(HermiteRule {
+            nodes: vec![0.0],
+            weights: vec![std::f64::consts::PI.sqrt()],
+        });
+        for order in 1..=CACHE_SIZE {
+            cache.insert(order, Arc::clone(&rule));
+        }
+        cache.get(2);
+        cache.get(1);
+        cache.insert(CACHE_SIZE + 1, Arc::clone(&rule));
+        assert!(cache.get(3).is_none());
+        assert!(cache.get(1).is_some());
+        assert_eq!(cache.rules.len(), CACHE_SIZE);
+        cache.insert(0, Arc::clone(&rule));
+        cache.insert(MAX_CACHED_ORDER + 1, Arc::clone(&rule));
+        assert!(cache.get(0).is_none());
+        assert!(cache.get(MAX_CACHED_ORDER + 1).is_none());
+        assert_eq!(cache.rules.len(), CACHE_SIZE);
+    }
+
+    #[test]
+    fn concurrent_misses_publish_one_shared_rule() {
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..8)
+                .map(|_| scope.spawn(|| gauss_hermite_nodes_weights(71)))
+                .collect();
+            let rules: Vec<_> = handles
+                .into_iter()
+                .map(|handle| handle.join().unwrap())
+                .collect();
+            assert!(rules.iter().all(|rule| Arc::ptr_eq(rule, &rules[0])));
+        });
+    }
 
     #[test]
     fn high_order_rule_integrates_low_order_moments() {

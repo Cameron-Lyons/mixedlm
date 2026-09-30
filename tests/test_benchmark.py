@@ -1138,3 +1138,18 @@ def test_benchmark_group_quadrature(benchmark, backend, n_groups, n_agq):
     evaluate = adaptive_gh_deviance if backend == "python" else adaptive_gh_deviance_fast
     result = benchmark(evaluate, np.array([0.7]), matrices, Poisson(), nAGQ=n_agq)
     assert np.isfinite(result[0])
+
+
+@pytest.mark.benchmark(group="quadrature-rule-reuse")
+@pytest.mark.parametrize("backend", ["python", "native"])
+@pytest.mark.parametrize("order", [9, 25, 100, 400])
+def test_benchmark_repeated_quadrature_rule(benchmark, backend, order):
+    from mixedlm.estimation.laplace import _get_gh_nodes_weights
+
+    evaluate = _get_gh_nodes_weights
+    if backend == "native":
+        evaluate = pytest.importorskip("mixedlm._rust").gauss_hermite
+    evaluate(order)
+    nodes, weights = benchmark(evaluate, order)
+    assert len(nodes) == len(weights) == order
+    assert np.sum(weights) == pytest.approx(np.sqrt(np.pi))

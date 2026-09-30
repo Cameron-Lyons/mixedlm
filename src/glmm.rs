@@ -675,6 +675,9 @@ fn compute_group_log_integral(
     let mut eta_quad = DVector::zeros(entries.len());
     let mut log_terms = Vec::with_capacity(nodes.len());
     for (node, weight) in nodes.iter().zip(weights.iter()) {
+        if *weight == 0.0 {
+            continue;
+        }
         let spherical_quad = spherical_mode + std::f64::consts::SQRT_2 * scale * node;
         let random_effect = relative_scale * spherical_quad;
         for (i, &(row, value)) in entries.iter().enumerate() {
@@ -789,7 +792,7 @@ pub fn adaptive_gh_deviance_impl(
         w_vec[i] = (w_vec[i] * weights[i]).max(1e-10);
     }
 
-    let (nodes, gh_weights) = gauss_hermite_nodes_weights(n_agq);
+    let rule = gauss_hermite_nodes_weights(n_agq);
 
     #[cfg(miri)]
     let iter = (0..n_levels_first).into_iter();
@@ -801,8 +804,8 @@ pub fn adaptive_gh_deviance_impl(
                 g,
                 &spherical,
                 relative_scale,
-                &nodes,
-                &gh_weights,
+                &rule.nodes,
+                &rule.weights,
                 y,
                 z,
                 &eta_fixed,
@@ -1104,13 +1107,13 @@ mod quadrature_tests {
         let hessian = 1.0 + relative_scale * relative_scale * 1.75;
         let score = -2.0 * relative_scale;
         let spherical = DVector::from_fn(2, |i| if i == 0 { score / hessian } else { 0.0 });
-        let (nodes, weights) = gauss_hermite_nodes_weights(9);
+        let rule = gauss_hermite_nodes_weights(9);
         let integral = compute_group_log_integral(
             0,
             &spherical,
             relative_scale,
-            &nodes,
-            &weights,
+            &rule.nodes,
+            &rule.weights,
             &y,
             &z,
             &eta_fixed,
@@ -1126,8 +1129,8 @@ mod quadrature_tests {
                 1,
                 &spherical,
                 relative_scale,
-                &nodes,
-                &weights,
+                &rule.nodes,
+                &rule.weights,
                 &y,
                 &z,
                 &eta_fixed,

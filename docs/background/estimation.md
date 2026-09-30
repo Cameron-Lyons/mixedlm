@@ -194,6 +194,19 @@ Explicit and implicit sparse zeros produce the same likelihood. A supplied desig
 with multiple nonzero random-effect coefficients in one row cannot use independent
 group quadrature and raises `ValueError`.
 
+#### Quadrature rules
+
+`GHrule(n)` and `GQN(n)` return rules normalized for the standard normal
+distribution. `GQdk(d, k)` builds a tensor rule for `d` independent standard
+normal variables with `k` points per dimension. Orders and dimensions must be
+positive integers. Public rule arrays are writable and independent of later calls.
+
+Python helpers and fitting share stable Hermite rule generation, including high
+orders where polynomial-based construction can overflow. Python and native fitting
+cache up to 32 rules with at most 1,024 points each. Larger rules remain supported
+and bypass the cache. Cache entries are shared read-only across evaluations;
+changing model data or parameters does not require clearing them.
+
 ### PIRLS Algorithm
 
 For fitting GLMMs, mixedlm uses Penalized Iteratively Reweighted Least Squares (PIRLS):

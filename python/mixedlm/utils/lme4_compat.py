@@ -983,9 +983,9 @@ def GHrule(n: int, asMatrix: bool = True) -> dict | NDArray[np.floating]:
     """Generate Gauss-Hermite quadrature rule.
 
     Compute the nodes and weights for Gauss-Hermite quadrature,
-    which is used for numerical integration of functions weighted
-    by exp(-x^2). This is used internally for adaptive Gauss-Hermite
-    quadrature in GLMMs.
+    normalized for integration against the standard normal distribution.
+    The underlying Hermite rule is shared with adaptive quadrature in GLMMs;
+    returned arrays are independent and writable.
 
     Parameters
     ----------
@@ -1005,15 +1005,15 @@ def GHrule(n: int, asMatrix: bool = True) -> dict | NDArray[np.floating]:
     --------
     >>> gh = GHrule(5)
     >>> gh  # 5x2 array of nodes and weights
-    array([[-2.02, 0.02],
-           [-0.96, 0.39],
+    array([[-2.86, 0.01],
+           [-1.36, 0.22],
            ...])
 
     >>> gh = GHrule(3, asMatrix=False)
     >>> gh['nodes']
-    array([-1.22, 0.0, 1.22])
+    array([-1.73, 0.0, 1.73])
     >>> gh['weights']
-    array([0.30, 1.18, 0.30])
+    array([0.17, 0.67, 0.17])
 
     Notes
     -----
@@ -1027,9 +1027,9 @@ def GHrule(n: int, asMatrix: bool = True) -> dict | NDArray[np.floating]:
     --------
     glmer : Fit GLMMs using adaptive Gauss-Hermite quadrature.
     """
-    from scipy.special import roots_hermite
+    from mixedlm.utils.quadrature import hermite_rule
 
-    nodes, weights = roots_hermite(n)
+    nodes, weights = hermite_rule(n)
 
     nodes = nodes * np.sqrt(2)
     weights = weights / np.sqrt(np.pi)
