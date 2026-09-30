@@ -27,6 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Root-level CHANGELOG.md
 
 ### Changed
+- Native sparse solves batch all right-hand sides and reuse the result buffer, eliminating per-column allocations and redundant solve setup
 - Multi-draw GLMM simulation now batches random effects and response generation
 - Vectorized grouping-level factorization and nested-key construction for sparse designs
 - EM-REML algorithm generalized from single random intercept to arbitrary unstructured covariance models

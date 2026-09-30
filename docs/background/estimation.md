@@ -366,3 +366,8 @@ For models with many groups, mixedlm uses sparse matrix operations to efficientl
 - Linear system solutions
 
 This enables fitting models with thousands of groups.
+
+Native sparse solves process multiple right-hand sides together, reusing the
+factor for every column. Cached and uncached solves share this implementation
+and solve directly in the returned array's storage, leaving the input unchanged
+even for strided or read-only arrays.

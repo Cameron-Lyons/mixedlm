@@ -3,12 +3,14 @@ use std::sync::Arc;
 use faer::dyn_stack::{MemBuffer, MemStack};
 use faer::linalg::cholesky::ldlt::factor::LdltRegularization;
 use faer::sparse::linalg::SupernodalThreshold;
+use faer::sparse::linalg::cholesky::simplicial::SimplicialLdltRef;
 use faer::sparse::linalg::cholesky::{
-    CholeskySymbolicParams, LdltRef, SymbolicCholesky, SymbolicCholeskyRaw, SymmetricOrdering,
+    CholeskySymbolicParams, SymbolicCholesky, SymbolicCholeskyRaw, SymmetricOrdering,
     factorize_symbolic_cholesky,
 };
 use faer::sparse::{SparseColMatRef, SymbolicSparseColMatRef};
-use faer::{Conj, Mat, Par, Side};
+use faer::{Conj, MatMut, Par, Side};
+use numpy::ndarray::ArrayView2;
 
 use crate::csc::CscMatrix;
 use crate::linalg::LinalgError;
@@ -154,25 +156,30 @@ pub struct NumericFactorization {
 }
 
 impl NumericFactorization {
-    pub fn n(&self) -> usize {
-        self.n
-    }
-
-    pub fn solve(&self, b: &[f64]) -> Result<Vec<f64>, LinalgError> {
-        if b.len() != self.n {
+    pub fn solve(&self, b: ArrayView2<'_, f64>) -> Result<Vec<f64>, LinalgError> {
+        if b.nrows() != self.n {
             return Err(LinalgError::DimensionMismatch(format!(
                 "right-hand side has {} rows, expected {}",
-                b.len(),
+                b.nrows(),
                 self.n
             )));
         }
-        let mut rhs = Mat::from_fn(self.n, 1, |row, _| b[row]);
+        // ndarray iteration follows logical row-major order even for strided inputs.
+        // Solve all columns directly in the owned Python result buffer.
+        let mut result: Vec<f64> = b.iter().copied().collect();
+        let rhs = MatMut::from_row_major_slice_mut(&mut result, self.n, b.ncols());
+        let SymbolicCholeskyRaw::Simplicial(symbolic) = self.symbolic.raw() else {
+            unreachable!("symbolic factorization is forced to be simplicial")
+        };
+        debug_assert!(self.symbolic.perm().is_none());
+        // Identity ordering needs no permutation buffer. The simplicial solve's
+        // own scratch requirement is empty, independent of the number of columns.
         let par = Par::Seq;
-        let factor = LdltRef::new(&self.symbolic, &self.values);
-        let mut memory = MemBuffer::new(self.symbolic.solve_in_place_scratch::<f64>(1, par));
+        let factor = SimplicialLdltRef::new(symbolic, &self.values);
+        let mut memory = MemBuffer::new(symbolic.solve_in_place_scratch::<f64>(b.ncols()));
         let stack = MemStack::new(&mut memory);
-        factor.solve_in_place_with_conj(Conj::No, rhs.as_mut(), par, stack);
-        Ok((0..self.n).map(|row| rhs[(row, 0)]).collect())
+        factor.solve_in_place_with_conj(Conj::No, rhs, par, stack);
+        Ok(result)
     }
 
     pub fn logdet(&self) -> f64 {
@@ -222,6 +229,7 @@ fn matrix_ref_from_parts<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use numpy::ndarray::{Array2, array};
 
     #[test]
     fn test_symbolic_cache_basic() {
@@ -233,17 +241,51 @@ mod tests {
         let cache = SymbolicCholeskyCache::new(&indices, &indptr, n).unwrap();
         let numeric = cache.factor(&data, &indices, &indptr).unwrap();
 
-        let b = vec![1.0, 2.0, 3.0];
-        let x = numeric.solve(&b).unwrap();
+        let b = array![[1.0], [2.0], [3.0]];
+        let x = numeric.solve(b.view()).unwrap();
 
         let reconstructed = [
             4.0 * x[0] + x[1],
             x[0] + 4.0 * x[1] + x[2],
             x[1] + 4.0 * x[2],
         ];
-        for (actual, expected) in reconstructed.into_iter().zip(b) {
+        for (actual, expected) in reconstructed.into_iter().zip(b.iter()) {
             assert!((actual - expected).abs() < 1e-12);
         }
+    }
+
+    #[test]
+    fn test_multiple_strided_rhs_and_empty_columns() {
+        let indices = [0, 1, 0, 1, 2, 1, 2];
+        let indptr = [0, 2, 5, 7];
+        let data = [4.0, 1.0, 1.0, 4.0, 1.0, 1.0, 4.0];
+        let cache = SymbolicCholeskyCache::new(&indices, &indptr, 3).unwrap();
+        let numeric = cache.factor(&data, &indices, &indptr).unwrap();
+        let transposed_rhs =
+            Array2::from_shape_fn((5, 3), |(column, row)| (1 + column + 2 * row) as f64);
+        let rhs = transposed_rhs.t();
+        let result = numeric.solve(rhs).unwrap();
+        for column in 0..5 {
+            let x = [result[column], result[5 + column], result[10 + column]];
+            let reconstructed = [
+                4.0 * x[0] + x[1],
+                x[0] + 4.0 * x[1] + x[2],
+                x[1] + 4.0 * x[2],
+            ];
+            for row in 0..3 {
+                assert!((reconstructed[row] - rhs[(row, column)]).abs() < 1e-12);
+            }
+        }
+        assert!(
+            numeric
+                .solve(Array2::zeros((3, 0)).view())
+                .unwrap()
+                .is_empty()
+        );
+        assert!(matches!(
+            numeric.solve(Array2::zeros((4, 2)).view()),
+            Err(LinalgError::DimensionMismatch(_))
+        ));
     }
 
     #[test]
