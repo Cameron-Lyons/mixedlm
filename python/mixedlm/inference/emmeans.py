@@ -9,12 +9,14 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pandas as pd
-from numpy.typing import NDArray
+from numpy.typing import ArrayLike, NDArray
 from scipy import stats
 
 if TYPE_CHECKING:
     from mixedlm.models.glmer import GlmerResult
     from mixedlm.models.lmer import LmerResult
+
+_MAX_CONTRAST_ELEMENTS = 1_000_000
 
 
 def _rowwise_quadratic_form(
@@ -88,8 +90,9 @@ class ContrastResult:
         Defaults to the level and adjustment selected when creating the contrasts.
         Holm, FDR, and the current Dunnett approximation use Bonferroni intervals;
         the actual method is recorded in ``result.attrs["adjust"]``. Tukey requires
-        differences created by ``pairs`` or ``trt.vs.ctrl``. Grouped comparisons
-        retain separate interval families. Quantiles are evaluated on demand.
+        pairwise differences, including custom rows with opposite coefficients.
+        Grouped comparisons retain separate interval families. Quantiles are
+        evaluated on demand.
         """
         confidence = _validate_contrast_level(self.level if level is None else level)
         requested = self.adjust if adjust is None else adjust
@@ -108,8 +111,8 @@ class ContrastResult:
                 continue
             if interval_adjust == "tukey" and n_means is None:
                 raise ValueError(
-                    "Tukey intervals require pairwise differences created by pairs() or "
-                    "trt.vs.ctrl; use adjust='bonferroni' or 'none' for custom contrasts."
+                    "Tukey intervals require pairwise differences; use "
+                    "adjust='bonferroni' or 'none' for general custom contrasts."
                 )
             critical = _contrast_critical_value(
                 confidence, self.df, interval_adjust, stop - start, n_means
@@ -215,7 +218,7 @@ class Emmeans:
 
     def contrast(
         self,
-        method: str | NDArray[np.floating] = "pairwise",
+        method: str | ArrayLike = "pairwise",
         adjust: str = "none",
         level: float = 0.95,
     ) -> ContrastResult:
@@ -267,11 +270,18 @@ class Emmeans:
 
     def _custom_contrast(
         self,
-        C: NDArray[np.floating],
+        C: ArrayLike,
         adjust: str = "none",
         level: float = 0.95,
     ) -> ContrastResult:
         level = _validate_contrast_level(level)
+        n_levels = len(self.result.emmean)
+        C, pairwise_means = _validate_custom_contrasts(C, n_levels)
+        if adjust == "tukey" and pairwise_means is None and len(C):
+            raise ValueError(
+                "Tukey adjustment requires pairwise differences; use "
+                "adjust='bonferroni', 'holm', 'fdr', or 'none' for general custom contrasts."
+            )
         n_contrasts = C.shape[0]
         L_contrast = C @ self._L
         estimates = L_contrast @ self._beta
@@ -279,7 +289,7 @@ class Emmeans:
         se_contrast = np.sqrt(np.maximum(var_contrast, 0))
         t_ratio = estimates / se_contrast
         raw_p = 2 * (1 - stats.t.cdf(np.abs(t_ratio), self._df))
-        p_adjusted = _adjust_pvalues(raw_p, adjust, n_contrasts, self._df, t_ratio)
+        p_adjusted = _adjust_pvalues(raw_p, adjust, n_levels, self._df, t_ratio)
 
         contrast_labels = [f"C{i + 1}" for i in range(n_contrasts)]
 
@@ -292,7 +302,7 @@ class Emmeans:
             p_value=p_adjusted,
             adjust=adjust,
             level=level,
-            _families=((0, n_contrasts, None),),
+            _families=((0, n_contrasts, pairwise_means),),
         )
 
     def __str__(self) -> str:
@@ -300,6 +310,46 @@ class Emmeans:
 
     def __repr__(self) -> str:
         return f"Emmeans(specs={self._specs}, n={len(self.result.emmean)})"
+
+
+def _validate_custom_contrasts(C: ArrayLike, n_means: int) -> tuple[NDArray, int | None]:
+    """Validate real coefficient rows and identify scaled pairwise differences."""
+    if np.ma.is_masked(C):
+        raise ValueError("Custom contrast coefficients must not contain masked values")
+    try:
+        coefficients = np.asarray(C)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Custom contrast coefficients must form a rectangular 2-D matrix") from exc
+    if coefficients.ndim != 2:
+        raise ValueError(
+            "Custom contrast coefficients must be a 2-D matrix; use [[...]] for a single contrast"
+        )
+    if coefficients.shape[1] != n_means:
+        raise ValueError(
+            f"Custom contrast matrix has {coefficients.shape[1]} columns; "
+            f"expected {n_means}, one per marginal mean"
+        )
+    if np.iscomplexobj(coefficients) or coefficients.dtype.kind in "mMV":
+        raise TypeError("Custom contrast coefficients must be real numeric values")
+    if coefficients.dtype.kind not in "biuf":
+        try:
+            coefficients = coefficients.astype(np.float64)
+        except (TypeError, ValueError) as exc:
+            raise TypeError("Custom contrast coefficients must be real numeric values") from exc
+
+    pairwise = n_means >= 2 and coefficients.dtype.kind != "b"
+    batch_rows = max(1, _MAX_CONTRAST_ELEMENTS // max(1, n_means))
+    for start in range(0, len(coefficients), batch_rows):
+        chunk = coefficients[start : start + batch_rows]
+        if not np.isfinite(chunk).all():
+            raise ValueError("Custom contrast coefficients must contain only finite values")
+        if pairwise:
+            minimum = chunk.min(axis=1)
+            maximum = chunk.max(axis=1)
+            pairwise = bool(np.all((minimum < 0) & (maximum > 0) & (minimum == -maximum)))
+            if pairwise:
+                pairwise = bool(np.all(np.count_nonzero(chunk, axis=1) == 2))
+    return coefficients, n_means if pairwise else None
 
 
 def _validate_contrast_level(level: float) -> float:
@@ -363,7 +413,7 @@ def _adjust_pvalues(
         q = np.abs(t_ratio) * np.sqrt(2)
         return stats.studentized_range.sf(q, n_groups, df)
     elif method == "dunnett":
-        return np.minimum(p * (n_groups - 1), 1.0)
+        return np.minimum(p * len(p), 1.0)
     else:
         return p
 

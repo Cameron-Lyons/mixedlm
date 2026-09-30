@@ -322,8 +322,12 @@ reuse scalar critical values for families with the same settings.
 Unadjusted intervals use the result's Student's t reference, or the normal
 reference when `df=inf`. Tukey intervals use the studentized range with the
 number of means in the pairwise family; treatment-versus-control differences
-can also use this adjustment. General custom contrasts require `"none"` or
-Bonferroni-based intervals. Holm, FDR/BH, and the current Dunnett approximation
+can also use this adjustment. Custom rows with exactly two nonzero, opposite
+coefficients are recognized as scaled pairwise differences and support Tukey
+tests and intervals. The family includes all marginal means represented by
+the matrix columns, even when only a subset of pairs is requested. General
+custom linear combinations reject Tukey and can use other adjustments instead.
+Holm, FDR/BH, and the current Dunnett approximation
 use Bonferroni intervals; both the requested and actual methods are recorded
 in the table's attributes. The Holm/FDR fallback follows the
 [emmeans interval convention](https://rvlenth.github.io/emmeans/reference/summary.emmGrid.html#p-value-adjustments).
@@ -331,6 +335,15 @@ in the table's attributes. The Holm/FDR fallback follows the
 Intervals remain on the linear predictor scale, including when marginal means
 were displayed with `type="response"`. Tables can be edited independently of
 the contrast result, and empty contrast sets return empty tables.
+
+Custom coefficients accept rectangular two-dimensional arrays, nested lists,
+or data frames, with one row per comparison and one column per marginal mean
+in the comparison family.
+Malformed shapes, complex values, and nonfinite or masked coefficients raise
+clear errors before covariance calculations. Numeric coefficient matrices are
+validated in bounded batches. The legacy `"dunnett"` option remains a Bonferroni approximation and
+counts the comparisons actually requested; it does not compute the exact
+Dunnett distribution.
 
 **Example:**
 

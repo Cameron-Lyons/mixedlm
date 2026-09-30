@@ -424,3 +424,42 @@ def test_benchmark_contrast_confidence_intervals(benchmark, adjust):
     assert np.all(intervals.lower < result.estimate)
     assert np.all(intervals.upper > result.estimate)
     np.testing.assert_allclose((intervals.lower + intervals.upper) / 2, result.estimate)
+
+
+@pytest.mark.benchmark(group="custom-contrast-validation")
+@pytest.mark.parametrize("kind", ["general", "pairwise"])
+def test_benchmark_custom_contrast_validation(benchmark, kind):
+    from mixedlm.inference.emmeans import EmmeanResult, Emmeans
+
+    rng = np.random.default_rng(929)
+    n_means, n_contrasts = 64, 2048
+    coefficients = rng.normal(size=(n_means, 24))
+    beta = rng.normal(size=24)
+    values = coefficients @ beta
+    zeros = np.zeros(n_means)
+    means = Emmeans(
+        EmmeanResult(
+            values, zeros, 80.0, zeros, zeros, pd.DataFrame({"treatment": range(n_means)}), 0.95
+        ),
+        coefficients,
+        np.eye(24),
+        beta,
+        80.0,
+        ["treatment"],
+        [list(range(n_means))],
+    )
+    if kind == "general":
+        custom = rng.normal(size=(n_contrasts, n_means))
+    else:
+        custom = np.zeros((n_contrasts, n_means))
+        left = np.arange(n_contrasts) % n_means
+        custom[np.arange(n_contrasts), left] = 1.0
+        custom[np.arange(n_contrasts), (left + 1) % n_means] = -1.0
+
+    result = benchmark(means.contrast, custom, adjust="none")
+
+    expected_coefficients = custom @ coefficients
+    np.testing.assert_allclose(
+        result.estimate, expected_coefficients @ beta, rtol=1e-12, atol=1e-12
+    )
+    np.testing.assert_allclose(result.se, np.linalg.norm(expected_coefficients, axis=1), rtol=1e-12)

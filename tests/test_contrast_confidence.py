@@ -147,10 +147,12 @@ def test_interval_adjustment_aliases_report_the_actual_method():
 
 
 def test_arbitrary_custom_contrasts_require_a_supported_interval_method():
-    result = _contrasts(_means(), "custom", "tukey")
+    with pytest.raises(ValueError, match="Tukey adjustment requires pairwise"):
+        _contrasts(_means(), "custom", "tukey")
+    result = _contrasts(_means(), "custom", "bonferroni")
 
     with pytest.raises(ValueError, match="Tukey intervals require pairwise"):
-        result.confint()
+        result.confint(adjust="tukey")
     assert np.all(np.isfinite(result.confint(adjust="bonferroni").lower))
 
 
