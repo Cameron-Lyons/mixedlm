@@ -569,6 +569,22 @@ boot = mlm.bootMer(model, nsim=500, seed=42)
 
 **Returns:** BootstrapResult object
 
+Linear and generalized parametric bootstrap use local random streams for each
+replicate and leave NumPy's global random state unchanged, including in worker
+processes. A fixed integer seed gives the same samples with serial and parallel
+execution. The direct `bootstrap_lmer()` and `bootstrap_glmer()` functions also
+accept a reusable NumPy `RandomState` or `Generator` as `seed`:
+
+```python
+import numpy as np
+
+rng = np.random.default_rng(42)
+first = mlm.bootstrap_lmer(model, n_boot=100, seed=rng)
+next_batch = mlm.bootstrap_lmer(model, n_boot=100, seed=rng)
+```
+
+The sample count must be a positive integer.
+
 **Methods:**
 
 - `ci(level=0.95, method="percentile")`: Fixed-effect confidence intervals

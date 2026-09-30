@@ -171,7 +171,7 @@ def test_structured_intercept_only_consumes_one_parameter(kind, cov_type):
 def test_zero_glmm_variance_adds_no_artificial_random_effects(monkeypatch, bootstrap, cov_type):
     result = _result("glmer", cov_type)
     result.theta[:] = 0.0
-    monkeypatch.setattr(result.family, "simulate", lambda mu: mu)
+    monkeypatch.setattr(result.family, "simulate", lambda mu, rng=None: mu)
     expected = result.matrices.X @ result.beta + result.matrices.offset
 
     actual = _simulate_glmer(result) if bootstrap else result.simulate(seed=8)

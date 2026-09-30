@@ -30,6 +30,7 @@ from mixedlm.models.shared_utils import (
     symmetric_inverse,
 )
 from mixedlm.utils import _format_pvalue, _get_signif_code
+from mixedlm.utils.random import RandomSeed, native_seed, random_stream, validate_simulation_count
 from mixedlm.utils.simulation import simulate_random_effects, simulation_parameters
 from mixedlm.utils.validation import _validate_confidence_level
 
@@ -1418,39 +1419,42 @@ class GlmerResult(MerResultMixin):
     def simulate(
         self,
         nsim: int = 1,
-        seed: int | None = None,
+        seed: RandomSeed = None,
         use_re: bool = True,
         re_form: str | None = None,
     ) -> NDArray[np.floating]:
-        if nsim < 1:
-            raise ValueError("nsim must be at least 1")
+        """Simulate responses using an isolated or caller-provided random stream.
 
-        if seed is not None:
-            np.random.seed(seed)
+        ``seed`` accepts an integer, ``RandomState``, ``Generator``, or ``None``.
+        Integer seeds preserve the existing draw sequence for the selected backend.
+        Reusing a stream continues it across calls without changing NumPy's global state.
+        """
+        validate_simulation_count(nsim)
+        rng = random_stream(seed)
 
         n = self.matrices.n_obs
         q = self.matrices.n_random
 
         if nsim == 1:
-            return self._simulate_once(use_re, re_form)
+            return self._simulate_once(use_re, re_form, rng)
 
         include_re = use_re and q > 0 and re_form not in ("~0", "NA")
 
         if not include_re:
             fixed_eta = self.matrices.X @ self.beta + self.matrices.offset
             eta = np.broadcast_to(fixed_eta[:, None], (n, nsim))
-            return self._simulate_response(self.family.link.inverse(eta))
+            return self._simulate_response(self.family.link.inverse(eta), rng)
 
         try:
             from mixedlm._rust import simulate_re_batch
 
-            return self._simulate_batch_rust(nsim, seed, simulate_re_batch)
+            return self._simulate_batch_rust(nsim, native_seed(seed, rng), simulate_re_batch, rng)
         except ImportError:
             pass
 
         result = np.zeros((n, nsim), dtype=np.float64)
         for i in range(nsim):
-            result[:, i] = self._simulate_once(use_re, re_form)
+            result[:, i] = self._simulate_once(use_re, re_form, rng)
 
         return result
 
@@ -1459,7 +1463,9 @@ class GlmerResult(MerResultMixin):
         nsim: int,
         seed: int | None,
         simulate_re_batch: Any,
+        rng: Any | None = None,
     ) -> NDArray[np.floating]:
+        rng = np.random if rng is None else rng
         fixed_eta = self.matrices.X @ self.beta + self.matrices.offset
         structures = self.matrices.random_structures
         theta, correlated = simulation_parameters(self.theta, structures)
@@ -1474,34 +1480,38 @@ class GlmerResult(MerResultMixin):
         )
         eta = np.asarray(self.matrices.Z @ u_batch.T, dtype=np.float64)
         eta += fixed_eta[:, None]
-        return self._simulate_response(self.family.link.inverse(eta))
+        return self._simulate_response(self.family.link.inverse(eta), rng)
 
     def _simulate_once(
         self,
         use_re: bool = True,
         re_form: str | None = None,
+        rng: Any | None = None,
     ) -> NDArray[np.floating]:
+        rng = np.random if rng is None else rng
         q = self.matrices.n_random
 
         eta = self.matrices.X @ self.beta + self.matrices.offset
 
         if re_form != "~0" and re_form != "NA" and use_re and q > 0:
-            u_new = simulate_random_effects(self.theta, self.matrices.random_structures)
+            u_new = simulate_random_effects(self.theta, self.matrices.random_structures, rng=rng)
             eta += self.matrices.Z @ u_new
 
-        return self._simulate_response(self.family.link.inverse(eta))
+        return self._simulate_response(self.family.link.inverse(eta), rng)
 
     def _simulate_response(
         self,
         mu: NDArray[np.floating],
+        rng: Any | None = None,
     ) -> NDArray[np.floating]:
+        rng = np.random if rng is None else rng
         if self.family.__class__.__name__ == "Binomial" and self.matrices.trials is not None:
             mu = self.family.clamp_mu(mu, eps=1e-6)
             trials = self.matrices.trials.astype(np.int64)
             if mu.ndim > 1:
                 trials = trials[:, None]
-            return np.random.binomial(trials, mu).astype(np.float64)
-        return self.family.simulate(mu)
+            return rng.binomial(trials, mu).astype(np.float64)
+        return self.family.simulate(mu, rng=rng)
 
     def _refit_from_matrices(self, matrices: ModelMatrices, **kwargs) -> GlmerResult:
         optimizer = GLMMOptimizer(
