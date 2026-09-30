@@ -27,6 +27,7 @@ from mixedlm.models.result_mixin import MerResultMixin
 from mixedlm.models.shared_utils import _RandomEffectFactor, symmetric_inverse
 from mixedlm.utils import _format_pvalue, _get_signif_code
 from mixedlm.utils.simulation import simulate_random_effects, simulation_parameters
+from mixedlm.utils.validation import _validate_confidence_level
 
 
 @dataclass
@@ -417,6 +418,7 @@ class GlmerResult(MerResultMixin):
         NDArray or PredictResult
             Predictions. Returns PredictResult if se_fit=True or interval!="none".
         """
+        level = _validate_confidence_level(level)
         include_re = re_form != "NA" and re_form != "~0"
 
         if newdata is None:
@@ -458,7 +460,7 @@ class GlmerResult(MerResultMixin):
                 "Prediction intervals not available for GLMMs. Use interval='confidence'."
             )
 
-        z_crit = stats.norm.ppf(1 - (1 - level) / 2)
+        z_crit = stats.norm.isf((1 - level) / 2)
 
         if interval == "confidence":
             if type == "link":
@@ -1383,6 +1385,7 @@ class GlmerResult(MerResultMixin):
         from mixedlm.inference.bootstrap import bootstrap_glmer
         from mixedlm.inference.profile import profile_glmer
 
+        level = _validate_confidence_level(level)
         if parm is None:
             parm = self.matrices.fixed_names
         elif isinstance(parm, str):
@@ -1391,7 +1394,7 @@ class GlmerResult(MerResultMixin):
         if method == "Wald":
             vcov = self.vcov()
             alpha = 1 - level
-            z_crit = stats.norm.ppf(1 - alpha / 2)
+            z_crit = stats.norm.isf(alpha / 2)
 
             result: dict[str, tuple[float, float]] = {}
             for p in parm:

@@ -14,6 +14,7 @@ if TYPE_CHECKING:
 from mixedlm.estimation.nlmm import NLMMOptimizer, _as_prior_weights, _build_psi_matrix
 from mixedlm.models.lmer_types import LogLik
 from mixedlm.nlme.models import NonlinearModel
+from mixedlm.utils.validation import _validate_confidence_level
 
 _COV_REGULARIZATION = 1e-8
 _VCOV_EPS = 1e-5
@@ -669,6 +670,7 @@ class NlmerResult:
         """
         from scipy import stats
 
+        level = _validate_confidence_level(level)
         if parm is None:
             parm = self.model.param_names
         elif isinstance(parm, str):
@@ -677,7 +679,7 @@ class NlmerResult:
         if method == "Wald":
             vcov = self.vcov()
             alpha = 1 - level
-            z_crit = stats.norm.ppf(1 - alpha / 2)
+            z_crit = stats.norm.isf(alpha / 2)
 
             result: dict[str, tuple[float, float]] = {}
             for p in parm:

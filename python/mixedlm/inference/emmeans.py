@@ -15,6 +15,7 @@ from scipy import stats
 
 from mixedlm.utils import _format_pvalue
 from mixedlm.utils.dataframe import get_categories, get_column_numpy, is_categorical_or_string
+from mixedlm.utils.validation import _validate_confidence_level
 
 if TYPE_CHECKING:
     from mixedlm.models.glmer import GlmerResult
@@ -743,6 +744,7 @@ def emmeans(
     in a count model fitted with a log-exposure offset. Offsets also enter
     contrasts but contribute no additional coefficient uncertainty.
     """
+    level = _validate_confidence_level(level)
     if type not in {"link", "response"}:
         raise ValueError("type must be 'link' or 'response'")
     if not np.isfinite(level) or not 0 < level < 1:
@@ -776,10 +778,7 @@ def emmeans(
 
     alpha = 1 - level
 
-    if family is not None:
-        critical_value = stats.norm.ppf(1 - alpha / 2)
-    else:
-        critical_value = stats.t.ppf(1 - alpha / 2, df)
+    critical_value = stats.norm.isf(alpha / 2) if family is not None else stats.t.isf(alpha / 2, df)
 
     lower = em_values - critical_value * se_em
     upper = em_values + critical_value * se_em
