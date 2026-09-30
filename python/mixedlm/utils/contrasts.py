@@ -9,6 +9,8 @@ from numpy.typing import NDArray
 if TYPE_CHECKING:
     import pandas as pd
 
+_CONTRAST_VECTORIZE_MIN_ROWS = 4096
+
 
 class ContrastType(Enum):
     TREATMENT = "treatment"
@@ -267,14 +269,33 @@ def apply_contrasts_array(
 
     level_to_idx = {cat: i for i, cat in enumerate(categories)}
 
-    level_indices = np.fromiter(
-        (level_to_idx.get(value, -1) for value in col_values),
-        dtype=np.intp,
-        count=n,
-    )
-    encoded = np.full((n, n_contrasts), np.nan, dtype=np.float64)
-    known = level_indices >= 0
-    encoded[known, :] = contrast_matrix[level_indices[known], :]
+    level_indices: NDArray[np.intp] | None = None
+    if n >= _CONTRAST_VECTORIZE_MIN_ROWS:
+        import pandas as pd
+
+        levels = pd.Index(list(level_to_idx), dtype=object, tupleize_cols=False)
+        if not levels.hasnans:
+            lookup = pd.Series(list(level_to_idx.values()), index=levels, dtype=np.intp)
+            level_indices = (
+                pd.Series(col_values, dtype=object, copy=False)
+                .map(lookup)
+                .fillna(-1)
+                .to_numpy(dtype=np.intp)
+            )
+
+    if level_indices is None:
+        # Avoid pandas setup for small inputs and preserve missing-key identity semantics.
+        level_indices = np.fromiter(
+            (level_to_idx.get(value, -1) for value in col_values), dtype=np.intp, count=n
+        )
+
+    unknown = level_indices < 0
+    if np.all(unknown):
+        encoded = np.full((n, n_contrasts), np.nan, dtype=np.float64)
+    else:
+        # Gather once, then mask unknown rows; avoid copying every known row twice.
+        encoded = np.asarray(contrast_matrix, dtype=np.float64)[level_indices]
+        encoded[unknown, :] = np.nan
 
     columns: list[NDArray[np.floating]] = [encoded[:, j] for j in range(n_contrasts)]
     names: list[str] = [f"{name}.{j + 1}" for j in range(n_contrasts)]
