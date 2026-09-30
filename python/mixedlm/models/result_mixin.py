@@ -126,7 +126,12 @@ class MerResultMixin:
                 raise ValueError(f"New level(s) {levels} in {kind} factor '{name}'.")
         return data
 
-    def _prediction_fixed_matrix(self, newdata: pd.DataFrame) -> NDArray[np.floating]:
+    def _prediction_fixed_matrix(
+        self,
+        newdata: pd.DataFrame,
+        *,
+        contrasts: dict[str, str | NDArray[np.floating]] | None = None,
+    ) -> NDArray[np.floating]:
         """Build a fixed-effects matrix using the fitted encoding schema."""
         from mixedlm.matrices.design import build_fixed_matrix
 
@@ -136,7 +141,7 @@ class MerResultMixin:
         X, fixed_names = build_fixed_matrix(
             self.formula,
             data,
-            contrasts=self.matrices.contrasts,
+            contrasts=self.matrices.contrasts if contrasts is None else contrasts,
             category_levels=self.matrices.category_levels,
         )
         column_indices = {name: index for index, name in enumerate(fixed_names)}
