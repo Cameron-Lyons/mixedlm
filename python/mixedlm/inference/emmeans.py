@@ -11,6 +11,8 @@ import pandas as pd
 from numpy.typing import NDArray
 from scipy import stats
 
+from mixedlm.utils import _format_pvalue
+
 if TYPE_CHECKING:
     from mixedlm.models.glmer import GlmerResult
     from mixedlm.models.lmer import LmerResult
@@ -62,7 +64,7 @@ class EmmeanResult:
 
         col_widths = {}
         for col in self.grid.columns:
-            max_width = max(len(str(col)), max(len(str(v)) for v in self.grid[col]))
+            max_width = max(len(str(col)), max((len(str(v)) for v in self.grid[col]), default=0))
             col_widths[col] = max(max_width, 8)
 
         header = ""
@@ -104,15 +106,16 @@ class ContrastResult:
         lines.append("Pairwise Comparisons")
         lines.append("")
 
-        max_contrast_len = max(len(c) for c in self.contrast)
+        max_contrast_len = max((len(c) for c in self.contrast), default=0)
         max_contrast_len = max(max_contrast_len, 8)
 
         header = f"{'contrast':<{max_contrast_len}} {'estimate':>10} {'SE':>8}"
-        header += f" {'df':>6} {'t.ratio':>8} {'p.value':>10}"
+        ratio_label = "z.ratio" if np.isinf(self.df) else "t.ratio"
+        header += f" {'df':>6} {ratio_label:>8} {'p.value':>10}"
         lines.append(header)
 
         for i in range(len(self.contrast)):
-            p_str = f"{self.p_value[i]:.4f}" if self.p_value[i] >= 0.0001 else "<.0001"
+            p_str = _format_pvalue(self.p_value[i])
             row = f"{self.contrast[i]:<{max_contrast_len}} {self.estimate[i]:>10.3f}"
             row += f" {self.se[i]:>8.3f} {self.df:>6.1f} {self.t_ratio[i]:>8.3f}"
             row += f" {p_str:>10}"
@@ -326,7 +329,8 @@ def emmeans(
     terms = model.terms()
     beta = model.beta
     vcov = model.vcov()
-    df_resid = float(model.df_residual())
+    family = getattr(model, "family", None)
+    df = np.inf if family is not None else float(model.df_residual())
 
     factor_vars: dict[str, list[Any]] = {}
     covariate_vars: dict[str, float] = {}
@@ -392,13 +396,12 @@ def emmeans(
     var_em = _rowwise_quadratic_form(L, vcov)
     se_em = np.sqrt(np.maximum(var_em, 0))
 
-    family = getattr(model, "family", None)
     alpha = 1 - level
 
     if family is not None:
         critical_value = stats.norm.ppf(1 - alpha / 2)
     else:
-        critical_value = stats.t.ppf(1 - alpha / 2, df_resid)
+        critical_value = stats.t.ppf(1 - alpha / 2, df)
 
     lower = em_values - critical_value * se_em
     upper = em_values + critical_value * se_em
@@ -426,7 +429,7 @@ def emmeans(
     result = EmmeanResult(
         emmean=em_values,
         se=se_em,
-        df=df_resid,
+        df=df,
         lower=lower,
         upper=upper,
         grid=result_grid,
@@ -438,7 +441,7 @@ def emmeans(
         _L=L,
         _vcov=vcov,
         _beta=beta,
-        _df=df_resid,
+        _df=df,
         _specs=specs,
         _levels=spec_levels,
     )
