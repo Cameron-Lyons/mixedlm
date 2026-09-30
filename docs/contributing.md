@@ -84,6 +84,37 @@ under similar load. Correctness tests check solutions and log-determinants
 independently of elapsed time, including reuse of earlier numeric factors after
 later factorizations.
 
+### Rebuilding the Native Backend
+
+After editing Rust code, rebuild the backend before running tests:
+
+```bash
+python -m pip install -e ".[dev]"
+python tools/native_build.py
+```
+
+The test suite checks that the loaded native library matches the checkout's
+Rust sources. The check covers `src/**/*.rs`, `Cargo.toml`, `Cargo.lock`, and
+`build.rs` using their contents, so it detects changes even when file timestamps
+are preserved. Test collection and tests without an available native backend
+keep their existing behavior. Normal package imports and model fitting do not
+run this development check.
+
+If the check reports an older or mismatched library, rebuild from the checkout
+you intend to test, using the active virtual environment:
+
+```bash
+cargo clean --release --package mixedlm
+python -m pip install -e ".[dev]"
+python tools/native_build.py
+```
+
+Use the same `CARGO_TARGET_DIR` as the build if you configured one. Sharing a
+target directory between worktrees can reuse an older library even when Cargo
+reports a successful build. Cleaning just the `mixedlm` package keeps dependency
+artifacts available. The embedded checksum identifies source contents; it is
+not a cryptographic signature or a record of compiler flags.
+
 ## Code Style
 
 This project uses:
@@ -94,9 +125,9 @@ This project uses:
 Run the linters:
 
 ```bash
-ruff check python/
-ruff format python/
-mypy python/mixedlm/
+ruff check python/ tests/ tools/
+ruff format python/ tests/ tools/
+mypy python/ tools/ --ignore-missing-imports
 ```
 
 ### Style Guidelines
