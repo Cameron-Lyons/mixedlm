@@ -31,6 +31,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Consolidated duplicate CI and security checks while preserving coverage
 
 ### Fixed
+- Linear and generalized fits, refits, and modular result constructors reject invalid final estimates instead of returning nonfinite values or fabricated coefficients; reported deviance comes from the validated final evaluation
 - Poisson and other unbounded GLMM families no longer clamp fitted means below one
 - Unsupported family and link combinations no longer route through the native fast path
 

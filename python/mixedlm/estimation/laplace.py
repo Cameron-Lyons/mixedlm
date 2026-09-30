@@ -15,6 +15,7 @@ from mixedlm.estimation.reml import (
     _build_theta_bounds,
     _count_theta,
 )
+from mixedlm.estimation.validation import validate_finite_real
 from mixedlm.families.base import Family, IdentityLink, LogitLink, LogLink
 from mixedlm.families.binomial import Binomial
 from mixedlm.families.gaussian import Gaussian
@@ -748,6 +749,34 @@ class GLMMOptimizer:
             dev, _, _ = laplace_deviance_fast(theta, self.matrices, self.family)
         return dev
 
+    def _final_evaluation(
+        self, theta: NDArray[np.floating], *, nAGQ: int | None = None
+    ) -> tuple[float, NDArray[np.floating], NDArray[np.floating]]:
+        """Evaluate and validate final estimates using the requested quadrature."""
+        nAGQ = self.nAGQ if nAGQ is None else nAGQ
+        try:
+            validate_finite_real("variance parameters", theta, (self.n_theta,))
+            if nAGQ > 1:
+                deviance, beta, u = adaptive_gh_deviance_fast(
+                    theta, self.matrices, self.family, nAGQ=nAGQ
+                )
+            else:
+                deviance, beta, u = laplace_deviance_fast(theta, self.matrices, self.family)
+            validate_finite_real("deviance", deviance, ())
+            validate_finite_real("fixed effects", beta, (self.matrices.n_fixed,))
+            validate_finite_real("random effects", u, (self.matrices.n_random,))
+        except (
+            FloatingPointError,
+            OverflowError,
+            TypeError,
+            ValueError,
+            linalg.LinAlgError,
+        ) as exc:
+            raise RuntimeError(
+                f"Generalized optimization did not produce a valid fit: {type(exc).__name__}: {exc}"
+            ) from exc
+        return deviance, beta, u
+
     def optimize(
         self,
         start: NDArray[np.floating] | None = None,
@@ -784,15 +813,7 @@ class GLMMOptimizer:
 
         theta_opt = result.x
 
-        if self.nAGQ > 1:
-            final_dev, beta, u = adaptive_gh_deviance_fast(
-                theta_opt,
-                self.matrices,
-                self.family,
-                nAGQ=self.nAGQ,
-            )
-        else:
-            final_dev, beta, u = laplace_deviance_fast(theta_opt, self.matrices, self.family)
+        final_dev, beta, u = self._final_evaluation(theta_opt)
 
         return GLMMOptimizationResult(
             theta=theta_opt,
