@@ -320,6 +320,15 @@ effects = mlm.allEffects(model)
 Grid calculations read the fitted pandas frame without copying or modifying it.
 Returned prediction tables are independent of that frame.
 
+For Polars models, adjusted prediction grids convert only fixed-effect predictor
+columns through NumPy arrays. This avoids creating Python objects for the whole
+model frame. Contiguous numeric columns without missing values can share their
+underlying storage; floating-point reference reductions retain float64 precision.
+Category order and missing values are preserved, and returned prediction tables
+can be edited independently of the fitted data.
+Extraction also handles Polars 0.20 releases that cannot export categorical
+columns directly to NumPy or return nonnullable Booleans as object arrays.
+
 ### emmeans
 
 Compute estimated marginal means.

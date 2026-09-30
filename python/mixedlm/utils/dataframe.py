@@ -16,6 +16,25 @@ class DataFrameLike(Protocol):
     def __len__(self) -> int: ...
 
 
+def _polars_column_numpy(column: Any) -> NDArray:
+    """Export native arrays while preserving dtypes on older Polars."""
+    import numpy as np
+    import polars as pl
+
+    try:
+        values = column.to_numpy()
+    except pl.exceptions.ComputeError:
+        dtype = str(column.dtype)
+        if "Categorical" not in dtype and "Enum" not in dtype:
+            raise
+        return column.cast(pl.Utf8).to_numpy()
+    # Older Polars exports even nonnullable Booleans as objects. Keep nulls
+    # intact, but restore bool dtype for numeric predictors and Boolean masks.
+    if column.dtype == pl.Boolean and column.null_count() == 0:
+        return np.asarray(values, dtype=np.bool_)
+    return values
+
+
 def get_column_numpy(data: Any, name: str, dtype: type | None = None) -> NDArray:
     """Extract a column as a numpy array.
 
@@ -33,7 +52,7 @@ def get_column_numpy(data: Any, name: str, dtype: type | None = None) -> NDArray
     data = ensure_dataframe(data, columns=[name])
 
     if _is_polars(data):
-        arr = data.get_column(name).to_numpy()
+        arr = _polars_column_numpy(data.get_column(name))
         if dtype is not None:
             return arr.astype(dtype)
         return arr
@@ -52,7 +71,7 @@ def get_column_values(data: Any, name: str) -> NDArray:
     data = ensure_dataframe(data, columns=[name])
     if _is_polars(data):
         col = data.get_column(name)
-        return col.to_numpy()
+        return _polars_column_numpy(col)
     return data[name].values
 
 
@@ -99,7 +118,7 @@ def is_categorical_or_string(data: Any, col_name: str) -> bool:
         import polars as pl
 
         col = data.get_column(col_name)
-        return col.dtype in (pl.Utf8, pl.String, pl.Categorical, pl.Enum)
+        return col.dtype in (pl.Utf8, pl.Categorical, pl.Enum)
 
     col = data[col_name]
 
