@@ -250,6 +250,7 @@ class OptimizeResult:
     converged: bool
     n_iter: int
     message: str
+    pirls_converged: bool | None = None
 
 
 def lFormula(
@@ -610,6 +611,8 @@ def optimizeGlmer(
     """
     from scipy.optimize import minimize
 
+    from mixedlm.estimation.laplace import glmm_deviance_with_status
+
     if start is None:
         start = devfun.get_start()
 
@@ -631,12 +634,19 @@ def optimizeGlmer(
         callback=callback,
     )
 
+    deviance, _, _, pirls_converged = glmm_deviance_with_status(
+        result.x, devfun.parsed.matrices, devfun.parsed.family, nAGQ=devfun.optimizer.nAGQ
+    )
+    message = str(result.message) if hasattr(result, "message") else ""
+    if not pirls_converged:
+        message += "; inner PIRLS solver did not converge"
     return OptimizeResult(
         theta=result.x,
-        deviance=result.fun,
-        converged=result.success,
+        deviance=deviance,
+        converged=bool(result.success and pirls_converged),
+        pirls_converged=pirls_converged,
         n_iter=result.nit,
-        message=result.message if hasattr(result, "message") else "",
+        message=message,
     )
 
 
@@ -733,13 +743,14 @@ def mkGlmerMod(
     mkGlmerDevfun : Create deviance function.
     optimizeGlmer : Optimize deviance.
     """
-    from mixedlm.estimation.laplace import laplace_deviance
+    from mixedlm.estimation.laplace import glmm_deviance_with_status
     from mixedlm.models.glmer import GlmerResult
 
-    _, beta, u = laplace_deviance(
+    deviance, beta, u, pirls_converged = glmm_deviance_with_status(
         opt.theta,
         devfun.parsed.matrices,
         devfun.parsed.family,
+        nAGQ=nAGQ,
     )
 
     return GlmerResult(
@@ -749,8 +760,9 @@ def mkGlmerMod(
         theta=opt.theta,
         beta=beta,
         u=u,
-        deviance=opt.deviance,
-        converged=opt.converged,
+        deviance=deviance,
+        converged=bool(opt.converged and pirls_converged),
+        pirls_converged=pirls_converged,
         n_iter=opt.n_iter,
         nAGQ=nAGQ,
     )

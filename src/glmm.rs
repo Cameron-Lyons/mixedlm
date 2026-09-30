@@ -519,7 +519,7 @@ pub fn laplace_deviance_impl(
     link: LinkFunction,
     beta_start: Option<&DVector<f64>>,
     u_start: Option<&DVector<f64>>,
-) -> (f64, DVector<f64>, DVector<f64>) {
+) -> (f64, DVector<f64>, DVector<f64>, bool) {
     let n = y.nrows();
     let q = z.ncols();
 
@@ -539,7 +539,8 @@ pub fn laplace_deviance_impl(
             PIRLS_MAX_ITER,
             PIRLS_TOLERANCE,
         );
-        return (result.deviance, result.beta, result.u);
+        let converged = result.converged && result.deviance.is_finite();
+        return (result.deviance, result.beta, result.u, converged);
     }
 
     let result = pirls_impl(
@@ -558,6 +559,7 @@ pub fn laplace_deviance_impl(
         PIRLS_TOLERANCE,
     );
 
+    let converged = result.converged && result.deviance.is_finite();
     let beta = result.beta;
     let u = result.u;
     let spherical = result.spherical;
@@ -636,7 +638,7 @@ pub fn laplace_deviance_impl(
 
     deviance += logdet_h;
 
-    (deviance, beta, u)
+    (deviance, beta, u, converged)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -735,7 +737,7 @@ pub fn adaptive_gh_deviance_impl(
     n_agq: usize,
     beta_start: Option<&DVector<f64>>,
     u_start: Option<&DVector<f64>>,
-) -> (f64, DVector<f64>, DVector<f64>) {
+) -> (f64, DVector<f64>, DVector<f64>, bool) {
     let q = z.ncols();
 
     if n_agq <= 1 || q == 0 {
@@ -776,6 +778,7 @@ pub fn adaptive_gh_deviance_impl(
         PIRLS_TOLERANCE,
     );
 
+    let converged = result.converged && result.deviance.is_finite();
     let beta = result.beta;
     let u = result.u;
     let spherical = result.spherical;
@@ -866,7 +869,7 @@ pub fn adaptive_gh_deviance_impl(
 
     let deviance = -2.0 * log_integral;
 
-    (deviance, beta, u)
+    (deviance, beta, u, converged)
 }
 
 #[pyfunction]
@@ -989,53 +992,11 @@ pub fn laplace_deviance<'py>(
     family: &str,
     link: &str,
 ) -> PyResult<(f64, Vec<f64>, Vec<f64>)> {
-    let structures: Vec<RandomEffectStructure> = n_levels
-        .into_iter()
-        .zip(n_terms)
-        .zip(correlated)
-        .map(|((nl, nt), c)| RandomEffectStructure {
-            n_levels: nl,
-            n_terms: nt,
-            correlated: c,
-        })
-        .collect();
-
-    let (family_type, link_fn) = parse_family_and_link(family, link)?;
-
-    let y_arr = y.as_array();
-    let x_arr = x.as_array();
-    let n = y_arr.len();
-    let p = x_arr.ncols();
-
-    let y_vec: DVector<f64> = y_arr.iter().copied().collect();
-    let x_mat = DMatrix::from_fn(n, p, |i, j| x_arr[[i, j]]);
-    let z_mat = csc_from_scipy(
-        z_data.as_slice()?,
-        z_indices.as_slice()?,
-        z_indptr.as_slice()?,
-        z_shape,
+    let (deviance, beta, u, _) = glmm_deviance(
+        y, x, z_data, z_indices, z_indptr, z_shape, weights, offset, theta, n_levels, n_terms,
+        correlated, family, link, 1,
     )?;
-    let offset_vec: DVector<f64> = offset.as_array().iter().copied().collect();
-
-    let (deviance, beta, u) = laplace_deviance_impl(
-        &y_vec,
-        &x_mat,
-        &z_mat,
-        weights.as_slice()?,
-        &offset_vec,
-        theta.as_slice()?,
-        &structures,
-        family_type,
-        link_fn,
-        None,
-        None,
-    );
-
-    Ok((
-        deviance,
-        beta.iter().cloned().collect(),
-        u.iter().cloned().collect(),
-    ))
+    Ok((deviance, beta, u))
 }
 
 #[pyfunction]
@@ -1074,6 +1035,49 @@ pub fn adaptive_gh_deviance<'py>(
     link: &str,
     n_agq: usize,
 ) -> PyResult<(f64, Vec<f64>, Vec<f64>)> {
+    let (deviance, beta, u, _) = glmm_deviance(
+        y, x, z_data, z_indices, z_indptr, z_shape, weights, offset, theta, n_levels, n_terms,
+        correlated, family, link, n_agq,
+    )?;
+    Ok((deviance, beta, u))
+}
+
+#[pyfunction]
+#[pyo3(signature = (
+    y,
+    x,
+    z_data,
+    z_indices,
+    z_indptr,
+    z_shape,
+    weights,
+    offset,
+    theta,
+    n_levels,
+    n_terms,
+    correlated,
+    family,
+    link,
+    n_agq
+))]
+#[allow(clippy::too_many_arguments)]
+pub fn glmm_deviance<'py>(
+    y: numpy::PyArrayLike1<'py, f64>,
+    x: numpy::PyArrayLike2<'py, f64>,
+    z_data: numpy::PyArrayLike1<'py, f64>,
+    z_indices: numpy::PyArrayLike1<'py, i64>,
+    z_indptr: numpy::PyArrayLike1<'py, i64>,
+    z_shape: (usize, usize),
+    weights: numpy::PyArrayLike1<'py, f64>,
+    offset: numpy::PyArrayLike1<'py, f64>,
+    theta: numpy::PyArrayLike1<'py, f64>,
+    n_levels: Vec<usize>,
+    n_terms: Vec<usize>,
+    correlated: Vec<bool>,
+    family: &str,
+    link: &str,
+    n_agq: usize,
+) -> PyResult<(f64, Vec<f64>, Vec<f64>, bool)> {
     let structures: Vec<RandomEffectStructure> = n_levels
         .into_iter()
         .zip(n_terms)
@@ -1102,7 +1106,7 @@ pub fn adaptive_gh_deviance<'py>(
     )?;
     let offset_vec: DVector<f64> = offset.as_array().iter().copied().collect();
 
-    let (deviance, beta, u) = adaptive_gh_deviance_impl(
+    let (deviance, beta, u, converged) = adaptive_gh_deviance_impl(
         &y_vec,
         &x_mat,
         &z_mat,
@@ -1121,5 +1125,6 @@ pub fn adaptive_gh_deviance<'py>(
         deviance,
         beta.iter().cloned().collect(),
         u.iter().cloned().collect(),
+        converged,
     ))
 }

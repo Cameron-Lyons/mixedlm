@@ -511,7 +511,8 @@ class TestRefitMethod:
 
         result2 = result.refit(newresp=new_y)
 
-        assert result2.converged or result2.n_iter > 0
+        np.testing.assert_array_equal(result2.matrices.y, new_y)
+        assert not result2.converged or result2.pirls_converged
         assert len(result2.beta) == len(result.beta)
 
     def test_refit_wrong_length(self):

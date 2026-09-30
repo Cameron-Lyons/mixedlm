@@ -73,6 +73,7 @@ def clear_lambda_cache() -> None:
 
 try:
     from mixedlm._rust import adaptive_gh_deviance as _rust_adaptive_gh_deviance
+    from mixedlm._rust import glmm_deviance as _rust_glmm_deviance
     from mixedlm._rust import laplace_deviance as _rust_laplace_deviance
 
     _HAS_RUST = True
@@ -112,6 +113,7 @@ class GLMMOptimizationResult:
     deviance: float
     converged: bool
     n_iter: int
+    pirls_converged: bool = True
 
 
 @dataclass
@@ -341,6 +343,17 @@ def laplace_deviance(
     beta_start: NDArray[np.floating] | None = None,
     u_start: NDArray[np.floating] | None = None,
 ) -> tuple[float, NDArray[np.floating], NDArray[np.floating]]:
+    """Evaluate deviance and fitted coefficients; use glmm_deviance_with_status for inner status."""
+    return _laplace_deviance_with_status(theta, matrices, family, beta_start, u_start)[:3]
+
+
+def _laplace_deviance_with_status(
+    theta: NDArray[np.floating],
+    matrices: ModelMatrices,
+    family: Family,
+    beta_start: NDArray[np.floating] | None = None,
+    u_start: NDArray[np.floating] | None = None,
+) -> tuple[float, NDArray[np.floating], NDArray[np.floating], bool]:
     q = matrices.n_random
 
     prior_weights = matrices.weights
@@ -348,7 +361,12 @@ def laplace_deviance(
 
     if q == 0:
         state = _pirls_state(matrices, family, theta, beta_start, u_start)
-        return state.deviance, state.beta, state.random_effects
+        return (
+            state.deviance,
+            state.beta,
+            state.random_effects,
+            bool(state.converged and np.isfinite(state.deviance)),
+        )
 
     state = _pirls_state(matrices, family, theta, beta_start, u_start)
     beta = state.beta
@@ -391,7 +409,12 @@ def laplace_deviance(
 
     deviance += logdet_H
 
-    return float(deviance), beta, random_effects
+    return (
+        float(deviance),
+        beta,
+        random_effects,
+        bool(state.converged and np.isfinite(state.deviance)),
+    )
 
 
 def _get_gh_nodes_weights(n: int) -> tuple[NDArray[np.floating], NDArray[np.floating]]:
@@ -494,8 +517,23 @@ def adaptive_gh_deviance(
     u : NDArray
         Random effect estimates.
     """
+    return _adaptive_gh_deviance_with_status(
+        theta, matrices, family, nAGQ, beta_start, u_start, n_jobs
+    )[:3]
+
+
+def _adaptive_gh_deviance_with_status(
+    theta: NDArray[np.floating],
+    matrices: ModelMatrices,
+    family: Family,
+    nAGQ: int = 1,
+    beta_start: NDArray[np.floating] | None = None,
+    u_start: NDArray[np.floating] | None = None,
+    n_jobs: int = 1,
+) -> tuple[float, NDArray[np.floating], NDArray[np.floating], bool]:
+    """Evaluate adaptive quadrature and retain the inner convergence flag."""
     if nAGQ == 1:
-        return laplace_deviance(theta, matrices, family, beta_start, u_start)
+        return _laplace_deviance_with_status(theta, matrices, family, beta_start, u_start)
 
     q = matrices.n_random
     prior_weights = matrices.weights
@@ -503,11 +541,16 @@ def adaptive_gh_deviance(
 
     if q == 0:
         state = _pirls_state(matrices, family, theta, beta_start, u_start)
-        return state.deviance, state.beta, state.random_effects
+        return (
+            state.deviance,
+            state.beta,
+            state.random_effects,
+            bool(state.converged and np.isfinite(state.deviance)),
+        )
 
     first_struct = matrices.random_structures[0]
     if len(matrices.random_structures) != 1 or first_struct.n_terms > 1:
-        return laplace_deviance(theta, matrices, family, beta_start, u_start)
+        return _laplace_deviance_with_status(theta, matrices, family, beta_start, u_start)
 
     state = _pirls_state(matrices, family, theta, beta_start, u_start)
     beta = state.beta
@@ -581,81 +624,63 @@ def adaptive_gh_deviance(
 
     deviance = -2.0 * log_integral
 
-    return float(deviance), beta, random_effects
+    return (
+        float(deviance),
+        beta,
+        random_effects,
+        bool(state.converged and np.isfinite(state.deviance)),
+    )
 
 
-def _laplace_deviance_rust(
-    theta: NDArray[np.floating],
-    matrices: ModelMatrices,
-    family: Family,
-) -> tuple[float, NDArray[np.floating], NDArray[np.floating]]:
-    n_levels = [s.n_levels for s in matrices.random_structures]
-    n_terms = [s.n_terms for s in matrices.random_structures]
-    correlated = [s.correlated for s in matrices.random_structures]
-
+def _native_glmm_args(
+    theta: NDArray[np.floating], matrices: ModelMatrices, family: Family
+) -> tuple[Any, ...]:
     z_csc = matrices.Z.tocsc()
-
     family_name = _get_family_name(family)
     link_name = _get_link_name(family)
     if family_name is None or link_name is None:
         raise TypeError("Family and link are not supported by the native GLMM backend")
-
-    deviance, beta, u = _rust_laplace_deviance(
+    return (
         np.ascontiguousarray(matrices.y, dtype=np.float64),
         np.ascontiguousarray(matrices.X, dtype=np.float64),
         np.ascontiguousarray(z_csc.data, dtype=np.float64),
         np.ascontiguousarray(z_csc.indices, dtype=np.int64),
         np.ascontiguousarray(z_csc.indptr, dtype=np.int64),
-        (z_csc.shape[0], z_csc.shape[1]),
+        z_csc.shape,
         np.ascontiguousarray(matrices.weights, dtype=np.float64),
         np.ascontiguousarray(matrices.offset, dtype=np.float64),
         np.ascontiguousarray(theta, dtype=np.float64),
-        n_levels,
-        n_terms,
-        correlated,
+        [s.n_levels for s in matrices.random_structures],
+        [s.n_terms for s in matrices.random_structures],
+        [s.correlated for s in matrices.random_structures],
         family_name,
         link_name,
     )
 
+
+def _laplace_deviance_rust(
+    theta: NDArray[np.floating], matrices: ModelMatrices, family: Family
+) -> tuple[float, NDArray[np.floating], NDArray[np.floating]]:
+    deviance, beta, u = _rust_laplace_deviance(*_native_glmm_args(theta, matrices, family))
     return deviance, np.array(beta), np.array(u)
 
 
 def _adaptive_gh_deviance_rust(
-    theta: NDArray[np.floating],
-    matrices: ModelMatrices,
-    family: Family,
-    nAGQ: int,
+    theta: NDArray[np.floating], matrices: ModelMatrices, family: Family, nAGQ: int
 ) -> tuple[float, NDArray[np.floating], NDArray[np.floating]]:
-    n_levels = [s.n_levels for s in matrices.random_structures]
-    n_terms = [s.n_terms for s in matrices.random_structures]
-    correlated = [s.correlated for s in matrices.random_structures]
-
-    z_csc = matrices.Z.tocsc()
-
-    family_name = _get_family_name(family)
-    link_name = _get_link_name(family)
-    if family_name is None or link_name is None:
-        raise TypeError("Family and link are not supported by the native GLMM backend")
-
     deviance, beta, u = _rust_adaptive_gh_deviance(
-        np.ascontiguousarray(matrices.y, dtype=np.float64),
-        np.ascontiguousarray(matrices.X, dtype=np.float64),
-        np.ascontiguousarray(z_csc.data, dtype=np.float64),
-        np.ascontiguousarray(z_csc.indices, dtype=np.int64),
-        np.ascontiguousarray(z_csc.indptr, dtype=np.int64),
-        (z_csc.shape[0], z_csc.shape[1]),
-        np.ascontiguousarray(matrices.weights, dtype=np.float64),
-        np.ascontiguousarray(matrices.offset, dtype=np.float64),
-        np.ascontiguousarray(theta, dtype=np.float64),
-        n_levels,
-        n_terms,
-        correlated,
-        family_name,
-        link_name,
-        nAGQ,
+        *_native_glmm_args(theta, matrices, family), nAGQ
     )
-
     return deviance, np.array(beta), np.array(u)
+
+
+def _native_deviance_with_status(
+    theta: NDArray[np.floating], matrices: ModelMatrices, family: Family, nAGQ: int
+) -> tuple[float, NDArray[np.floating], NDArray[np.floating], bool]:
+    deviance, beta, u, converged = _rust_glmm_deviance(
+        *_native_glmm_args(theta, matrices, family), nAGQ
+    )
+    return deviance, np.array(beta), np.array(u), converged
 
 
 def laplace_deviance_fast(
@@ -703,6 +728,35 @@ def adaptive_gh_deviance_fast(
             return _adaptive_gh_deviance_rust(theta, matrices, family, nAGQ)
 
     return adaptive_gh_deviance(theta, matrices, family, nAGQ, beta_start, u_start)
+
+
+def glmm_deviance_with_status(
+    theta: NDArray[np.floating],
+    matrices: ModelMatrices,
+    family: Family,
+    nAGQ: int = 1,
+    beta_start: NDArray[np.floating] | None = None,
+    u_start: NDArray[np.floating] | None = None,
+) -> tuple[float, NDArray[np.floating], NDArray[np.floating], bool]:
+    """Return deviance, fixed effects, random effects, and inner PIRLS convergence.
+
+    Status comes from the same evaluation as the estimates. Outer optimization
+    success alone does not establish convergence of the conditional mode.
+    """
+    family_name = _get_family_name(family)
+    link_name = _get_link_name(family)
+    if (
+        _HAS_RUST
+        and beta_start is None
+        and u_start is None
+        and (family_name, link_name) in _NATIVE_FAMILY_LINKS
+        and _native_covariance_supported(matrices)
+        and (
+            nAGQ == 1 or (matrices.random_structures and matrices.random_structures[0].n_terms == 1)
+        )
+    ):
+        return _native_deviance_with_status(theta, matrices, family, nAGQ)
+    return _adaptive_gh_deviance_with_status(theta, matrices, family, nAGQ, beta_start, u_start)
 
 
 class GLMMOptimizer:
@@ -784,22 +838,17 @@ class GLMMOptimizer:
 
         theta_opt = result.x
 
-        if self.nAGQ > 1:
-            final_dev, beta, u = adaptive_gh_deviance_fast(
-                theta_opt,
-                self.matrices,
-                self.family,
-                nAGQ=self.nAGQ,
-            )
-        else:
-            final_dev, beta, u = laplace_deviance_fast(theta_opt, self.matrices, self.family)
+        final_dev, beta, u, pirls_converged = glmm_deviance_with_status(
+            theta_opt, self.matrices, self.family, nAGQ=self.nAGQ
+        )
 
         return GLMMOptimizationResult(
             theta=theta_opt,
             beta=beta,
             u=u,
             deviance=final_dev,
-            converged=result.success,
+            converged=bool(result.success and pirls_converged),
+            pirls_converged=pirls_converged,
             n_iter=result.nit,
         )
 

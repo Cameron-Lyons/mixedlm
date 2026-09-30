@@ -189,6 +189,20 @@ For fitting GLMMs, mixedlm uses Penalized Iteratively Reweighted Least Squares (
 
 This is nested within the outer optimization over variance parameters.
 
+A fitted GLMM reports `converged=True` only when both the outer optimizer and the
+inner PIRLS solver converge. `result.pirls_converged` exposes the inner status,
+including on refitted and modular results. For example, all-zero Poisson responses
+or constant binary responses can leave the inner coefficients drifting even when
+the outer objective stops changing. Such fits retain their finite estimates but
+report nonconvergence, with an inner-solver warning and a summary note.
+
+`check_conv=False` suppresses the fitting warning without changing these flags.
+For direct objective evaluation,
+`mixedlm.estimation.laplace.glmm_deviance_with_status(...)` returns
+`(deviance, beta, u, pirls_converged)` from one solve. Existing deviance functions
+continue to return their three-item tuples.
+
+
 The random effects are solved in spherical coordinates,
 
 \[
