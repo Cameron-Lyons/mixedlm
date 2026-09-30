@@ -192,12 +192,13 @@ class TestPolarsGlmer:
         np.testing.assert_allclose(lazy.theta, eager.theta)
 
 
+# Conversion fixtures need residual variation: y == x can give a nonfinite likelihood.
 class TestPolarsDataTypes:
     def test_numeric_columns(self):
         """Test with various numeric dtypes."""
         data = pl.DataFrame(
             {
-                "y": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+                "y": [1.2, 1.8, 3.4, 3.7, 5.3, 5.8],
                 "x": [1, 2, 3, 4, 5, 6],
                 "group": ["A", "A", "B", "B", "C", "C"],
             }
@@ -205,12 +206,14 @@ class TestPolarsDataTypes:
 
         result = mlm.lmer("y ~ x + (1 | group)", data)
         assert result.converged
+        assert np.isfinite(result.deviance)
+        assert result.sigma > 0
 
     def test_categorical_column(self):
         """Test with polars Categorical dtype."""
         data = pl.DataFrame(
             {
-                "y": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+                "y": [1.2, 1.8, 3.4, 3.7, 5.3, 5.8],
                 "x": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
                 "group": pl.Series(["A", "A", "B", "B", "C", "C"]).cast(pl.Categorical),
             }
@@ -218,12 +221,14 @@ class TestPolarsDataTypes:
 
         result = mlm.lmer("y ~ x + (1 | group)", data)
         assert result.converged
+        assert np.isfinite(result.deviance)
+        assert result.sigma > 0
 
     def test_string_grouping(self):
         """Test with string grouping variable."""
         data = pl.DataFrame(
             {
-                "y": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+                "y": [1.2, 1.8, 3.4, 3.7, 5.3, 5.8],
                 "x": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
                 "group": ["A", "A", "B", "B", "C", "C"],
             }
@@ -231,6 +236,8 @@ class TestPolarsDataTypes:
 
         result = mlm.lmer("y ~ x + (1 | group)", data)
         assert result.converged
+        assert np.isfinite(result.deviance)
+        assert result.sigma > 0
 
 
 class TestPolarsNAHandling:
@@ -238,7 +245,7 @@ class TestPolarsNAHandling:
     def nan_data(self, request):
         return pl.DataFrame(
             {
-                "y": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+                "y": [1.2, 1.8, 3.4, 3.7, 5.3, 5.8],
                 "x": pl.Series(
                     [1.0, 2.0, float("nan"), 4.0, 5.0, 6.0],
                     dtype=request.param,
@@ -251,7 +258,7 @@ class TestPolarsNAHandling:
         """Test NA handling with polars."""
         data = pl.DataFrame(
             {
-                "y": [1.0, 2.0, None, 4.0, 5.0, 6.0],
+                "y": [1.2, 1.8, None, 3.7, 5.3, 5.8],
                 "x": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
                 "group": ["A", "A", "B", "B", "C", "C"],
             }
@@ -265,7 +272,7 @@ class TestPolarsNAHandling:
         """Test NA fail action with polars."""
         data = pl.DataFrame(
             {
-                "y": [1.0, 2.0, None, 4.0, 5.0, 6.0],
+                "y": [1.2, 1.8, None, 3.7, 5.3, 5.8],
                 "x": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
                 "group": ["A", "A", "B", "B", "C", "C"],
             }

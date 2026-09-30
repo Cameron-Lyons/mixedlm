@@ -2,6 +2,16 @@
 
 This page documents the main model fitting functions and control classes.
 
+Linear and generalized fits validate their final variance parameters, fixed effects,
+random effects, and deviance before returning a result. Linear fits also require a
+positive finite residual scale. Invalid final evaluations raise `RuntimeError` with
+the underlying numerical reason; this applies to refits and the modular result
+constructors as well. Bootstrap counts these refit errors as failed samples.
+
+A finite fit that reaches an iteration limit can still be returned with
+`converged=False`. Final deviance is recomputed with the reported estimates,
+including the `nAGQ` requested when constructing a modular GLMM result.
+
 ## Model Fitting Functions
 
 ### lmer

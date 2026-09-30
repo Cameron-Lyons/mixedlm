@@ -186,7 +186,7 @@ class TestModelChecks:
     def test_check_nlev_gtr_1_stop(self):
         data = pd.DataFrame(
             {
-                "y": [1.0, 2.0, 3.0],
+                "y": [1.0, 2.0, 4.0],
                 "x": [1.0, 2.0, 3.0],
                 "group": ["A", "A", "A"],
             }
