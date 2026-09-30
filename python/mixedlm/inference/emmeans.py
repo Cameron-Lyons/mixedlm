@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import itertools
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from functools import lru_cache
+from numbers import Real
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -76,6 +78,56 @@ class ContrastResult:
     t_ratio: NDArray[np.floating]
     p_value: NDArray[np.floating]
     adjust: str
+    level: float = 0.95
+    # Each family records its row bounds and, for pairwise differences, mean count.
+    _families: tuple[tuple[int, int, int | None], ...] = field(default=(), repr=False)
+
+    def confint(self, level: float | None = None, adjust: str | None = None) -> pd.DataFrame:
+        """Return link-scale confidence intervals in the comparison row order.
+
+        Defaults to the level and adjustment selected when creating the contrasts.
+        Holm, FDR, and the current Dunnett approximation use Bonferroni intervals;
+        the actual method is recorded in ``result.attrs["adjust"]``. Tukey requires
+        differences created by ``pairs`` or ``trt.vs.ctrl``. Grouped comparisons
+        retain separate interval families. Quantiles are evaluated on demand.
+        """
+        confidence = _validate_contrast_level(self.level if level is None else level)
+        requested = self.adjust if adjust is None else adjust
+        if not isinstance(requested, str):
+            raise TypeError("adjust must be a string naming an interval adjustment")
+        requested = requested.strip().lower()
+        if requested == "bh":
+            requested = "fdr"
+        if requested not in {"none", "tukey", "bonferroni", "holm", "fdr", "dunnett"}:
+            raise ValueError(f"Unknown interval adjustment: {requested!r}")
+        interval_adjust = requested if requested in {"none", "tukey"} else "bonferroni"
+        families = self._families or ((0, len(self.estimate), None),)
+        half_width = np.empty(len(self.estimate), dtype=np.float64)
+        for start, stop, n_means in families:
+            if start == stop:
+                continue
+            if interval_adjust == "tukey" and n_means is None:
+                raise ValueError(
+                    "Tukey intervals require pairwise differences created by pairs() or "
+                    "trt.vs.ctrl; use adjust='bonferroni' or 'none' for custom contrasts."
+                )
+            critical = _contrast_critical_value(
+                confidence, self.df, interval_adjust, stop - start, n_means
+            )
+            half_width[start:stop] = critical * self.se[start:stop]
+        result = pd.DataFrame(
+            {
+                "contrast": self.contrast,
+                "estimate": self.estimate,
+                "SE": self.se,
+                "df": self.df,
+                "lower": self.estimate - half_width,
+                "upper": self.estimate + half_width,
+            },
+            copy=True,
+        )
+        result.attrs.update(level=confidence, adjust=interval_adjust, requested_adjust=requested)
+        return result
 
     def __str__(self) -> str:
         lines = []
@@ -121,6 +173,7 @@ class Emmeans:
         adjust: str = "tukey",
         level: float = 0.95,
     ) -> ContrastResult:
+        level = _validate_contrast_level(level)
         n_levels = len(self.result.emmean)
         if n_levels < 2:
             raise ValueError("Need at least 2 levels for pairwise comparisons")
@@ -156,6 +209,8 @@ class Emmeans:
             t_ratio=t_ratio,
             p_value=p_adjusted,
             adjust=adjust,
+            level=level,
+            _families=((0, len(contrast_labels), n_levels),),
         )
 
     def contrast(
@@ -180,6 +235,7 @@ class Emmeans:
         adjust: str = "dunnett",
         level: float = 0.95,
     ) -> ContrastResult:
+        level = _validate_contrast_level(level)
         n_levels = len(self.result.emmean)
 
         grid_labels = []
@@ -205,6 +261,8 @@ class Emmeans:
             t_ratio=t_ratio,
             p_value=p_adjusted,
             adjust=adjust,
+            level=level,
+            _families=((0, len(contrast_labels), n_levels),),
         )
 
     def _custom_contrast(
@@ -213,6 +271,7 @@ class Emmeans:
         adjust: str = "none",
         level: float = 0.95,
     ) -> ContrastResult:
+        level = _validate_contrast_level(level)
         n_contrasts = C.shape[0]
         L_contrast = C @ self._L
         estimates = L_contrast @ self._beta
@@ -232,6 +291,8 @@ class Emmeans:
             t_ratio=t_ratio,
             p_value=p_adjusted,
             adjust=adjust,
+            level=level,
+            _families=((0, n_contrasts, None),),
         )
 
     def __str__(self) -> str:
@@ -239,6 +300,27 @@ class Emmeans:
 
     def __repr__(self) -> str:
         return f"Emmeans(specs={self._specs}, n={len(self.result.emmean)})"
+
+
+def _validate_contrast_level(level: float) -> float:
+    if isinstance(level, bool | np.bool_) or not isinstance(level, Real):
+        raise TypeError("level must be a finite number strictly between 0 and 1")
+    value = float(level)
+    if not np.isfinite(value) or not 0 < value < 1:
+        raise ValueError("level must be a finite number strictly between 0 and 1")
+    return value
+
+
+@lru_cache(maxsize=128)
+def _contrast_critical_value(
+    level: float, df: float, adjust: str, n_comparisons: int, n_means: int | None
+) -> float:
+    """Share scalar quantiles across interval families without retaining arrays."""
+    alpha = 1.0 - level
+    if adjust == "tukey" and n_means != 2:
+        return float(stats.studentized_range.isf(alpha, n_means, df) / np.sqrt(2.0))
+    tail = alpha / (2 * n_comparisons) if adjust == "bonferroni" else alpha / 2
+    return float(stats.norm.isf(tail) if np.isinf(df) else stats.t.isf(tail, df))
 
 
 def _adjust_pvalues(

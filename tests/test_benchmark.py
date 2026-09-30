@@ -397,3 +397,30 @@ def test_benchmark_large_leverage(benchmark, large_crossed_sparse_data, kind):
 
     assert values.shape == (len(large_crossed_sparse_data),)
     assert np.all((values >= 0) & (values < 1))
+
+
+@pytest.mark.benchmark(group="contrast-confidence")
+@pytest.mark.parametrize("adjust", ["none", "tukey"])
+def test_benchmark_contrast_confidence_intervals(benchmark, adjust):
+    from mixedlm.inference.emmeans import ContrastResult
+
+    n_means = 16
+    n_comparisons = n_means * (n_means - 1) // 2
+    result = ContrastResult(
+        contrast=[f"C{i}" for i in range(n_comparisons)],
+        estimate=np.linspace(-2.0, 2.0, n_comparisons),
+        se=np.linspace(0.2, 0.5, n_comparisons),
+        df=80.0,
+        t_ratio=np.zeros(n_comparisons),
+        p_value=np.ones(n_comparisons),
+        adjust=adjust,
+        _families=((0, n_comparisons, n_means),),
+    )
+    result.confint()
+
+    intervals = benchmark(result.confint)
+
+    assert intervals.shape == (n_comparisons, 6)
+    assert np.all(intervals.lower < result.estimate)
+    assert np.all(intervals.upper > result.estimate)
+    np.testing.assert_allclose((intervals.lower + intervals.upper) / 2, result.estimate)

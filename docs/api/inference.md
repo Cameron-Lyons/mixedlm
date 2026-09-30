@@ -304,6 +304,34 @@ em = mlm.emmeans(model, "treatment", type="response")
 - `pairs(adjust="tukey")`: Compute all pairwise comparisons
 - `contrast(method, adjust="none")`: Compute pairwise, treatment-vs-control, or custom contrasts
 
+Contrast results provide `confint()` for a table containing the contrast label,
+estimate, standard error, degrees of freedom, and `lower`/`upper` confidence bounds:
+
+```python
+comparisons = em.pairs(adjust="tukey", level=0.90)
+intervals = comparisons.confint()  # uses the requested 90% confidence level
+pointwise = comparisons.confint(level=0.95, adjust="none")
+```
+
+The table preserves comparison order and reports its confidence level and actual
+interval adjustment in `intervals.attrs["level"]` and `intervals.attrs["adjust"]`.
+Overrides affect only the returned intervals. The estimates, p-values, and stored
+defaults remain unchanged. Interval calculations are performed on request and
+reuse scalar critical values for families with the same settings.
+
+Unadjusted intervals use the result's Student's t reference, or the normal
+reference when `df=inf`. Tukey intervals use the studentized range with the
+number of means in the pairwise family; treatment-versus-control differences
+can also use this adjustment. General custom contrasts require `"none"` or
+Bonferroni-based intervals. Holm, FDR/BH, and the current Dunnett approximation
+use Bonferroni intervals; both the requested and actual methods are recorded
+in the table's attributes. The Holm/FDR fallback follows the
+[emmeans interval convention](https://rvlenth.github.io/emmeans/reference/summary.emmGrid.html#p-value-adjustments).
+
+Intervals remain on the linear predictor scale, including when marginal means
+were displayed with `type="response"`. Tables can be edited independently of
+the contrast result, and empty contrast sets return empty tables.
+
 **Example:**
 
 ```python
