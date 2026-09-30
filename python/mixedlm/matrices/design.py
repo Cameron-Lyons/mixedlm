@@ -362,35 +362,22 @@ def _encode_interaction(
     contrasts: dict[str, str | NDArray[np.floating]] | None = None,
     category_levels: dict[str, list[Any]] | None = None,
 ) -> tuple[list[NDArray[np.floating]], list[str]]:
-    encoded_vars: list[tuple[list[NDArray[np.floating]], list[str]]] = []
+    result_cols: list[NDArray[np.floating]] = [np.ones(dataframe_length(data), dtype=np.float64)]
+    result_names = [""]
     for var in variables:
         if isinstance(var, PowerTerm):
             cols, nms = _encode_power(var, data)
         else:
             cols, nms = _encode_variable(var, data, contrasts, category_levels)
-        encoded_vars.append((cols, nms))
+        next_cols = []
+        next_names = []
+        for current_col, current_name in zip(result_cols, result_names, strict=True):
+            for col, nm in zip(cols, nms, strict=True):
+                next_cols.append(current_col * col)
+                next_names.append(f"{current_name}:{nm}" if current_name else nm)
+        result_cols, result_names = next_cols, next_names
 
-    result_cols: list[NDArray[np.floating]] = []
-    result_names: list[str] = []
-
-    def _product(
-        idx: int,
-        current_col: NDArray[np.floating],
-        current_name: str,
-    ) -> None:
-        if idx >= len(encoded_vars):
-            result_cols.append(current_col)
-            result_names.append(current_name)
-            return
-
-        cols, nms = encoded_vars[idx]
-        for col, nm in zip(cols, nms, strict=False):
-            new_col = current_col * col
-            new_name = f"{current_name}:{nm}" if current_name else nm
-            _product(idx + 1, new_col, new_name)
-
-    n = dataframe_length(data)
-    _product(0, np.ones(n, dtype=np.float64), "")
+    # Iteration avoids a recursive closure retaining encoded arrays until cyclic GC.
     return result_cols, result_names
 
 
