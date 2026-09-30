@@ -397,3 +397,18 @@ def test_benchmark_large_leverage(benchmark, large_crossed_sparse_data, kind):
 
     assert values.shape == (len(large_crossed_sparse_data),)
     assert np.all((values >= 0) & (values < 1))
+
+
+@pytest.mark.benchmark(group="quadrature-rule-reuse")
+@pytest.mark.parametrize("backend", ["python", "native"])
+@pytest.mark.parametrize("order", [9, 25, 100, 400])
+def test_benchmark_repeated_quadrature_rule(benchmark, backend, order):
+    from mixedlm.estimation.laplace import _get_gh_nodes_weights
+
+    evaluate = _get_gh_nodes_weights
+    if backend == "native":
+        evaluate = pytest.importorskip("mixedlm._rust").gauss_hermite
+    evaluate(order)
+    nodes, weights = benchmark(evaluate, order)
+    assert len(nodes) == len(weights) == order
+    assert np.sum(weights) == pytest.approx(np.sqrt(np.pi))

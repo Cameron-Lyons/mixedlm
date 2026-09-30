@@ -684,6 +684,9 @@ fn compute_group_log_integral(
 
     let mut log_terms = Vec::with_capacity(nodes.len());
     for (node, weight) in nodes.iter().zip(weights.iter()) {
+        if *weight == 0.0 {
+            continue;
+        }
         let mut spherical_quad = spherical.clone();
         for i in 0..n_terms {
             spherical_quad[idx_start + i] = spherical_mode[i] + sqrt2 * scale * node;
@@ -836,7 +839,7 @@ pub fn adaptive_gh_deviance_impl(
 
     let h = lambda.transpose() * &ztwz * &lambda + DMatrix::<f64>::identity(q, q);
 
-    let (nodes, gh_weights) = gauss_hermite_nodes_weights(n_agq);
+    let rule = gauss_hermite_nodes_weights(n_agq);
 
     #[cfg(miri)]
     let iter = (0..n_levels_first).into_iter();
@@ -850,8 +853,8 @@ pub fn adaptive_gh_deviance_impl(
                 &spherical,
                 &h,
                 &lambda,
-                &nodes,
-                &gh_weights,
+                &rule.nodes,
+                &rule.weights,
                 y,
                 x,
                 z,
