@@ -51,6 +51,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Native GLMM entry points reject inconsistent array dimensions, covariance parameter counts, and random-effect metadata with `ValueError`, preventing Rust panics and silently ignored input. Dimension arithmetic and sparse column-pointer lengths are checked for overflow.
+
 - Bootstrap refits require convergence and finite real estimates of the expected shapes in both serial and parallel execution. Failed samples stay entirely missing, and all confidence interval methods require at least two valid samples per parameter.
 
 - Nonlinear fits no longer report convergence when the inner PNLS iteration limit is reached. Summaries identify unfinished inner solves, and nonlinear bootstrap intervals exclude unconverged refits.

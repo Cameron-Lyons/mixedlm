@@ -268,6 +268,12 @@ settings and allow `result.refit(pirls_maxiter=200, pirls_tol=1e-9)` to override
 Model-derived bootstrap and comparison fits, model updates, and cross-validation
 also retain these settings, including their parallel worker paths.
 
+The native `pirls`, `laplace_deviance`, `glmm_deviance`, and
+`adaptive_gh_deviance` bindings require a nonempty response and matching design,
+weight, and offset row counts. They also check covariance parameter counts and
+random-effect structure dimensions. Mismatched row counts, vector lengths, or
+metadata, and dimension overflows raise `ValueError` before fitting.
+
 A fitted GLMM reports `converged=True` only when both the outer optimizer and the
 inner PIRLS solver converge. `result.pirls_converged` exposes the inner status,
 including on refitted and modular results. For example, all-zero Poisson responses
