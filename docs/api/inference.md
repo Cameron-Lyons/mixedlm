@@ -430,6 +430,15 @@ validated in bounded batches. The legacy `"dunnett"` option remains a Bonferroni
 counts the comparisons actually requested; it does not compute the exact
 Dunnett distribution.
 
+Custom contrasts are evaluated in batches, with each coefficient row normalized
+by a power of two before its estimate and standard error are calculated. This
+keeps two-sided tests stable when a row is multiplied by a very
+small or large nonzero constant. Estimates and standard errors are returned in
+the requested units. Calculation uses float64 precision; values outside its
+representable range may round to zero or infinity even when the corresponding
+test statistic is finite. Scaling cannot recover precision already lost in the
+input coefficients.
+
 **Example:**
 
 ```python
