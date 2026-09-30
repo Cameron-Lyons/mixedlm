@@ -603,6 +603,9 @@ and starts optimization from the original fitted covariance parameters.
 - `ci(level=0.95, method="percentile")`: Fixed-effect confidence intervals
 - `se()`: Fixed-effect bootstrap standard errors
 - `beta_samples`, `theta_samples`, `sigma_samples`: Bootstrap sample arrays
+- `n_failed`: Number of unsuccessful replicates
+- `failures`: Tuple of `BootstrapFailure` records, ordered by sample row
+- `summary()`: Sample statistics and failure counts by stage
 
 **Example:**
 
@@ -621,6 +624,34 @@ PIRLS or PNLS solve where applicable, and return finite real estimates with the
 expected shapes. Residual scales must be positive. These checks apply to both
 serial and parallel bootstrap execution. Converged fits with zero variance
 components are retained.
+
+Each `BootstrapFailure` contains:
+
+| Attribute | Meaning |
+| --- | --- |
+| `index` | Zero-based row in the sample arrays |
+| `stage` | `"simulation"`, `"refit"`, `"convergence"`, or `"validation"` |
+| `exception_type` | Exception class name, such as `"ValueError"` |
+| `message` | Exception message or reason a convergence/estimate check failed |
+
+Simulation includes response generation and validation; responses must be finite
+real vectors with one entry per observation. Refit includes per-replicate model
+preparation and fitting. Convergence checks identify unsuccessful status flags,
+including `pirls_converged` or `pnls_converged` when applicable. Validation checks
+the returned estimates and residual scale. The first failure in each replicate
+is recorded. Setup errors, worker-pool failures, and interruptions still propagate.
+
+```python
+print(boot.summary())
+for failure in boot.failures:
+    print(failure.index, failure.stage, failure.exception_type, failure.message)
+```
+
+Records are immutable and contain strings rather than exception objects or
+tracebacks, so results remain serializable even when a custom exception is not.
+They use the same format in serial and parallel runs. A successful bootstrap has
+`failures == ()`. Results constructed without this optional field default to an
+empty tuple; their historical failure details cannot be recovered.
 
 Confidence intervals and standard errors exclude failed samples and are `NaN`
 when fewer than two valid samples remain for a parameter. Check `n_failed`

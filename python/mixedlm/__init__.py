@@ -50,7 +50,7 @@ if TYPE_CHECKING:
     )
     from mixedlm.inference.anova import AnovaResult, AnovaType3Result, anova, anova_type3
     from mixedlm.inference.boot_ci import bootCI
-    from mixedlm.inference.bootstrap import bootMer, bootstrap_nlmer
+    from mixedlm.inference.bootstrap import BootstrapFailure, bootMer, bootstrap_nlmer
     from mixedlm.inference.cross_validation import (
         CrossValidationFold,
         CrossValidationResult,
@@ -191,6 +191,7 @@ __all__ = [
     "bootMer",
     "bootCI",
     "bootstrap_nlmer",
+    "BootstrapFailure",
     "cross_validate",
     "make_folds",
     "weighted_mse",
@@ -395,7 +396,9 @@ _LAZY_EXPORTS: dict[str, tuple[str, str | None]] = {
         "mixedlm.inference.anova", "AnovaResult", "AnovaType3Result", "anova", "anova_type3"
     ),
     **_module_exports("mixedlm.inference.boot_ci", "bootCI"),
-    **_module_exports("mixedlm.inference.bootstrap", "bootMer", "bootstrap_nlmer"),
+    **_module_exports(
+        "mixedlm.inference.bootstrap", "bootMer", "bootstrap_nlmer", "BootstrapFailure"
+    ),
     **_module_exports(
         "mixedlm.inference.cross_validation",
         "CrossValidationFold",
