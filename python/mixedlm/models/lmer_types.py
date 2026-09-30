@@ -132,6 +132,7 @@ class VarCorrGroup:
     stddev: dict[str, float]
     cov: NDArray[np.floating]
     corr: NDArray[np.floating] | None
+    grouping_factor: str | None = None
 
 
 @dataclass

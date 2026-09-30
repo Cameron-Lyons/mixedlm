@@ -96,6 +96,16 @@ Extract variance-covariance components of random effects.
 
 **Returns:** VarCorr object with variance, standard deviation, and correlation information.
 
+Every random-effect term has its own covariance block. When terms share a
+grouping factor, entries receive unique names such as `group`, `group.1`, and
+`group.2`; generated names skip any existing grouping-factor names. Each entry's
+`grouping_factor` attribute retains the original factor name.
+
+For example, `(1 | group) + (0 + x | group)` produces two covariance entries.
+`rePCA()` instead returns one entry for `group`, including the principal
+components from both independent blocks. This retains zero-variance components
+when checking PCA singularity.
+
 Compound-symmetry and AR(1) structures are reported on their exact fitted covariance scale.
 The same structured covariance is used by `rePCA()`, `isSingular()`, and the parameter bounds
 returned by `getME("lower")`:
@@ -363,10 +373,18 @@ Variance-covariance structure of random effects.
 
 ### Attributes
 
-- `groups`: List of grouping factors
-- `variance`: Variance estimates
-- `stddev`: Standard deviation estimates
-- `corr`: Correlation matrices
+- `groups`: Dictionary mapping unique report names to `VarCorrGroup` entries
+- `residual`: Residual variance for LMMs
+
+Each `VarCorrGroup` entry contains:
+
+- `name`: Unique report name
+- `grouping_factor`: Original grouping factor, before any report-name suffix
+- `term_names`: Ordered random-effect coefficient names
+- `variance`: Dictionary of coefficient variances
+- `stddev`: Dictionary of coefficient standard deviations
+- `cov`: Covariance matrix for this term
+- `corr`: Correlation matrix, or `None` for independent coefficients
 
 ### String Representation
 

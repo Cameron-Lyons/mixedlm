@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
-from scipy import sparse
+from scipy import linalg, sparse
 
 from mixedlm.formula.terms import Formula
 from mixedlm.matrices.design import (
@@ -14,7 +14,7 @@ from mixedlm.matrices.design import (
     _normalize_grouped_binomial_response,
     _random_term_columns,
 )
-from mixedlm.models.lmer_types import ModelTerms, RanefResult
+from mixedlm.models.lmer_types import ModelTerms, RanefResult, RePCA, RePCAGroup, VarCorrGroup
 from mixedlm.utils.dataframe import (
     concat_columns_as_string,
     copy_dataframe,
@@ -333,6 +333,53 @@ class MerResultMixin:
             cov = level_factor @ level_factor.T
 
             yield struct, cov * scale
+
+    def _varcorr_groups(self, scale: float) -> dict[str, VarCorrGroup]:
+        """Report every covariance block under a unique, stable name."""
+        from mixedlm.utils.variance import _covariance_block_names, cov2sdcor
+
+        names = _covariance_block_names(self.matrices.random_structures)
+        groups: dict[str, VarCorrGroup] = {}
+        for name, (struct, cov) in zip(
+            names, self._iter_random_cov_blocks(scale=scale), strict=True
+        ):
+            variances = np.diag(cov)
+            if struct.correlated or struct.cov_type in ("cs", "ar1"):
+                stddevs, corr = cov2sdcor(cov)
+            else:
+                stddevs = np.sqrt(variances)
+                corr = None
+            terms = list(struct.term_names)
+            groups[name] = VarCorrGroup(
+                name=name,
+                term_names=terms,
+                variance=dict(zip(terms, variances, strict=True)),
+                stddev=dict(zip(terms, stddevs, strict=True)),
+                cov=cov,
+                corr=corr,
+                grouping_factor=struct.grouping_factor,
+            )
+        return groups
+
+    def _random_effect_pca(self, scale: float) -> RePCA:
+        """Combine block spectra without constructing a larger covariance matrix."""
+        spectra: dict[str, list[NDArray[np.floating]]] = {}
+        for struct, cov in self._iter_random_cov_blocks(scale=scale):
+            spectra.setdefault(struct.grouping_factor, []).append(linalg.eigvalsh(cov))
+
+        groups: dict[str, RePCAGroup] = {}
+        for name, blocks in spectra.items():
+            eigenvalues = np.maximum(np.sort(np.concatenate(blocks))[::-1], 0.0)
+            total_var = np.sum(eigenvalues)
+            proportion = eigenvalues / total_var if total_var > 0 else np.zeros_like(eigenvalues)
+            groups[name] = RePCAGroup(
+                name=name,
+                n_terms=len(eigenvalues),
+                sdev=np.sqrt(eigenvalues),
+                proportion=proportion,
+                cumulative=np.cumsum(proportion),
+            )
+        return RePCA(groups=groups)
 
     def _is_singular_covariance(self, tol: float = 1e-4) -> bool:
         if not np.isfinite(tol) or tol < 0:
