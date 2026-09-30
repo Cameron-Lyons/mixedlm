@@ -175,7 +175,24 @@ model = mlm.glmer(
 )
 ```
 
-**Limitation:** AGQ is only available for models with a single scalar random effect (random intercept only, one grouping factor).
+**Limitation:** AGQ is available for one grouping factor with one random-effect
+coefficient per group: a random intercept or a scalar random slope.
+
+#### Quadrature computation
+
+For adaptive quadrature with a single scalar random effect per group, each
+integration point evaluates only the observations affected by that group's
+coefficient. Curvature is computed from the corresponding weighted design column.
+This avoids rebuilding full-model predictors and dense curvature matrices at each
+quadrature evaluation. Python parallel evaluation shares the fitted random-effect
+modes without modifying them.
+
+An observation with a zero random-effect design row still contributes its
+fixed-effect response likelihood. This includes zero-valued scalar random-slope
+predictors and observations in groups whose slope predictors are all zero.
+Explicit and implicit sparse zeros produce the same likelihood. A supplied design
+with multiple nonzero random-effect coefficients in one row cannot use independent
+group quadrature and raises `ValueError`.
 
 ### PIRLS Algorithm
 
