@@ -445,6 +445,7 @@ impl GlmmProblem {
     #[pyo3(signature = (theta, n_agq=1, *, offset=None, maxiter=PIRLS_MAX_ITER, tol=PIRLS_TOLERANCE))]
     fn evaluate<'py>(
         &self,
+        py: Python<'py>,
         theta: numpy::PyArrayLike1<'py, f64>,
         n_agq: usize,
         offset: Option<numpy::PyArrayLike1<'py, f64>>,
@@ -455,6 +456,8 @@ impl GlmmProblem {
         validate_agq_structure(n_agq, self.z.ncols(), &self.structures)?;
         let theta = theta.as_slice()?;
         validate_theta_length(theta.len(), self.n_theta).map_err(PyValueError::new_err)?;
+        // Per-call NumPy parameters must be owned before releasing Python's lock.
+        let theta = theta.to_vec();
         let override_offset = if let Some(offset) = offset {
             let offset = offset.as_array();
             if offset.len() != self.y.nrows() {
@@ -476,28 +479,30 @@ impl GlmmProblem {
         } else {
             None
         };
-        let (deviance, beta, u, converged) = adaptive_gh_deviance_impl(
-            &self.y,
-            &self.x,
-            &self.z,
-            &self.weights,
-            offset,
-            theta,
-            &self.structures,
-            self.family,
-            self.link,
-            n_agq,
-            beta_start,
-            None,
-            maxiter,
-            tol,
-        )?;
-        Ok((
-            deviance,
-            beta.iter().copied().collect(),
-            u.iter().copied().collect(),
-            converged,
-        ))
+        py.detach(|| {
+            let (deviance, beta, u, converged) = adaptive_gh_deviance_impl(
+                &self.y,
+                &self.x,
+                &self.z,
+                &self.weights,
+                offset,
+                &theta,
+                &self.structures,
+                self.family,
+                self.link,
+                n_agq,
+                beta_start,
+                None,
+                maxiter,
+                tol,
+            )?;
+            Ok((
+                deviance,
+                beta.iter().copied().collect(),
+                u.iter().copied().collect(),
+                converged,
+            ))
+        })
     }
 }
 
