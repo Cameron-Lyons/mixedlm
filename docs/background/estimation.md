@@ -232,6 +232,18 @@ mixedlm uses a first-order linearization approach:
 
 This is similar to the Lindstrom-Bates algorithm.
 
+The low-level `pnls_step()` and `nlmm_deviance()` functions, and
+`NLMMOptimizer`, accept integer grouping labels with gaps or negative values.
+Rows of the random-effect matrix `b` correspond to sorted unique labels in
+both the Python and native implementations; observations within each group
+keep their input order.
+
+Each objective evaluation builds the group row indices once and reuses them
+through linearization, random-effect updates, residual calculations, and the
+Laplace correction. Python's serial and threaded paths share the same group
+calculations, and threaded updates reuse the covariance inverse. This avoids
+repeated full-data group scans and retaining one full-length mask per group.
+
 ## EM-REML Initialization
 
 ### The Algorithm
