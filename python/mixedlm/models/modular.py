@@ -488,6 +488,8 @@ def mkGlmerDevfun(
         parsed.matrices,
         parsed.family,
         verbose=verbose,
+        pirls_maxiter=control.pirls_maxiter,
+        pirls_tol=control.tolPwrss,
     )
 
     return GlmerDevfun(parsed=parsed, optimizer=optimizer)
@@ -635,7 +637,12 @@ def optimizeGlmer(
     )
 
     deviance, _, _, pirls_converged = glmm_deviance_with_status(
-        result.x, devfun.parsed.matrices, devfun.parsed.family, nAGQ=devfun.optimizer.nAGQ
+        result.x,
+        devfun.parsed.matrices,
+        devfun.parsed.family,
+        nAGQ=devfun.optimizer.nAGQ,
+        pirls_maxiter=devfun.optimizer.pirls_maxiter,
+        pirls_tol=devfun.optimizer.pirls_tol,
     )
     message = str(result.message) if hasattr(result, "message") else ""
     if not pirls_converged:
@@ -751,6 +758,8 @@ def mkGlmerMod(
         devfun.parsed.matrices,
         devfun.parsed.family,
         nAGQ=nAGQ,
+        pirls_maxiter=devfun.optimizer.pirls_maxiter,
+        pirls_tol=devfun.optimizer.pirls_tol,
     )
 
     return GlmerResult(
@@ -763,6 +772,8 @@ def mkGlmerMod(
         deviance=deviance,
         converged=bool(opt.converged and pirls_converged),
         pirls_converged=pirls_converged,
+        pirls_maxiter=devfun.optimizer.pirls_maxiter,
+        pirls_tol=devfun.optimizer.pirls_tol,
         n_iter=opt.n_iter,
         nAGQ=nAGQ,
     )

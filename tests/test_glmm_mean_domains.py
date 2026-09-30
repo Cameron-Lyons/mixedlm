@@ -18,9 +18,9 @@ def test_unsupported_native_families_fall_back_to_python(monkeypatch, family) ->
     expected = (1.25, np.array([2.0]), np.array([3.0]))
 
     monkeypatch.setattr(laplace, "_HAS_RUST", True)
-    monkeypatch.setattr(laplace, "laplace_deviance", lambda *args: expected)
+    monkeypatch.setattr(laplace, "laplace_deviance", lambda *args, **kwargs: expected)
 
-    def fail_native(*args):
+    def fail_native(*args, **kwargs):
         raise AssertionError("unsupported family reached the native backend")
 
     monkeypatch.setattr(laplace, "_laplace_deviance_rust", fail_native)

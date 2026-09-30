@@ -255,6 +255,7 @@ def _drop1_glmer_worker(
         full_n_params,
         full_loglik,
         test,
+        control,
     ) = args
 
     try:
@@ -262,6 +263,7 @@ def _drop1_glmer_worker(
             formula,
             data,
             family=family,
+            control=control,
             weights=weights,
             offset=offset,
         )
@@ -381,6 +383,7 @@ def drop1_glmer(
             full_n_params,
             full_loglik,
             test,
+            model._refit_control(),
         )
         for term in droppable_terms
     ]

@@ -175,7 +175,7 @@ def test_unsupported_native_families_use_python_backend(monkeypatch, family) -> 
         "_rust_laplace_deviance",
         lambda *args: pytest.fail("unsupported family was sent to the Rust backend"),
     )
-    monkeypatch.setattr(laplace, "laplace_deviance", lambda *args: expected)
+    monkeypatch.setattr(laplace, "laplace_deviance", lambda *args, **kwargs: expected)
 
     actual = laplace.laplace_deviance_fast(np.array([0.5]), object(), family)
 
@@ -316,7 +316,7 @@ def test_non_native_links_use_python_backend(monkeypatch, family) -> None:
         "_rust_laplace_deviance",
         lambda *args: pytest.fail("non-native link was sent to the Rust backend"),
     )
-    monkeypatch.setattr(laplace, "laplace_deviance", lambda *args: expected)
+    monkeypatch.setattr(laplace, "laplace_deviance", lambda *args, **kwargs: expected)
 
     actual = laplace.laplace_deviance_fast(np.array([0.5]), object(), family)
 

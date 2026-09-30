@@ -5,6 +5,14 @@ All notable changes to mixedlm will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- GLMM fitting accepts `pirls_maxiter` to limit inner iterations independently of outer optimization; fitted results and refits retain the inner controls
+
+### Fixed
+- `GlmerControl.tolPwrss` now governs PIRLS stopping in native and Python likelihoods, quadrature, modular fitting, and final extraction; invalid inner controls are rejected before solving
+
 ## [1.2.0] - 2026-08-18
 
 ### Added

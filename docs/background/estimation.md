@@ -189,6 +189,21 @@ For fitting GLMMs, mixedlm uses Penalized Iteratively Reweighted Least Squares (
 
 This is nested within the outer optimization over variance parameters.
 
+`GlmerControl(tolPwrss=1e-8, pirls_maxiter=100)` controls the inner solve.
+`tolPwrss` bounds the maximum absolute coefficient update in both the fixed and
+spherical random effects. `pirls_maxiter` limits inner iterations independently
+of the outer optimizer's `maxiter`. Its default `None` retains the native limit
+of 100 and the Python limit of 25. Fitting now honors the configured `tolPwrss`
+default of `1e-7`; previously both backends used `1e-6` regardless of this control.
+
+Direct likelihood functions accept keyword arguments `pirls_tol` and
+`pirls_maxiter`. Their defaults preserve the previous `1e-6` tolerance and backend
+iteration limits. `pirls()` uses its existing `tol` and `maxiter` arguments;
+native entry points also accept these keywords. Refits inherit the fitted inner
+settings and allow `result.refit(pirls_maxiter=200, pirls_tol=1e-9)` to override them.
+Model-derived bootstrap and comparison fits, model updates, and cross-validation
+also retain these settings, including their parallel worker paths.
+
 A fitted GLMM reports `converged=True` only when both the outer optimizer and the
 inner PIRLS solver converge. `result.pirls_converged` exposes the inner status,
 including on refitted and modular results. For example, all-zero Poisson responses
