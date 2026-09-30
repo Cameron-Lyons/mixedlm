@@ -404,11 +404,8 @@ def emmeans(
             response_derivative = 1.0 / link_derivative
 
         se_em = se_em * np.abs(response_derivative)
-        lower_response = family.link.inverse(lower)
-        upper_response = family.link.inverse(upper)
+        lower, upper = family.link.inverse_interval(lower, upper)
         em_values = mu
-        lower = np.minimum(lower_response, upper_response)
-        upper = np.maximum(lower_response, upper_response)
 
     result_grid_data: dict[str, list[Any]] = {spec: [] for spec in specs}
     for spec_combo in spec_combinations:

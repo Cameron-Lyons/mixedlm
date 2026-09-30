@@ -24,7 +24,11 @@ from mixedlm.models.lmer_types import (
     VarCorrGroup,
 )
 from mixedlm.models.result_mixin import MerResultMixin
-from mixedlm.models.shared_utils import sparse_quadratic_form_diagonal, symmetric_inverse
+from mixedlm.models.shared_utils import (
+    dense_quadratic_form_diagonal,
+    sparse_quadratic_form_diagonal,
+    symmetric_inverse,
+)
 from mixedlm.utils import _get_signif_code
 
 
@@ -406,6 +410,14 @@ class GlmerResult(MerResultMixin):
         NDArray or PredictResult
             Predictions. Returns PredictResult if se_fit=True or interval!="none".
         """
+        if not isinstance(type, str) or type not in ("response", "link"):
+            raise ValueError("type must be 'response' or 'link'")
+        if not isinstance(interval, str) or interval not in ("none", "confidence", "prediction"):
+            raise ValueError(f"Unknown interval type: {interval}. Use 'none' or 'confidence'.")
+        if interval == "prediction":
+            raise ValueError(
+                "Prediction intervals not available for GLMMs. Use interval='confidence'."
+            )
         include_re = re_form != "NA" and re_form != "~0"
 
         if newdata is None:
@@ -430,55 +442,24 @@ class GlmerResult(MerResultMixin):
                 return self.family.link.inverse(eta)
 
         vcov_beta = self.vcov()
-        var_eta = np.sum((X @ vcov_beta) * X, axis=1)
-        se_eta = np.sqrt(var_eta)
+        var_eta = dense_quadratic_form_diagonal(X, vcov_beta)
+        se_eta = np.sqrt(np.maximum(var_eta, 0.0))
 
-        if interval == "none":
-            if type == "link":
-                return PredictResult(fit=eta, se_fit=se_eta, interval="none", level=level)
-            else:
-                mu = self.family.link.inverse(eta)
-                deriv = self.family.link.deriv(mu)
-                se_mu = se_eta / np.abs(deriv)
-                return PredictResult(fit=mu, se_fit=se_mu, interval="none", level=level)
-
-        if interval == "prediction":
-            raise ValueError(
-                "Prediction intervals not available for GLMMs. Use interval='confidence'."
-            )
-
-        z_crit = stats.norm.ppf(1 - (1 - level) / 2)
-
+        lower = upper = None
         if interval == "confidence":
-            if type == "link":
-                lower = eta - z_crit * se_eta
-                upper = eta + z_crit * se_eta
-                return PredictResult(
-                    fit=eta,
-                    se_fit=se_eta,
-                    lower=lower,
-                    upper=upper,
-                    interval="confidence",
-                    level=level,
-                )
-            else:
-                eta_lower = eta - z_crit * se_eta
-                eta_upper = eta + z_crit * se_eta
-                mu = self.family.link.inverse(eta)
-                lower = self.family.link.inverse(eta_lower)
-                upper = self.family.link.inverse(eta_upper)
-                deriv = self.family.link.deriv(mu)
-                se_mu = se_eta / np.abs(deriv)
-                return PredictResult(
-                    fit=mu,
-                    se_fit=se_mu,
-                    lower=lower,
-                    upper=upper,
-                    interval="confidence",
-                    level=level,
-                )
-        else:
-            raise ValueError(f"Unknown interval type: {interval}. Use 'none' or 'confidence'.")
+            z_crit = stats.norm.ppf(1 - (1 - level) / 2)
+            lower = eta - z_crit * se_eta
+            upper = eta + z_crit * se_eta
+        if type == "response":
+            mu = self.family.link.inverse(eta)
+            deriv = self.family.link.deriv(mu)
+            se_eta = se_eta / np.abs(deriv)
+            if lower is not None and upper is not None:
+                lower, upper = self.family.link.inverse_interval(lower, upper)
+            eta = mu
+        return PredictResult(
+            fit=eta, se_fit=se_eta, lower=lower, upper=upper, interval=interval, level=level
+        )
 
     def _add_random_effects_to_eta(
         self,

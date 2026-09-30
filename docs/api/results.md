@@ -185,10 +185,22 @@ Generate predictions.
   column in `newdata`. GLMM offsets are applied on the link scale.
 - `allow_new_levels`: Allow unseen grouping levels and center their random effects at zero.
 - `se_fit`: Return pointwise standard errors for the predicted mean.
-- `interval`: For LMMs, `"none"`, `"confidence"`, or `"prediction"`.
+- `interval`: For LMMs, `"none"`, `"confidence"`, or `"prediction"`; for GLMMs,
+  `"none"` or `"confidence"`.
 - `level`: Interval coverage strictly between zero and one.
 
 **Returns:** An array, or a `PredictResult` when standard errors or intervals are requested.
+
+GLMM predictions validate `type` and `interval` before building prediction
+matrices or calculating covariance. Confidence intervals use the link's
+`inverse_interval()` transformation: decreasing inverse links have ordered
+response bounds, and a square-root inverse includes zero when the link-scale
+interval crosses zero. GLMM standard errors still use fixed-coefficient
+uncertainty and the delta method on the response scale.
+
+Fixed-coefficient covariance projections are evaluated in batches for both model
+types, bounding each temporary projection to one million elements (or one row
+when the fitted coefficient count exceeds that limit).
 
 For conditional LMM predictions, uncertainty is evaluated from the joint fixed- and
 random-effect covariance. This includes covariance between fixed and random estimates,

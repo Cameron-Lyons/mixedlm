@@ -20,6 +20,13 @@ Family constructors accept either a documented link name or a custom `Link`
 instance. Invalid names and family/link combinations raise `ValueError` when
 the family is created.
 
+`Link.inverse_interval(lower, upper)` transforms ordered link-scale bounds into
+ordered response bounds. Its default handles increasing and decreasing inverse
+links. The square-root link also includes zero when the interval crosses zero,
+because squaring has an interior minimum there. Custom inverse links with
+interior extrema should override this method. Prediction, adjusted-effect, and
+marginal-mean confidence intervals all use it.
+
 ## Available Families
 
 ### Gaussian
