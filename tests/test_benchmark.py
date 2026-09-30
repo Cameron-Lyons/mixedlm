@@ -1315,3 +1315,28 @@ def test_benchmark_native_glmm_wide_covariance(benchmark, n_terms):
     actual = benchmark(_laplace_deviance_rust, theta, matrices, family)
     for left, right in zip(actual, expected, strict=True):
         np.testing.assert_allclose(left, right, rtol=2e-7, atol=2e-7)
+
+
+@pytest.mark.benchmark(group="native-glmm-solves")
+@pytest.mark.parametrize("n_fixed", [2, 16, 32])
+def test_benchmark_native_glmm_fixed_columns(benchmark, n_fixed):
+    from mixedlm.estimation.laplace import _laplace_deviance_rust
+    from mixedlm.families import Poisson
+
+    rng = np.random.default_rng(892)
+    n = 6000
+    groups = np.arange(n) % 300
+    predictors = {f"x{i}": rng.normal(scale=0.5, size=n) for i in range(n_fixed - 1)}
+    offset = 0.1 * np.sin(np.arange(n))
+    eta = 0.3 + 0.15 * np.sin(groups) + offset
+    for values in predictors.values():
+        eta += values * (0.3 / np.sqrt(n_fixed - 1))
+    data = pd.DataFrame({**predictors, "g": groups, "y": rng.poisson(np.exp(eta))})
+    formula = parse_formula("y ~ " + " + ".join(predictors) + " + (1 | g)")
+    matrices = build_model_matrices(formula, data, weights=np.linspace(0.4, 2.0, n), offset=offset)
+
+    deviance, beta, random = benchmark(_laplace_deviance_rust, np.array([0.5]), matrices, Poisson())
+
+    assert np.isfinite(deviance)
+    assert beta.shape == (n_fixed,)
+    assert random.shape == (300,)
