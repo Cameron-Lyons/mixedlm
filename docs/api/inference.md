@@ -216,9 +216,12 @@ Compute Satterthwaite denominator degrees of freedom.
 
 ```python
 df = mlm.satterthwaite_df(model)
+by_coefficient = df.as_dict()
 ```
 
-**Returns:** Dictionary mapping coefficient names to degrees of freedom
+**Returns:** `DenomDFResult` containing `df`, `method`, and `param_names`.
+Use `df["coefficient_name"]` to retrieve one value or `df.as_dict()` to obtain a
+dictionary.
 
 ### kenward_roger_df
 
@@ -228,7 +231,7 @@ Compute Kenward-Roger denominator degrees of freedom.
 df = mlm.kenward_roger_df(model)
 ```
 
-**Returns:** Dictionary mapping coefficient names to degrees of freedom
+**Returns:** `DenomDFResult`, with the same accessors as `satterthwaite_df`.
 
 ### pvalues_with_ddf
 
@@ -243,7 +246,8 @@ pvals = mlm.pvalues_with_ddf(model, method="Satterthwaite")
 - `model`: Fitted model
 - `method`: `"Satterthwaite"` or `"Kenward-Roger"`
 
-**Returns:** Dictionary mapping coefficient names to p-values
+**Returns:** Dictionary mapping coefficient names to `(estimate, t_value, p_value)`
+tuples.
 
 ## Estimated Marginal Means
 

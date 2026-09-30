@@ -94,6 +94,7 @@ def _direct_profiled_likelihood(
         "wrss": wrss,
         "ussq": ussq,
         "pwrss": pwrss,
+        "fixed_information": information,
     }
 
 
@@ -114,6 +115,7 @@ def test_profiled_core_matches_direct_marginal_likelihood(reml: bool) -> None:
     assert result.ussq == pytest.approx(expected["ussq"], abs=1e-12)
     assert result.pwrss == pytest.approx(expected["pwrss"], abs=1e-12)
     assert result.pwrss == pytest.approx(result.wrss + result.ussq, abs=1e-12)
+    assert_allclose(result.fixed_information, expected["fixed_information"], atol=1e-12)
 
 
 @pytest.mark.parametrize("reml", [False, True])
