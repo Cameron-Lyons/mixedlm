@@ -131,17 +131,23 @@ def test_fixed_predictions_do_not_evaluate_unused_columns(kind, unused):
 @pytest.mark.parametrize("kind", ["lmm", "glmm"])
 @pytest.mark.parametrize("n_rows", [0, 1, 7])
 @pytest.mark.parametrize("offset", [None, 0.4])
-def test_intercept_only_predictions_preserve_lazy_row_count_with_one_query(kind, n_rows, offset):
+def test_intercept_only_predictions_preserve_lazy_row_count_with_one_query(
+    kind, n_rows, offset, monkeypatch
+):
     model = _model(kind, "y ~ 1 + (1 | g)")
     data = pl.DataFrame({"unused": np.arange(n_rows, dtype=float)})
-    calls = []
-
-    def observe(values):
-        calls.append(len(values))
-        return values
-
-    lazy = data.lazy().with_columns(pl.col("unused").map_batches(observe, return_dtype=pl.Float64))
+    lazy = data.lazy()
     expected = model.predict(pd.DataFrame(index=pd.RangeIndex(n_rows)), re_form="NA", offset=offset)
+    calls = []
+    original_collect = pl.LazyFrame.collect
+
+    def observe_collect(query, *args, **kwargs):
+        calls.append(query)
+        return original_collect(query, *args, **kwargs)
+
+    # Row-count queries can optimize away unused expressions, so count collections
+    # directly instead of observing a Python expression that may never execute.
+    monkeypatch.setattr(pl.LazyFrame, "collect", observe_collect)
 
     actual = model.predict(lazy, re_form="NA", offset=offset)
 
