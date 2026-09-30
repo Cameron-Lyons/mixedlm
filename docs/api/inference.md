@@ -310,8 +310,15 @@ em = mlm.emmeans(model, "treatment", type="response")
 **Parameters:**
 
 - `model`: Fitted model
-- `specs`: Factor name or names to compute marginal means for
-- `at`: Optional values at which to evaluate other predictors
+- `specs`: Fixed-effect predictor name or names to compute marginal means for;
+  numeric predictors are supported, and `[]` requests a grand mean
+- `by`: Optional predictor name or names defining separate comparison groups
+- `offset`: A finite scalar or one-dimensional sequence with one value per result
+  row; `None` (default) uses the unweighted mean of the fitted link-scale offsets
+  after missing-value omission
+- `at`: Reference values for fixed-effect predictors, given as scalars or nonempty
+  one-dimensional sequences of distinct values; unknown names and missing or
+  nonfinite numeric values raise an error
 - `cov_reduce`: Function used to reduce numeric covariates (default: mean)
 - `type`: `"response"` (default) or `"link"` for generalized models
 - `level`: Confidence level (default: `0.95`)
@@ -354,6 +361,54 @@ Adjustment names ignore case and surrounding whitespace. Supported names are
 `"none"`, `"bonferroni"`, `"holm"`, `"fdr"`, `"tukey"`, and `"dunnett"`;
 `"BH"` is an alias for `"fdr"`. Results report the canonical name. The existing
 `"dunnett"` option uses a Bonferroni approximation. Unknown names raise an error.
+
+
+Numeric predictors use `cov_reduce` unless `at` overrides their values. Every
+requested value enters the reference grid. Predictors in `specs` or `by` identify
+separate result rows; other grid dimensions are averaged with equal weights.
+Categorical levels follow the fitted order unless `at` supplies an explicit order.
+
+```python
+# Compare treatments separately at each requested dose
+model = mlm.lmer("yield ~ treatment * dose + (1 | block)", data)
+em = mlm.emmeans(model, "treatment", by="dose", at={"dose": [0, 5, 10]})
+print(em)
+comparisons = em.pairs(adjust="holm")
+print(comparisons)
+print(comparisons.grid)  # One row of grouping values per comparison
+```
+
+Pairwise, treatment-vs-control, and custom contrasts operate separately within each
+`by` group. P-value adjustments apply to each group's comparison family. Custom
+contrast matrices need one column per mean **within a group**, in the displayed
+order, and the same matrix is applied to every group. Contrast labels include the
+group values, also available in `ContrastResult.grid`; this field is `None` for
+ungrouped comparisons. For generalized models, comparisons remain on the link
+scale even when the displayed means use `type="response"`.
+
+Offsets enter means and contrasts on the link scale. They are treated as known,
+so they do not change link-scale standard errors. Response-scale means, standard
+errors, and confidence limits incorporate the offset through the inverse link.
+The default reference offset is shared by all means; it does not depend on `by`,
+`at`, prior weights, or `cov_reduce`. For a log-exposure offset this uses the mean
+of the log exposures, rather than the log of the mean exposure. Supply an override
+when a different exposure or group-specific offsets are wanted.
+
+```python
+# Per-unit rates from a count model fitted with a log-exposure offset
+rates = mlm.emmeans(count_model, "treatment", offset=0)
+# Expected counts at an exposure of 10
+counts = mlm.emmeans(count_model, "treatment", offset=np.log(10))
+```
+
+An offset sequence must match the rows of `em.result.grid` exactly, including
+their order when `by` is used. It replaces the fitted reference offset and is
+neither recycled nor added to it. A scalar applies to every row. Equal offsets
+cancel in ordinary pairwise comparisons; differing offsets enter the comparison
+estimate. Custom contrasts also apply their coefficients to the offsets.
+
+The third positional argument now behaves as `by`. The former `_by=` keyword is
+retained as an alias; passing both names raises an error.
 
 ## Bootstrap
 

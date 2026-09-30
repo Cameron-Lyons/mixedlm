@@ -305,7 +305,7 @@ class TestEmmeansContrast:
 
 class TestEmmeansEdgeCases:
     def test_invalid_factor_raises(self, lmer_result, simple_data):
-        with pytest.raises(ValueError, match="must be a factor"):
+        with pytest.raises(ValueError, match="must name a fixed-effect predictor"):
             emmeans(lmer_result, "nonexistent")
 
     def test_multiple_specs(self, simple_data):

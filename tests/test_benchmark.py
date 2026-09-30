@@ -532,6 +532,47 @@ def test_benchmark_large_pvalue_adjustment(benchmark, method):
     assert np.all(adjusted <= 1.0)
 
 
+@pytest.mark.benchmark(group="emmeans-grouped")
+def test_benchmark_grouped_emmeans(benchmark):
+    from mixedlm.inference.emmeans import emmeans
+    from mixedlm.models.lmer import LmerResult
+
+    data = pd.DataFrame(
+        {
+            "y": np.ones(1024),
+            "treatment": np.tile([f"L{i:02}" for i in range(16)], 64),
+            "x": np.repeat(np.tile([-1.0, 1.0], 32), 16),
+            "group": np.repeat(np.arange(32), 32),
+        }
+    )
+    formula = parse_formula("y ~ treatment * x + (1 | group)")
+    matrices = build_model_matrices(formula, data)
+    model = LmerResult(
+        formula=formula,
+        matrices=matrices,
+        theta=np.array([0.6]),
+        beta=np.linspace(-0.2, 0.3, matrices.n_fixed),
+        sigma=1.0,
+        u=np.zeros(matrices.n_random),
+        deviance=0.0,
+        REML=True,
+        converged=True,
+        n_iter=0,
+    )
+    model.vcov()
+
+    def compare():
+        return emmeans(model, "treatment", by="x", at={"x": np.linspace(-1, 1, 16)}).pairs(
+            adjust="none"
+        )
+
+    result = benchmark(compare)
+
+    assert result.estimate.shape == (16 * 120,)
+    assert result.grid.x.nunique() == 16
+    assert np.all(np.isfinite(result.se))
+
+
 @pytest.mark.benchmark(group="leverage")
 @pytest.mark.parametrize("kind", ["lmm", "glmm"])
 def test_benchmark_large_leverage(benchmark, large_crossed_sparse_data, kind):
