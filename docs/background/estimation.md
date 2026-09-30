@@ -350,6 +350,13 @@ This parameterization makes the covariance scale explicit, keeps zero-variance b
 well-defined, and uses the same system for the PIRLS mode, Laplace determinant, post-fit
 covariance, and leverage calculations. Adaptive quadrature uses the normalized standard-normal
 prior in these coordinates and evaluates each grouping level's likelihood contribution once.
+With one native worker, group integration runs on the calling thread. With multiple
+workers, groups are evaluated in parallel and their scalar contributions are added
+in group order with compensated summation. Compensation preserves small contributions
+beside much larger group log likelihoods. This keeps the reduction independent of scheduling and
+worker count, using one additional scalar per group for parallel collection.
+Compared with earlier versions, fixing the addition order can change the last few
+bits of the deviance. The model likelihood and quadrature rule are unchanged.
 
 Starting means lie inside the family and link domains. For Poisson models with a
 log link, positive counts are transformed with the logarithm before estimating
