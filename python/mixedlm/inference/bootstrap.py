@@ -712,8 +712,7 @@ def bootstrap_nlmer(
     theta_samples = np.full((n_boot, n_theta), np.nan)
     sigma_samples = np.full(n_boot, np.nan)
 
-    if seed is not None:
-        np.random.seed(seed)
+    rng = np.random.RandomState(seed)
 
     n_failed = 0
 
@@ -722,7 +721,7 @@ def bootstrap_nlmer(
             print(f"Bootstrap iteration {b + 1}/{n_boot}")
 
         try:
-            y_sim = result.simulate(nsim=1, use_re=True)
+            y_sim = result.simulate(nsim=1, seed=rng, use_re=True)
             boot_result = result.refit(y_sim)
 
             # Validate every component before writing any part of the sample.

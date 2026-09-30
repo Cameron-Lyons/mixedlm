@@ -591,6 +591,11 @@ intervals and standard errors exclude failed samples, and all-failed intervals
 have `NaN` bounds. `NlmerResult.confint(method="boot")` uses this same bootstrap
 path. Nonlinear bootstrap counts (`nsim` or `n_boot`) must be positive integers.
 
+Nonlinear bootstrap (`bootstrap_nlmer()`, `bootMer()` on an `NlmerResult`, and
+`NlmerResult.confint(method="boot")`) uses a local random stream shared across
+replicates. Integer seeds retain the previous simulation sequence without
+changing NumPy's global random state. Supply `seed` for reproducibility.
+
 ### bootCI
 
 Create tidy confidence intervals for fixed effects, variance parameters, and
