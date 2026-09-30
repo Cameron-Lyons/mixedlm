@@ -382,8 +382,9 @@ class GlmerResult(MerResultMixin):
 
         Parameters
         ----------
-        newdata : DataFrame, optional
-            New data for prediction. If None, returns fitted values.
+        newdata : pandas or Polars DataFrame or LazyFrame, optional
+            New data for prediction. If None, returns fitted values. Lazy queries
+            are projected to prediction columns and collected once per call.
         type : str, default "response"
             Type of prediction: "response" (mean) or "link" (linear predictor).
         re_form : str, optional
@@ -407,6 +408,12 @@ class GlmerResult(MerResultMixin):
             Predictions. Returns PredictResult if se_fit=True or interval!="none".
         """
         include_re = re_form != "NA" and re_form != "~0"
+        if newdata is not None:
+            newdata = self._prepare_prediction_data(
+                newdata,
+                include_re=include_re,
+                extra_columns=(offset,) if isinstance(offset, str) else (),
+            )
 
         if newdata is None:
             if offset is not None:

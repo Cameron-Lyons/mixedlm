@@ -124,7 +124,8 @@ def dataframe_length(data: Any) -> int:
 def get_columns(data: Any) -> list[str]:
     """Get column names from a DataFrame."""
     if _is_polars_lazy(data):
-        return data.collect_schema().names()
+        collect_schema = getattr(data, "collect_schema", None)
+        return list(data.schema) if collect_schema is None else collect_schema().names()
     if _is_polars(data):
         return data.columns
     return list(data.columns)

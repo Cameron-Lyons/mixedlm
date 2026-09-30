@@ -5,6 +5,14 @@ All notable changes to mixedlm will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- LMM and GLMM predictions collect Polars lazy queries once, projecting to prediction
+  columns and preserving row order and intercept-only grid sizes. Conditional lazy
+  predictions no longer fail when checking the number of rows.
+
 ## [1.2.0] - 2026-08-18
 
 ### Added

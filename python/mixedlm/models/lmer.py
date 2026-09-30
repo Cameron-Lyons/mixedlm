@@ -371,8 +371,9 @@ class LmerResult(MerResultMixin):
 
         Parameters
         ----------
-        newdata : DataFrame, optional
-            New data for prediction. If None, returns fitted values.
+        newdata : pandas or Polars DataFrame or LazyFrame, optional
+            New data for prediction. If None, returns fitted values. Lazy queries
+            are projected to prediction columns and collected once per call.
         re_form : str, optional
             Formula for random effects. Use "NA" or "~0" for fixed effects only.
         allow_new_levels : bool, default False
@@ -407,6 +408,12 @@ class LmerResult(MerResultMixin):
             raise ValueError("level must be a finite number strictly between 0 and 1")
 
         include_re = re_form != "NA" and re_form != "~0"
+        if newdata is not None:
+            newdata = self._prepare_prediction_data(
+                newdata,
+                include_re=include_re,
+                extra_columns=(offset,) if isinstance(offset, str) else (),
+            )
         pred_matrices: ModelMatrices | None = None
 
         if newdata is None:
