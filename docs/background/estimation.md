@@ -211,7 +211,7 @@ changing model data or parameters does not require clearing them.
 
 For fitting GLMMs, mixedlm uses Penalized Iteratively Reweighted Least Squares (PIRLS):
 
-1. Initialize random effects at zero
+1. Initialize fixed effects from a weighted regression of starting response means on the link scale, subtracting offsets; initialize random effects at zero
 2. Given current \(\mathbf{b}\), compute working responses and weights
 3. Solve a penalized weighted least squares problem
 4. Update \(\mathbf{b}\)
@@ -238,6 +238,14 @@ This parameterization makes the covariance scale explicit, keeps zero-variance b
 well-defined, and uses the same system for the PIRLS mode, Laplace determinant, post-fit
 covariance, and leverage calculations. Adaptive quadrature uses the normalized standard-normal
 prior in these coordinates and evaluates each grouping level's likelihood contribution once.
+
+Starting means lie inside the family and link domains. For Poisson models with a
+log link, positive counts are transformed with the logarithm before estimating
+starting coefficients; zero counts use a small positive starting mean. This keeps
+large counts from producing an excessively large initial linear predictor. The
+native solver uses the same starting-mean convention as Python, including prior
+weights and offsets. Its inner convergence flag remains false if an update or
+final deviance is nonfinite.
 
 ## Nonlinear Mixed Models
 

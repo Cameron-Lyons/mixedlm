@@ -27,6 +27,14 @@ pub enum FamilyType {
 }
 
 impl LinkFunction {
+    fn link(&self, mu: f64) -> f64 {
+        match self {
+            LinkFunction::Identity => mu,
+            LinkFunction::Log => mu.ln(),
+            LinkFunction::Logit => (mu / (1.0 - mu)).ln(),
+        }
+    }
+
     fn inverse(&self, eta: &DVector<f64>) -> DVector<f64> {
         match self {
             LinkFunction::Identity => eta.clone(),
@@ -48,6 +56,17 @@ impl LinkFunction {
 }
 
 impl FamilyType {
+    fn starting_mean(&self, y: f64, link: LinkFunction) -> f64 {
+        // Use the intersection of the family and link mean domains, matching Python.
+        if *self == FamilyType::Binomial || link == LinkFunction::Logit {
+            ((y + 0.5) / 2.0).clamp(1e-7, 1.0 - 1e-7)
+        } else if *self == FamilyType::Poisson || link == LinkFunction::Log {
+            y.max(0.1)
+        } else {
+            y
+        }
+    }
+
     fn clamp_mu(&self, mu: &mut DVector<f64>, eps: f64) {
         match self {
             FamilyType::Gaussian => {}
@@ -266,8 +285,43 @@ fn forward_solve_mat(l: &DMatrix<f64>, b: &DMatrix<f64>) -> DMatrix<f64> {
 fn max_abs_diff(left: &DVector<f64>, right: &DVector<f64>) -> f64 {
     left.iter()
         .zip(right.iter())
-        .map(|(&lhs, &rhs)| (lhs - rhs).abs())
+        .map(|(&lhs, &rhs)| {
+            if lhs.is_finite() && rhs.is_finite() {
+                (lhs - rhs).abs()
+            } else {
+                f64::INFINITY
+            }
+        })
         .fold(0.0, f64::max)
+}
+
+fn initial_beta(
+    y: &DVector<f64>,
+    x: &DMatrix<f64>,
+    weights: &[f64],
+    offset: &DVector<f64>,
+    family: FamilyType,
+    link: LinkFunction,
+) -> DVector<f64> {
+    let n = y.nrows();
+    let p = x.ncols();
+    if p == 0 {
+        return DVector::zeros(0);
+    }
+    let sqrt_weights: Vec<f64> = weights
+        .iter()
+        .map(|weight| weight.max(1e-10).sqrt())
+        .collect();
+    let weighted_x = DMatrix::from_fn(n, p, |i, j| sqrt_weights[i] * x[(i, j)]);
+    let weighted_eta = DVector::from_fn(n, |i| {
+        sqrt_weights[i] * (link.link(family.starting_mean(y[i], link)) - offset[i])
+    });
+    let xtwx = weighted_x.transpose() * &weighted_x;
+    let xtweta = weighted_x.transpose() * &weighted_eta;
+    match Llt::new(xtwx.as_ref(), Side::Lower) {
+        Ok(chol) => chol.solve(&xtweta),
+        Err(_) => xtwx.partial_piv_lu().solve(&xtweta),
+    }
 }
 
 #[derive(Debug)]
@@ -302,18 +356,7 @@ pub fn pirls_impl(
     let mut beta = if let Some(b) = beta_start {
         b.clone()
     } else {
-        let eta = x * &DVector::<f64>::zeros(p) + offset;
-        let mu = link.inverse(&eta);
-        let link_deriv = link.deriv(&mu);
-        let y_work: DVector<f64> = DVector::from_fn(n, |i| eta[i] + link_deriv[i] * (y[i] - mu[i]));
-
-        let xtx = x.transpose() * x;
-        let xty = x.transpose() * &y_work;
-
-        match Llt::new(xtx.as_ref(), Side::Lower) {
-            Ok(chol) => chol.solve(&xty),
-            Err(_) => xtx.partial_piv_lu().solve(&xty),
-        }
+        initial_beta(y, x, weights, offset, family, link)
     };
 
     let lambda = build_lambda_dense(theta, structures);
@@ -473,6 +516,9 @@ pub fn pirls_impl(
         beta = beta_new;
         spherical = spherical_new;
 
+        if !delta_beta.is_finite() || !delta_u.is_finite() {
+            break;
+        }
         if delta_beta < tol && delta_u < tol {
             converged = true;
             break;
@@ -502,7 +548,7 @@ pub fn pirls_impl(
         spherical,
         u: random_effects,
         deviance,
-        converged,
+        converged: converged && deviance.is_finite(),
     }
 }
 
@@ -1141,5 +1187,120 @@ mod quadrature_tests {
             ),
             0.0
         );
+    }
+}
+
+#[cfg(test)]
+mod initialization_tests {
+    use super::*;
+
+    #[test]
+    fn weighted_link_scale_starts_match_python_with_offsets() {
+        let y = DVector::from_fn(3, |i| [0.0, 0.25, 1.0][i]);
+        let x = DMatrix::from_fn(3, 2, |i, j| if j == 0 { 1.0 } else { i as f64 - 1.0 });
+        let weights = [0.5, 1.0, 2.0];
+        let offset = DVector::from_fn(3, |i| [-0.4, 0.1, 0.7][i]);
+        let cases = [
+            (
+                FamilyType::Gaussian,
+                LinkFunction::Identity,
+                [0.2730769230769231, -0.0038461538461538026],
+            ),
+            (
+                FamilyType::Binomial,
+                LinkFunction::Logit,
+                [-0.327240624525381, 0.6549566633833384],
+            ),
+            (
+                FamilyType::Poisson,
+                LinkFunction::Log,
+                [-1.372447090582741, 0.6439852729484538],
+            ),
+        ];
+        for (family, link, expected) in cases {
+            let beta = initial_beta(&y, &x, &weights, &offset, family, link);
+            for i in 0..2 {
+                assert!((beta[i] - expected[i]).abs() < 1e-13);
+            }
+        }
+    }
+
+    #[test]
+    fn poisson_large_counts_converge_in_a_few_iterations() {
+        let y = DVector::from_fn(12, |i| [998.0, 1000.0, 1002.0][i % 3]);
+        let x = DMatrix::full(12, 1, 1.0);
+        let z = csc_from_scipy(
+            &[1.0; 12],
+            &(0..12).collect::<Vec<_>>(),
+            &[0, 3, 6, 9, 12],
+            (12, 4),
+        )
+        .unwrap();
+        let structures = [RandomEffectStructure {
+            n_levels: 4,
+            n_terms: 1,
+            correlated: true,
+        }];
+        let result = pirls_impl(
+            &y,
+            &x,
+            &z,
+            &[1.0; 12],
+            &DVector::full(12, -20.0),
+            &[0.5],
+            &structures,
+            FamilyType::Poisson,
+            LinkFunction::Log,
+            None,
+            None,
+            6,
+            1e-6,
+        );
+        assert!(result.converged);
+        assert!(result.deviance.is_finite());
+        assert!((result.beta[0] - (1000.0_f64.ln() + 20.0)).abs() < 1e-10);
+    }
+
+    #[test]
+    fn supplied_starts_are_preserved() {
+        let y = DVector::full(3, 10.0);
+        let x = DMatrix::full(3, 1, 1.0);
+        let z = csc_from_scipy(&[1.0; 3], &[0, 1, 2], &[0, 3], (3, 1)).unwrap();
+        let structures = [RandomEffectStructure {
+            n_levels: 1,
+            n_terms: 1,
+            correlated: true,
+        }];
+        let beta = DVector::full(1, 1.25);
+        let u = DVector::full(1, 0.4);
+        let result = pirls_impl(
+            &y,
+            &x,
+            &z,
+            &[1.0; 3],
+            &DVector::zeros(3),
+            &[0.5],
+            &structures,
+            FamilyType::Poisson,
+            LinkFunction::Log,
+            Some(&beta),
+            Some(&u),
+            0,
+            1e-6,
+        );
+        assert_eq!(result.beta[0], beta[0]);
+        assert!((result.u[0] - u[0]).abs() < 1e-14);
+        assert!(!result.converged);
+    }
+
+    #[test]
+    fn nonfinite_updates_never_appear_stationary() {
+        let finite = DVector::full(2, 1.0);
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let invalid = DVector::full(2, value);
+            assert_eq!(max_abs_diff(&invalid, &finite), f64::INFINITY);
+            assert_eq!(max_abs_diff(&finite, &invalid), f64::INFINITY);
+            assert_eq!(max_abs_diff(&invalid, &invalid), f64::INFINITY);
+        }
     }
 }
