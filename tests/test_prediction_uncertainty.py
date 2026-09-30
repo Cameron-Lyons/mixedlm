@@ -49,8 +49,17 @@ def _make_result(
     )
 
 
+@pytest.fixture(params=["dense", "sparse"])
+def projection_backend(request, monkeypatch):
+    from mixedlm.models import shared_utils
+
+    monkeypatch.setattr(
+        shared_utils, "_SPARSE_PROJECTION_MIN_RANDOM", 0 if request.param == "sparse" else np.inf
+    )
+
+
 @pytest.fixture(params=[False, True], ids=["unweighted", "weighted"])
-def slope_result(request: pytest.FixtureRequest) -> LmerResult:
+def slope_result(request: pytest.FixtureRequest, projection_backend) -> LmerResult:
     formula = parse_formula("y ~ x + (x | group)")
     data = _prediction_data()
     weights = np.geomspace(0.1, 5.0, len(data)) if request.param else None

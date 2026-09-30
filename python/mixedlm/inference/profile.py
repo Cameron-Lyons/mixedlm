@@ -12,6 +12,7 @@ from scipy import stats
 from scipy.optimize import brentq
 
 from mixedlm.inference.profile_types import Profile2DResult, ProfileResult
+from mixedlm.models.shared_utils import _RandomEffectFactor
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -462,9 +463,9 @@ class _ProfileProjection:
     weighted_X: NDArray[np.floating]
     weighted_Zt: Any | None
     Lambda_T: Any | None
-    L_V: NDArray[np.floating] | None
+    random_factor: _RandomEffectFactor | None
     logdet_V: float
-    RZX: NDArray[np.floating] | None
+    random_fixed_map: NDArray[np.floating] | None
     L_XtVinvX: NDArray[np.floating] | None
     logdet_XtVinvX: float
 
@@ -481,17 +482,17 @@ class _ProfileProjection:
         if matrices.n_random == 0:
             weighted_Zt = None
             Lambda_T = None
-            L_V = None
+            random_factor = None
             logdet_V = 0.0
-            RZX = None
+            random_fixed_map = None
         else:
-            if weighted.lambda_matrix is None or weighted.L_V is None:
+            if weighted.lambda_matrix is None or weighted.random_factor is None:
                 raise ValueError("fitted random-effect projection is incomplete")
             weighted_Zt = weighted.weighted_Z.T.tocsc()
             Lambda_T = weighted.lambda_matrix.T
-            L_V = weighted.L_V
-            logdet_V = float(2.0 * np.sum(np.log(np.diag(L_V))))
-            RZX = weighted.RZX[:, keep_idx]
+            random_factor = weighted.random_factor
+            logdet_V = random_factor.logdet
+            random_fixed_map = weighted.random_fixed_map[:, keep_idx]
 
         weights = np.asarray(matrices.weights, dtype=np.float64)
         return cls(
@@ -505,9 +506,9 @@ class _ProfileProjection:
             weighted_X=weighted.weighted_X[:, keep_idx],
             weighted_Zt=weighted_Zt,
             Lambda_T=Lambda_T,
-            L_V=L_V,
+            random_factor=random_factor,
             logdet_V=logdet_V,
-            RZX=RZX,
+            random_fixed_map=random_fixed_map,
             L_XtVinvX=L_XtVinvX,
             logdet_XtVinvX=logdet_XtVinvX,
         )
@@ -553,9 +554,9 @@ class _ProfileProjection:
                 weighted_X=weighted_X,
                 weighted_Zt=None,
                 Lambda_T=None,
-                L_V=None,
+                random_factor=None,
                 logdet_V=0.0,
-                RZX=None,
+                random_fixed_map=None,
                 L_XtVinvX=L_XtVinvX,
                 logdet_XtVinvX=logdet_XtVinvX,
             )
@@ -567,20 +568,20 @@ class _ProfileProjection:
         V_factor = V_factor + sparse.eye(q, format="csc")
 
         try:
-            L_V = linalg.cholesky(V_factor.toarray(), lower=True)
-        except linalg.LinAlgError:
-            L_V = None
+            random_factor = _RandomEffectFactor(V_factor)
+        except (linalg.LinAlgError, RuntimeError):
+            random_factor = None
 
-        if L_V is None:
-            RZX = None
+        if random_factor is None:
+            random_fixed_map = None
             L_XtVinvX = None
             logdet_V = 0.0
             logdet_XtVinvX = 0.0
         else:
-            logdet_V = float(2.0 * np.sum(np.log(np.diag(L_V))))
+            logdet_V = random_factor.logdet
             Lambdat_ZtWX = Lambda_T @ (weighted_Zt @ weighted_X)
-            RZX = linalg.solve_triangular(L_V, Lambdat_ZtWX, lower=True)
-            information = weighted_X.T @ weighted_X - RZX.T @ RZX
+            random_fixed_map, correction = random_factor.solve_with_crossproduct(Lambdat_ZtWX)
+            information = weighted_X.T @ weighted_X - correction
             information = (information + information.T) / 2.0
             L_XtVinvX, logdet_XtVinvX = _factor_profile_information(information, REML)
 
@@ -595,9 +596,9 @@ class _ProfileProjection:
             weighted_X=weighted_X,
             weighted_Zt=weighted_Zt,
             Lambda_T=Lambda_T,
-            L_V=L_V,
+            random_factor=random_factor,
             logdet_V=logdet_V,
-            RZX=RZX,
+            random_fixed_map=random_fixed_map,
             L_XtVinvX=L_XtVinvX,
             logdet_XtVinvX=logdet_XtVinvX,
         )
@@ -618,17 +619,16 @@ class _ProfileProjection:
         else:
             if (
                 self.L_XtVinvX is None
-                or self.RZX is None
-                or self.L_V is None
+                or self.random_fixed_map is None
+                or self.random_factor is None
                 or self.weighted_Zt is None
                 or self.Lambda_T is None
             ):
                 return 1e10
 
-            cu = self.Lambda_T @ (self.weighted_Zt @ weighted_y)
-            cu_star = linalg.solve_triangular(self.L_V, cu, lower=True)
-            rhs = self.weighted_X.T @ weighted_y - self.RZX.T @ cu_star
             if self.X_reduced.shape[1] > 0:
+                cu = self.Lambda_T @ (self.weighted_Zt @ weighted_y)
+                rhs = self.weighted_X.T @ weighted_y - self.random_fixed_map.T @ cu
                 beta_reduced = linalg.cho_solve((self.L_XtVinvX, True), rhs)
             else:
                 beta_reduced = np.empty(0, dtype=np.float64)
@@ -638,8 +638,9 @@ class _ProfileProjection:
         pwrss = float(np.dot(weighted_residual, weighted_residual))
 
         if self.q > 0:
+            assert self.random_factor is not None
             Lambda_t_ZtW_resid = self.Lambda_T @ (self.weighted_Zt @ weighted_residual)
-            u_star = linalg.cho_solve((self.L_V, True), Lambda_t_ZtW_resid)
+            u_star = self.random_factor.solve(Lambda_t_ZtW_resid)
             pwrss -= float(np.dot(Lambda_t_ZtW_resid, u_star))
 
         denom = self.n - self.X_reduced.shape[1] if self.REML else self.n
@@ -1027,7 +1028,8 @@ def slice2D(
     """Compute 2D profile likelihood slice for two parameters.
 
     This function evaluates the profile deviance over a grid of values
-    for two parameters, while optimizing over all other parameters.
+    for two fixed effects, while recomputing the remaining fixed effects and
+    residual scale at the fitted covariance parameters.
     The result can be used to visualize joint confidence regions and
     parameter correlations.
 

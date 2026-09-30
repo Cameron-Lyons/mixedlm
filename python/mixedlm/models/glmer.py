@@ -24,7 +24,7 @@ from mixedlm.models.lmer_types import (
 )
 from mixedlm.models.lmer_types import RePCAGroup as RePCAGroup
 from mixedlm.models.result_mixin import MerResultMixin
-from mixedlm.models.shared_utils import sparse_quadratic_form_diagonal, symmetric_inverse
+from mixedlm.models.shared_utils import _RandomEffectFactor, symmetric_inverse
 from mixedlm.utils import _get_signif_code
 from mixedlm.utils.simulation import simulate_random_effects, simulation_parameters
 
@@ -76,12 +76,25 @@ class _GLMMRandomSystem:
 class _GLMMProjection:
     weights: NDArray[np.floating]
     Lambda: sparse.csc_matrix
-    random_cholesky: NDArray[np.floating]
-    RZX: NDArray[np.floating]
+    random_factor: _RandomEffectFactor | None
+    spherical_cross: NDArray[np.float64]
+    random_fixed_map: NDArray[np.float64]
     fixed_information: NDArray[np.floating]
     weighted_X: NDArray[np.float64]
     weighted_Z: sparse.csc_matrix
     information_inv: NDArray[np.float64]
+
+    @property
+    def random_cholesky(self) -> NDArray[np.float64]:
+        if self.random_factor is None:
+            return np.empty((0, 0), dtype=np.float64)
+        return self.random_factor.cholesky
+
+    @cached_property
+    def RZX(self) -> NDArray[np.float64]:
+        if self.random_factor is None:
+            return self.spherical_cross.copy()
+        return linalg.solve_triangular(self.random_cholesky, self.spherical_cross, lower=True)
 
 
 @dataclass
@@ -271,33 +284,30 @@ class GlmerResult(MerResultMixin):
             return _GLMMProjection(
                 weights=weights,
                 Lambda=Lambda,
-                random_cholesky=np.empty((0, 0), dtype=np.float64),
-                RZX=np.empty((0, X.shape[1]), dtype=np.float64),
+                random_factor=None,
+                spherical_cross=np.empty((0, X.shape[1]), dtype=np.float64),
+                random_fixed_map=np.empty((0, X.shape[1]), dtype=np.float64),
                 fixed_information=np.asarray(XtWX),
                 weighted_X=np.asarray(WX),
                 weighted_Z=WZ,
                 information_inv=symmetric_inverse(XtWX),
             )
 
-        random_information_dense = system.precision.toarray()
-        try:
-            random_cholesky = linalg.cholesky(random_information_dense, lower=True)
-        except linalg.LinAlgError:
-            random_information_dense += 1e-6 * np.eye(q)
-            random_cholesky = linalg.cholesky(random_information_dense, lower=True)
+        random_factor = _RandomEffectFactor(system.precision, jitter=1e-6)
 
         XtWZ = WX.T @ WZ
         XtWZ_dense = XtWZ.toarray() if sparse.issparse(XtWZ) else np.asarray(XtWZ)
         spherical_cross = np.asarray(Lambda.T @ XtWZ_dense.T)
-        RZX = linalg.solve_triangular(random_cholesky, spherical_cross, lower=True)
-        fixed_information = np.asarray(XtWX - RZX.T @ RZX)
+        random_fixed_map, correction = random_factor.solve_with_crossproduct(spherical_cross)
+        fixed_information = np.asarray(XtWX - correction)
         fixed_information = 0.5 * (fixed_information + fixed_information.T)
 
         return _GLMMProjection(
             weights=weights,
             Lambda=Lambda,
-            random_cholesky=random_cholesky,
-            RZX=RZX,
+            random_factor=random_factor,
+            spherical_cross=spherical_cross,
+            random_fixed_map=random_fixed_map,
             fixed_information=fixed_information,
             weighted_X=np.asarray(WX),
             weighted_Z=WZ,
@@ -506,18 +516,14 @@ class GlmerResult(MerResultMixin):
             return np.clip(diagonal, 0, 1 - 1e-10)
 
         weighted_z_lambda = projection.weighted_Z @ projection.Lambda
-        random_fixed_map = linalg.solve_triangular(
-            projection.random_cholesky.T,
-            projection.RZX,
-            lower=False,
-        )
-        adjusted_x = projection.weighted_X - weighted_z_lambda @ random_fixed_map
+        assert projection.random_factor is not None
+        adjusted_x = projection.weighted_X - weighted_z_lambda @ projection.random_fixed_map
         diagonal = np.einsum(
             "ij,ij->i",
             adjusted_x @ projection.information_inv,
             adjusted_x,
         )
-        diagonal += sparse_quadratic_form_diagonal(weighted_z_lambda, projection.random_cholesky)
+        diagonal += projection.random_factor.quadratic_diagonal(weighted_z_lambda)
         return np.clip(diagonal, 0, 1 - 1e-10)
 
     def hatvalues(self) -> NDArray[np.floating]:

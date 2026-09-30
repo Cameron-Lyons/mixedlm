@@ -1,23 +1,97 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+from functools import cached_property
 from typing import Any
 
 import numpy as np
 from numpy.typing import NDArray
 from scipy import linalg, sparse
+from scipy.sparse import linalg as sparse_linalg
 
 from mixedlm.utils.dataframe import dataframe_length, get_column_numpy, get_columns
 
 _MAX_QUADRATIC_FORM_ELEMENTS = 1_000_000
+_SPARSE_PROJECTION_MIN_RANDOM = 256
+
+
+class _RandomEffectFactor:
+    """Reuse a precision solve, materializing its dense Cholesky only on demand."""
+
+    def __init__(self, precision: sparse.spmatrix, *, jitter: float = 0.0) -> None:
+        self.precision = sparse.csc_matrix(precision)
+        self._dense_factor: NDArray[np.float64] | None = None
+        self._sparse_factor: sparse_linalg.SuperLU | None = None
+        try:
+            self._factorize()
+        except (linalg.LinAlgError, RuntimeError):
+            if jitter == 0.0:
+                raise
+            self.precision = self.precision + jitter * sparse.eye(
+                self.precision.shape[0], format="csc"
+            )
+            self._factorize()
+
+    def _factorize(self) -> None:
+        if self.precision.shape[0] >= _SPARSE_PROJECTION_MIN_RANDOM:
+            self._sparse_factor = sparse_linalg.splu(self.precision)
+        else:
+            self._dense_factor = linalg.cholesky(self.precision.toarray(), lower=True)
+
+    def __reduce__(self) -> tuple[type[_RandomEffectFactor], tuple[sparse.csc_matrix]]:
+        # SuperLU objects cannot be pickled; rebuild from the effective precision.
+        return type(self), (self.precision,)
+
+    @cached_property
+    def cholesky(self) -> NDArray[np.float64]:
+        if self._dense_factor is not None:
+            return self._dense_factor
+        return linalg.cholesky(self.precision.toarray(), lower=True)
+
+    @cached_property
+    def logdet(self) -> float:
+        if self._sparse_factor is not None:
+            return float(np.sum(np.log(np.abs(self._sparse_factor.U.diagonal()))))
+        return float(2.0 * np.sum(np.log(np.diag(self.cholesky))))
+
+    def solve(self, rhs: NDArray[np.floating]) -> NDArray[np.float64]:
+        if rhs.size == 0:
+            return np.asarray(rhs, dtype=np.float64).copy()
+        if self._sparse_factor is not None:
+            return self._sparse_factor.solve(rhs)
+        return linalg.cho_solve((self.cholesky, True), rhs)
+
+    def quadratic_diagonal(self, design: sparse.spmatrix) -> NDArray[np.float64]:
+        factor = self.solve if self._sparse_factor is not None else self.cholesky
+        return sparse_quadratic_form_diagonal(design, factor)
+
+    def crossproduct(self, rhs: NDArray[np.floating]) -> NDArray[np.float64]:
+        """Return B.T C^-1 B, using only a forward solve for dense factors."""
+        if self._sparse_factor is not None:
+            return rhs.T @ self.solve(rhs)
+        whitened = linalg.solve_triangular(self.cholesky, rhs, lower=True)
+        return whitened.T @ whitened
+
+    def solve_with_crossproduct(
+        self, rhs: NDArray[np.floating]
+    ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+        """Return C^-1 B and B.T C^-1 B, retaining the dense Cholesky arithmetic."""
+        if self._sparse_factor is not None:
+            solved = self.solve(rhs)
+            return solved, rhs.T @ solved
+        whitened = linalg.solve_triangular(self.cholesky, rhs, lower=True)
+        solved = linalg.solve_triangular(self.cholesky.T, whitened, lower=False)
+        return solved, whitened.T @ whitened
 
 
 def sparse_quadratic_form_diagonal(
     design: sparse.spmatrix,
-    factor: NDArray[np.floating],
+    factor: NDArray[np.floating] | Callable[[NDArray[np.floating]], NDArray[np.floating]],
 ) -> NDArray[np.float64]:
-    """Compute diag(A (L L.T)^-1 A.T) with bounded dense solve buffers.
+    """Compute diag(A C^-1 A.T) with bounded dense solve buffers.
 
-    ``design`` is A and ``factor`` is its precision's lower Cholesky factor L.
+    ``design`` is A. ``factor`` is either C's lower Cholesky factor or a
+    callable computing C^-1 times its argument without modifying that argument.
     Each right-hand-side buffer holds at most one million elements, or one
     row of A if its width exceeds that limit.
     """
@@ -31,8 +105,13 @@ def sparse_quadratic_form_diagonal(
     for start in range(0, n_rows, chunk_size):
         stop = min(start + chunk_size, n_rows)
         rhs = design[start:stop].toarray().T
-        solved = linalg.solve_triangular(factor, rhs, lower=True, overwrite_b=True)
-        result[start:stop] = np.einsum("ij,ij->j", solved, solved)
+        if callable(factor):
+            solved = factor(rhs)
+            result[start:stop] = np.einsum("ij,ij->j", rhs, solved)
+        else:
+            solved = linalg.solve_triangular(factor, rhs, lower=True, overwrite_b=True)
+            result[start:stop] = np.einsum("ij,ij->j", solved, solved)
+        del rhs, solved
     return result
 
 

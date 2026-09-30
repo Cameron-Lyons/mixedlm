@@ -41,6 +41,12 @@ rows from several fits can be concatenated directly.
 
 The result object returned by `lmer()`.
 
+Fixed-effect covariance (`vcov()`), prediction standard errors, and leverage
+(`hatvalues()`) reuse a factored random-effect precision system. Large systems
+use sparse solves, and pointwise variances use bounded batches instead of a
+full dense observation-by-random-effect matrix. GLMM covariance and leverage
+use the same approach with the final working weights.
+
 ### Methods
 
 #### summary
@@ -340,6 +346,11 @@ Extract model components.
 - `name`: Component name. Options include `"X"`, `"Z"`, `"theta"`, `"Lambda"`, `"Zt"`, `"beta"`, `"b"`, `"u"`, etc.
 
 **Returns:** The requested component.
+
+Requesting `"RZX"` materializes a dense random-effect Cholesky factor on demand.
+It retains the original coefficient order and is cached for subsequent calls.
+LMM fixed-effect profiling reuses the precision solver without requesting this
+dense factor.
 
 #### is_singular
 
