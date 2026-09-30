@@ -47,6 +47,7 @@ pub fn build_lambda_blocks(theta: &[f64], structures: &[RandomEffectStructure]) 
     blocks
 }
 
+#[derive(Debug)]
 struct FactorBlock {
     offset: usize,
     n_levels: usize,
@@ -56,6 +57,7 @@ struct FactorBlock {
 
 /// One covariance factor per structure, repeated over its grouping levels.
 /// Multiplication preserves every cross-structure and cross-level contribution.
+#[derive(Debug)]
 pub struct CovarianceFactor {
     blocks: Vec<FactorBlock>,
     dimension: usize,
