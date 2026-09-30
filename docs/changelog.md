@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- GLMM fitting accepts `pirls_maxiter` to limit inner iterations independently of outer optimization; fitted results and refits retain the inner controls
+
 - New-data LMM prediction intervals accept scalar, array, or column-based residual precision weights.
 - `ggpredict()` accepts one known link-scale offset per prediction-grid row.
 - Nonlinear new-data predictions accept scalar, array, or column-based response offsets.
@@ -20,6 +22,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   behavior, including per-unit rates from models fitted with log-exposure offsets.
 
 ### Fixed
+
+- `GlmerControl.tolPwrss` now governs PIRLS stopping in native and Python likelihoods, quadrature, modular fitting, and final extraction; invalid inner controls are rejected before solving
 
 - Prediction offsets reject complex, masked, and non-finite values before evaluating
   a model. Scalar offsets use constant-size storage even for large prediction grids.
