@@ -189,6 +189,14 @@ For fitting GLMMs, mixedlm uses Penalized Iteratively Reweighted Least Squares (
 
 This is nested within the outer optimization over variance parameters.
 
+The native solver computes weighted random-effect crossproducts by observation,
+using only columns that occur together in a row of the sparse design matrix.
+It builds this row layout once per likelihood evaluation and reuses it as the
+working weights change. Dense designs accumulate one column pair at a time,
+using direct dot products for fully populated matrices. Linear and generalized
+linear models share this implementation. The GLMM random-effect system is still factored
+as a dense matrix, so large numbers of random-effect coefficients can remain costly.
+
 The random effects are solved in spherical coordinates,
 
 \[

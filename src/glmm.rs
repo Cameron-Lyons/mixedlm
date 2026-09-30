@@ -369,38 +369,12 @@ pub fn pirls_impl(
 
         let ztwx = xtwz_mat.transpose();
 
-        let mut ztwz = DMatrix::zeros(q, q);
-        for j1 in 0..q {
-            let col1_start = z.col_offsets()[j1];
-            let col1_end = z.col_offsets()[j1 + 1];
-
-            for j2 in 0..=j1 {
-                let col2_start = z.col_offsets()[j2];
-                let col2_end = z.col_offsets()[j2 + 1];
-
-                let mut sum = 0.0;
-                let mut idx1 = col1_start;
-                let mut idx2 = col2_start;
-
-                while idx1 < col1_end && idx2 < col2_end {
-                    let row1 = z.row_indices()[idx1];
-                    let row2 = z.row_indices()[idx2];
-
-                    if row1 == row2 {
-                        sum += z.values()[idx1] * w_vec[row1] * z.values()[idx2];
-                        idx1 += 1;
-                        idx2 += 1;
-                    } else if row1 < row2 {
-                        idx1 += 1;
-                    } else {
-                        idx2 += 1;
-                    }
-                }
-
-                ztwz[(j1, j2)] = sum;
-                ztwz[(j2, j1)] = sum;
-            }
-        }
+        let ztwz = z.weighted_crossproduct(
+            w_vec
+                .try_as_col_major()
+                .expect("owned weights are contiguous")
+                .as_slice(),
+        );
 
         let xtwz_vec: DVector<f64> = DVector::from_fn(p, |i| {
             let mut sum = 0.0;
@@ -586,38 +560,12 @@ pub fn laplace_deviance_impl(
         w_vec[i] = (w_vec[i] * weights[i]).max(1e-10);
     }
 
-    let mut ztwz = DMatrix::zeros(q, q);
-    for j1 in 0..q {
-        let col1_start = z.col_offsets()[j1];
-        let col1_end = z.col_offsets()[j1 + 1];
-
-        for j2 in 0..=j1 {
-            let col2_start = z.col_offsets()[j2];
-            let col2_end = z.col_offsets()[j2 + 1];
-
-            let mut sum = 0.0;
-            let mut idx1 = col1_start;
-            let mut idx2 = col2_start;
-
-            while idx1 < col1_end && idx2 < col2_end {
-                let row1 = z.row_indices()[idx1];
-                let row2 = z.row_indices()[idx2];
-
-                if row1 == row2 {
-                    sum += z.values()[idx1] * w_vec[row1] * z.values()[idx2];
-                    idx1 += 1;
-                    idx2 += 1;
-                } else if row1 < row2 {
-                    idx1 += 1;
-                } else {
-                    idx2 += 1;
-                }
-            }
-
-            ztwz[(j1, j2)] = sum;
-            ztwz[(j2, j1)] = sum;
-        }
-    }
+    let ztwz = z.weighted_crossproduct(
+        w_vec
+            .try_as_col_major()
+            .expect("owned weights are contiguous")
+            .as_slice(),
+    );
 
     let h = lambda.transpose() * &ztwz * &lambda + DMatrix::<f64>::identity(q, q);
 
@@ -801,38 +749,12 @@ pub fn adaptive_gh_deviance_impl(
         w_vec[i] = (w_vec[i] * weights[i]).max(1e-10);
     }
 
-    let mut ztwz = DMatrix::zeros(q, q);
-    for j1 in 0..q {
-        let col1_start = z.col_offsets()[j1];
-        let col1_end = z.col_offsets()[j1 + 1];
-
-        for j2 in 0..=j1 {
-            let col2_start = z.col_offsets()[j2];
-            let col2_end = z.col_offsets()[j2 + 1];
-
-            let mut sum = 0.0;
-            let mut idx1 = col1_start;
-            let mut idx2 = col2_start;
-
-            while idx1 < col1_end && idx2 < col2_end {
-                let row1 = z.row_indices()[idx1];
-                let row2 = z.row_indices()[idx2];
-
-                if row1 == row2 {
-                    sum += z.values()[idx1] * w_vec[row1] * z.values()[idx2];
-                    idx1 += 1;
-                    idx2 += 1;
-                } else if row1 < row2 {
-                    idx1 += 1;
-                } else {
-                    idx2 += 1;
-                }
-            }
-
-            ztwz[(j1, j2)] = sum;
-            ztwz[(j2, j1)] = sum;
-        }
-    }
+    let ztwz = z.weighted_crossproduct(
+        w_vec
+            .try_as_col_major()
+            .expect("owned weights are contiguous")
+            .as_slice(),
+    );
 
     let h = lambda.transpose() * &ztwz * &lambda + DMatrix::<f64>::identity(q, q);
 
