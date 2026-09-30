@@ -497,8 +497,6 @@ def mkGlmerDevfun(
         parsed.matrices,
         parsed.family,
         verbose=verbose,
-        pirls_maxiter=control.pirls_maxiter,
-        pirls_tol=control.tolPwrss,
         nAGQ=nAGQ,
         pirls_maxiter=control.pirls_maxiter,
         pirls_tol=control.tolPwrss,
