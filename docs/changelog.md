@@ -84,6 +84,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Nonlinear fits and refits now reject invalid final evaluations instead of reporting convergence with a failure penalty and starting estimates
 
 - Nonlinear fitting and refitting preserve custom prediction and gradient methods instead of selecting a built-in native formula by display name
+
+- Sparse-cache correctness tests no longer depend on single-run timing comparisons; paired cached and uncached measurements now use the benchmark suite
 - Poisson and other unbounded GLMM families no longer clamp fitted means below one
 - Unsupported family and link combinations no longer route through the native fast path
 
