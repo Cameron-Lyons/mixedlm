@@ -305,6 +305,14 @@ def profile_lmer(
     elif isinstance(which, str):
         which = [which]
 
+    from mixedlm.utils.names import _check_unique_coefficient_names
+
+    _check_unique_coefficient_names(
+        result.matrices.fixed_names,
+        which,
+        alternative="Rename colliding formula variables before requesting named profiles.",
+    )
+
     profiles: dict[str, ProfileResult] = {}
     alpha = 1 - level
     z_crit = stats.norm.isf(alpha / 2)
@@ -757,6 +765,14 @@ def profile_glmer(
     elif isinstance(which, str):
         which = [which]
 
+    from mixedlm.utils.names import _check_unique_coefficient_names
+
+    _check_unique_coefficient_names(
+        result.matrices.fixed_names,
+        which,
+        alternative="Rename colliding formula variables before requesting named profiles.",
+    )
+
     profiles: dict[str, ProfileResult] = {}
     alpha = 1 - level
     z_crit = stats.norm.isf(alpha / 2)
@@ -1068,6 +1084,14 @@ def slice2D(
         raise ValueError(f"Parameter '{param1}' not found in fixed effects")
     if param2 not in result.matrices.fixed_names:
         raise ValueError(f"Parameter '{param2}' not found in fixed effects")
+
+    from mixedlm.utils.names import _check_unique_coefficient_names
+
+    _check_unique_coefficient_names(
+        result.matrices.fixed_names,
+        [param1, param2],
+        alternative="Rename colliding formula variables before requesting named profile slices.",
+    )
 
     idx1 = result.matrices.fixed_names.index(param1)
     idx2 = result.matrices.fixed_names.index(param2)

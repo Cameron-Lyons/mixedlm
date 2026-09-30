@@ -67,6 +67,12 @@ class NlmerResult:
     _y_var: str = field(default="y", repr=False)
 
     def fixef(self) -> dict[str, float]:
+        from mixedlm.utils.names import _check_unique_coefficient_names
+
+        _check_unique_coefficient_names(
+            self.model.param_names,
+            alternative="Use tidy() or phi to inspect coefficients by position.",
+        )
         return dict(zip(self.model.param_names, self.phi, strict=False))
 
     def ranef(self) -> dict[str, dict[str, NDArray[np.floating]]]:
@@ -693,6 +699,14 @@ class NlmerResult:
         elif isinstance(parm, str):
             parm = [parm]
 
+        from mixedlm.utils.names import _check_unique_coefficient_names
+
+        _check_unique_coefficient_names(
+            self.model.param_names,
+            None if method == "boot" else parm,
+            alternative="Use tidy(conf_int=True) for intervals in coefficient order.",
+        )
+
         if method == "Wald":
             vcov = self.vcov()
             alpha = 1 - level
@@ -932,7 +946,7 @@ class NlmerResult:
 
         lines.append("Fixed effects:")
         lines.append("             Estimate")
-        for name, val in self.fixef().items():
+        for name, val in zip(self.model.param_names, self.phi, strict=False):
             lines.append(f"{name:12} {val:10.4f}")
 
         lines.append("")

@@ -26,6 +26,11 @@ For linear mixed models, `ddf_method` accepts `"Satterthwaite"` (the default),
 `"Kenward-Roger"`, or `"normal"`. Generalized models use Wald z tests, while nonlinear
 models use residual degrees of freedom.
 
+Fixed-effect rows follow the fitted coefficient order, including repeated `term`
+labels. For example, a generated categorical contrast and a quoted numeric variable
+can both be named `a.1`. Use row positions to distinguish these coefficients;
+`tidy(conf_int=True)` preserves both estimates and their individual intervals.
+
 ### glance
 
 ```python
@@ -70,6 +75,13 @@ result.fixef()
 Extract fixed effects coefficients.
 
 **Returns:** Dictionary mapping coefficient names to values.
+
+Dictionary results require unique coefficient names. If labels repeat, use
+`result.tidy()` or pair `result.beta` with `result.matrices.fixed_names` by position
+(`result.phi` and `result.model.param_names` for nonlinear models). Named interval,
+profile, and hypothesis selections reject a requested name that identifies multiple
+columns. Unambiguous selections remain available even if other labels repeat.
+Rename colliding formula variables before requesting profiles for those coefficients.
 
 #### ranef
 
