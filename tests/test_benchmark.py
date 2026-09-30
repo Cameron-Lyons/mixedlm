@@ -912,3 +912,21 @@ def test_benchmark_custom_contrast_validation(benchmark, kind):
         result.estimate, expected_coefficients @ beta, rtol=1e-12, atol=1e-12
     )
     np.testing.assert_allclose(result.se, np.linalg.norm(expected_coefficients, axis=1), rtol=1e-12)
+
+
+@pytest.mark.benchmark(group="custom-contrast-scaling")
+@pytest.mark.parametrize("scale", [1.0, 1e-200, 1e200])
+def test_benchmark_scaled_custom_contrasts(benchmark, scale):
+    from tests.test_emmeans import _synthetic_emmeans
+
+    means = _synthetic_emmeans(n_levels=32, n_beta=16)
+    coefficients = np.random.default_rng(423).normal(size=(512, 32))
+    projected = coefficients @ means._L
+    estimate = projected @ means._beta
+    se = np.sqrt(np.einsum("ij,ij->i", projected @ means._vcov, projected))
+
+    result = benchmark(means.contrast, coefficients * scale, adjust="none")
+
+    np.testing.assert_allclose(result.estimate / scale, estimate, rtol=1e-12, atol=1e-12)
+    np.testing.assert_allclose(result.se / scale, se, rtol=1e-12)
+    np.testing.assert_allclose(result.t_ratio, estimate / se, rtol=1e-12, atol=1e-12)
