@@ -98,9 +98,19 @@ def _build_psi_matrix(
     return factor @ factor.T
 
 
+def _grouped_observation_indices(groups: NDArray[np.integer]) -> list[NDArray[np.intp]]:
+    """Return rows in observation order for each sorted group label."""
+    order = np.argsort(groups, kind="stable")
+    if len(order) == 0:
+        return []
+    sorted_groups = groups[order]
+    boundaries = np.flatnonzero(sorted_groups[1:] != sorted_groups[:-1]) + 1
+    return list(np.split(order, boundaries))
+
+
 def _compute_group_resid_grad(
     g: int,
-    groups: NDArray,
+    rows: NDArray,
     x: NDArray,
     y: NDArray,
     phi: NDArray,
@@ -108,9 +118,8 @@ def _compute_group_resid_grad(
     random_params: list[int],
     model: NonlinearModel,
 ) -> tuple[int, NDArray, NDArray, NDArray]:
-    mask = groups == g
-    x_g = x[mask]
-    y_g = y[mask]
+    x_g = x[rows]
+    y_g = y[rows]
 
     params_g = phi.copy()
     np.add.at(params_g, random_params, b[g, :])
@@ -118,25 +127,24 @@ def _compute_group_resid_grad(
     pred_g = model.predict(params_g, x_g)
     grad_g = model.gradient(params_g, x_g)
 
-    return (g, mask, y_g - pred_g, grad_g)
+    return (g, rows, y_g - pred_g, grad_g)
 
 
 def _update_group_random_effects(
     g: int,
-    groups: NDArray,
+    rows: NDArray,
     x: NDArray,
     y: NDArray,
     phi: NDArray,
     b: NDArray,
     random_params: list[int],
     model: NonlinearModel,
-    Psi_chol: NDArray,
+    Psi_inv: NDArray,
     weights: NDArray[np.floating],
 ) -> tuple[int, NDArray]:
-    mask = groups == g
-    x_g = x[mask]
-    y_g = y[mask]
-    weights_g = weights[mask]
+    x_g = x[rows]
+    y_g = y[rows]
+    weights_g = weights[rows]
 
     params_g = phi.copy()
     np.add.at(params_g, random_params, b[g, :])
@@ -150,8 +158,6 @@ def _update_group_random_effects(
     ZtZ = Z_g.T @ (weights_g[:, None] * Z_g)
     Ztr = Z_g.T @ (weights_g * resid_g)
 
-    n_random = len(random_params)
-    Psi_inv = linalg.cho_solve((Psi_chol, True), np.eye(n_random))
     C = ZtZ + Psi_inv
     try:
         b_g = linalg.solve(C, Ztr, assume_a="pos")
@@ -163,7 +169,7 @@ def _update_group_random_effects(
 
 def _compute_group_rss(
     g: int,
-    groups: NDArray,
+    rows: NDArray,
     x: NDArray,
     y: NDArray,
     phi: NDArray,
@@ -172,10 +178,9 @@ def _compute_group_rss(
     model: NonlinearModel,
     weights: NDArray[np.floating],
 ) -> float:
-    mask = groups == g
-    x_g = x[mask]
-    y_g = y[mask]
-    weights_g = weights[mask]
+    x_g = x[rows]
+    y_g = y[rows]
+    weights_g = weights[rows]
 
     params_g = phi.copy()
     np.add.at(params_g, random_params, b[g, :])
@@ -198,11 +203,40 @@ def pnls_step(
     n_jobs: int = 1,
     weights: NDArray[np.floating] | None = None,
 ) -> tuple[NDArray[np.floating], NDArray[np.floating], float]:
+    """Update parameters with random-effect rows in sorted group-label order."""
+    return _pnls_step(
+        y,
+        x,
+        _grouped_observation_indices(groups),
+        model,
+        phi,
+        b,
+        Psi,
+        sigma,
+        random_params,
+        n_jobs=n_jobs,
+        weights=weights,
+    )
+
+
+def _pnls_step(
+    y: NDArray[np.floating],
+    x: NDArray[np.floating],
+    group_rows: list[NDArray[np.intp]],
+    model: NonlinearModel,
+    phi: NDArray[np.floating],
+    b: NDArray[np.floating],
+    Psi: NDArray[np.floating],
+    sigma: float,
+    random_params: list[int],
+    n_jobs: int = 1,
+    weights: NDArray[np.floating] | None = None,
+) -> tuple[NDArray[np.floating], NDArray[np.floating], float]:
     _ = sigma
     n = len(y)
     prior_weights = _as_prior_weights(weights, n)
     sqrt_weights = np.sqrt(prior_weights)
-    n_groups = len(np.unique(groups))
+    n_groups = len(group_rows)
     n_phi = len(phi)
     n_random = len(random_params)
 
@@ -232,28 +266,29 @@ def pnls_step(
             with ThreadPoolExecutor(max_workers=n_jobs) as executor:
                 residual_futures = [
                     executor.submit(
-                        _compute_group_resid_grad, g, groups, x, y, phi, b, random_params, model
+                        _compute_group_resid_grad,
+                        g,
+                        group_rows[g],
+                        x,
+                        y,
+                        phi,
+                        b,
+                        random_params,
+                        model,
                     )
                     for g in range(n_groups)
                 ]
                 for residual_future in residual_futures:
-                    g, mask, resid_g, grad_g = residual_future.result()
-                    resid_total[mask] = resid_g
-                    grad_total[mask, :] = grad_g
+                    g, rows, resid_g, grad_g = residual_future.result()
+                    resid_total[rows] = resid_g
+                    grad_total[rows, :] = grad_g
         else:
             for g in range(n_groups):
-                mask = groups == g
-                x_g = x[mask]
-                y_g = y[mask]
-
-                params_g = phi.copy()
-                np.add.at(params_g, random_params, b[g, :])
-
-                pred_g = model.predict(params_g, x_g)
-                grad_g = model.gradient(params_g, x_g)
-
-                resid_total[mask] = y_g - pred_g
-                grad_total[mask, :] = grad_g
+                _, rows, resid_g, grad_g = _compute_group_resid_grad(
+                    g, group_rows[g], x, y, phi, b, random_params, model
+                )
+                resid_total[rows] = resid_g
+                grad_total[rows, :] = grad_g
 
         resid_total *= sqrt_weights
         grad_total *= sqrt_weights[:, None]
@@ -273,14 +308,14 @@ def pnls_step(
                     executor.submit(
                         _update_group_random_effects,
                         g,
-                        groups,
+                        group_rows[g],
                         x,
                         y,
                         phi_new,
                         b,
                         random_params,
                         model,
-                        Psi_chol,
+                        Psi_inv,
                         prior_weights,
                     )
                     for g in range(n_groups)
@@ -290,28 +325,18 @@ def pnls_step(
                     b_new[result[0], :] = result[1]
         else:
             for g in range(n_groups):
-                mask = groups == g
-                x_g = x[mask]
-                y_g = y[mask]
-                weights_g = prior_weights[mask]
-
-                params_g = phi_new.copy()
-                np.add.at(params_g, random_params, b[g, :])
-
-                pred_g = model.predict(params_g, x_g)
-                grad_g = model.gradient(params_g, x_g)
-
-                Z_g = grad_g[:, random_params]
-                resid_g = y_g - pred_g + Z_g @ b[g, :]
-
-                ZtZ = Z_g.T @ (weights_g[:, None] * Z_g)
-                Ztr = Z_g.T @ (weights_g * resid_g)
-
-                C = ZtZ + Psi_inv
-                try:
-                    b_new[g, :] = linalg.solve(C, Ztr, assume_a="pos")
-                except linalg.LinAlgError:
-                    b_new[g, :] = linalg.lstsq(C, Ztr)[0]
+                _, b_new[g, :] = _update_group_random_effects(
+                    g,
+                    group_rows[g],
+                    x,
+                    y,
+                    phi_new,
+                    b,
+                    random_params,
+                    model,
+                    Psi_inv,
+                    prior_weights,
+                )
 
         max_delta = max(
             float(np.max(np.abs(phi_new - phi))),
@@ -330,7 +355,7 @@ def pnls_step(
                 executor.submit(
                     _compute_group_rss,
                     g,
-                    groups,
+                    group_rows[g],
                     x,
                     y,
                     phi_new,
@@ -344,7 +369,9 @@ def pnls_step(
             rss = float(sum(future.result() for future in rss_futures))
     else:
         rss = sum(
-            _compute_group_rss(g, groups, x, y, phi_new, b_new, random_params, model, prior_weights)
+            _compute_group_rss(
+                g, group_rows[g], x, y, phi_new, b_new, random_params, model, prior_weights
+            )
             for g in range(n_groups)
         )
 
@@ -367,18 +394,20 @@ def nlmm_deviance(
     n_jobs: int = 1,
     weights: NDArray[np.floating] | None = None,
 ) -> tuple[float, NDArray[np.floating], NDArray[np.floating], float]:
+    """Evaluate deviance with random-effect rows in sorted group-label order."""
     n = len(y)
     prior_weights = _as_prior_weights(weights, n)
-    n_groups = len(np.unique(groups))
+    group_rows = _grouped_observation_indices(groups)
+    n_groups = len(group_rows)
     n_random = len(random_params)
 
     Psi_factor = _build_psi_factor(theta, n_random)
     Psi = Psi_factor @ Psi_factor.T
 
-    phi_new, b_new, _sigma_new = pnls_step(
+    phi_new, b_new, _sigma_new = _pnls_step(
         y,
         x,
-        groups,
+        group_rows,
         model,
         phi,
         b,
@@ -401,7 +430,7 @@ def nlmm_deviance(
                 executor.submit(
                     _compute_group_rss,
                     g,
-                    groups,
+                    group_rows[g],
                     x,
                     y,
                     phi_new,
@@ -415,7 +444,9 @@ def nlmm_deviance(
             rss = float(sum(future.result() for future in rss_futures))
     else:
         rss = sum(
-            _compute_group_rss(g, groups, x, y, phi_new, b_new, random_params, model, prior_weights)
+            _compute_group_rss(
+                g, group_rows[g], x, y, phi_new, b_new, random_params, model, prior_weights
+            )
             for g in range(n_groups)
         )
 
@@ -433,12 +464,12 @@ def nlmm_deviance(
     laplace_correction = 0.0
     identity = np.eye(n_random, dtype=np.float64)
     for g in range(n_groups):
-        mask = groups == g
+        rows = group_rows[g]
         params_g = phi_new.copy()
         np.add.at(params_g, random_params, b_new[g, :])
-        grad_g = model.gradient(params_g, x[mask])
+        grad_g = model.gradient(params_g, x[rows])
         Z_g = grad_g[:, random_params]
-        weights_g = prior_weights[mask]
+        weights_g = prior_weights[rows]
         # Stable form of log|Psi| + log|Z'WZ + Psi^-1| for Psi = L L'.
         ZtWZ = Z_g.T @ (weights_g[:, None] * Z_g)
         system = identity + Psi_factor.T @ ZtWZ @ Psi_factor

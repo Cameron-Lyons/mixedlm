@@ -57,6 +57,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - LMM summaries reuse one denominator-DF calculation and evaluate coefficient p-values together
 
 - Multi-draw nonlinear simulation reuses covariance, group, and residual setup and accepts reusable NumPy random streams
+
+- Nonlinear objective evaluations reuse group row indices; threaded Python updates share the covariance inverse and group calculations
 - Multi-draw GLMM simulation now batches random effects and response generation
 - Vectorized grouping-level factorization and nested-key construction for sparse designs
 - EM-REML algorithm generalized from single random intercept to arbitrary unstructured covariance models
@@ -74,6 +76,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Nonlinear bootstrap confidence intervals exclude failed refits instead of substituting original estimates, validate requests before refitting, and share sample handling with `bootstrap_nlmer()`
 
 - Nonlinear simulation and bootstrap preserve NumPy's global random state while retaining integer-seeded draw sequences
+
+- Python nonlinear fitting honors arbitrary integer group labels and matches native sorted-label ordering
 - Poisson and other unbounded GLMM families no longer clamp fitted means below one
 - Unsupported family and link combinations no longer route through the native fast path
 
