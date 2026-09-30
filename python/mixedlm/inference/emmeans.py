@@ -14,6 +14,52 @@ if TYPE_CHECKING:
     from mixedlm.models.glmer import GlmerResult
     from mixedlm.models.lmer import LmerResult
 
+_MAX_CONTRAST_ELEMENTS = 1_000_000
+
+
+def _custom_contrast_statistics(
+    contrasts: NDArray[np.floating],
+    coefficients: NDArray[np.floating],
+    beta: NDArray[np.floating],
+    covariance: NDArray[np.floating],
+    offset: NDArray[np.floating] | None = None,
+) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
+    """Compute tests before restoring each contrast's coefficient scale."""
+    if np.iscomplexobj(contrasts):
+        raise TypeError("Custom contrast coefficients must be real numeric values")
+    n_contrasts, n_means = contrasts.shape
+    estimates = np.empty(n_contrasts, dtype=np.float64)
+    standard_errors = np.empty(n_contrasts, dtype=np.float64)
+    ratios = np.empty(n_contrasts, dtype=np.float64)
+    batch_rows = max(1, _MAX_CONTRAST_ELEMENTS // max(1, n_means, len(beta)))
+    dtype = np.result_type(contrasts.dtype, np.float64)
+    for start in range(0, n_contrasts, batch_rows):
+        rows = slice(start, start + batch_rows)
+        chunk = np.asarray(contrasts[rows], dtype=dtype)
+        # Cast integers before negation, and retain extended-range inputs until
+        # normalization. Only the normalized coefficients need to fit float64.
+        scale = np.maximum(-chunk.min(axis=1, initial=0), chunk.max(axis=1, initial=0))
+        # Powers of two preserve cancellation of common terms. The lower power
+        # stays representable even for the largest and subnormal coefficients.
+        scale = np.ldexp(np.ones_like(scale), np.frexp(scale)[1] - 1)
+        normalized = np.asarray(
+            chunk if np.all(scale == 1) else chunk / scale[:, None], dtype=np.float64
+        )
+        projected = normalized @ coefficients
+        estimate = projected @ beta
+        if offset is not None:
+            estimate += normalized @ offset
+        variance = _rowwise_quadratic_form(projected, covariance)
+        se = np.sqrt(np.maximum(variance, 0))
+        # Zero-variance comparisons retain their usual NaN/infinite statistics.
+        with np.errstate(divide="ignore", invalid="ignore"):
+            ratios[rows] = estimate / se
+        with np.errstate(over="ignore", under="ignore"):
+            estimates[rows] = estimate * scale
+            standard_errors[rows] = se * scale
+        del chunk, normalized, projected
+    return estimates, standard_errors, ratios
+
 
 def _rowwise_quadratic_form(
     coefficients: NDArray[np.floating],
@@ -214,11 +260,9 @@ class Emmeans:
         level: float = 0.95,
     ) -> ContrastResult:
         n_contrasts = C.shape[0]
-        L_contrast = C @ self._L
-        estimates = L_contrast @ self._beta
-        var_contrast = _rowwise_quadratic_form(L_contrast, self._vcov)
-        se_contrast = np.sqrt(np.maximum(var_contrast, 0))
-        t_ratio = estimates / se_contrast
+        estimates, se_contrast, t_ratio = _custom_contrast_statistics(
+            C, self._L, self._beta, self._vcov
+        )
         raw_p = 2 * (1 - stats.t.cdf(np.abs(t_ratio), self._df))
         p_adjusted = _adjust_pvalues(raw_p, adjust, n_contrasts, self._df, t_ratio)
 
