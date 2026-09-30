@@ -10,6 +10,7 @@ from numpy.typing import NDArray
 from scipy import stats
 
 from mixedlm.formula.terms import InteractionTerm, PowerTerm, VariableTerm
+from mixedlm.utils.dataframe import _polars_column_numpy, select_columns
 
 if TYPE_CHECKING:
     from mixedlm.models.glmer import GlmerResult
@@ -20,14 +21,21 @@ def _as_pandas_frame(frame: Any) -> pd.DataFrame:
     """Access the model frame for read-only reference-value calculations."""
     if isinstance(frame, pd.DataFrame):
         return frame
-    if "polars" in type(frame).__module__ and hasattr(frame, "to_dict"):
-        result = pd.DataFrame(frame.to_dict(as_series=False))
+    if "polars" in type(frame).__module__ and hasattr(frame, "get_column"):
+        columns: dict[str, Any] = {}
         for name in frame.columns:
             column = frame.get_column(name)
+            values = _polars_column_numpy(column)
+            # Python float lists previously promoted Float32 and nullable small
+            # integers to float64. Keep that precision for reference reductions.
+            if values.dtype.kind == "f" and values.dtype.itemsize < 8:
+                values = values.astype(np.float64)
             if "Categorical" in str(column.dtype) or "Enum" in str(column.dtype):
                 categories = column.cat.get_categories().to_list()
-                result[name] = pd.Categorical(result[name], categories=categories)
-        return result
+                columns[name] = pd.Categorical(values, categories=categories)
+            else:
+                columns[name] = values
+        return pd.DataFrame(columns, copy=False)
     raise TypeError(f"Expected a pandas or Polars model frame, got {type(frame).__name__}")
 
 
@@ -144,8 +152,10 @@ class _EffectGrid:
         frame_source = model.matrices.frame
         if frame_source is None:
             frame_source = model.model_frame()
-        self.frame = _as_pandas_frame(frame_source)
         self.variables = _fixed_variable_order(model)
+        if not isinstance(frame_source, pd.DataFrame):
+            frame_source = select_columns(frame_source, self.variables)
+        self.frame = _as_pandas_frame(frame_source)
         self.n_points = n_points
         overrides = {} if at is None else at
         if not isinstance(overrides, Mapping):
