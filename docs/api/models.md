@@ -162,14 +162,33 @@ control = mlm.LmerControl(
 control = mlm.GlmerControl(
     optimizer="COBYQA",
     maxiter=10000,
+    tolPwrss=1e-8,
+    pirls_maxiter=100,
     optCtrl={"final_tr_radius": 1e-6},
 )
 ```
 
 **Parameters:**
 
-- Same as LmerControl, plus:
-- `nAGQ`: Number of quadrature points (can be overridden in glmer call)
+- The outer optimizer settings are the same as `LmerControl`.
+- `tolPwrss`: Positive finite tolerance for the maximum absolute changes in fixed
+  effects and spherical random effects during PIRLS. The default is `1e-7`.
+- `pirls_maxiter`: Positive integer limit on inner PIRLS iterations per likelihood
+  evaluation. The default, `None`, retains each backend's existing limit: 100 for
+  native fitting and 25 for Python fitting. Set an integer to use the same limit
+  for both. This is separate from the outer optimizer's `maxiter`.
+
+These inner controls apply to Laplace and adaptive quadrature, including final
+coefficient extraction and modular fitting. Results retain `pirls_maxiter` and
+`pirls_tol`; `result.refit()` inherits them and accepts overrides with those names.
+Reconstructed objectives, model updates, bootstrap, optimizer comparisons,
+term deletion, and cross-validation also preserve the fitted inner settings.
+An explicit `control` supplied to an update or cross-validation fit overrides them.
+
+A fit that reaches its inner limit without converging reports
+`pirls_converged=False` even when the outer optimizer succeeds.
+
+Pass quadrature order to `glmer(..., nAGQ=7)`.
 
 ## Modular Interface
 

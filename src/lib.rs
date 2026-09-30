@@ -3,8 +3,10 @@ use numpy::{PyArray1, PyArray2, PyArrayLike1, PyArrayLike2};
 use pyo3::prelude::*;
 
 mod blocked_chol;
+mod covariance;
 mod csc;
 mod glmm;
+mod glmm_sparse;
 mod linalg;
 mod lmm;
 mod nlmm;
@@ -160,6 +162,7 @@ fn update_cholesky_factor<'py>(
 
 #[pymodule]
 fn _rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add("_source_fingerprint", env!("MIXEDLM_SOURCE_FINGERPRINT"))?;
     m.add_class::<SparseCholeskySymbolic>()?;
     m.add_class::<SparseCholeskyNumeric>()?;
     m.add_function(wrap_pyfunction!(sparse_cholesky_solve, m)?)?;

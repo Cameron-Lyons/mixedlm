@@ -285,8 +285,12 @@ class GlmerControl:
     check_singular : bool, default True
         Whether to check for and warn about singular fits.
     tolPwrss : float, default 1e-7
-        Tolerance for penalized weighted residual sum of squares
-        convergence in the PIRLS algorithm.
+        Absolute tolerance for updates to the fixed effects and spherical
+        random effects in PIRLS. Must be positive and finite.
+    pirls_maxiter : int or None, default None
+        Maximum inner PIRLS iterations per likelihood evaluation. None retains
+        the backend default (100 for native fitting, 25 for Python fitting).
+        This is independent of the outer optimizer's maxiter.
     compDev : bool, default True
         Whether to compute deviance (vs just optimize parameters).
     nAGQ0initStep : bool, default True
@@ -338,10 +342,12 @@ class GlmerControl:
     check_rankX: str = "message+drop.cols"
     check_scaleX: str = "warning"
     optCtrl: dict[str, Any] = field(default_factory=dict)
+    pirls_maxiter: int | None = None
 
     def __post_init__(self) -> None:
-        if self.tolPwrss <= 0:
-            raise ValueError("tolPwrss must be positive")
+        from mixedlm.estimation.pirls_control import validate_pirls_controls
+
+        validate_pirls_controls(self.pirls_maxiter, self.tolPwrss, tol_name="tolPwrss")
         _validate_common_control(
             optimizer=self.optimizer,
             maxiter=self.maxiter,
@@ -372,7 +378,8 @@ class GlmerControl:
     def __repr__(self) -> str:
         return (
             f"GlmerControl(optimizer='{self.optimizer}', maxiter={self.maxiter}, "
-            f"boundary_tol={self.boundary_tol}, tolPwrss={self.tolPwrss})"
+            f"boundary_tol={self.boundary_tol}, tolPwrss={self.tolPwrss}, "
+            f"pirls_maxiter={self.pirls_maxiter})"
         )
 
 
@@ -456,6 +463,7 @@ def glmerControl(
     check_rankX: str = "message+drop.cols",
     check_scaleX: str = "warning",
     optCtrl: dict[str, Any] | None = None,
+    pirls_maxiter: int | None = None,
 ) -> GlmerControl:
     """Create a control object for glmer().
 
@@ -482,6 +490,7 @@ def glmerControl(
         check_conv=check_conv,
         check_singular=check_singular,
         tolPwrss=tolPwrss,
+        pirls_maxiter=pirls_maxiter,
         compDev=compDev,
         nAGQ0initStep=nAGQ0initStep,
         em_init=em_init,

@@ -314,9 +314,11 @@ GLMMs are more prone to convergence issues than LMMs.
 2. **Use uncorrelated random effects**: `||` instead of `|`
 3. **Increase iterations**:
    ```python
-   control = mlm.GlmerControl(maxfun=50000)
+   control = mlm.GlmerControl(maxiter=2000, pirls_maxiter=100)
    model = mlm.glmer(..., control=control)
    ```
+   `maxiter` controls the outer optimizer; `pirls_maxiter` controls the inner
+   solve. Inspect `model.pirls_converged` to distinguish an inner failure.
 4. **Try different optimizers**:
    ```python
    model.allFit(data)

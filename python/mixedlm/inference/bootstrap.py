@@ -195,12 +195,20 @@ def _refit_glmer_response(
     theta: NDArray[np.floating],
     family: Family,
     nAGQ: int,
+    pirls_maxiter: int | None = None,
+    pirls_tol: float = 1e-6,
 ) -> GLMMOptimizationResult:
     """Refit a GLMM response against the original validated design matrices."""
     from mixedlm.estimation.laplace import GLMMOptimizer
 
     bootstrap_matrices = replace(matrices, y=np.ascontiguousarray(response))
-    optimizer = GLMMOptimizer(bootstrap_matrices, family, nAGQ=nAGQ)
+    optimizer = GLMMOptimizer(
+        bootstrap_matrices,
+        family,
+        nAGQ=nAGQ,
+        pirls_maxiter=pirls_maxiter,
+        pirls_tol=pirls_tol,
+    )
     return optimizer.optimize(start=theta)
 
 
@@ -237,13 +245,17 @@ def _glmer_bootstrap_worker(args: tuple[Any, ...]) -> tuple[int, NDArray | None,
         theta,
         family,
         nAGQ,
+        pirls_maxiter,
+        pirls_tol,
     ) = args
 
     rng = np.random.RandomState(seed)
 
     try:
         y_sim = _simulate_glmer_components(matrices, beta, theta, family, rng)
-        boot_result = _refit_glmer_response(matrices, y_sim, theta, family, nAGQ)
+        boot_result = _refit_glmer_response(
+            matrices, y_sim, theta, family, nAGQ, pirls_maxiter, pirls_tol
+        )
 
         return (boot_idx, boot_result.beta.copy(), boot_result.theta.copy())
     except Exception:
@@ -267,6 +279,8 @@ def _prepare_glmer_worker_data(result: GlmerResult) -> dict[str, Any]:
         "theta": result.theta.copy(),
         "family": result.family,
         "nAGQ": result.nAGQ,
+        "pirls_maxiter": result.pirls_maxiter,
+        "pirls_tol": result.pirls_tol,
     }
 
 
@@ -426,6 +440,8 @@ def bootstrap_glmer(
                     result.theta,
                     result.family,
                     result.nAGQ,
+                    result.pirls_maxiter,
+                    result.pirls_tol,
                 )
 
                 beta_samples[b, :] = boot_result.beta
@@ -448,6 +464,8 @@ def bootstrap_glmer(
                 worker_data["theta"],
                 worker_data["family"],
                 worker_data["nAGQ"],
+                worker_data["pirls_maxiter"],
+                worker_data["pirls_tol"],
             )
             for b in range(n_boot)
         ]

@@ -7,15 +7,10 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
 use crate::blocked_chol::{BlockedCholesky, BlockedMatrix};
+pub use crate::covariance::RandomEffectStructure;
+use crate::covariance::build_lambda_blocks;
 use crate::csc::CscMatrix;
 use crate::linalg::LinalgError;
-
-#[derive(Debug, Clone, Copy)]
-pub struct RandomEffectStructure {
-    pub n_levels: usize,
-    pub n_terms: usize,
-    pub correlated: bool,
-}
 
 fn validate_prior_weights(weights: ArrayView1<'_, f64>, n: usize) -> PyResult<(Vec<f64>, f64)> {
     if weights.len() != n {
@@ -49,44 +44,6 @@ fn csc_from_scipy(
     shape: (usize, usize),
 ) -> Result<CscMatrix, LinalgError> {
     CscMatrix::try_from_i64(data, indices, indptr, shape)
-}
-
-fn build_lambda_blocks(theta: &[f64], structures: &[RandomEffectStructure]) -> Vec<Mat<f64>> {
-    let mut blocks = Vec::new();
-    let mut theta_idx = 0;
-
-    for structure in structures {
-        let q = structure.n_terms;
-
-        let l_block = if structure.correlated {
-            let n_theta = q * (q + 1) / 2;
-            let theta_block = &theta[theta_idx..theta_idx + n_theta];
-            theta_idx += n_theta;
-
-            let mut l = Mat::zeros(q, q);
-            let mut idx = 0;
-            for i in 0..q {
-                for j in 0..=i {
-                    l[(i, j)] = theta_block[idx];
-                    idx += 1;
-                }
-            }
-            l
-        } else {
-            let theta_block = &theta[theta_idx..theta_idx + q];
-            theta_idx += q;
-
-            let mut l = Mat::zeros(q, q);
-            for i in 0..q {
-                l[(i, i)] = theta_block[i];
-            }
-            l
-        };
-
-        blocks.push(l_block);
-    }
-
-    blocks
 }
 
 fn build_lambda_derivative_blocks(structures: &[RandomEffectStructure]) -> Vec<Vec<Mat<f64>>> {
@@ -253,55 +210,7 @@ fn apply_dlambda_transpose_vector(
 }
 
 fn compute_ztwz_sparse(z: &CscMatrix, weights: &[f64]) -> Mat<f64> {
-    let n = z.nrows();
-    let q = z.ncols();
-    let nnz = z.values().len();
-    let mut row_offsets = vec![0_usize; n + 1];
-
-    for &row in z.row_indices() {
-        row_offsets[row + 1] += 1;
-    }
-    for row in 0..n {
-        row_offsets[row + 1] += row_offsets[row];
-    }
-
-    let mut next_position = row_offsets[..n].to_vec();
-    let mut row_columns = vec![0_usize; nnz];
-    let mut row_values = vec![0.0; nnz];
-
-    for column in 0..q {
-        for index in z.col_offsets()[column]..z.col_offsets()[column + 1] {
-            let row = z.row_indices()[index];
-            let position = next_position[row];
-            row_columns[position] = column;
-            row_values[position] = z.values()[index];
-            next_position[row] += 1;
-        }
-    }
-
-    let mut ztwz = Mat::zeros(q, q);
-
-    for row in 0..n {
-        let start = row_offsets[row];
-        let end = row_offsets[row + 1];
-        let weight = weights[row];
-
-        for left in start..end {
-            let left_column = row_columns[left];
-            let weighted_left = weight * row_values[left];
-
-            for right in left..end {
-                let right_column = row_columns[right];
-                let value = weighted_left * row_values[right];
-                ztwz[(left_column, right_column)] += value;
-                if left_column != right_column {
-                    ztwz[(right_column, left_column)] += value;
-                }
-            }
-        }
-    }
-
-    ztwz
+    z.weighted_crossproduct(weights)
 }
 
 fn mat_from_flat_array(data: &[f64], q: usize) -> Mat<f64> {

@@ -205,7 +205,7 @@ def _allfit_glmer_worker(
 ) -> tuple[str, GlmerResult | None, str | None, list[str]]:
     from mixedlm.models.glmer import GlmerMod
 
-    opt_name, formula, data, family, weights, offset, nAGQ = args
+    opt_name, formula, data, family, weights, offset, nAGQ, control = args
 
     warnings_list: list[str] = []
 
@@ -214,6 +214,7 @@ def _allfit_glmer_worker(
             formula,
             data,
             family=family,
+            control=control,
             weights=weights,
             offset=offset,
         )
@@ -327,6 +328,7 @@ def allfit_glmer(
                     model.formula,
                     data,
                     family=model.family,
+                    control=model._refit_control(),
                     weights=weights,
                     offset=offset,
                 )
@@ -347,7 +349,16 @@ def allfit_glmer(
             n_jobs = os.cpu_count() or 1
 
         tasks = [
-            (opt_name, model.formula, data, model.family, weights, offset, model.nAGQ)
+            (
+                opt_name,
+                model.formula,
+                data,
+                model.family,
+                weights,
+                offset,
+                model.nAGQ,
+                model._refit_control(),
+            )
             for opt_name in optimizers
         ]
 

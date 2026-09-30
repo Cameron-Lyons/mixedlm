@@ -5,12 +5,25 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use rayon::prelude::*;
 
+use crate::covariance::CovarianceFactor;
+pub use crate::covariance::RandomEffectStructure;
 use crate::csc::CscMatrix;
+use crate::glmm_sparse::{RandomFactor, SparseWeightedDesign};
 use crate::linalg::LinalgError;
 use crate::quadrature::gauss_hermite_nodes_weights;
 
 const PIRLS_MAX_ITER: usize = 100;
 const PIRLS_TOLERANCE: f64 = 1e-6;
+
+fn validate_pirls_controls(maxiter: usize, tol: f64) -> PyResult<()> {
+    if maxiter == 0 {
+        return Err(PyValueError::new_err("maxiter must be a positive integer"));
+    }
+    if !tol.is_finite() || tol <= 0.0 {
+        return Err(PyValueError::new_err("tol must be positive and finite"));
+    }
+    Ok(())
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum LinkFunction {
@@ -179,13 +192,6 @@ fn parse_family_and_link(family: &str, link: &str) -> PyResult<(FamilyType, Link
     Ok((family_type, link_function))
 }
 
-#[derive(Debug, Clone)]
-pub struct RandomEffectStructure {
-    pub n_levels: usize,
-    pub n_terms: usize,
-    pub correlated: bool,
-}
-
 fn csc_from_scipy(
     data: &[f64],
     indices: &[i64],
@@ -195,91 +201,60 @@ fn csc_from_scipy(
     CscMatrix::try_from_i64(data, indices, indptr, shape)
 }
 
-fn build_lambda_dense(theta: &[f64], structures: &[RandomEffectStructure]) -> DMatrix<f64> {
-    let mut total_dim = 0;
-    for s in structures {
-        total_dim += s.n_levels * s.n_terms;
-    }
-
-    if total_dim == 0 {
-        return DMatrix::zeros(0, 0);
-    }
-
-    let mut lambda = DMatrix::zeros(total_dim, total_dim);
-    let mut theta_idx = 0;
-    let mut block_offset = 0;
-
-    for structure in structures {
-        let q = structure.n_terms;
-        let n_levels = structure.n_levels;
-
-        let l_block: Vec<Vec<f64>> = if structure.correlated {
-            let n_theta = q * (q + 1) / 2;
-            let theta_block = &theta[theta_idx..theta_idx + n_theta];
-            theta_idx += n_theta;
-
-            let mut l = vec![vec![0.0; q]; q];
-            let mut idx = 0;
-            for (i, row) in l.iter_mut().enumerate() {
-                for cell in row.iter_mut().take(i + 1) {
-                    *cell = theta_block[idx];
-                    idx += 1;
-                }
-            }
-            l
-        } else {
-            let theta_block = &theta[theta_idx..theta_idx + q];
-            theta_idx += q;
-
-            let mut l = vec![vec![0.0; q]; q];
-            for i in 0..q {
-                l[i][i] = theta_block[i];
-            }
-            l
-        };
-
-        for level in 0..n_levels {
-            let level_offset = block_offset + level * q;
-            for i in 0..q {
-                for j in 0..=i {
-                    lambda[(level_offset + i, level_offset + j)] = l_block[i][j];
-                }
-            }
-        }
-
-        block_offset += n_levels * q;
-    }
-
-    lambda
+fn dense_penalized_crossproduct(
+    z: &CscMatrix,
+    lambda: &CovarianceFactor,
+    w_vec: &DVector<f64>,
+) -> DMatrix<f64> {
+    let ztwz = z.weighted_crossproduct(
+        w_vec
+            .try_as_col_major()
+            .expect("owned weights are contiguous")
+            .as_slice(),
+    );
+    lambda.penalized_crossproduct(ztwz)
 }
 
-fn forward_solve_vec(l: &DMatrix<f64>, b: &DVector<f64>) -> DVector<f64> {
-    let n = l.nrows();
-    let mut x = DVector::zeros(n);
-    for i in 0..n {
-        let mut sum = b[i];
-        for j in 0..i {
-            sum -= l[(i, j)] * x[j];
-        }
-        x[i] = sum / l[(i, i)];
+fn factor_random_system(
+    z: &CscMatrix,
+    lambda: &CovarianceFactor,
+    sparse: Option<&SparseWeightedDesign>,
+    weights: &DVector<f64>,
+) -> Result<RandomFactor, LinalgError> {
+    if let Some(sparse) = sparse {
+        let weights = weights
+            .try_as_col_major()
+            .expect("owned weights are contiguous");
+        return sparse
+            .factor(weights.as_slice(), 0.0)
+            .or_else(|_| sparse.factor(weights.as_slice(), 1e-6))
+            .map(RandomFactor::Sparse);
     }
-    x
+    let mut matrix = dense_penalized_crossproduct(z, lambda, weights);
+    match Llt::new(matrix.as_ref(), Side::Lower) {
+        Ok(factor) => Ok(RandomFactor::Dense(factor)),
+        Err(_) => {
+            for i in 0..z.ncols() {
+                matrix[(i, i)] += 1e-6;
+            }
+            Llt::new(matrix.as_ref(), Side::Lower)
+                .map(RandomFactor::Dense)
+                .map_err(|_| LinalgError::NotPositiveDefinite)
+        }
+    }
 }
 
-fn forward_solve_mat(l: &DMatrix<f64>, b: &DMatrix<f64>) -> DMatrix<f64> {
-    let n = l.nrows();
-    let ncols = b.ncols();
-    let mut result = DMatrix::zeros(n, ncols);
-    for col in 0..ncols {
-        for i in 0..n {
-            let mut sum = b[(i, col)];
-            for j in 0..i {
-                sum -= l[(i, j)] * result[(j, col)];
-            }
-            result[(i, col)] = sum / l[(i, i)];
-        }
+fn dense_logdet(z: &CscMatrix, lambda: &CovarianceFactor, weights: &DVector<f64>) -> f64 {
+    let matrix = dense_penalized_crossproduct(z, lambda, weights);
+    match Llt::new(matrix.as_ref(), Side::Lower) {
+        Ok(factor) => 2.0 * (0..z.ncols()).map(|i| factor.L()[(i, i)].ln()).sum::<f64>(),
+        Err(_) => matrix
+            .self_adjoint_eigenvalues(Side::Lower)
+            .unwrap_or_else(|_| vec![1e-10; z.ncols()])
+            .iter()
+            .map(|&value| value.max(1e-10).ln())
+            .sum(),
     }
-    result
 }
 
 fn max_abs_diff(left: &DVector<f64>, right: &DVector<f64>) -> f64 {
@@ -331,6 +306,7 @@ pub struct PirlsResult {
     pub u: DVector<f64>,
     pub deviance: f64,
     pub converged: bool,
+    sparse_system: Option<SparseWeightedDesign>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -359,18 +335,18 @@ pub fn pirls_impl(
         initial_beta(y, x, weights, offset, family, link)
     };
 
-    let lambda = build_lambda_dense(theta, structures);
+    let lambda = CovarianceFactor::new(theta, structures);
+    let sparse_system = SparseWeightedDesign::new(z, &lambda);
     let mut spherical = if let Some(u_init) = u_start {
-        lambda.col_piv_qr().solve_lstsq(u_init)
+        lambda.to_dense().col_piv_qr().solve_lstsq(u_init)
     } else {
         DVector::zeros(q)
     };
-    let lambda_t = lambda.transpose();
 
     let mut converged = false;
 
     for _iter in 0..maxiter {
-        let random_effects = &lambda * &spherical;
+        let random_effects = lambda.apply(&spherical);
         let mut eta = x * &beta + offset;
         for j in 0..q {
             let col_start = z.col_offsets()[j];
@@ -412,39 +388,6 @@ pub fn pirls_impl(
 
         let ztwx = xtwz_mat.transpose();
 
-        let mut ztwz = DMatrix::zeros(q, q);
-        for j1 in 0..q {
-            let col1_start = z.col_offsets()[j1];
-            let col1_end = z.col_offsets()[j1 + 1];
-
-            for j2 in 0..=j1 {
-                let col2_start = z.col_offsets()[j2];
-                let col2_end = z.col_offsets()[j2 + 1];
-
-                let mut sum = 0.0;
-                let mut idx1 = col1_start;
-                let mut idx2 = col2_start;
-
-                while idx1 < col1_end && idx2 < col2_end {
-                    let row1 = z.row_indices()[idx1];
-                    let row2 = z.row_indices()[idx2];
-
-                    if row1 == row2 {
-                        sum += z.values()[idx1] * w_vec[row1] * z.values()[idx2];
-                        idx1 += 1;
-                        idx2 += 1;
-                    } else if row1 < row2 {
-                        idx1 += 1;
-                    } else {
-                        idx2 += 1;
-                    }
-                }
-
-                ztwz[(j1, j2)] = sum;
-                ztwz[(j2, j1)] = sum;
-            }
-        }
-
         let xtwz_vec: DVector<f64> = DVector::from_fn(p, |i| {
             let mut sum = 0.0;
             for j in 0..n {
@@ -465,46 +408,45 @@ pub fn pirls_impl(
             ztwz_vec[j] = sum;
         }
 
-        let mut c =
-            lambda_t.as_ref() * ztwz.as_ref() * lambda.as_ref() + DMatrix::<f64>::identity(q, q);
-        let chol_c = match Llt::new(c.as_ref(), Side::Lower) {
-            Ok(ch) => ch,
+        let chol_c = match factor_random_system(z, &lambda, sparse_system.as_ref(), &w_vec) {
+            Ok(factor) => factor,
             Err(_) => {
-                for i in 0..q {
-                    c[(i, i)] += 1e-6;
-                }
-                match Llt::new(c.as_ref(), Side::Lower) {
-                    Ok(ch) => ch,
-                    Err(_) => {
-                        return PirlsResult {
-                            beta,
-                            spherical,
-                            u: random_effects,
-                            deviance: 1e10,
-                            converged: false,
-                        };
-                    }
-                }
+                return PirlsResult {
+                    beta,
+                    spherical,
+                    u: random_effects,
+                    deviance: 1e10,
+                    converged: false,
+                    sparse_system,
+                };
             }
         };
 
-        let spherical_ztwx = lambda_t.as_ref() * ztwx.as_ref();
-        let spherical_ztwz = lambda_t.as_ref() * ztwz_vec.as_ref();
-        let l_c = chol_c.L().to_owned();
-        let rzx = forward_solve_mat(&l_c, &spherical_ztwx);
-        let cu = forward_solve_vec(&l_c, &spherical_ztwz);
+        let spherical_ztwx = lambda.transpose_apply(ztwx);
+        let spherical_ztwz = lambda.transpose_apply_vector(&ztwz_vec);
+        // Solve all fixed-effect and response columns together, borrowing the
+        // Cholesky factor instead of copying its q-by-q storage each iteration.
+        let mut rhs = DMatrix::from_fn(q, p + 1, |i, j| {
+            if j == p {
+                spherical_ztwz[i]
+            } else {
+                spherical_ztwx[(i, j)]
+            }
+        });
+        chol_c.solve_lower_in_place(rhs.as_mut());
+        let rzx = rhs.subcols(0, p);
+        let cu = rhs.col(p);
 
-        let xtvinvx = &xtwx - &(rzx.transpose() * &rzx);
-        let xtvinvz = &xtwz_vec - &(rzx.transpose() * &cu);
+        let xtvinvx = &xtwx - &(rzx.transpose() * rzx);
+        let xtvinvz = &xtwz_vec - &(rzx.transpose() * cu);
 
         let beta_new = match Llt::new(xtvinvx.as_ref(), Side::Lower) {
             Ok(chol) => chol.solve(&xtvinvz),
             Err(_) => xtvinvx.partial_piv_lu().solve(&xtvinvz),
         };
 
-        let fixed_contribution = &spherical_ztwx * &beta_new;
-        let spherical_rhs = &spherical_ztwz - &fixed_contribution;
-        let spherical_new = chol_c.solve(&spherical_rhs);
+        let mut spherical_new = cu - rzx * &beta_new;
+        chol_c.solve_upper_in_place(spherical_new.as_mat_mut());
 
         let delta_beta = max_abs_diff(&beta_new, &beta);
         let delta_u = if q > 0 {
@@ -525,7 +467,7 @@ pub fn pirls_impl(
         }
     }
 
-    let random_effects = &lambda * &spherical;
+    let random_effects = lambda.apply(&spherical);
     let mut eta_final = x * &beta + offset;
     for j in 0..q {
         let col_start = z.col_offsets()[j];
@@ -549,6 +491,7 @@ pub fn pirls_impl(
         u: random_effects,
         deviance,
         converged: converged && deviance.is_finite(),
+        sparse_system,
     }
 }
 
@@ -565,44 +508,24 @@ pub fn laplace_deviance_impl(
     link: LinkFunction,
     beta_start: Option<&DVector<f64>>,
     u_start: Option<&DVector<f64>>,
+    maxiter: usize,
+    tol: f64,
 ) -> (f64, DVector<f64>, DVector<f64>, bool) {
     let n = y.nrows();
     let q = z.ncols();
 
     if q == 0 {
         let result = pirls_impl(
-            y,
-            x,
-            z,
-            weights,
-            offset,
-            theta,
-            structures,
-            family,
-            link,
-            beta_start,
-            u_start,
-            PIRLS_MAX_ITER,
-            PIRLS_TOLERANCE,
+            y, x, z, weights, offset, theta, structures, family, link, beta_start, u_start,
+            maxiter, tol,
         );
         let converged = result.converged && result.deviance.is_finite();
         return (result.deviance, result.beta, result.u, converged);
     }
 
     let result = pirls_impl(
-        y,
-        x,
-        z,
-        weights,
-        offset,
-        theta,
-        structures,
-        family,
-        link,
-        beta_start,
-        u_start,
-        PIRLS_MAX_ITER,
-        PIRLS_TOLERANCE,
+        y, x, z, weights, offset, theta, structures, family, link, beta_start, u_start, maxiter,
+        tol,
     );
 
     let converged = result.converged && result.deviance.is_finite();
@@ -610,7 +533,7 @@ pub fn laplace_deviance_impl(
     let u = result.u;
     let spherical = result.spherical;
 
-    let lambda = build_lambda_dense(theta, structures);
+    let lambda = CovarianceFactor::new(theta, structures);
 
     let mut eta = x * &beta + offset;
     for j in 0..q {
@@ -634,52 +557,16 @@ pub fn laplace_deviance_impl(
         w_vec[i] = (w_vec[i] * weights[i]).max(1e-10);
     }
 
-    let mut ztwz = DMatrix::zeros(q, q);
-    for j1 in 0..q {
-        let col1_start = z.col_offsets()[j1];
-        let col1_end = z.col_offsets()[j1 + 1];
-
-        for j2 in 0..=j1 {
-            let col2_start = z.col_offsets()[j2];
-            let col2_end = z.col_offsets()[j2 + 1];
-
-            let mut sum = 0.0;
-            let mut idx1 = col1_start;
-            let mut idx2 = col2_start;
-
-            while idx1 < col1_end && idx2 < col2_end {
-                let row1 = z.row_indices()[idx1];
-                let row2 = z.row_indices()[idx2];
-
-                if row1 == row2 {
-                    sum += z.values()[idx1] * w_vec[row1] * z.values()[idx2];
-                    idx1 += 1;
-                    idx2 += 1;
-                } else if row1 < row2 {
-                    idx1 += 1;
-                } else {
-                    idx2 += 1;
-                }
-            }
-
-            ztwz[(j1, j2)] = sum;
-            ztwz[(j2, j1)] = sum;
+    let logdet_h = if let Some(sparse) = result.sparse_system.as_ref() {
+        let weights = w_vec
+            .try_as_col_major()
+            .expect("owned weights are contiguous");
+        match sparse.factor(weights.as_slice(), 0.0) {
+            Ok(factor) => factor.logdet(),
+            Err(_) => dense_logdet(z, &lambda, &w_vec),
         }
-    }
-
-    let h = lambda.transpose() * &ztwz * &lambda + DMatrix::<f64>::identity(q, q);
-
-    let logdet_h = match Llt::new(h.as_ref(), Side::Lower) {
-        Ok(chol) => {
-            let l = chol.L();
-            2.0 * (0..q).map(|i| l[(i, i)].ln()).sum::<f64>()
-        }
-        Err(_) => {
-            let eigvals = h
-                .self_adjoint_eigenvalues(Side::Lower)
-                .unwrap_or_else(|_| vec![1e-10; q]);
-            eigvals.iter().map(|&e| e.max(1e-10).ln()).sum::<f64>()
-        }
+    } else {
+        dense_logdet(z, &lambda, &w_vec)
     };
 
     deviance += logdet_h;
@@ -761,18 +648,22 @@ pub fn adaptive_gh_deviance_impl(
     n_agq: usize,
     beta_start: Option<&DVector<f64>>,
     u_start: Option<&DVector<f64>>,
+    maxiter: usize,
+    tol: f64,
 ) -> PyResult<(f64, DVector<f64>, DVector<f64>, bool)> {
     let q = z.ncols();
 
     if n_agq <= 1 || q == 0 {
         return Ok(laplace_deviance_impl(
             y, x, z, weights, offset, theta, structures, family, link, beta_start, u_start,
+            maxiter, tol,
         ));
     }
 
     if structures.len() != 1 {
         return Ok(laplace_deviance_impl(
             y, x, z, weights, offset, theta, structures, family, link, beta_start, u_start,
+            maxiter, tol,
         ));
     }
 
@@ -783,6 +674,7 @@ pub fn adaptive_gh_deviance_impl(
     if n_terms_first > 1 {
         return Ok(laplace_deviance_impl(
             y, x, z, weights, offset, theta, structures, family, link, beta_start, u_start,
+            maxiter, tol,
         ));
     }
 
@@ -799,19 +691,8 @@ pub fn adaptive_gh_deviance_impl(
     }
 
     let result = pirls_impl(
-        y,
-        x,
-        z,
-        weights,
-        offset,
-        theta,
-        structures,
-        family,
-        link,
-        beta_start,
-        u_start,
-        PIRLS_MAX_ITER,
-        PIRLS_TOLERANCE,
+        y, x, z, weights, offset, theta, structures, family, link, beta_start, u_start, maxiter,
+        tol,
     );
 
     let converged = result.converged && result.deviance.is_finite();
@@ -892,7 +773,10 @@ pub fn adaptive_gh_deviance_impl(
     n_terms,
     correlated,
     family,
-    link
+    link,
+    *,
+    maxiter=PIRLS_MAX_ITER,
+    tol=PIRLS_TOLERANCE
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn pirls<'py>(
@@ -910,7 +794,10 @@ pub fn pirls<'py>(
     correlated: Vec<bool>,
     family: &str,
     link: &str,
+    maxiter: usize,
+    tol: f64,
 ) -> PyResult<(Vec<f64>, Vec<f64>, f64, bool)> {
+    validate_pirls_controls(maxiter, tol)?;
     let structures: Vec<RandomEffectStructure> = n_levels
         .into_iter()
         .zip(n_terms)
@@ -951,8 +838,8 @@ pub fn pirls<'py>(
         link_fn,
         None,
         None,
-        PIRLS_MAX_ITER,
-        PIRLS_TOLERANCE,
+        maxiter,
+        tol,
     );
 
     Ok((
@@ -978,7 +865,10 @@ pub fn pirls<'py>(
     n_terms,
     correlated,
     family,
-    link
+    link,
+    *,
+    maxiter=PIRLS_MAX_ITER,
+    tol=PIRLS_TOLERANCE
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn laplace_deviance<'py>(
@@ -996,10 +886,12 @@ pub fn laplace_deviance<'py>(
     correlated: Vec<bool>,
     family: &str,
     link: &str,
+    maxiter: usize,
+    tol: f64,
 ) -> PyResult<(f64, Vec<f64>, Vec<f64>)> {
     let (deviance, beta, u, _) = glmm_deviance(
         y, x, z_data, z_indices, z_indptr, z_shape, weights, offset, theta, n_levels, n_terms,
-        correlated, family, link, 1,
+        correlated, family, link, 1, maxiter, tol,
     )?;
     Ok((deviance, beta, u))
 }
@@ -1020,7 +912,10 @@ pub fn laplace_deviance<'py>(
     correlated,
     family,
     link,
-    n_agq
+    n_agq,
+    *,
+    maxiter=PIRLS_MAX_ITER,
+    tol=PIRLS_TOLERANCE
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn adaptive_gh_deviance<'py>(
@@ -1039,10 +934,12 @@ pub fn adaptive_gh_deviance<'py>(
     family: &str,
     link: &str,
     n_agq: usize,
+    maxiter: usize,
+    tol: f64,
 ) -> PyResult<(f64, Vec<f64>, Vec<f64>)> {
     let (deviance, beta, u, _) = glmm_deviance(
         y, x, z_data, z_indices, z_indptr, z_shape, weights, offset, theta, n_levels, n_terms,
-        correlated, family, link, n_agq,
+        correlated, family, link, n_agq, maxiter, tol,
     )?;
     Ok((deviance, beta, u))
 }
@@ -1063,7 +960,10 @@ pub fn adaptive_gh_deviance<'py>(
     correlated,
     family,
     link,
-    n_agq
+    n_agq,
+    *,
+    maxiter=PIRLS_MAX_ITER,
+    tol=PIRLS_TOLERANCE
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn glmm_deviance<'py>(
@@ -1082,7 +982,10 @@ pub fn glmm_deviance<'py>(
     family: &str,
     link: &str,
     n_agq: usize,
+    maxiter: usize,
+    tol: f64,
 ) -> PyResult<(f64, Vec<f64>, Vec<f64>, bool)> {
+    validate_pirls_controls(maxiter, tol)?;
     let structures: Vec<RandomEffectStructure> = n_levels
         .into_iter()
         .zip(n_terms)
@@ -1133,6 +1036,8 @@ pub fn glmm_deviance<'py>(
         n_agq,
         None,
         None,
+        maxiter,
+        tol,
     )?;
 
     Ok((

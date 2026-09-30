@@ -15,6 +15,7 @@ from mixedlm.estimation.laplace import GLMMOptimizer, _build_lambda, _count_thet
 from mixedlm.families.base import Family
 from mixedlm.formula.terms import Formula
 from mixedlm.matrices.design import ModelMatrices
+from mixedlm.models.control import GlmerControl
 from mixedlm.models.lmer_types import (
     LogLik,
     PredictResult,
@@ -117,6 +118,12 @@ class GlmerResult(MerResultMixin):
     n_iter: int
     nAGQ: int
     pirls_converged: bool = True
+    pirls_maxiter: int | None = None
+    pirls_tol: float = 1e-6
+
+    def _refit_control(self) -> GlmerControl:
+        """Carry the fitted inner settings into formula-based refitting paths."""
+        return GlmerControl(tolPwrss=self.pirls_tol, pirls_maxiter=self.pirls_maxiter)
 
     def fixef(self) -> dict[str, float]:
         return self._fixef_dict(self.beta)
@@ -1175,6 +1182,8 @@ class GlmerResult(MerResultMixin):
         if nAGQ is None:
             nAGQ = self.nAGQ
 
+        kwargs.setdefault("control", self._refit_control())
+
         return glmer(
             new_formula, data, family=family, weights=weights, offset=offset, nAGQ=nAGQ, **kwargs
         )
@@ -1352,6 +1361,8 @@ class GlmerResult(MerResultMixin):
                 self.family,
                 verbose=0,
                 nAGQ=self.nAGQ,
+                pirls_maxiter=self.pirls_maxiter,
+                pirls_tol=self.pirls_tol,
             )
             return optimizer.objective
         elif type == "predict":
@@ -1520,6 +1531,8 @@ class GlmerResult(MerResultMixin):
             self.family,
             verbose=0,
             nAGQ=self.nAGQ,
+            pirls_maxiter=kwargs.pop("pirls_maxiter", self.pirls_maxiter),
+            pirls_tol=kwargs.pop("pirls_tol", self.pirls_tol),
         )
 
         start = kwargs.pop("start", self.theta)
@@ -1537,6 +1550,8 @@ class GlmerResult(MerResultMixin):
             n_iter=opt_result.n_iter,
             nAGQ=self.nAGQ,
             pirls_converged=opt_result.pirls_converged,
+            pirls_maxiter=optimizer.pirls_maxiter,
+            pirls_tol=optimizer.pirls_tol,
         )
 
     def refitML(self) -> GlmerResult:
@@ -1573,6 +1588,8 @@ class GlmerResult(MerResultMixin):
             original response.
         **kwargs
             Additional arguments passed to the optimizer (start, method, maxiter).
+            Inner controls pirls_maxiter and pirls_tol default to the original
+            fit's settings and can be overridden independently.
 
         Returns
         -------
