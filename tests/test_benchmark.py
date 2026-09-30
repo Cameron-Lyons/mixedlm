@@ -170,6 +170,53 @@ def test_benchmark_em_reml_iterations(benchmark, large_crossed_sparse_data):
     assert np.isfinite(result.final_loglik)
 
 
+@pytest.fixture(scope="module")
+def marginal_mean_model():
+    from mixedlm.models.lmer import LmerResult
+
+    n_levels, n_nuisance = 256, 8
+    data = pd.DataFrame(
+        {
+            "treatment": np.repeat([f"L{i}" for i in range(n_levels)], n_nuisance),
+            "nuisance": np.tile([f"N{i}" for i in range(n_nuisance)], n_levels),
+            "group": (np.arange(n_levels * n_nuisance) % 32).astype(str),
+            "y": np.ones(n_levels * n_nuisance),
+        }
+    )
+    formula = parse_formula("y ~ treatment + nuisance + (1 | group)")
+    matrices = build_model_matrices(formula, data)
+    return LmerResult(
+        formula=formula,
+        matrices=matrices,
+        theta=np.array([0.5]),
+        beta=np.linspace(-0.2, 0.5, matrices.n_fixed),
+        sigma=0.7,
+        u=np.zeros(matrices.n_random),
+        deviance=0.0,
+        REML=True,
+        converged=True,
+        n_iter=0,
+    )
+
+
+@pytest.mark.benchmark(group="marginal-means")
+@pytest.mark.parametrize("kind", ["grid", "pairs"])
+def test_benchmark_large_marginal_means(benchmark, marginal_mean_model, kind):
+    from mixedlm.inference.emmeans import emmeans
+
+    means = emmeans(marginal_mean_model, "treatment")
+    if kind == "grid":
+        actual = benchmark(emmeans, marginal_mean_model, "treatment")
+        np.testing.assert_allclose(actual.result.emmean, means.result.emmean)
+        np.testing.assert_allclose(actual.result.se, means.result.se)
+    else:
+        actual = benchmark(means.pairs, adjust="none")
+        left, right = np.triu_indices(len(means.result.emmean), k=1)
+        expected = means.result.emmean[left] - means.result.emmean[right]
+        np.testing.assert_allclose(actual.estimate, expected, atol=1e-14)
+        assert np.all(np.isfinite(actual.se))
+
+
 @pytest.mark.benchmark(group="lmer")
 def test_benchmark_lmer_random_slope(benchmark, sleepstudy_data):
     def fit_model():
