@@ -497,6 +497,8 @@ def mkGlmerDevfun(
         parsed.matrices,
         parsed.family,
         verbose=verbose,
+        pirls_maxiter=control.pirls_maxiter,
+        pirls_tol=control.tolPwrss,
         nAGQ=nAGQ,
     )
 
@@ -781,6 +783,8 @@ def mkGlmerMod(
         deviance=deviance,
         converged=bool(opt.converged and pirls_converged),
         pirls_converged=pirls_converged,
+        pirls_maxiter=devfun.optimizer.pirls_maxiter,
+        pirls_tol=devfun.optimizer.pirls_tol,
         n_iter=opt.n_iter,
         nAGQ=nAGQ,
     )

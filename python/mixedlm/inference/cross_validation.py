@@ -386,7 +386,7 @@ def _fit_fold(
             **kwargs,
         )
 
-    kwargs = {"nAGQ": model.nAGQ}
+    kwargs = {"nAGQ": model.nAGQ, "control": model._refit_control()}
     kwargs.update(fit_kwargs)
     return glmer(
         formula,

@@ -12,6 +12,16 @@ use crate::quadrature::gauss_hermite_nodes_weights;
 const PIRLS_MAX_ITER: usize = 100;
 const PIRLS_TOLERANCE: f64 = 1e-6;
 
+fn validate_pirls_controls(maxiter: usize, tol: f64) -> PyResult<()> {
+    if maxiter == 0 {
+        return Err(PyValueError::new_err("maxiter must be a positive integer"));
+    }
+    if !tol.is_finite() || tol <= 0.0 {
+        return Err(PyValueError::new_err("tol must be positive and finite"));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum LinkFunction {
     Identity,
@@ -565,44 +575,24 @@ pub fn laplace_deviance_impl(
     link: LinkFunction,
     beta_start: Option<&DVector<f64>>,
     u_start: Option<&DVector<f64>>,
+    maxiter: usize,
+    tol: f64,
 ) -> (f64, DVector<f64>, DVector<f64>, bool) {
     let n = y.nrows();
     let q = z.ncols();
 
     if q == 0 {
         let result = pirls_impl(
-            y,
-            x,
-            z,
-            weights,
-            offset,
-            theta,
-            structures,
-            family,
-            link,
-            beta_start,
-            u_start,
-            PIRLS_MAX_ITER,
-            PIRLS_TOLERANCE,
+            y, x, z, weights, offset, theta, structures, family, link, beta_start, u_start,
+            maxiter, tol,
         );
         let converged = result.converged && result.deviance.is_finite();
         return (result.deviance, result.beta, result.u, converged);
     }
 
     let result = pirls_impl(
-        y,
-        x,
-        z,
-        weights,
-        offset,
-        theta,
-        structures,
-        family,
-        link,
-        beta_start,
-        u_start,
-        PIRLS_MAX_ITER,
-        PIRLS_TOLERANCE,
+        y, x, z, weights, offset, theta, structures, family, link, beta_start, u_start, maxiter,
+        tol,
     );
 
     let converged = result.converged && result.deviance.is_finite();
@@ -761,18 +751,22 @@ pub fn adaptive_gh_deviance_impl(
     n_agq: usize,
     beta_start: Option<&DVector<f64>>,
     u_start: Option<&DVector<f64>>,
+    maxiter: usize,
+    tol: f64,
 ) -> PyResult<(f64, DVector<f64>, DVector<f64>, bool)> {
     let q = z.ncols();
 
     if n_agq <= 1 || q == 0 {
         return Ok(laplace_deviance_impl(
             y, x, z, weights, offset, theta, structures, family, link, beta_start, u_start,
+            maxiter, tol,
         ));
     }
 
     if structures.len() != 1 {
         return Ok(laplace_deviance_impl(
             y, x, z, weights, offset, theta, structures, family, link, beta_start, u_start,
+            maxiter, tol,
         ));
     }
 
@@ -783,6 +777,7 @@ pub fn adaptive_gh_deviance_impl(
     if n_terms_first > 1 {
         return Ok(laplace_deviance_impl(
             y, x, z, weights, offset, theta, structures, family, link, beta_start, u_start,
+            maxiter, tol,
         ));
     }
 
@@ -799,19 +794,8 @@ pub fn adaptive_gh_deviance_impl(
     }
 
     let result = pirls_impl(
-        y,
-        x,
-        z,
-        weights,
-        offset,
-        theta,
-        structures,
-        family,
-        link,
-        beta_start,
-        u_start,
-        PIRLS_MAX_ITER,
-        PIRLS_TOLERANCE,
+        y, x, z, weights, offset, theta, structures, family, link, beta_start, u_start, maxiter,
+        tol,
     );
 
     let converged = result.converged && result.deviance.is_finite();
@@ -892,7 +876,10 @@ pub fn adaptive_gh_deviance_impl(
     n_terms,
     correlated,
     family,
-    link
+    link,
+    *,
+    maxiter=PIRLS_MAX_ITER,
+    tol=PIRLS_TOLERANCE
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn pirls<'py>(
@@ -910,7 +897,10 @@ pub fn pirls<'py>(
     correlated: Vec<bool>,
     family: &str,
     link: &str,
+    maxiter: usize,
+    tol: f64,
 ) -> PyResult<(Vec<f64>, Vec<f64>, f64, bool)> {
+    validate_pirls_controls(maxiter, tol)?;
     let structures: Vec<RandomEffectStructure> = n_levels
         .into_iter()
         .zip(n_terms)
@@ -951,8 +941,8 @@ pub fn pirls<'py>(
         link_fn,
         None,
         None,
-        PIRLS_MAX_ITER,
-        PIRLS_TOLERANCE,
+        maxiter,
+        tol,
     );
 
     Ok((
@@ -978,7 +968,10 @@ pub fn pirls<'py>(
     n_terms,
     correlated,
     family,
-    link
+    link,
+    *,
+    maxiter=PIRLS_MAX_ITER,
+    tol=PIRLS_TOLERANCE
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn laplace_deviance<'py>(
@@ -996,10 +989,12 @@ pub fn laplace_deviance<'py>(
     correlated: Vec<bool>,
     family: &str,
     link: &str,
+    maxiter: usize,
+    tol: f64,
 ) -> PyResult<(f64, Vec<f64>, Vec<f64>)> {
     let (deviance, beta, u, _) = glmm_deviance(
         y, x, z_data, z_indices, z_indptr, z_shape, weights, offset, theta, n_levels, n_terms,
-        correlated, family, link, 1,
+        correlated, family, link, 1, maxiter, tol,
     )?;
     Ok((deviance, beta, u))
 }
@@ -1020,7 +1015,10 @@ pub fn laplace_deviance<'py>(
     correlated,
     family,
     link,
-    n_agq
+    n_agq,
+    *,
+    maxiter=PIRLS_MAX_ITER,
+    tol=PIRLS_TOLERANCE
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn adaptive_gh_deviance<'py>(
@@ -1039,10 +1037,12 @@ pub fn adaptive_gh_deviance<'py>(
     family: &str,
     link: &str,
     n_agq: usize,
+    maxiter: usize,
+    tol: f64,
 ) -> PyResult<(f64, Vec<f64>, Vec<f64>)> {
     let (deviance, beta, u, _) = glmm_deviance(
         y, x, z_data, z_indices, z_indptr, z_shape, weights, offset, theta, n_levels, n_terms,
-        correlated, family, link, n_agq,
+        correlated, family, link, n_agq, maxiter, tol,
     )?;
     Ok((deviance, beta, u))
 }
@@ -1063,7 +1063,10 @@ pub fn adaptive_gh_deviance<'py>(
     correlated,
     family,
     link,
-    n_agq
+    n_agq,
+    *,
+    maxiter=PIRLS_MAX_ITER,
+    tol=PIRLS_TOLERANCE
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn glmm_deviance<'py>(
@@ -1082,7 +1085,10 @@ pub fn glmm_deviance<'py>(
     family: &str,
     link: &str,
     n_agq: usize,
+    maxiter: usize,
+    tol: f64,
 ) -> PyResult<(f64, Vec<f64>, Vec<f64>, bool)> {
+    validate_pirls_controls(maxiter, tol)?;
     let structures: Vec<RandomEffectStructure> = n_levels
         .into_iter()
         .zip(n_terms)
@@ -1133,6 +1139,8 @@ pub fn glmm_deviance<'py>(
         n_agq,
         None,
         None,
+        maxiter,
+        tol,
     )?;
 
     Ok((
