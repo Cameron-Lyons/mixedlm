@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `nAGQ=0` exposes the previous fast joint-PIRLS GLMM approximation; `nAGQ0initStep` now controls preliminary covariance optimization for joint fits.
+
 - GLMM fitting accepts `pirls_maxiter` to limit inner iterations independently of outer optimization; fitted results and refits retain the inner controls
 
 - New-data LMM prediction intervals accept scalar, array, or column-based residual precision weights.
@@ -22,6 +24,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   behavior, including per-unit rates from models fitted with log-exposure offsets.
 
 ### Fixed
+
+- GLMM fits with `nAGQ>=1` now jointly optimize fixed coefficients and covariance parameters against the integrated likelihood; modular fits, refits, reconstructed objectives, and profiles use the same objective. Default estimates can change and fitting may take longer; `nAGQ=0` preserves the previous algorithm.
 
 - GLMM profile confidence intervals now use constrained likelihood fits and likelihood-ratio cutoffs, with nuisance covariance and fixed coefficients re-optimized, instead of returning Wald intervals.
 

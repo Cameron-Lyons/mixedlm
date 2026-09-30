@@ -7,6 +7,7 @@ import pandas as pd
 import pytest
 from mixedlm import glFormula, glmer, mkGlmerDevfun, mkGlmerMod, optimizeGlmer
 from mixedlm.estimation import laplace
+from mixedlm.estimation.joint_glmm import JointGLMMObjective
 from mixedlm.families import Binomial, Poisson
 from mixedlm.models.modular import OptimizeResult
 
@@ -51,9 +52,9 @@ def test_modular_quadrature_matches_direct_fit_and_likelihood(data, native, kind
         opt = optimizeGlmer(devfun)
         result = mkGlmerMod(devfun, opt)
         direct = glmer(formula, data, nAGQ=n_agq, method="L-BFGS-B", **kwargs)
-        expected = laplace.adaptive_gh_deviance_fast(
-            result.theta, parsed.matrices, family, nAGQ=n_agq
-        )
+        expected = JointGLMMObjective(
+            parsed.matrices, family, n_agq, pirls_tol=result.pirls_tol
+        ).evaluate(np.r_[result.theta, result.beta])
     assert devfun.optimizer.nAGQ == opt.nAGQ == result.nAGQ == n_agq
     assert opt.converged == result.converged == direct.converged
     np.testing.assert_allclose(result.theta, direct.theta, rtol=1e-7, atol=1e-7)
@@ -101,7 +102,7 @@ def test_result_cannot_relabel_optimization_with_another_order(data, recorded):
         mkGlmerMod(devfun, opt, nAGQ=1 if expected == 5 else 5)
 
 
-INVALID_ORDERS = [0, -1, True, False, np.bool_(True), 1.0, 2.5, np.nan, np.inf, "5", None]
+INVALID_ORDERS = [-1, True, False, np.bool_(True), 1.0, 2.5, np.nan, np.inf, "5", None]
 
 
 @pytest.mark.parametrize("n_agq", INVALID_ORDERS)
@@ -116,7 +117,7 @@ def test_invalid_orders_fail_before_numerical_evaluation(data, n_agq, entry):
         patch.object(
             laplace, "_rust_adaptive_gh_deviance", side_effect=AssertionError("must not evaluate")
         ),
-        pytest.raises(ValueError, match="nAGQ must be a positive integer"),
+        pytest.raises(ValueError, match="nAGQ must be a nonnegative integer"),
     ):
         if entry == "optimizer":
             laplace.GLMMOptimizer(parsed.matrices, parsed.family, nAGQ=n_agq)
@@ -137,7 +138,7 @@ def test_invalid_orders_fail_before_numerical_evaluation(data, n_agq, entry):
 def test_invalid_result_order_is_rejected(data, n_agq):
     devfun = mkGlmerDevfun(glFormula("y ~ x + (1 | g)", data, family=Poisson()))
     opt = OptimizeResult(np.ones(1), 12.0, True, 0, "")
-    with pytest.raises(ValueError, match="nAGQ must be a positive integer"):
+    with pytest.raises(ValueError, match="nAGQ must be a nonnegative integer"):
         mkGlmerMod(devfun, opt, nAGQ=n_agq)
 
 
@@ -233,7 +234,7 @@ def test_changed_quadrature_setting_is_revalidated_before_optimization(data, n_a
     with (
         patch.object(laplace, "run_optimizer", side_effect=AssertionError("must not optimize")),
         patch("scipy.optimize.minimize", side_effect=AssertionError("must not optimize")),
-        pytest.raises(ValueError, match="nAGQ must be a positive integer"),
+        pytest.raises(ValueError, match="nAGQ must be a nonnegative integer"),
     ):
         if entry == "direct":
             devfun.optimizer.optimize()

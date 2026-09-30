@@ -100,6 +100,7 @@ class GlmerMod:
             nAGQ=nAGQ,
             pirls_maxiter=ctrl.pirls_maxiter,
             pirls_tol=ctrl.tolPwrss,
+            nAGQ0initStep=ctrl.nAGQ0initStep,
         )
 
         opt_options = ctrl.get_scipy_options(optimizer=opt_method, maxiter=opt_maxiter)
@@ -124,6 +125,7 @@ class GlmerMod:
             pirls_converged=opt_result.pirls_converged,
             pirls_maxiter=optimizer.pirls_maxiter,
             pirls_tol=optimizer.pirls_tol,
+            joint_fit=opt_result.joint_fit,
         )
 
         if ctrl.check_conv and not result.converged:
@@ -179,7 +181,9 @@ def glmer_nb(
     verbose : int, default 0
         Verbosity level for optimization output.
     nAGQ : int, default 1
-        Number of adaptive Gauss-Hermite quadrature points.
+        Fitting approximation: 0 uses joint PIRLS with theta-only optimization;
+        1 jointly optimizes theta and beta using Laplace approximation; larger
+        integers use adaptive quadrature for a single scalar random-effect term.
     weights : array-like, optional
         Prior weights for observations.
     offset : array-like, optional
@@ -263,7 +267,9 @@ def glmer(
     verbose : int, default 0
         Verbosity level for optimization output.
     nAGQ : int, default 1
-        Number of adaptive Gauss-Hermite quadrature points.
+        Fitting approximation: 0 uses joint PIRLS with theta-only optimization;
+        1 jointly optimizes theta and beta using Laplace approximation; larger
+        integers use adaptive quadrature for a single scalar random-effect term.
     weights : array-like, optional
         Prior weights for observations.
     offset : array-like, optional

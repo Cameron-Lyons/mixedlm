@@ -160,7 +160,16 @@ model = mlm.glmer(
 )
 ```
 
-This is fast but may be biased for small cluster sizes or large random effects.
+This jointly optimizes fixed coefficients and covariance parameters while
+approximating the random-effect integral. The approximation can be biased for
+small cluster sizes or large random effects.
+
+For a faster preliminary fit, use `nAGQ=0`. It estimates fixed and random effects
+together with PIRLS while optimizing only covariance parameters externally,
+reproducing the previous fitting algorithm. Its estimates may differ from the
+joint Laplace optimum. The default fit uses this approximation to initialize
+joint optimization; `GlmerControl(nAGQ0initStep=False)` skips that preliminary
+covariance optimization.
 
 ### Adaptive Gauss-Hermite Quadrature
 
@@ -176,7 +185,7 @@ model = mlm.glmer(
 ```
 
 !!! note
-    AGQ is only available for models with a single random effect (one grouping factor with random intercept only). For models with multiple random effects or random slopes, use `nAGQ=1`.
+    AGQ requires one random-effect term with one coefficient per group, either a random intercept or a scalar random slope. Models with multiple terms or intercept/slope blocks support `nAGQ=0` and `nAGQ=1`.
 
 ### When to Use AGQ
 
@@ -272,7 +281,8 @@ profiles["x"].plot()
 Profiling re-optimizes the other coefficients and covariance parameters and
 can produce asymmetric intervals. It refines the joint likelihood optimum
 before tracing each curve; a warning reports a material shift from the original
-coefficient estimate. The fitted model remains unchanged. Profiling retains
+coefficient estimate, especially for a preliminary `nAGQ=0` fit. Default joint
+fits usually retain their center within optimization tolerance. The fitted model remains unchanged. Profiling retains
 `nAGQ`, weights, offsets, and PIRLS controls and requires converged solves.
 `n_points` controls the curve resolution; confidence limits use root finding.
 The default `model.confint()` continues to provide faster Wald intervals.

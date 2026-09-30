@@ -151,12 +151,15 @@ def test_penicillin_crossed_random_effects_golden() -> None:
 
 @pytest.mark.filterwarnings("ignore:divide by zero encountered in log")
 @pytest.mark.filterwarnings("ignore:invalid value encountered in multiply")
-def test_cbpp_binomial_glmer_golden() -> None:
+def test_cbpp_binomial_glmer_fast_approximation_golden() -> None:
+    # Preserve the reference for the former joint PIRLS approximation.
+    # Full likelihood fits have a separate independent integration oracle.
     data = CBPP.copy()
     model = mlm.glmer(
         "y ~ period + (1 | herd)",
         data,
         family=families.Binomial(),
+        nAGQ=0,
         weights=data["size"].to_numpy(dtype=float),
     )
 

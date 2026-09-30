@@ -106,6 +106,8 @@ class _GLMMProjection:
 
 @dataclass
 class GlmerResult(MerResultMixin):
+    """Fitted GLMM; joint_fit identifies the joint theta/beta likelihood objective."""
+
     _IS_GLMM: ClassVar[bool] = True
     formula: Formula
     matrices: ModelMatrices
@@ -120,6 +122,7 @@ class GlmerResult(MerResultMixin):
     pirls_converged: bool = True
     pirls_maxiter: int | None = None
     pirls_tol: float = 1e-6
+    joint_fit: bool = False
 
     def _refit_control(self) -> GlmerControl:
         """Carry the fitted inner settings into formula-based refitting paths."""
@@ -1351,7 +1354,9 @@ class GlmerResult(MerResultMixin):
         Returns
         -------
         callable
-            The requested function.
+            The requested function. For a joint fit, deviance accepts either
+            [theta, beta] or theta alone with fitted beta held fixed. For a
+            fast PIRLS fit, it accepts theta and recomputes beta by PIRLS.
         """
         from mixedlm.estimation.laplace import GLMMOptimizer
 
@@ -1364,7 +1369,18 @@ class GlmerResult(MerResultMixin):
                 pirls_maxiter=self.pirls_maxiter,
                 pirls_tol=self.pirls_tol,
             )
-            return optimizer.objective
+            if not self.joint_fit:
+                return optimizer.objective
+            joint = optimizer.joint_objective()
+            fitted_beta = self.beta.copy()
+
+            def deviance(parameters: NDArray[np.floating]) -> float:
+                parameters = np.asarray(parameters)
+                if parameters.shape == self.theta.shape:
+                    parameters = np.r_[parameters, fitted_beta]
+                return joint(parameters)
+
+            return deviance
         elif type == "predict":
 
             def predict_fn(X: NDArray[np.floating]) -> NDArray[np.floating]:
@@ -1534,6 +1550,7 @@ class GlmerResult(MerResultMixin):
             nAGQ=self.nAGQ,
             pirls_maxiter=kwargs.pop("pirls_maxiter", self.pirls_maxiter),
             pirls_tol=kwargs.pop("pirls_tol", self.pirls_tol),
+            nAGQ0initStep=kwargs.pop("nAGQ0initStep", True),
         )
 
         start = kwargs.pop("start", self.theta)
@@ -1553,6 +1570,7 @@ class GlmerResult(MerResultMixin):
             pirls_converged=opt_result.pirls_converged,
             pirls_maxiter=optimizer.pirls_maxiter,
             pirls_tol=optimizer.pirls_tol,
+            joint_fit=opt_result.joint_fit,
         )
 
     def refitML(self) -> GlmerResult:

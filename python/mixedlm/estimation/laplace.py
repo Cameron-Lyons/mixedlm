@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from numbers import Integral
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from numpy.typing import NDArray
@@ -24,6 +24,9 @@ from mixedlm.families.gaussian import Gaussian
 from mixedlm.families.poisson import Poisson
 from mixedlm.matrices.design import ModelMatrices, RandomEffectStructure
 from mixedlm.utils.quadrature import _positive_integer, hermite_rule
+
+if TYPE_CHECKING:
+    from mixedlm.estimation.joint_glmm import JointGLMMObjective
 
 _ETA_CLIP_MIN = -30.0
 _ETA_CLIP_MAX = 30.0
@@ -45,8 +48,8 @@ _NATIVE_FAMILY_LINKS = frozenset(
 
 def _validate_quadrature(nAGQ: int, matrices: ModelMatrices) -> None:
     """Reject unavailable quadrature requests before fitting or backend dispatch."""
-    if isinstance(nAGQ, (bool, np.bool_)) or not isinstance(nAGQ, Integral) or nAGQ < 1:
-        raise ValueError("nAGQ must be a positive integer")
+    if isinstance(nAGQ, (bool, np.bool_)) or not isinstance(nAGQ, Integral) or nAGQ < 0:
+        raise ValueError("nAGQ must be a nonnegative integer")
     if nAGQ > 1 and matrices.n_random:
         structures = matrices.random_structures
         if len(structures) != 1 or structures[0].n_terms != 1:
@@ -131,6 +134,8 @@ class GLMMOptimizationResult:
     converged: bool
     n_iter: int
     pirls_converged: bool = True
+    message: str = ""
+    joint_fit: bool = False
 
 
 @dataclass
@@ -514,7 +519,8 @@ def adaptive_gh_deviance(
 ) -> tuple[float, NDArray[np.floating], NDArray[np.floating]]:
     """Compute deviance using adaptive Gauss-Hermite quadrature.
 
-    For nAGQ=1, this is equivalent to the Laplace approximation.
+    For nAGQ=0 or 1, this evaluates the Laplace approximation with beta
+    estimated by PIRLS. Joint theta/beta fitting uses JointGLMMObjective.
     For nAGQ>1, uses adaptive GH quadrature for more accurate integration.
 
     Parameters
@@ -570,7 +576,7 @@ def _adaptive_gh_deviance_with_status(
 ) -> tuple[float, NDArray[np.floating], NDArray[np.floating], bool]:
     """Evaluate adaptive quadrature and retain the inner convergence flag."""
     _validate_quadrature(nAGQ, matrices)
-    if nAGQ == 1:
+    if nAGQ <= 1:
         return _laplace_deviance_with_status(
             theta,
             matrices,
@@ -759,7 +765,7 @@ def _native_deviance_with_status(
     validate_pirls_controls(pirls_maxiter, pirls_tol)
     deviance, beta, u, converged = _rust_glmm_deviance(
         *_native_glmm_args(theta, matrices, family),
-        nAGQ,
+        max(1, nAGQ),
         maxiter=100 if pirls_maxiter is None else pirls_maxiter,
         tol=pirls_tol,
     )
@@ -812,7 +818,7 @@ def adaptive_gh_deviance_fast(
 ) -> tuple[float, NDArray[np.floating], NDArray[np.floating]]:
     _validate_quadrature(nAGQ, matrices)
 
-    if nAGQ == 1:
+    if nAGQ <= 1:
         return laplace_deviance_fast(
             theta,
             matrices,
@@ -876,7 +882,7 @@ def glmm_deviance_with_status(
         and (family_name, link_name) in _NATIVE_FAMILY_LINKS
         and _native_covariance_supported(matrices)
         and (
-            nAGQ == 1 or (matrices.random_structures and matrices.random_structures[0].n_terms == 1)
+            nAGQ <= 1 or (matrices.random_structures and matrices.random_structures[0].n_terms == 1)
         )
     ):
         return _native_deviance_with_status(
@@ -904,11 +910,15 @@ class GLMMOptimizer:
         *,
         pirls_maxiter: int | None = None,
         pirls_tol: float = 1e-6,
+        nAGQ0initStep: bool = True,
     ) -> None:
         _validate_quadrature(nAGQ, matrices)
         validate_pirls_controls(pirls_maxiter, pirls_tol)
         self.pirls_maxiter = pirls_maxiter
         self.pirls_tol = pirls_tol
+        if not isinstance(nAGQ0initStep, (bool, np.bool_)):
+            raise ValueError("nAGQ0initStep must be a boolean")
+        self.nAGQ0initStep = bool(nAGQ0initStep)
         self.matrices = matrices
         self.family = family
         self.verbose = verbose
@@ -952,26 +962,50 @@ class GLMMOptimizer:
             )
         return dev
 
+    def joint_objective(self) -> JointGLMMObjective:
+        from mixedlm.estimation.joint_glmm import JointGLMMObjective
+
+        return JointGLMMObjective(
+            self.matrices,
+            self.family,
+            self.nAGQ,
+            pirls_maxiter=self.pirls_maxiter,
+            pirls_tol=self.pirls_tol,
+        )
+
     def _final_evaluation(
-        self, theta: NDArray[np.floating], *, nAGQ: int | None = None
+        self,
+        theta: NDArray[np.floating],
+        *,
+        nAGQ: int | None = None,
+        beta: NDArray[np.floating] | None = None,
     ) -> tuple[float, NDArray[np.floating], NDArray[np.floating]]:
-        return self._final_evaluation_with_status(theta, nAGQ=nAGQ)[:3]
+        return self._final_evaluation_with_status(theta, nAGQ=nAGQ, beta=beta)[:3]
 
     def _final_evaluation_with_status(
-        self, theta: NDArray[np.floating], *, nAGQ: int | None = None
+        self,
+        theta: NDArray[np.floating],
+        *,
+        nAGQ: int | None = None,
+        beta: NDArray[np.floating] | None = None,
     ) -> tuple[float, NDArray[np.floating], NDArray[np.floating], bool]:
         """Evaluate and validate final estimates and their inner convergence."""
         nAGQ = self.nAGQ if nAGQ is None else nAGQ
         try:
             validate_finite_real("variance parameters", theta, (self.n_theta,))
-            deviance, beta, u, converged = glmm_deviance_with_status(
-                theta,
-                self.matrices,
-                self.family,
-                nAGQ=nAGQ,
-                pirls_maxiter=self.pirls_maxiter,
-                pirls_tol=self.pirls_tol,
-            )
+            if beta is None:
+                deviance, beta, u, converged = glmm_deviance_with_status(
+                    theta,
+                    self.matrices,
+                    self.family,
+                    nAGQ=nAGQ,
+                    pirls_maxiter=self.pirls_maxiter,
+                    pirls_tol=self.pirls_tol,
+                )
+            else:
+                objective = self.joint_objective()
+                objective.nAGQ = nAGQ
+                deviance, beta, u, converged = objective.evaluate(np.r_[theta, beta])
             validate_finite_real("deviance", deviance, ())
             validate_finite_real("fixed effects", beta, (self.matrices.n_fixed,))
             validate_finite_real("random effects", u, (self.matrices.n_random,))
@@ -988,6 +1022,108 @@ class GLMMOptimizer:
         return deviance, beta, u, converged
 
     def optimize(
+        self,
+        start: NDArray[np.floating] | None = None,
+        method: str = "L-BFGS-B",
+        maxiter: int = 1000,
+        options: dict[str, Any] | None = None,
+    ) -> GLMMOptimizationResult:
+        """Optimize theta and beta jointly, or use the nAGQ=0 PIRLS approximation."""
+        _validate_quadrature(self.nAGQ, self.matrices)
+        if self.nAGQ == 0:
+            return self._optimize_pirls(start, method, maxiter, options)
+        exact_pirls = self.matrices.n_random == 0 or (
+            self.nAGQ == 1
+            and (
+                self.matrices.n_fixed == 0
+                or (type(self.family) is Gaussian and type(self.family.link) is IdentityLink)
+            )
+        )
+        if exact_pirls:
+            fitted = self._optimize_pirls(start, method, maxiter, options)
+            return replace(fitted, joint_fit=fitted.pirls_converged)
+        if start is None:
+            start = self.get_start_theta()
+        if self.nAGQ0initStep:
+            initial = GLMMOptimizer(
+                self.matrices,
+                self.family,
+                self.verbose,
+                nAGQ=0,
+                pirls_maxiter=self.pirls_maxiter,
+                pirls_tol=self.pirls_tol,
+            )._optimize_pirls(start, method, maxiter, options)
+            theta, beta = initial.theta, initial.beta
+            initial_iterations = initial.n_iter
+            initial_converged = initial.pirls_converged
+        else:
+            theta = np.asarray(start, dtype=np.float64)
+            _, beta, _, initial_converged = self._final_evaluation_with_status(theta, nAGQ=1)
+            initial_iterations = 0
+        if not initial_converged:
+            # A failed mode solve (including non-finite MLEs for separated data)
+            # cannot provide a trustworthy starting point for the joint likelihood.
+            deviance, beta, u, _ = self._final_evaluation_with_status(theta)
+            return GLMMOptimizationResult(
+                theta=theta,
+                beta=beta,
+                u=u,
+                deviance=deviance,
+                converged=False,
+                pirls_converged=False,
+                n_iter=initial_iterations,
+                message="initial inner PIRLS solver did not converge",
+            )
+        objective = self.joint_objective()
+        scale = objective.parameter_scale(theta)
+        parameters = np.r_[theta, beta] / scale
+        bounds = [
+            (None if lower is None else lower / step, None if upper is None else upper / step)
+            for (lower, upper), step in zip(objective.bounds, scale, strict=True)
+        ]
+
+        def scaled_objective(values: NDArray[np.floating]) -> float:
+            return objective(values * scale)
+
+        callback = None
+        if self.verbose > 0:
+
+            def callback(values: NDArray[np.floating]) -> None:
+                print(
+                    f"joint parameters = {values * scale}, "
+                    f"deviance = {scaled_objective(values):.6f}"
+                )
+
+        opt_options = {"maxiter": maxiter}
+        if options:
+            opt_options.update(options)
+        result = run_optimizer(
+            scaled_objective,
+            parameters,
+            method=method,
+            bounds=bounds,
+            options=opt_options,
+            callback=callback,
+            jac="3-point"
+            if method in {"L-BFGS-B", "BFGS", "TNC", "SLSQP", "trust-constr"}
+            else None,
+        )
+        optimum = result.x * scale
+        theta, beta = optimum[: self.n_theta], optimum[self.n_theta :]
+        deviance, beta, u, pirls_converged = self._final_evaluation_with_status(theta, beta=beta)
+        return GLMMOptimizationResult(
+            theta=theta,
+            beta=beta,
+            u=u,
+            deviance=deviance,
+            converged=bool(result.success and pirls_converged),
+            pirls_converged=pirls_converged,
+            n_iter=initial_iterations + result.nit,
+            joint_fit=True,
+            message=str(getattr(result, "message", "")),
+        )
+
+    def _optimize_pirls(
         self,
         start: NDArray[np.floating] | None = None,
         method: str = "L-BFGS-B",
@@ -1034,6 +1170,7 @@ class GLMMOptimizer:
             converged=bool(result.success and pirls_converged),
             pirls_converged=pirls_converged,
             n_iter=result.nit,
+            message=str(getattr(result, "message", "")),
         )
 
 
