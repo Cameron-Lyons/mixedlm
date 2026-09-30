@@ -266,6 +266,20 @@ The returned data frame contains the requested grid columns plus `predicted`,
 the confidence interval on the link scale before transforming both endpoints.
 Use `type="link"` to keep results on the linear-predictor scale.
 
+Both adjusted-effect functions default to `offset=None`, using the unweighted
+mean of the model's fitted link-scale offsets after missing-value omission.
+Set `offset=0` to request per-unit rates for a count model with a log-exposure
+offset, or pass another finite scalar to choose a reference exposure. This
+changes the previous default of zero for models fitted with nonzero offsets.
+Offsets are treated as known and add no coefficient uncertainty.
+
+`ggpredict()` also accepts one finite offset per returned grid row, in the
+Cartesian order of `terms` with the last term varying fastest. Values are
+positional, including when passed as a pandas Series; they are not recycled.
+For example, `offset=np.log([10, 20, 30])` requests three different exposures
+for a three-row grid. The result's `attrs["offset"]` records the resolved scalar
+or an immutable tuple of row offsets.
+
 ### allEffects
 
 Compute a separate adjusted prediction grid for every fixed-effect variable.
@@ -274,6 +288,9 @@ Compute a separate adjusted prediction grid for every fixed-effect variable.
 effects = mlm.allEffects(model, n_points=25)
 days_effect = effects["Days"]
 ```
+
+`allEffects()` uses the same scalar offset for every grid. Call `ggpredict()`
+separately when different grids require different row offsets.
 
 Both functions are batched, use the fitted fixed-effect covariance matrix, and
 require no plotting package. If a model was fit with non-default categorical
