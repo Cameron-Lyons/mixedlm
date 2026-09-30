@@ -29,6 +29,18 @@ class Link(ABC):
     def inverse(self, eta: NDArray[np.floating]) -> NDArray[np.floating]:
         pass
 
+    def inverse_interval(
+        self, lower: NDArray[np.floating], upper: NDArray[np.floating]
+    ) -> tuple[NDArray[np.floating], NDArray[np.floating]]:
+        """Transform ordered bounds, allowing increasing or decreasing links.
+
+        Custom nonmonotone inverse links should override this method to include
+        any interior extrema, as the square-root link does.
+        """
+        left = self.inverse(lower)
+        right = self.inverse(upper)
+        return np.minimum(left, right), np.maximum(left, right)
+
     @abstractmethod
     def deriv(self, mu: NDArray[np.floating]) -> NDArray[np.floating]:
         pass
@@ -136,6 +148,13 @@ class SqrtLink(Link):
 
     def inverse(self, eta: NDArray[np.floating]) -> NDArray[np.floating]:
         return eta**2
+
+    def inverse_interval(
+        self, lower: NDArray[np.floating], upper: NDArray[np.floating]
+    ) -> tuple[NDArray[np.floating], NDArray[np.floating]]:
+        response_lower, response_upper = super().inverse_interval(lower, upper)
+        crosses_zero = (lower <= 0) & (upper >= 0)
+        return np.where(crosses_zero, 0.0, response_lower), response_upper
 
     def deriv(self, mu: NDArray[np.floating]) -> NDArray[np.floating]:
         return 0.5 / np.sqrt(mu)
