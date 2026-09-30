@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import os
+from collections import deque
 from collections.abc import Callable, Iterator
-from concurrent.futures import ThreadPoolExecutor, wait
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from typing import TypeVar
@@ -159,23 +160,29 @@ class _NLMMWorkspace:
     weights: NDArray[np.float64]
     sqrt_weights: NDArray[np.float64]
     executor: ThreadPoolExecutor | None
+    workers: int
 
     def map_groups(
         self,
         function: Callable[[int, NDArray[np.intp]], _GroupResult],
-        *,
-        parallel: bool = True,
     ) -> Iterator[_GroupResult]:
         indices = range(len(self.group_rows))
-        if not parallel or self.executor is None:
+        if self.executor is None:
             yield from map(function, indices, self.group_rows)
             return
-        futures = []
+        futures: deque[Future[_GroupResult]] = deque()
+        rows_to_submit = iter(enumerate(self.group_rows))
         try:
-            for g, rows in enumerate(self.group_rows):
+            for _ in range(min(2 * self.workers, len(self.group_rows))):
+                g, rows = next(rows_to_submit)
                 futures.append(self.executor.submit(function, g, rows))
-            for future in futures:
-                yield future.result()
+            while futures:
+                yield futures[0].result()
+                futures.popleft()
+                following = next(rows_to_submit, None)
+                if following is not None:
+                    g, rows = following
+                    futures.append(self.executor.submit(function, g, rows))
         except BaseException:
             # A failed trial must finish using the model before the next trial.
             for future in futures:
@@ -198,7 +205,9 @@ def _nlmm_workspace(
     workers = (os.cpu_count() or 1) if n_jobs == -1 else n_jobs
     use_parallel = workers > 1 and len(group_rows) >= workers
     with ThreadPoolExecutor(max_workers=workers) if use_parallel else nullcontext() as executor:
-        yield _NLMMWorkspace(y, x, group_rows, prior_weights, np.sqrt(prior_weights), executor)
+        yield _NLMMWorkspace(
+            y, x, group_rows, prior_weights, np.sqrt(prior_weights), executor, workers
+        )
 
 
 def _compute_group_resid_grad(
@@ -223,41 +232,48 @@ def _compute_group_resid_grad(
     return (g, rows, y_g - pred_g, grad_g)
 
 
-def _update_group_random_effects(
+@dataclass
+class _PNLSGroupLinearization:
+    group: int
+    normal: NDArray[np.floating]
+    rhs: NDArray[np.floating]
+    random_solution: NDArray[np.floating]
+    rss: float
+
+
+def _linearize_group(
     g: int,
-    rows: NDArray,
-    x: NDArray,
-    y: NDArray,
-    phi: NDArray,
-    b: NDArray,
-    random_params: list[int],
+    rows: NDArray[np.intp],
+    workspace: _NLMMWorkspace,
     model: NonlinearModel,
-    Psi_inv: NDArray,
-    weights: NDArray[np.floating],
-) -> tuple[int, NDArray]:
-    x_g = x[rows]
-    y_g = y[rows]
-    weights_g = weights[rows]
-
-    params_g = phi.copy()
-    np.add.at(params_g, random_params, b[g, :])
-
-    pred_g = model.predict(params_g, x_g)
-    grad_g = model.gradient(params_g, x_g)
-
-    Z_g = grad_g[:, random_params]
-    resid_g = y_g - pred_g + Z_g @ b[g, :]
-
-    ZtZ = Z_g.T @ (weights_g[:, None] * Z_g)
-    Ztr = Z_g.T @ (weights_g * resid_g)
-
-    C = ZtZ + Psi_inv
+    phi: NDArray[np.floating],
+    b: NDArray[np.floating],
+    random_params: list[int],
+    precision: NDArray[np.floating],
+) -> _PNLSGroupLinearization:
+    _, _, residual, gradient = _compute_group_resid_grad(
+        g, rows, workspace.x, workspace.y, phi, b, random_params, model
+    )
+    rss = float(np.dot(workspace.weights[rows], residual**2))
+    sqrt_weight = workspace.sqrt_weights[rows]
+    weighted_gradient = gradient * sqrt_weight[:, None]
+    weighted_residual = residual * sqrt_weight
+    random_gradient = weighted_gradient[:, random_params]
+    crossproduct = weighted_gradient.T @ random_gradient
+    random_normal = random_gradient.T @ random_gradient + precision
+    random_rhs = random_gradient.T @ weighted_residual - precision @ b[g]
+    rhs = np.column_stack([crossproduct.T, random_rhs])
     try:
-        b_g = linalg.solve(C, Ztr, assume_a="pos")
+        solution = linalg.solve(random_normal, rhs, assume_a="pos")
     except linalg.LinAlgError:
-        b_g = linalg.lstsq(C, Ztr)[0]
-
-    return (g, b_g)
+        solution = linalg.lstsq(random_normal, rhs)[0]
+    return _PNLSGroupLinearization(
+        g,
+        weighted_gradient.T @ weighted_gradient - crossproduct @ solution[:, :-1],
+        weighted_gradient.T @ weighted_residual - crossproduct @ solution[:, -1],
+        solution,
+        rss,
+    )
 
 
 def _compute_group_rss(
@@ -326,76 +342,96 @@ def _pnls_step(
     tol: float,
 ) -> tuple[NDArray[np.floating], NDArray[np.floating], float, bool]:
     """Return updated parameters and the profiled residual variance."""
-    y, x = workspace.y, workspace.x
-    n = len(y)
-    prior_weights = workspace.weights
-    sqrt_weights = workspace.sqrt_weights
+    n = len(workspace.y)
     n_phi = len(phi)
     n_random = len(random_params)
-
-    Psi_reg = Psi + _PSI_REGULARIZATION * np.eye(n_random)
+    covariance = Psi + _PSI_REGULARIZATION * np.eye(n_random)
     try:
-        Psi_chol = linalg.cholesky(Psi_reg, lower=True)
-        Psi_inv = linalg.cho_solve((Psi_chol, True), np.eye(n_random))
+        factor = linalg.cholesky(covariance, lower=True)
+        precision = linalg.cho_solve((factor, True), np.eye(n_random))
     except linalg.LinAlgError:
-        Psi_inv = linalg.pinv(Psi_reg)
-        Psi_chol = None
+        precision = linalg.pinv(covariance)
 
-    phi_new = phi.copy()
-    b_new = b.copy()
-    reg_phi = _PNLS_REGULARIZATION * np.eye(n_phi)
-    resid_total = np.empty(n, dtype=np.float64)
-    grad_total = np.empty((n, n_phi), dtype=np.float64)
+    phi = phi.copy()
+    b = b.copy()
+    regularization = _PNLS_REGULARIZATION * np.eye(n_phi)
 
-    def residual_gradient(g: int, rows: NDArray[np.intp]) -> tuple[int, NDArray, NDArray, NDArray]:
-        return _compute_group_resid_grad(g, rows, x, y, phi, b, random_params, model)
+    def linearize(g: int, rows: NDArray[np.intp]) -> _PNLSGroupLinearization:
+        return _linearize_group(g, rows, workspace, model, phi, b, random_params, precision)
 
-    def update_random_effects(g: int, rows: NDArray[np.intp]) -> tuple[int, NDArray]:
-        return _update_group_random_effects(
-            g, rows, x, y, phi_new, b, random_params, model, Psi_inv, prior_weights
-        )
+    def penalty(effects: NDArray[np.floating]) -> float:
+        return float(np.einsum("gi,ij,gj->", effects, precision, effects, optimize=True))
+
+    def objective(parameters: NDArray[np.floating], effects: NDArray[np.floating]) -> float:
+        def group_rss(g: int, rows: NDArray[np.intp]) -> float:
+            with np.errstate(divide="raise", invalid="raise", over="raise"):
+                return _compute_group_rss(
+                    g,
+                    rows,
+                    workspace.x,
+                    workspace.y,
+                    parameters,
+                    effects,
+                    random_params,
+                    model,
+                    workspace.weights,
+                )
+
+        return sum(workspace.map_groups(group_rss)) + penalty(effects)
 
     converged = False
+    pwrss = np.inf
     for _iteration in range(maxiter):
-        # After the first iteration b and b_new share storage.
-        b_previous = b.copy()
-        for _, rows, resid_g, grad_g in workspace.map_groups(residual_gradient):
-            resid_total[rows] = resid_g
-            grad_total[rows, :] = grad_g
-
-        resid_total *= sqrt_weights
-        grad_total *= sqrt_weights[:, None]
-        GtG = grad_total.T @ grad_total
-        Gtr = grad_total.T @ resid_total
-
+        normal = np.zeros((n_phi, n_phi), dtype=np.float64)
+        rhs = np.zeros(n_phi, dtype=np.float64)
+        solutions = []
+        residual_sums = []
+        for block in workspace.map_groups(linearize):
+            normal += block.normal
+            rhs += block.rhs
+            solutions.append((block.group, block.random_solution))
+            residual_sums.append(block.rss)
+        normal = 0.5 * (normal + normal.T) + regularization
         try:
-            delta_phi = linalg.solve(GtG + reg_phi, Gtr, assume_a="pos")
+            delta_phi = linalg.solve(normal, rhs, assume_a="pos")
         except linalg.LinAlgError:
-            delta_phi = linalg.lstsq(GtG, Gtr)[0]
-
-        phi_new = phi + 0.5 * delta_phi
-        for g, b_g in workspace.map_groups(update_random_effects, parallel=Psi_chol is not None):
-            b_new[g, :] = b_g
-
-        max_delta = max(
-            float(np.max(np.abs(phi_new - phi))),
-            float(np.max(np.abs(b_new - b_previous))),
+            delta_phi = linalg.lstsq(normal, rhs)[0]
+        delta_b = np.empty_like(b)
+        for group, solution in solutions:
+            delta_b[group] = solution[:, -1] - solution[:, :-1] @ delta_phi
+        max_delta = float(
+            np.maximum(
+                np.max(np.abs(delta_phi), initial=0.0),
+                np.max(np.abs(delta_b), initial=0.0),
+            )
         )
-        phi = phi_new
-        b = b_new
-        if max_delta < tol:
+        pwrss = sum(residual_sums) + penalty(b)
+        if not np.isfinite(max_delta):
+            break
+        slack = 16 * np.finfo(np.float64).eps * max(pwrss, _MIN_VARIANCE)
+        step = 1.0
+        accepted = False
+        for _backtrack in range(21):
+            try:
+                with np.errstate(over="raise", invalid="raise"):
+                    trial_phi = phi + step * delta_phi
+                    trial_b = b + step * delta_b
+                    candidate = objective(trial_phi, trial_b)
+            except (FloatingPointError, OverflowError, ValueError, linalg.LinAlgError):
+                candidate = np.inf
+            if np.isfinite(candidate) and candidate <= pwrss + slack:
+                phi, b, pwrss = trial_phi, trial_b, candidate
+                accepted = True
+                break
+            step *= 0.5
+        # A shortened step alone cannot establish convergence.
+        if np.isfinite(max_delta) and max_delta < tol:
             converged = True
             break
+        if not accepted:
+            break
 
-    def group_rss(g: int, rows: NDArray[np.intp]) -> float:
-        return _compute_group_rss(
-            g, rows, x, y, phi_new, b_new, random_params, model, prior_weights
-        )
-
-    rss = sum(workspace.map_groups(group_rss))
-    penalty = float(np.einsum("gi,ij,gj->", b_new, Psi_inv, b_new, optimize=True))
-    sigma_sq = max((rss + penalty) / n, _MIN_VARIANCE)
-    return phi_new, b_new, sigma_sq, converged
+    return phi, b, max(pwrss / n, _MIN_VARIANCE), converged
 
 
 def nlmm_deviance(

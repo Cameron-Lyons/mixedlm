@@ -36,19 +36,22 @@ def first_update_oracle(data, theta):
     fraction = x / (phi[1] + x)
     gradient = np.column_stack([fraction, -vm * x / (phi[1] + x) ** 2])
     residual = y - vm * fraction
-    update = np.linalg.solve(
-        gradient.T @ (weights[:, None] * gradient) + 1e-6 * np.eye(2),
-        gradient.T @ (weights * residual),
-    )
-    phi = phi + 0.5 * update
+    random_design = np.zeros((len(x), 3))
+    random_design[np.arange(len(x)), group] = fraction
+    design = np.column_stack([gradient, random_design])
     precision = 1 / (theta[0] ** 2 + 1e-8)
-    b = np.empty(3)
+    prior = np.diag([0.0, 0.0, precision, precision, precision])
+    normal = design.T @ (weights[:, None] * design) + prior
+    normal[:2, :2] += 1e-6 * np.eye(2)
+    rhs = design.T @ (weights * residual) - prior @ np.r_[phi, b]
+    update = np.linalg.solve(normal, rhs)
+    phi = phi + update[:2]
+    b = b + update[2:]
     correction = 0.0
     for g in range(3):
         rows = group == g
         z = x[rows] / (phi[1] + x[rows])
         info = weights[rows] @ z**2
-        b[g] = (weights[rows] * z) @ (y[rows] - phi[0] * z) / (info + precision)
         correction += np.log1p(theta[0] ** 2 * info)
     residual = y - (phi[0] + b[group]) * x / (phi[1] + x)
     variance = (weights @ residual**2 + precision * (b @ b)) / len(y)
@@ -237,7 +240,7 @@ def test_native_bindings_reject_zero_iteration_limit(entry):
 
 
 @pytest.mark.parametrize("backend", ["python", "native"])
-def test_real_outer_optimum_at_default_limit_does_not_claim_inner_convergence(backend):
+def test_joint_updates_complete_the_previously_unfinished_default_fit(backend):
     from mixedlm.nlme.models import SSasymp
 
     rng = np.random.default_rng(12)
@@ -249,9 +252,9 @@ def test_real_outer_optimum_at_default_limit_does_not_claim_inner_convergence(ba
     y += rng.normal(0, 0.3, len(x))
     optimizer = nlmm.NLMMOptimizer(y, x, groups, model, [0], use_rust=backend == "native")
     result = optimizer.optimize(start_phi=phi)
-    assert not result.converged and not result.pnls_converged
+    assert result.converged and result.pnls_converged
     assert result.n_iter > 0 and np.isfinite(result.deviance)
-    # Verify incompleteness using an additional update at the final covariance.
+    # Verify stationarity using an additional update at the final covariance.
     advanced_phi, advanced_b, _ = nlmm.pnls_step(
         y,
         x,
@@ -267,7 +270,7 @@ def test_real_outer_optimum_at_default_limit_does_not_claim_inner_convergence(ba
     remaining = max(
         np.max(np.abs(advanced_phi - result.phi)), np.max(np.abs(advanced_b - result.b))
     )
-    assert remaining > 1e-4
+    assert remaining < 1e-6
 
 
 @pytest.mark.parametrize("backend", ["1", "2", "native"])

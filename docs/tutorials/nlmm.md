@@ -293,6 +293,11 @@ functions and can add overhead for small models.
 
 ## Convergence Issues
 
+Both backends update fixed and random parameters together using small group
+systems. A line search checks the penalized residual error and shortens a step
+when needed. This avoids the slow alternating updates that previously required
+large inner iteration budgets for many models.
+
 During optimization, a failed trial evaluation receives a finite penalty so the
 optimizer can try other parameter values. If the final evaluation fails,
 `nlmer()` and `refit()` raise `RuntimeError` with the evaluation's failure reason.
@@ -301,13 +306,15 @@ residual scale. The failure penalty is never returned as a fitted deviance.
 
 A valid final evaluation has `converged=True` only when both the outer optimizer
 and inner parameter updates converge. `pnls_converged` records the inner status;
-an iteration limit no longer counts as successful convergence. `nlmer()` warns
+iteration limits and failed line searches leave it false. `nlmer()` warns
 when the final inner solve is unfinished, and the summary identifies that case.
 
 `pnls_maxiter` sets the inner iteration budget (default 50). `pnls_tol` sets the
-largest allowed absolute change in any fixed or random parameter (default
-`1e-6`). Both controls apply to Python and native fitting. The existing `maxiter`
-argument limits outer covariance optimization independently. Results retain the
+largest allowed absolute proposed change in any fixed or random parameter
+(default `1e-6`). The tolerance applies to the full proposal, so a heavily
+shortened step cannot falsely establish convergence. Both controls apply to
+Python and native fitting. The existing `maxiter` argument limits outer
+covariance optimization independently. Results retain the
 inner controls for `refit()` and `update()`, which accept overrides:
 
 ```python
