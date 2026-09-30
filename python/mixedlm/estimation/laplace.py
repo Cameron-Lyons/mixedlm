@@ -11,6 +11,7 @@ from numpy.typing import NDArray
 from scipy import linalg, sparse, special
 
 from mixedlm.estimation.optimizers import run_optimizer
+from mixedlm.estimation.pirls_control import validate_pirls_controls
 from mixedlm.estimation.reml import (
     _build_lambda,
     _build_theta_bounds,
@@ -170,6 +171,7 @@ def _pirls_state(
     maxiter: int = 25,
     tol: float = 1e-6,
 ) -> _PIRLSState:
+    validate_pirls_controls(maxiter, tol)
     q = matrices.n_random
 
     prior_weights = matrices.weights
@@ -358,9 +360,20 @@ def laplace_deviance(
     family: Family,
     beta_start: NDArray[np.floating] | None = None,
     u_start: NDArray[np.floating] | None = None,
+    *,
+    pirls_maxiter: int | None = None,
+    pirls_tol: float = 1e-6,
 ) -> tuple[float, NDArray[np.floating], NDArray[np.floating]]:
     """Evaluate deviance and fitted coefficients; use glmm_deviance_with_status for inner status."""
-    return _laplace_deviance_with_status(theta, matrices, family, beta_start, u_start)[:3]
+    return _laplace_deviance_with_status(
+        theta,
+        matrices,
+        family,
+        beta_start,
+        u_start,
+        pirls_maxiter=pirls_maxiter,
+        pirls_tol=pirls_tol,
+    )[:3]
 
 
 def _laplace_deviance_with_status(
@@ -369,6 +382,9 @@ def _laplace_deviance_with_status(
     family: Family,
     beta_start: NDArray[np.floating] | None = None,
     u_start: NDArray[np.floating] | None = None,
+    *,
+    pirls_maxiter: int | None = None,
+    pirls_tol: float = 1e-6,
 ) -> tuple[float, NDArray[np.floating], NDArray[np.floating], bool]:
     q = matrices.n_random
 
@@ -376,7 +392,15 @@ def _laplace_deviance_with_status(
     offset = matrices.offset
 
     if q == 0:
-        state = _pirls_state(matrices, family, theta, beta_start, u_start)
+        state = _pirls_state(
+            matrices,
+            family,
+            theta,
+            beta_start,
+            u_start,
+            maxiter=25 if pirls_maxiter is None else pirls_maxiter,
+            tol=pirls_tol,
+        )
         return (
             state.deviance,
             state.beta,
@@ -384,7 +408,15 @@ def _laplace_deviance_with_status(
             bool(state.converged and np.isfinite(state.deviance)),
         )
 
-    state = _pirls_state(matrices, family, theta, beta_start, u_start)
+    state = _pirls_state(
+        matrices,
+        family,
+        theta,
+        beta_start,
+        u_start,
+        maxiter=25 if pirls_maxiter is None else pirls_maxiter,
+        tol=pirls_tol,
+    )
     beta = state.beta
     spherical = state.spherical
     random_effects = state.random_effects
@@ -476,6 +508,9 @@ def adaptive_gh_deviance(
     beta_start: NDArray[np.floating] | None = None,
     u_start: NDArray[np.floating] | None = None,
     n_jobs: int = 1,
+    *,
+    pirls_maxiter: int | None = None,
+    pirls_tol: float = 1e-6,
 ) -> tuple[float, NDArray[np.floating], NDArray[np.floating]]:
     """Compute deviance using adaptive Gauss-Hermite quadrature.
 
@@ -509,7 +544,15 @@ def adaptive_gh_deviance(
         Random effect estimates.
     """
     return _adaptive_gh_deviance_with_status(
-        theta, matrices, family, nAGQ, beta_start, u_start, n_jobs
+        theta,
+        matrices,
+        family,
+        nAGQ,
+        beta_start,
+        u_start,
+        n_jobs,
+        pirls_maxiter=pirls_maxiter,
+        pirls_tol=pirls_tol,
     )[:3]
 
 
@@ -521,18 +564,37 @@ def _adaptive_gh_deviance_with_status(
     beta_start: NDArray[np.floating] | None = None,
     u_start: NDArray[np.floating] | None = None,
     n_jobs: int = 1,
+    *,
+    pirls_maxiter: int | None = None,
+    pirls_tol: float = 1e-6,
 ) -> tuple[float, NDArray[np.floating], NDArray[np.floating], bool]:
     """Evaluate adaptive quadrature and retain the inner convergence flag."""
     _validate_quadrature(nAGQ, matrices)
     if nAGQ == 1:
-        return _laplace_deviance_with_status(theta, matrices, family, beta_start, u_start)
+        return _laplace_deviance_with_status(
+            theta,
+            matrices,
+            family,
+            beta_start,
+            u_start,
+            pirls_maxiter=pirls_maxiter,
+            pirls_tol=pirls_tol,
+        )
 
     q = matrices.n_random
     prior_weights = matrices.weights
     offset = matrices.offset
 
     if q == 0:
-        state = _pirls_state(matrices, family, theta, beta_start, u_start)
+        state = _pirls_state(
+            matrices,
+            family,
+            theta,
+            beta_start,
+            u_start,
+            maxiter=25 if pirls_maxiter is None else pirls_maxiter,
+            tol=pirls_tol,
+        )
         return (
             state.deviance,
             state.beta,
@@ -553,7 +615,15 @@ def _adaptive_gh_deviance_with_status(
             "coefficient per observation"
         )
 
-    state = _pirls_state(matrices, family, theta, beta_start, u_start)
+    state = _pirls_state(
+        matrices,
+        family,
+        theta,
+        beta_start,
+        u_start,
+        maxiter=25 if pirls_maxiter is None else pirls_maxiter,
+        tol=pirls_tol,
+    )
     beta = state.beta
     spherical = state.spherical
     random_effects = state.random_effects
@@ -642,26 +712,56 @@ def _native_glmm_args(
 
 
 def _laplace_deviance_rust(
-    theta: NDArray[np.floating], matrices: ModelMatrices, family: Family
+    theta: NDArray[np.floating],
+    matrices: ModelMatrices,
+    family: Family,
+    *,
+    pirls_maxiter: int | None = None,
+    pirls_tol: float = 1e-6,
 ) -> tuple[float, NDArray[np.floating], NDArray[np.floating]]:
-    deviance, beta, u = _rust_laplace_deviance(*_native_glmm_args(theta, matrices, family))
+    validate_pirls_controls(pirls_maxiter, pirls_tol)
+    deviance, beta, u = _rust_laplace_deviance(
+        *_native_glmm_args(theta, matrices, family),
+        maxiter=100 if pirls_maxiter is None else pirls_maxiter,
+        tol=pirls_tol,
+    )
     return deviance, np.array(beta), np.array(u)
 
 
 def _adaptive_gh_deviance_rust(
-    theta: NDArray[np.floating], matrices: ModelMatrices, family: Family, nAGQ: int
+    theta: NDArray[np.floating],
+    matrices: ModelMatrices,
+    family: Family,
+    nAGQ: int,
+    *,
+    pirls_maxiter: int | None = None,
+    pirls_tol: float = 1e-6,
 ) -> tuple[float, NDArray[np.floating], NDArray[np.floating]]:
+    validate_pirls_controls(pirls_maxiter, pirls_tol)
     deviance, beta, u = _rust_adaptive_gh_deviance(
-        *_native_glmm_args(theta, matrices, family), nAGQ
+        *_native_glmm_args(theta, matrices, family),
+        nAGQ,
+        maxiter=100 if pirls_maxiter is None else pirls_maxiter,
+        tol=pirls_tol,
     )
     return deviance, np.array(beta), np.array(u)
 
 
 def _native_deviance_with_status(
-    theta: NDArray[np.floating], matrices: ModelMatrices, family: Family, nAGQ: int
+    theta: NDArray[np.floating],
+    matrices: ModelMatrices,
+    family: Family,
+    nAGQ: int,
+    *,
+    pirls_maxiter: int | None = None,
+    pirls_tol: float = 1e-6,
 ) -> tuple[float, NDArray[np.floating], NDArray[np.floating], bool]:
+    validate_pirls_controls(pirls_maxiter, pirls_tol)
     deviance, beta, u, converged = _rust_glmm_deviance(
-        *_native_glmm_args(theta, matrices, family), nAGQ
+        *_native_glmm_args(theta, matrices, family),
+        nAGQ,
+        maxiter=100 if pirls_maxiter is None else pirls_maxiter,
+        tol=pirls_tol,
     )
     return deviance, np.array(beta), np.array(u), converged
 
@@ -672,6 +772,9 @@ def laplace_deviance_fast(
     family: Family,
     beta_start: NDArray[np.floating] | None = None,
     u_start: NDArray[np.floating] | None = None,
+    *,
+    pirls_maxiter: int | None = None,
+    pirls_tol: float = 1e-6,
 ) -> tuple[float, NDArray[np.floating], NDArray[np.floating]]:
     family_name = _get_family_name(family)
     link_name = _get_link_name(family)
@@ -682,8 +785,18 @@ def laplace_deviance_fast(
         and (family_name, link_name) in _NATIVE_FAMILY_LINKS
         and _native_covariance_supported(matrices)
     ):
-        return _laplace_deviance_rust(theta, matrices, family)
-    return laplace_deviance(theta, matrices, family, beta_start, u_start)
+        return _laplace_deviance_rust(
+            theta, matrices, family, pirls_maxiter=pirls_maxiter, pirls_tol=pirls_tol
+        )
+    return laplace_deviance(
+        theta,
+        matrices,
+        family,
+        beta_start,
+        u_start,
+        pirls_maxiter=pirls_maxiter,
+        pirls_tol=pirls_tol,
+    )
 
 
 def adaptive_gh_deviance_fast(
@@ -693,11 +806,22 @@ def adaptive_gh_deviance_fast(
     nAGQ: int = 1,
     beta_start: NDArray[np.floating] | None = None,
     u_start: NDArray[np.floating] | None = None,
+    *,
+    pirls_maxiter: int | None = None,
+    pirls_tol: float = 1e-6,
 ) -> tuple[float, NDArray[np.floating], NDArray[np.floating]]:
     _validate_quadrature(nAGQ, matrices)
 
     if nAGQ == 1:
-        return laplace_deviance_fast(theta, matrices, family, beta_start, u_start)
+        return laplace_deviance_fast(
+            theta,
+            matrices,
+            family,
+            beta_start,
+            u_start,
+            pirls_maxiter=pirls_maxiter,
+            pirls_tol=pirls_tol,
+        )
 
     family_name = _get_family_name(family)
     link_name = _get_link_name(family)
@@ -710,9 +834,20 @@ def adaptive_gh_deviance_fast(
     ):
         first_struct = matrices.random_structures[0] if matrices.random_structures else None
         if first_struct and first_struct.n_terms == 1:
-            return _adaptive_gh_deviance_rust(theta, matrices, family, nAGQ)
+            return _adaptive_gh_deviance_rust(
+                theta, matrices, family, nAGQ, pirls_maxiter=pirls_maxiter, pirls_tol=pirls_tol
+            )
 
-    return adaptive_gh_deviance(theta, matrices, family, nAGQ, beta_start, u_start)
+    return adaptive_gh_deviance(
+        theta,
+        matrices,
+        family,
+        nAGQ,
+        beta_start,
+        u_start,
+        pirls_maxiter=pirls_maxiter,
+        pirls_tol=pirls_tol,
+    )
 
 
 def glmm_deviance_with_status(
@@ -722,6 +857,9 @@ def glmm_deviance_with_status(
     nAGQ: int = 1,
     beta_start: NDArray[np.floating] | None = None,
     u_start: NDArray[np.floating] | None = None,
+    *,
+    pirls_maxiter: int | None = None,
+    pirls_tol: float = 1e-6,
 ) -> tuple[float, NDArray[np.floating], NDArray[np.floating], bool]:
     """Return deviance, fixed effects, random effects, and inner PIRLS convergence.
 
@@ -741,8 +879,19 @@ def glmm_deviance_with_status(
             nAGQ == 1 or (matrices.random_structures and matrices.random_structures[0].n_terms == 1)
         )
     ):
-        return _native_deviance_with_status(theta, matrices, family, nAGQ)
-    return _adaptive_gh_deviance_with_status(theta, matrices, family, nAGQ, beta_start, u_start)
+        return _native_deviance_with_status(
+            theta, matrices, family, nAGQ, pirls_maxiter=pirls_maxiter, pirls_tol=pirls_tol
+        )
+    return _adaptive_gh_deviance_with_status(
+        theta,
+        matrices,
+        family,
+        nAGQ,
+        beta_start,
+        u_start,
+        pirls_maxiter=pirls_maxiter,
+        pirls_tol=pirls_tol,
+    )
 
 
 class GLMMOptimizer:
@@ -752,8 +901,14 @@ class GLMMOptimizer:
         family: Family,
         verbose: int = 0,
         nAGQ: int = 1,
+        *,
+        pirls_maxiter: int | None = None,
+        pirls_tol: float = 1e-6,
     ) -> None:
         _validate_quadrature(nAGQ, matrices)
+        validate_pirls_controls(pirls_maxiter, pirls_tol)
+        self.pirls_maxiter = pirls_maxiter
+        self.pirls_tol = pirls_tol
         self.matrices = matrices
         self.family = family
         self.verbose = verbose
@@ -784,9 +939,17 @@ class GLMMOptimizer:
                 self.matrices,
                 self.family,
                 nAGQ=self.nAGQ,
+                pirls_maxiter=self.pirls_maxiter,
+                pirls_tol=self.pirls_tol,
             )
         else:
-            dev, _, _ = laplace_deviance_fast(theta, self.matrices, self.family)
+            dev, _, _ = laplace_deviance_fast(
+                theta,
+                self.matrices,
+                self.family,
+                pirls_maxiter=self.pirls_maxiter,
+                pirls_tol=self.pirls_tol,
+            )
         return dev
 
     def _final_evaluation(
@@ -802,7 +965,12 @@ class GLMMOptimizer:
         try:
             validate_finite_real("variance parameters", theta, (self.n_theta,))
             deviance, beta, u, converged = glmm_deviance_with_status(
-                theta, self.matrices, self.family, nAGQ=nAGQ
+                theta,
+                self.matrices,
+                self.family,
+                nAGQ=nAGQ,
+                pirls_maxiter=self.pirls_maxiter,
+                pirls_tol=self.pirls_tol,
             )
             validate_finite_real("deviance", deviance, ())
             validate_finite_real("fixed effects", beta, (self.matrices.n_fixed,))

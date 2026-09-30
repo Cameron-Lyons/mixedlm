@@ -1,5 +1,7 @@
 use faer::{Col, Mat, MatRef};
 
+use crate::csc::CscMatrix;
+
 #[derive(Debug, Clone, Copy)]
 pub struct RandomEffectStructure {
     pub n_levels: usize,
@@ -88,6 +90,73 @@ impl CovarianceFactor {
 
     pub fn apply(&self, vector: &Col<f64>) -> Col<f64> {
         self.apply_vector::<false>(vector)
+    }
+
+    /// Form Z * Lambda without allocating a dense covariance or design matrix.
+    /// A row accumulator merges contributions from correlated slope columns.
+    pub fn sparse_design(&self, design: &CscMatrix) -> Option<CscMatrix> {
+        assert_eq!(design.ncols(), self.dimension);
+        if design.values().iter().any(|value| !value.is_finite()) {
+            return None;
+        }
+        let mut offsets = vec![0];
+        let mut indices = Vec::new();
+        let mut values = Vec::new();
+        let mut accumulator = vec![0.0; design.nrows()];
+        let mut present = vec![false; design.nrows()];
+        let mut rows = Vec::new();
+        for block in &self.blocks {
+            let width = block.lower.nrows();
+            for level in 0..block.n_levels {
+                let offset = block.offset + level * width;
+                for column in 0..width {
+                    let end = if block.diagonal { column + 1 } else { width };
+                    for source in column..end {
+                        let coefficient = block.lower[(source, column)];
+                        if !coefficient.is_finite() {
+                            return None;
+                        }
+                        if coefficient == 0.0 {
+                            continue;
+                        }
+                        let source = offset + source;
+                        for position in
+                            design.col_offsets()[source]..design.col_offsets()[source + 1]
+                        {
+                            let row = design.row_indices()[position];
+                            if !present[row] {
+                                present[row] = true;
+                                rows.push(row);
+                            }
+                            accumulator[row] += coefficient * design.values()[position];
+                        }
+                    }
+                    rows.sort_unstable();
+                    for row in rows.drain(..) {
+                        let value = accumulator[row];
+                        if !value.is_finite() {
+                            return None;
+                        }
+                        if value != 0.0 {
+                            indices.push(row);
+                            values.push(value);
+                        }
+                        accumulator[row] = 0.0;
+                        present[row] = false;
+                    }
+                    offsets.push(values.len());
+                }
+            }
+        }
+        Some(
+            CscMatrix::try_from_usize(
+                &values,
+                &indices,
+                &offsets,
+                (design.nrows(), self.dimension),
+            )
+            .expect("transformed design has canonical columns"),
+        )
     }
 
     pub fn transpose_apply_vector(&self, vector: &Col<f64>) -> Col<f64> {
@@ -311,6 +380,47 @@ mod tests {
             Mat::<f64>::identity(14, 14)
         );
         assert_eq!(factor.apply(&Col::full(14, 3.0)), Col::<f64>::zeros(14));
+    }
+
+    #[test]
+    fn sparse_design_matches_dense_covariance_product() {
+        let (structures, mut theta, dense) = fixture();
+        let design = Mat::from_fn(31, 14, |i, j| {
+            if (i + 2 * j) % 5 == 0 {
+                (i + j + 1) as f64 / 17.0
+            } else {
+                0.0
+            }
+        });
+        let mut offsets = vec![0];
+        let mut rows = Vec::new();
+        let mut values = Vec::new();
+        for column in 0..14 {
+            for row in 0..31 {
+                if design[(row, column)] != 0.0 {
+                    rows.push(row);
+                    values.push(design[(row, column)]);
+                }
+            }
+            offsets.push(values.len());
+        }
+        let input = CscMatrix::try_from_usize(&values, &rows, &offsets, (31, 14)).unwrap();
+        let transformed = CovarianceFactor::new(&theta, &structures)
+            .sparse_design(&input)
+            .unwrap();
+        let mut actual = Mat::zeros(31, 14);
+        for column in 0..14 {
+            for entry in transformed.col_offsets()[column]..transformed.col_offsets()[column + 1] {
+                actual[(transformed.row_indices()[entry], column)] = transformed.values()[entry];
+            }
+        }
+        assert_close(actual.as_ref(), (&design * &dense).as_ref());
+        theta.fill(0.0);
+        let zero = CovarianceFactor::new(&theta, &structures)
+            .sparse_design(&input)
+            .unwrap();
+        assert_eq!(zero.ncols(), 14);
+        assert!(zero.values().is_empty());
     }
 
     #[test]

@@ -8,11 +8,22 @@ use rayon::prelude::*;
 use crate::covariance::CovarianceFactor;
 pub use crate::covariance::RandomEffectStructure;
 use crate::csc::CscMatrix;
+use crate::glmm_sparse::{RandomFactor, SparseWeightedDesign};
 use crate::linalg::LinalgError;
 use crate::quadrature::gauss_hermite_nodes_weights;
 
 const PIRLS_MAX_ITER: usize = 100;
 const PIRLS_TOLERANCE: f64 = 1e-6;
+
+fn validate_pirls_controls(maxiter: usize, tol: f64) -> PyResult<()> {
+    if maxiter == 0 {
+        return Err(PyValueError::new_err("maxiter must be a positive integer"));
+    }
+    if !tol.is_finite() || tol <= 0.0 {
+        return Err(PyValueError::new_err("tol must be positive and finite"));
+    }
+    Ok(())
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum LinkFunction {
@@ -190,6 +201,62 @@ fn csc_from_scipy(
     CscMatrix::try_from_i64(data, indices, indptr, shape)
 }
 
+fn dense_penalized_crossproduct(
+    z: &CscMatrix,
+    lambda: &CovarianceFactor,
+    w_vec: &DVector<f64>,
+) -> DMatrix<f64> {
+    let ztwz = z.weighted_crossproduct(
+        w_vec
+            .try_as_col_major()
+            .expect("owned weights are contiguous")
+            .as_slice(),
+    );
+    lambda.penalized_crossproduct(ztwz)
+}
+
+fn factor_random_system(
+    z: &CscMatrix,
+    lambda: &CovarianceFactor,
+    sparse: Option<&SparseWeightedDesign>,
+    weights: &DVector<f64>,
+) -> Result<RandomFactor, LinalgError> {
+    if let Some(sparse) = sparse {
+        let weights = weights
+            .try_as_col_major()
+            .expect("owned weights are contiguous");
+        return sparse
+            .factor(weights.as_slice(), 0.0)
+            .or_else(|_| sparse.factor(weights.as_slice(), 1e-6))
+            .map(RandomFactor::Sparse);
+    }
+    let mut matrix = dense_penalized_crossproduct(z, lambda, weights);
+    match Llt::new(matrix.as_ref(), Side::Lower) {
+        Ok(factor) => Ok(RandomFactor::Dense(factor)),
+        Err(_) => {
+            for i in 0..z.ncols() {
+                matrix[(i, i)] += 1e-6;
+            }
+            Llt::new(matrix.as_ref(), Side::Lower)
+                .map(RandomFactor::Dense)
+                .map_err(|_| LinalgError::NotPositiveDefinite)
+        }
+    }
+}
+
+fn dense_logdet(z: &CscMatrix, lambda: &CovarianceFactor, weights: &DVector<f64>) -> f64 {
+    let matrix = dense_penalized_crossproduct(z, lambda, weights);
+    match Llt::new(matrix.as_ref(), Side::Lower) {
+        Ok(factor) => 2.0 * (0..z.ncols()).map(|i| factor.L()[(i, i)].ln()).sum::<f64>(),
+        Err(_) => matrix
+            .self_adjoint_eigenvalues(Side::Lower)
+            .unwrap_or_else(|_| vec![1e-10; z.ncols()])
+            .iter()
+            .map(|&value| value.max(1e-10).ln())
+            .sum(),
+    }
+}
+
 fn max_abs_diff(left: &DVector<f64>, right: &DVector<f64>) -> f64 {
     left.iter()
         .zip(right.iter())
@@ -239,6 +306,7 @@ pub struct PirlsResult {
     pub u: DVector<f64>,
     pub deviance: f64,
     pub converged: bool,
+    sparse_system: Option<SparseWeightedDesign>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -268,6 +336,7 @@ pub fn pirls_impl(
     };
 
     let lambda = CovarianceFactor::new(theta, structures);
+    let sparse_system = SparseWeightedDesign::new(z, &lambda);
     let mut spherical = if let Some(u_init) = u_start {
         lambda.to_dense().col_piv_qr().solve_lstsq(u_init)
     } else {
@@ -319,13 +388,6 @@ pub fn pirls_impl(
 
         let ztwx = xtwz_mat.transpose();
 
-        let ztwz = z.weighted_crossproduct(
-            w_vec
-                .try_as_col_major()
-                .expect("owned weights are contiguous")
-                .as_slice(),
-        );
-
         let xtwz_vec: DVector<f64> = DVector::from_fn(p, |i| {
             let mut sum = 0.0;
             for j in 0..n {
@@ -346,25 +408,17 @@ pub fn pirls_impl(
             ztwz_vec[j] = sum;
         }
 
-        let mut c = lambda.penalized_crossproduct(ztwz);
-        let chol_c = match Llt::new(c.as_ref(), Side::Lower) {
-            Ok(ch) => ch,
+        let chol_c = match factor_random_system(z, &lambda, sparse_system.as_ref(), &w_vec) {
+            Ok(factor) => factor,
             Err(_) => {
-                for i in 0..q {
-                    c[(i, i)] += 1e-6;
-                }
-                match Llt::new(c.as_ref(), Side::Lower) {
-                    Ok(ch) => ch,
-                    Err(_) => {
-                        return PirlsResult {
-                            beta,
-                            spherical,
-                            u: random_effects,
-                            deviance: 1e10,
-                            converged: false,
-                        };
-                    }
-                }
+                return PirlsResult {
+                    beta,
+                    spherical,
+                    u: random_effects,
+                    deviance: 1e10,
+                    converged: false,
+                    sparse_system,
+                };
             }
         };
 
@@ -379,7 +433,7 @@ pub fn pirls_impl(
                 spherical_ztwx[(i, j)]
             }
         });
-        chol_c.L().solve_lower_triangular_in_place(&mut rhs);
+        chol_c.solve_lower_in_place(rhs.as_mut());
         let rzx = rhs.subcols(0, p);
         let cu = rhs.col(p);
 
@@ -391,13 +445,8 @@ pub fn pirls_impl(
             Err(_) => xtvinvx.partial_piv_lu().solve(&xtvinvz),
         };
 
-        // The batched solve already applied L^-1 to both terms. Reuse those
-        // columns so recovering the random effects only needs L^-T.
         let mut spherical_new = cu - rzx * &beta_new;
-        chol_c
-            .L()
-            .transpose()
-            .solve_upper_triangular_in_place(&mut spherical_new);
+        chol_c.solve_upper_in_place(spherical_new.as_mat_mut());
 
         let delta_beta = max_abs_diff(&beta_new, &beta);
         let delta_u = if q > 0 {
@@ -442,6 +491,7 @@ pub fn pirls_impl(
         u: random_effects,
         deviance,
         converged: converged && deviance.is_finite(),
+        sparse_system,
     }
 }
 
@@ -458,44 +508,24 @@ pub fn laplace_deviance_impl(
     link: LinkFunction,
     beta_start: Option<&DVector<f64>>,
     u_start: Option<&DVector<f64>>,
+    maxiter: usize,
+    tol: f64,
 ) -> (f64, DVector<f64>, DVector<f64>, bool) {
     let n = y.nrows();
     let q = z.ncols();
 
     if q == 0 {
         let result = pirls_impl(
-            y,
-            x,
-            z,
-            weights,
-            offset,
-            theta,
-            structures,
-            family,
-            link,
-            beta_start,
-            u_start,
-            PIRLS_MAX_ITER,
-            PIRLS_TOLERANCE,
+            y, x, z, weights, offset, theta, structures, family, link, beta_start, u_start,
+            maxiter, tol,
         );
         let converged = result.converged && result.deviance.is_finite();
         return (result.deviance, result.beta, result.u, converged);
     }
 
     let result = pirls_impl(
-        y,
-        x,
-        z,
-        weights,
-        offset,
-        theta,
-        structures,
-        family,
-        link,
-        beta_start,
-        u_start,
-        PIRLS_MAX_ITER,
-        PIRLS_TOLERANCE,
+        y, x, z, weights, offset, theta, structures, family, link, beta_start, u_start, maxiter,
+        tol,
     );
 
     let converged = result.converged && result.deviance.is_finite();
@@ -527,26 +557,16 @@ pub fn laplace_deviance_impl(
         w_vec[i] = (w_vec[i] * weights[i]).max(1e-10);
     }
 
-    let ztwz = z.weighted_crossproduct(
-        w_vec
+    let logdet_h = if let Some(sparse) = result.sparse_system.as_ref() {
+        let weights = w_vec
             .try_as_col_major()
-            .expect("owned weights are contiguous")
-            .as_slice(),
-    );
-
-    let h = lambda.penalized_crossproduct(ztwz);
-
-    let logdet_h = match Llt::new(h.as_ref(), Side::Lower) {
-        Ok(chol) => {
-            let l = chol.L();
-            2.0 * (0..q).map(|i| l[(i, i)].ln()).sum::<f64>()
+            .expect("owned weights are contiguous");
+        match sparse.factor(weights.as_slice(), 0.0) {
+            Ok(factor) => factor.logdet(),
+            Err(_) => dense_logdet(z, &lambda, &w_vec),
         }
-        Err(_) => {
-            let eigvals = h
-                .self_adjoint_eigenvalues(Side::Lower)
-                .unwrap_or_else(|_| vec![1e-10; q]);
-            eigvals.iter().map(|&e| e.max(1e-10).ln()).sum::<f64>()
-        }
+    } else {
+        dense_logdet(z, &lambda, &w_vec)
     };
 
     deviance += logdet_h;
@@ -628,18 +648,22 @@ pub fn adaptive_gh_deviance_impl(
     n_agq: usize,
     beta_start: Option<&DVector<f64>>,
     u_start: Option<&DVector<f64>>,
+    maxiter: usize,
+    tol: f64,
 ) -> PyResult<(f64, DVector<f64>, DVector<f64>, bool)> {
     let q = z.ncols();
 
     if n_agq <= 1 || q == 0 {
         return Ok(laplace_deviance_impl(
             y, x, z, weights, offset, theta, structures, family, link, beta_start, u_start,
+            maxiter, tol,
         ));
     }
 
     if structures.len() != 1 {
         return Ok(laplace_deviance_impl(
             y, x, z, weights, offset, theta, structures, family, link, beta_start, u_start,
+            maxiter, tol,
         ));
     }
 
@@ -650,6 +674,7 @@ pub fn adaptive_gh_deviance_impl(
     if n_terms_first > 1 {
         return Ok(laplace_deviance_impl(
             y, x, z, weights, offset, theta, structures, family, link, beta_start, u_start,
+            maxiter, tol,
         ));
     }
 
@@ -666,19 +691,8 @@ pub fn adaptive_gh_deviance_impl(
     }
 
     let result = pirls_impl(
-        y,
-        x,
-        z,
-        weights,
-        offset,
-        theta,
-        structures,
-        family,
-        link,
-        beta_start,
-        u_start,
-        PIRLS_MAX_ITER,
-        PIRLS_TOLERANCE,
+        y, x, z, weights, offset, theta, structures, family, link, beta_start, u_start, maxiter,
+        tol,
     );
 
     let converged = result.converged && result.deviance.is_finite();
@@ -759,7 +773,10 @@ pub fn adaptive_gh_deviance_impl(
     n_terms,
     correlated,
     family,
-    link
+    link,
+    *,
+    maxiter=PIRLS_MAX_ITER,
+    tol=PIRLS_TOLERANCE
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn pirls<'py>(
@@ -777,7 +794,10 @@ pub fn pirls<'py>(
     correlated: Vec<bool>,
     family: &str,
     link: &str,
+    maxiter: usize,
+    tol: f64,
 ) -> PyResult<(Vec<f64>, Vec<f64>, f64, bool)> {
+    validate_pirls_controls(maxiter, tol)?;
     let structures: Vec<RandomEffectStructure> = n_levels
         .into_iter()
         .zip(n_terms)
@@ -818,8 +838,8 @@ pub fn pirls<'py>(
         link_fn,
         None,
         None,
-        PIRLS_MAX_ITER,
-        PIRLS_TOLERANCE,
+        maxiter,
+        tol,
     );
 
     Ok((
@@ -845,7 +865,10 @@ pub fn pirls<'py>(
     n_terms,
     correlated,
     family,
-    link
+    link,
+    *,
+    maxiter=PIRLS_MAX_ITER,
+    tol=PIRLS_TOLERANCE
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn laplace_deviance<'py>(
@@ -863,10 +886,12 @@ pub fn laplace_deviance<'py>(
     correlated: Vec<bool>,
     family: &str,
     link: &str,
+    maxiter: usize,
+    tol: f64,
 ) -> PyResult<(f64, Vec<f64>, Vec<f64>)> {
     let (deviance, beta, u, _) = glmm_deviance(
         y, x, z_data, z_indices, z_indptr, z_shape, weights, offset, theta, n_levels, n_terms,
-        correlated, family, link, 1,
+        correlated, family, link, 1, maxiter, tol,
     )?;
     Ok((deviance, beta, u))
 }
@@ -887,7 +912,10 @@ pub fn laplace_deviance<'py>(
     correlated,
     family,
     link,
-    n_agq
+    n_agq,
+    *,
+    maxiter=PIRLS_MAX_ITER,
+    tol=PIRLS_TOLERANCE
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn adaptive_gh_deviance<'py>(
@@ -906,10 +934,12 @@ pub fn adaptive_gh_deviance<'py>(
     family: &str,
     link: &str,
     n_agq: usize,
+    maxiter: usize,
+    tol: f64,
 ) -> PyResult<(f64, Vec<f64>, Vec<f64>)> {
     let (deviance, beta, u, _) = glmm_deviance(
         y, x, z_data, z_indices, z_indptr, z_shape, weights, offset, theta, n_levels, n_terms,
-        correlated, family, link, n_agq,
+        correlated, family, link, n_agq, maxiter, tol,
     )?;
     Ok((deviance, beta, u))
 }
@@ -930,7 +960,10 @@ pub fn adaptive_gh_deviance<'py>(
     correlated,
     family,
     link,
-    n_agq
+    n_agq,
+    *,
+    maxiter=PIRLS_MAX_ITER,
+    tol=PIRLS_TOLERANCE
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn glmm_deviance<'py>(
@@ -949,7 +982,10 @@ pub fn glmm_deviance<'py>(
     family: &str,
     link: &str,
     n_agq: usize,
+    maxiter: usize,
+    tol: f64,
 ) -> PyResult<(f64, Vec<f64>, Vec<f64>, bool)> {
+    validate_pirls_controls(maxiter, tol)?;
     let structures: Vec<RandomEffectStructure> = n_levels
         .into_iter()
         .zip(n_terms)
@@ -1000,6 +1036,8 @@ pub fn glmm_deviance<'py>(
         n_agq,
         None,
         None,
+        maxiter,
+        tol,
     )?;
 
     Ok((
