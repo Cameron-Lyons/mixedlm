@@ -2,6 +2,7 @@ use faer::linalg::solvers::{DenseSolveCore, Llt, Solve};
 use faer::{Col as DVector, Mat as DMatrix, Side};
 use pyo3::PyResult;
 use pyo3::prelude::*;
+use std::collections::BTreeMap;
 
 const PNLS_MAX_ITER: usize = 50;
 const PNLS_TOLERANCE: f64 = 1e-6;
@@ -302,19 +303,11 @@ fn validate_prior_weights(weights: &[f64], n: usize) -> PyResult<()> {
 }
 
 fn grouped_observation_indices(groups: &[i64]) -> Vec<Vec<usize>> {
-    let mut unique_groups = groups.to_vec();
-    unique_groups.sort_unstable();
-    unique_groups.dedup();
-    unique_groups
-        .iter()
-        .map(|group| {
-            groups
-                .iter()
-                .enumerate()
-                .filter_map(|(index, candidate)| (candidate == group).then_some(index))
-                .collect()
-        })
-        .collect()
+    let mut indices: BTreeMap<i64, Vec<usize>> = BTreeMap::new();
+    for (row, group) in groups.iter().enumerate() {
+        indices.entry(*group).or_default().push(row);
+    }
+    indices.into_values().collect()
 }
 
 pub struct PnlsResult {
@@ -336,8 +329,33 @@ pub fn pnls_step_impl(
     _sigma: f64,
     random_params: &[usize],
 ) -> PnlsResult {
-    let n = y.len();
     let group_indices = grouped_observation_indices(groups);
+    pnls_step_with_groups(
+        y,
+        x,
+        &group_indices,
+        weights,
+        model,
+        phi,
+        b,
+        psi,
+        random_params,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn pnls_step_with_groups(
+    y: &[f64],
+    x: &[f64],
+    group_indices: &[Vec<usize>],
+    weights: &[f64],
+    model: NlmeModel,
+    phi: &[f64],
+    b: &DMatrix<f64>,
+    psi: &DMatrix<f64>,
+    random_params: &[usize],
+) -> PnlsResult {
+    let n = y.len();
     let n_phi = phi.len();
     let n_random = random_params.len();
     let sqrt_weights: Vec<f64> = weights.iter().map(|weight| weight.sqrt()).collect();
@@ -525,7 +543,7 @@ pub fn nlmm_deviance_impl(
     phi: &[f64],
     b: &DMatrix<f64>,
     random_params: &[usize],
-    sigma: f64,
+    _sigma: f64,
 ) -> (f64, Vec<f64>, DMatrix<f64>, f64) {
     let n = y.len();
     let group_indices = grouped_observation_indices(groups);
@@ -536,16 +554,15 @@ pub fn nlmm_deviance_impl(
     let psi_factor = build_psi_factor(theta, n_random);
     let psi = &psi_factor * psi_factor.transpose();
 
-    let result = pnls_step_impl(
+    let result = pnls_step_with_groups(
         y,
         x,
-        groups,
+        &group_indices,
         weights,
         model,
         phi,
         b,
         &psi,
-        sigma,
         random_params,
     );
 
@@ -813,6 +830,30 @@ pub fn nlmm_deviance<'py>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn group_indices_preserve_label_and_observation_order() {
+        let groups = [i64::MAX, -3, i64::MIN, -3, i64::MAX, i64::MIN];
+        assert_eq!(
+            grouped_observation_indices(&groups),
+            vec![vec![2, 5], vec![1, 3], vec![0, 4]]
+        );
+        assert!(grouped_observation_indices(&[]).is_empty());
+    }
+
+    #[test]
+    fn group_indices_handle_many_interleaved_labels() {
+        let groups: Vec<i64> = (0..10_000).map(|row| ((row * 7) % 1000) - 400).collect();
+        let indices = grouped_observation_indices(&groups);
+        assert_eq!(indices.len(), 1000);
+        for (group, rows) in indices.iter().enumerate() {
+            assert_eq!(rows.len(), 10);
+            assert!(rows.windows(2).all(|pair| pair[0] < pair[1]));
+            for row in rows {
+                assert_eq!(groups[*row], group as i64 - 400);
+            }
+        }
+    }
 
     fn asymptotic_data() -> (Vec<f64>, Vec<f64>, Vec<i64>) {
         let base = [10.0, 0.5, -0.5];
