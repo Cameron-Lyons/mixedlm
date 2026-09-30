@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import itertools
-from collections.abc import Mapping, Sequence
+import math
+from collections.abc import Callable, Mapping, Sequence
+from functools import cached_property
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -16,6 +17,47 @@ from mixedlm.utils.validation import _validate_confidence_level
 if TYPE_CHECKING:
     from mixedlm.models.glmer import GlmerResult
     from mixedlm.models.lmer import LmerResult
+
+
+_MAX_EFFECT_MATRIX_ELEMENTS = 1_000_000
+
+
+def _cartesian_grid(terms: list[str], values: list[list[Any]]) -> pd.DataFrame:
+    """Build product columns in the same order as itertools.product."""
+    n_rows = math.prod(map(len, values))
+    columns = {}
+    stride = n_rows
+    for term, levels in zip(terms, values, strict=True):
+        stride //= len(levels)
+        indices = np.tile(
+            np.repeat(np.arange(len(levels)), stride), n_rows // (len(levels) * stride)
+        )
+        columns[term] = pd.Series(levels).array.take(indices)
+    return pd.DataFrame(columns, copy=False)
+
+
+def _prediction_moments(
+    grid: pd.DataFrame,
+    beta: NDArray[np.float64],
+    build_matrix: Callable[[pd.DataFrame], NDArray[np.floating]],
+    covariance: Callable[[], NDArray[np.floating]],
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    """Build and project one batch of design rows at a time."""
+    eta = np.empty(len(grid), dtype=np.float64)
+    variance = np.empty(len(grid), dtype=np.float64)
+    batch_rows = max(1, _MAX_EFFECT_MATRIX_ELEMENTS // max(1, len(beta), len(grid.columns)))
+    vcov = None
+    for start in range(0, len(grid), batch_rows):
+        rows = slice(start, start + batch_rows)
+        matrix = build_matrix(grid.iloc[rows])
+        if vcov is None:
+            # Validate the design (including contrasts) before requesting covariance.
+            vcov = np.asarray(covariance(), dtype=np.float64)
+        eta[rows] = matrix @ beta
+        projected = matrix @ vcov
+        variance[rows] = np.einsum("ij,ij->i", projected, matrix)
+        del matrix, projected
+    return eta, np.sqrt(np.maximum(variance, 0.0))
 
 
 def _as_pandas_frame(frame: Any) -> pd.DataFrame:
@@ -205,7 +247,7 @@ class _EffectGrid:
         self,
         terms: list[str],
         contrasts: dict[str, str | NDArray[np.floating]] | None,
-    ) -> tuple[pd.DataFrame, NDArray[np.float64]]:
+    ) -> pd.DataFrame:
         grid_values = []
         for term in terms:
             levels = self._levels(term)
@@ -217,7 +259,7 @@ class _EffectGrid:
                     levels,
                 )
             grid_values.append(values)
-        grid = pd.DataFrame(itertools.product(*grid_values), columns=terms)
+        grid = _cartesian_grid(terms, grid_values)
         for variable in self.variables:
             if variable in terms:
                 continue
@@ -232,8 +274,7 @@ class _EffectGrid:
             grid[variable] = value
         for variable, dtype in self.categories.items():
             grid[variable] = pd.Categorical(grid[variable], dtype=dtype)
-        matrix = self.model._prediction_fixed_matrix(grid, contrasts=contrasts)
-        return grid, np.asarray(matrix, dtype=np.float64)
+        return grid
 
 
 def _validate_prediction_options(
@@ -266,7 +307,7 @@ class _EffectPrediction:
         self, model: LmerResult | GlmerResult, type: str, level: float, offset: float
     ) -> None:
         self.beta = np.asarray(model.beta, dtype=np.float64)
-        self.vcov = np.asarray(model.vcov(), dtype=np.float64)
+        self.model = model
         self.type = type
         self.level = level
         self.offset = offset
@@ -280,12 +321,23 @@ class _EffectPrediction:
             else stats.t.isf((1.0 - level) / 2.0, float(model.df_residual()))
         )
 
+    @cached_property
+    def vcov(self) -> NDArray[np.float64]:
+        return np.asarray(self.model.vcov(), dtype=np.float64)
+
     def predict(
-        self, terms: list[str], grid: pd.DataFrame, matrix: NDArray[np.float64]
+        self,
+        terms: list[str],
+        grid: pd.DataFrame,
+        contrasts: dict[str, str | NDArray[np.floating]] | None,
     ) -> pd.DataFrame:
-        eta = matrix @ self.beta + self.offset
-        variance = np.einsum("ij,jk,ik->i", matrix, self.vcov, matrix, optimize=True)
-        se_eta = np.sqrt(np.maximum(variance, 0.0))
+        eta, se_eta = _prediction_moments(
+            grid,
+            self.beta,
+            lambda chunk: self.model._prediction_fixed_matrix(chunk, contrasts=contrasts),
+            lambda: self.vcov,
+        )
+        eta += self.offset
         lower_eta = eta - self.critical * se_eta
         upper_eta = eta + self.critical * se_eta
 
@@ -336,6 +388,9 @@ def ggpredict(
     the complete fixed-effect covariance matrix. GLMM intervals are constructed on
     the link scale and transformed to the response scale when requested.
 
+    Design matrices and covariance projections are evaluated in batches. The
+    complete reference grid and returned predictions remain in memory.
+
     Parameters
     ----------
     model : LmerResult or GlmerResult
@@ -368,9 +423,9 @@ def ggpredict(
     normalized_terms = _normalize_terms(terms)
     builder = _EffectGrid(model, at, n_points)
     builder.validate_terms(normalized_terms)
-    grid, matrix = builder.build(normalized_terms, contrasts)
+    grid = builder.build(normalized_terms, contrasts)
     prediction = _EffectPrediction(model, type, level, offset_value)
-    return prediction.predict(normalized_terms, grid, matrix)
+    return prediction.predict(normalized_terms, grid, contrasts)
 
 
 def allEffects(
@@ -399,8 +454,8 @@ def allEffects(
     prediction = None
     results = {}
     for variable in builder.variables:
-        grid, matrix = builder.build([variable], contrasts)
+        grid = builder.build([variable], contrasts)
         if prediction is None:
             prediction = _EffectPrediction(model, type, level, offset_value)
-        results[variable] = prediction.predict([variable], grid, matrix)
+        results[variable] = prediction.predict([variable], grid, contrasts)
     return results
