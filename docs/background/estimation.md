@@ -353,7 +353,7 @@ mixedlm uses a relative covariance factor parameterization (\(\boldsymbol{\theta
 
 where \(\boldsymbol{\theta}\) contains the elements of \(\mathbf{\Lambda}\). This:
 
-- Ensures positive definite covariance matrices
+- Ensures positive semidefinite covariance matrices
 - Improves optimization stability
 - Allows variance to approach zero smoothly
 
@@ -361,8 +361,13 @@ where \(\boldsymbol{\theta}\) contains the elements of \(\mathbf{\Lambda}\). Thi
 
 For models with many groups, mixedlm uses sparse matrix operations to efficiently compute:
 
-- \(\mathbf{Z}^T\mathbf{Z}\) (block diagonal structure)
-- Cholesky factorizations
+- Weighted products \(\mathbf{Z}^T\mathbf{W}\mathbf{Z}\)
+- Factorizations of the random-effect precision system
 - Linear system solutions
 
 This enables fitting models with thousands of groups.
+
+The Python ML/REML evaluator keeps large random-effect systems sparse and reuses
+one factorization for the fixed-effect and random-effect solves. Small systems
+use dense Cholesky. Both paths support observation weights, offsets, and
+unstructured, independent, compound-symmetry, and AR(1) random effects.
