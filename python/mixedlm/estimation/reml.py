@@ -11,6 +11,7 @@ from scipy import linalg, sparse
 from scipy.sparse import linalg as sparse_linalg
 
 from mixedlm.estimation.optimizers import run_optimizer
+from mixedlm.estimation.validation import validate_finite_real
 from mixedlm.matrices.design import ModelMatrices, RandomEffectStructure, validate_prior_weights
 
 try:
@@ -757,13 +758,36 @@ class LMMOptimizer:
         result = self._evaluate_core(theta)
         return 1e10 if result is None else result.deviance
 
+    def _final_evaluation(self, theta: NDArray[np.floating]) -> _DevianceCoreResult:
+        """Extract and validate the estimates at the final parameter vector."""
+        try:
+            validate_finite_real("variance parameters", theta, (self.n_theta,))
+            result = self._evaluate_core(theta)
+            if result is None:
+                raise ValueError("final covariance factorization failed")
+            validate_finite_real("deviance", result.deviance, ())
+            validate_finite_real("fixed effects", result.beta, (self.matrices.n_fixed,))
+            validate_finite_real("random effects", result.u, (self.matrices.n_random,))
+            validate_finite_real("residual scale", result.sigma, ())
+            if result.sigma <= 0:
+                raise ValueError("residual scale must be strictly positive")
+        except (
+            FloatingPointError,
+            OverflowError,
+            TypeError,
+            ValueError,
+            linalg.LinAlgError,
+        ) as exc:
+            raise RuntimeError(
+                f"Linear optimization did not produce a valid fit: {type(exc).__name__}: {exc}"
+            ) from exc
+        return result
+
     def _extract_estimates(
         self, theta: NDArray[np.floating]
     ) -> tuple[NDArray[np.floating], float, NDArray[np.floating]]:
-        """Extract beta, sigma, and u from fitted theta."""
-        result = self._evaluate_core(theta)
-        if result is None:
-            return np.zeros(self.matrices.n_fixed), 1.0, np.zeros(self.matrices.n_random)
+        """Extract beta, sigma, and u from valid fitted theta."""
+        result = self._final_evaluation(theta)
         return result.beta, result.sigma, result.u
 
     def _check_at_boundary(
@@ -811,7 +835,7 @@ class LMMOptimizer:
         )
 
         theta_opt = result.x
-        core_result = self._evaluate_core(theta_opt)
+        core_result = self._final_evaluation(theta_opt)
 
         gradient_norm = None
         if result.jac is not None:
@@ -819,27 +843,12 @@ class LMMOptimizer:
 
         at_boundary = self._check_at_boundary(theta_opt, bounds)
 
-        if core_result is None:
-            return OptimizationResult(
-                theta=theta_opt,
-                beta=np.zeros(self.matrices.n_fixed),
-                sigma=1.0,
-                u=np.zeros(self.matrices.n_random),
-                deviance=result.fun,
-                converged=False,
-                n_iter=result.nit,
-                gradient_norm=gradient_norm,
-                at_boundary=at_boundary,
-                message=result.message,
-                function_evals=result.nfev,
-            )
-
         return OptimizationResult(
             theta=theta_opt,
             beta=core_result.beta,
             sigma=core_result.sigma,
             u=core_result.u,
-            deviance=result.fun,
+            deviance=core_result.deviance,
             converged=result.success,
             n_iter=result.nit,
             gradient_norm=gradient_norm,

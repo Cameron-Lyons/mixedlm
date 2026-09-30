@@ -679,16 +679,16 @@ def mkLmerMod(
     """
     from mixedlm.models.lmer import LmerResult
 
-    beta, sigma, u = devfun.optimizer._extract_estimates(opt.theta)
+    evaluation = devfun.optimizer._final_evaluation(opt.theta)
 
     return LmerResult(
         formula=devfun.parsed.formula,
         matrices=devfun.parsed.matrices,
         theta=opt.theta,
-        beta=beta,
-        sigma=sigma,
-        u=u,
-        deviance=opt.deviance,
+        beta=evaluation.beta,
+        sigma=evaluation.sigma,
+        u=evaluation.u,
+        deviance=evaluation.deviance,
         REML=devfun.parsed.REML,
         converged=opt.converged,
         n_iter=opt.n_iter,
@@ -733,14 +733,9 @@ def mkGlmerMod(
     mkGlmerDevfun : Create deviance function.
     optimizeGlmer : Optimize deviance.
     """
-    from mixedlm.estimation.laplace import laplace_deviance
     from mixedlm.models.glmer import GlmerResult
 
-    _, beta, u = laplace_deviance(
-        opt.theta,
-        devfun.parsed.matrices,
-        devfun.parsed.family,
-    )
+    deviance, beta, u = devfun.optimizer._final_evaluation(opt.theta, nAGQ=nAGQ)
 
     return GlmerResult(
         formula=devfun.parsed.formula,
@@ -749,7 +744,7 @@ def mkGlmerMod(
         theta=opt.theta,
         beta=beta,
         u=u,
-        deviance=opt.deviance,
+        deviance=deviance,
         converged=opt.converged,
         n_iter=opt.n_iter,
         nAGQ=nAGQ,

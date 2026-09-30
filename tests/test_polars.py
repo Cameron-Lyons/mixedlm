@@ -197,7 +197,7 @@ class TestPolarsDataTypes:
         """Test with various numeric dtypes."""
         data = pl.DataFrame(
             {
-                "y": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+                "y": [1.1, 1.8, 3.2, 3.9, 5.3, 5.7],
                 "x": [1, 2, 3, 4, 5, 6],
                 "group": ["A", "A", "B", "B", "C", "C"],
             }
@@ -205,12 +205,14 @@ class TestPolarsDataTypes:
 
         result = mlm.lmer("y ~ x + (1 | group)", data)
         assert result.converged
+        assert np.isfinite(result.deviance)
+        assert result.sigma > 0
 
     def test_categorical_column(self):
         """Test with polars Categorical dtype."""
         data = pl.DataFrame(
             {
-                "y": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+                "y": [1.1, 1.8, 3.2, 3.9, 5.3, 5.7],
                 "x": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
                 "group": pl.Series(["A", "A", "B", "B", "C", "C"]).cast(pl.Categorical),
             }
@@ -218,12 +220,14 @@ class TestPolarsDataTypes:
 
         result = mlm.lmer("y ~ x + (1 | group)", data)
         assert result.converged
+        assert np.isfinite(result.deviance)
+        assert result.sigma > 0
 
     def test_string_grouping(self):
         """Test with string grouping variable."""
         data = pl.DataFrame(
             {
-                "y": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+                "y": [1.1, 1.8, 3.2, 3.9, 5.3, 5.7],
                 "x": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
                 "group": ["A", "A", "B", "B", "C", "C"],
             }
@@ -231,6 +235,8 @@ class TestPolarsDataTypes:
 
         result = mlm.lmer("y ~ x + (1 | group)", data)
         assert result.converged
+        assert np.isfinite(result.deviance)
+        assert result.sigma > 0
 
 
 class TestPolarsNAHandling:
