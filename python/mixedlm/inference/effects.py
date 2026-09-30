@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import itertools
-from collections.abc import Mapping, Sequence
+import math
+from collections.abc import Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -15,6 +15,47 @@ from mixedlm.matrices.design import build_fixed_matrix
 if TYPE_CHECKING:
     from mixedlm.models.glmer import GlmerResult
     from mixedlm.models.lmer import LmerResult
+
+
+_MAX_EFFECT_MATRIX_ELEMENTS = 1_000_000
+
+
+def _cartesian_grid(terms: list[str], values: list[list[Any]]) -> pd.DataFrame:
+    """Build product columns in the same order as itertools.product."""
+    n_rows = math.prod(map(len, values))
+    columns = {}
+    stride = n_rows
+    for term, levels in zip(terms, values, strict=True):
+        stride //= len(levels)
+        indices = np.tile(
+            np.repeat(np.arange(len(levels)), stride), n_rows // (len(levels) * stride)
+        )
+        columns[term] = pd.Series(levels).array.take(indices)
+    return pd.DataFrame(columns, copy=False)
+
+
+def _prediction_moments(
+    grid: pd.DataFrame,
+    beta: NDArray[np.float64],
+    build_matrix: Callable[[pd.DataFrame], NDArray[np.floating]],
+    covariance: Callable[[], NDArray[np.floating]],
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    """Build and project one batch of design rows at a time."""
+    eta = np.empty(len(grid), dtype=np.float64)
+    variance = np.empty(len(grid), dtype=np.float64)
+    batch_rows = max(1, _MAX_EFFECT_MATRIX_ELEMENTS // max(1, len(beta), len(grid.columns)))
+    vcov = None
+    for start in range(0, len(grid), batch_rows):
+        rows = slice(start, start + batch_rows)
+        matrix = build_matrix(grid.iloc[rows])
+        if vcov is None:
+            # Validate the design (including contrasts) before requesting covariance.
+            vcov = np.asarray(covariance(), dtype=np.float64)
+        eta[rows] = matrix @ beta
+        projected = matrix @ vcov
+        variance[rows] = np.einsum("ij,ij->i", projected, matrix)
+        del matrix, projected
+    return eta, np.sqrt(np.maximum(variance, 0.0))
 
 
 def _as_pandas_frame(frame: Any) -> pd.DataFrame:
@@ -130,8 +171,7 @@ def _prediction_grid(
     terms: list[str],
     at: Mapping[str, Any],
     n_points: int,
-    contrasts: dict[str, str | NDArray[np.floating]] | None,
-) -> tuple[pd.DataFrame, NDArray[np.float64]]:
+) -> pd.DataFrame:
     frame_source = model.matrices.frame
     if frame_source is None:
         frame_source = model.model_frame()
@@ -156,8 +196,7 @@ def _prediction_grid(
         )
         grid_values.append(_validate_values(frame[term], values))
 
-    grid = pd.DataFrame(list(itertools.product(*grid_values)), columns=terms)
-
+    references = {}
     for variable in fixed_variables:
         if variable in terms:
             continue
@@ -168,9 +207,13 @@ def _prediction_grid(
                     f"Non-focal variable '{variable}' must have one value in at; "
                     "include it in terms to predict a grid"
                 )
-            grid[variable] = values[0]
+            references[variable] = values[0]
         else:
-            grid[variable] = _reference_value(frame[variable])
+            references[variable] = _reference_value(frame[variable])
+
+    grid = _cartesian_grid(terms, grid_values)
+    for variable, value in references.items():
+        grid[variable] = value
 
     for variable in fixed_variables:
         source = frame[variable]
@@ -179,6 +222,14 @@ def _prediction_grid(
             ordered = bool(isinstance(source.dtype, pd.CategoricalDtype) and source.dtype.ordered)
             grid[variable] = pd.Categorical(grid[variable], categories=levels, ordered=ordered)
 
+    return grid
+
+
+def _effect_design_matrix(
+    model: LmerResult | GlmerResult,
+    grid: pd.DataFrame,
+    contrasts: dict[str, str | NDArray[np.floating]] | None,
+) -> NDArray[np.float64]:
     X_grid, fixed_names = build_fixed_matrix(model.formula, grid, contrasts=contrasts)
     column_indices = {name: index for index, name in enumerate(fixed_names)}
     try:
@@ -187,7 +238,7 @@ def _prediction_grid(
         raise ValueError(
             f"Prediction grid is missing fitted fixed-effect column '{exc.args[0]}'"
         ) from None
-    return grid, np.asarray(X_grid[:, fitted_indices], dtype=np.float64)
+    return np.asarray(X_grid[:, fitted_indices], dtype=np.float64)
 
 
 def ggpredict(
@@ -207,6 +258,9 @@ def ggpredict(
     variables are held at their reference level. Confidence intervals account for
     the complete fixed-effect covariance matrix. GLMM intervals are constructed on
     the link scale and transformed to the response scale when requested.
+
+    Design matrices and covariance projections are evaluated in batches. The
+    complete reference grid and returned predictions remain in memory.
 
     Parameters
     ----------
@@ -251,13 +305,13 @@ def ggpredict(
         raise TypeError("model must be a fitted linear or generalized linear mixed model")
 
     normalized_terms = _normalize_terms(terms)
-    grid, X_grid = _prediction_grid(model, normalized_terms, at or {}, n_points, contrasts)
+    grid = _prediction_grid(model, normalized_terms, at or {}, n_points)
 
     beta = np.asarray(model.beta, dtype=np.float64)
-    vcov = np.asarray(model.vcov(), dtype=np.float64)
-    eta = X_grid @ beta + offset_value
-    variance = np.einsum("ij,jk,ik->i", X_grid, vcov, X_grid, optimize=True)
-    se_eta = np.sqrt(np.maximum(variance, 0.0))
+    eta, se_eta = _prediction_moments(
+        grid, beta, lambda chunk: _effect_design_matrix(model, chunk, contrasts), model.vcov
+    )
+    eta += offset_value
 
     is_glmm = bool(hasattr(model, "isGLMM") and model.isGLMM())
     if is_glmm:

@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 import pytest
-from mixedlm import lmer
+from mixedlm import ggpredict, lmer
 from mixedlm._rust import (
     SparseCholeskySymbolic,
     simulate_re_batch,
@@ -13,6 +13,32 @@ from mixedlm.formula.parser import parse_formula
 from mixedlm.matrices.design import build_model_matrices
 from mixedlm.utils.variance import cov2sdcor, sdcor2cov
 from scipy import sparse
+
+
+@pytest.mark.benchmark(group="adjusted-effects")
+def test_benchmark_large_adjusted_effect_grid(benchmark):
+    rng = np.random.default_rng(20260930)
+    n = 512
+    x = rng.uniform(-0.5, 0.5, n)
+    z = rng.uniform(-0.5, 0.5, n)
+    group = np.repeat(np.arange(32), 16)
+    treatment = np.arange(n) % 8
+    y = 1 + x + z + 0.2 * x * z + treatment / 8
+    y += rng.normal(scale=0.4, size=32)[group] + rng.normal(scale=0.2, size=n)
+    frame = pd.DataFrame(
+        {"y": y, "x": x, "z": z, "g": group, "treatment": pd.Categorical(treatment)}
+    )
+    model = lmer("y ~ treatment * x * z + (1 | g)", frame)
+    model.vcov()
+
+    actual = benchmark(ggpredict, model, ["x", "z", "treatment"], n_points=64)
+
+    assert len(actual) == 64 * 64 * 8
+    sample = actual.iloc[[0, len(actual) // 2, -1]]
+    np.testing.assert_allclose(sample.predicted, model.predict(sample, re_form="NA"))
+    assert np.isfinite(actual["std.error"]).all()
+    assert np.all(actual["conf.low"] <= actual.predicted)
+    assert np.all(actual["conf.high"] >= actual.predicted)
 
 
 @pytest.fixture

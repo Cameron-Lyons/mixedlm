@@ -266,6 +266,14 @@ The returned data frame contains the requested grid columns plus `predicted`,
 the confidence interval on the link scale before transforming both endpoints.
 Use `type="link"` to keep results on the linear-predictor scale.
 
+Effect grids are constructed column by column, preserving the Cartesian-product
+order with the last requested variable changing fastest. Design matrices and
+covariance projections are evaluated in batches sized using a one-million-element
+budget and the larger of the fitted coefficient and predictor counts (at least
+one row per batch). The full reference grid and returned data frame still scale
+with the requested number of combinations. These calculations also apply to each
+grid returned by `allEffects()`.
+
 ### allEffects
 
 Compute a separate adjusted prediction grid for every fixed-effect variable.
