@@ -233,21 +233,27 @@ mlm.bootCI(boot_result, component="all")
 
 ## Custom Nonlinear Functions
 
-Define your own nonlinear model:
+Define a model with parameter names, predictions, gradients, and starting values:
 
 ```python
 from mixedlm.nlme import NonlinearModel
 import numpy as np
 
 class MyModel(NonlinearModel):
-    parameters = ['a', 'b', 'c']
+    @property
+    def name(self):
+        return "exponential_decay"
 
-    @staticmethod
-    def func(x, a, b, c):
+    @property
+    def param_names(self):
+        return ["a", "b", "c"]
+
+    def predict(self, params, x):
+        a, b, c = params
         return a * np.exp(-b * x) + c
 
-    @staticmethod
-    def gradient(x, a, b, c):
+    def gradient(self, params, x):
+        a, b, c = params
         exp_term = np.exp(-b * x)
         return np.column_stack([
             exp_term,           # d/da
@@ -255,23 +261,28 @@ class MyModel(NonlinearModel):
             np.ones_like(x)     # d/dc
         ])
 
-    @classmethod
-    def get_start(cls, data, y_col, x_col):
-        # Compute starting values from data
-        y = data[y_col].values
-        x = data[x_col].values
-        return {'a': y.max() - y.min(), 'b': 0.1, 'c': y.min()}
+    def get_start(self, x, y):
+        return np.array([y.max() - y.min(), 0.1, y.min()])
 ```
 
 Then use it:
 
 ```python
 model = mlm.nlmer(
-    f"y ~ {MyModel.formula('x')} + (a | group)",
+    MyModel(),
     data,
-    start=MyModel.get_start(data, 'y', 'x')
+    x_var="x",
+    y_var="y",
+    group_var="group",
+    random_params=["a"],
 )
 ```
+
+Custom models and subclasses use their Python prediction and gradient methods,
+even when their display name matches a built-in model. The six built-in model
+classes use the native fast path when available and their prediction and
+gradient methods are unchanged. Replacing either method on a built-in instance
+or class selects the Python path as well.
 
 ## Convergence Issues
 

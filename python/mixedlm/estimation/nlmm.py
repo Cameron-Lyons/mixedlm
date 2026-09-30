@@ -10,7 +10,15 @@ from numpy.typing import NDArray
 from scipy import linalg
 from scipy.optimize import minimize
 
-from mixedlm.nlme.models import NonlinearModel
+from mixedlm.nlme.models import (
+    NonlinearModel,
+    SSasymp,
+    SSbiexp,
+    SSfpl,
+    SSgompertz,
+    SSlogis,
+    SSmicmen,
+)
 
 try:
     from mixedlm._rust import nlmm_deviance as _rust_nlmm_deviance
@@ -20,13 +28,41 @@ except ImportError:
     _HAS_RUST = False
 
 
-_SUPPORTED_RUST_MODELS = {"ssasymp", "sslogis", "ssmicmen", "ssfpl", "ssgompertz", "ssbiexp"}
+_RUST_MODEL_IMPLEMENTATIONS: dict[
+    type[NonlinearModel],
+    tuple[str, Callable[..., NDArray[np.floating]], Callable[..., NDArray[np.floating]]],
+] = {
+    model_type: (name, model_type.predict, model_type.gradient)
+    for model_type, name in (
+        (SSasymp, "ssasymp"),
+        (SSlogis, "sslogis"),
+        (SSmicmen, "ssmicmen"),
+        (SSfpl, "ssfpl"),
+        (SSgompertz, "ssgompertz"),
+        (SSbiexp, "ssbiexp"),
+    )
+}
 _PSI_REGULARIZATION = 1e-8
 _PNLS_REGULARIZATION = 1e-6
 _PNLS_MAX_ITER = 50
 _PNLS_TOL = 1e-6
 _MIN_VARIANCE = np.finfo(np.float64).tiny
 _INVALID_OBJECTIVE = 1e100
+
+
+def _get_rust_model_name(model: NonlinearModel) -> str | None:
+    """Select native formulas only for their original Python implementations."""
+    implementation = _RUST_MODEL_IMPLEMENTATIONS.get(type(model))
+    if implementation is None:
+        return None
+    name, predict, gradient = implementation
+    # Built-in instances can also have their methods replaced without subclassing.
+    if (
+        getattr(model.predict, "__func__", None) is not predict
+        or getattr(model.gradient, "__func__", None) is not gradient
+    ):
+        return None
+    return name
 
 
 @dataclass
@@ -497,12 +533,15 @@ def _nlmm_deviance_rust(
     sigma: float,
     weights: NDArray[np.floating],
 ) -> tuple[float, NDArray[np.floating], NDArray[np.floating], float]:
+    model_name = _get_rust_model_name(model)
+    if model_name is None:
+        raise ValueError("Native nonlinear evaluation requires an unmodified built-in model")
     dev, phi_out, b_out, sigma_out = _rust_nlmm_deviance(
         np.ascontiguousarray(theta, dtype=np.float64),
         np.ascontiguousarray(y, dtype=np.float64),
         np.ascontiguousarray(x, dtype=np.float64),
         np.ascontiguousarray(groups, dtype=np.int64),
-        model.name.lower(),
+        model_name,
         np.ascontiguousarray(phi, dtype=np.float64),
         np.ascontiguousarray(b, dtype=np.float64),
         list(random_params),
@@ -531,7 +570,7 @@ class NLMMOptimizer:
         self.model = model
         self.random_params = random_params
         self.verbose = verbose
-        self.use_rust = use_rust and _HAS_RUST and model.name.lower() in _SUPPORTED_RUST_MODELS
+        self.use_rust = use_rust and _HAS_RUST and _get_rust_model_name(model) is not None
         self.n_jobs = n_jobs
         self.weights = _as_prior_weights(weights, len(y)).copy()
 
