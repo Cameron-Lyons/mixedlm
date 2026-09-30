@@ -284,7 +284,9 @@ predictions = mlm.ggpredict(
 
 The returned data frame contains the requested grid columns plus `predicted`,
 `std.error`, `conf.low`, and `conf.high`. For GLMMs, `type="response"` builds
-the confidence interval on the link scale before transforming both endpoints.
+the confidence interval on the link scale before transforming its bounds with
+`Link.inverse_interval()`. Decreasing inverse links return ordered response
+bounds, and square-root links include zero when the interval crosses zero.
 Use `type="link"` to keep results on the linear-predictor scale.
 
 ### allEffects

@@ -291,10 +291,9 @@ class _EffectPrediction:
 
         if self.family is not None and self.type == "response":
             predicted = np.asarray(self.family.link.inverse(eta), dtype=np.float64)
-            lower_response = np.asarray(self.family.link.inverse(lower_eta), dtype=np.float64)
-            upper_response = np.asarray(self.family.link.inverse(upper_eta), dtype=np.float64)
-            lower = np.minimum(lower_response, upper_response)
-            upper = np.maximum(lower_response, upper_response)
+            lower_response, upper_response = self.family.link.inverse_interval(lower_eta, upper_eta)
+            lower = np.asarray(lower_response, dtype=np.float64)
+            upper = np.asarray(upper_response, dtype=np.float64)
             link_derivative = np.asarray(self.family.link.deriv(predicted), dtype=np.float64)
             standard_error = se_eta / np.maximum(np.abs(link_derivative), np.finfo(float).tiny)
         else:

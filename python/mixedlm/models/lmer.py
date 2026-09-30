@@ -24,7 +24,11 @@ from mixedlm.models.lmer_types import (
 )
 from mixedlm.models.lmer_types import RePCAGroup as RePCAGroup
 from mixedlm.models.result_mixin import MerResultMixin
-from mixedlm.models.shared_utils import _RandomEffectFactor, symmetric_inverse
+from mixedlm.models.shared_utils import (
+    _RandomEffectFactor,
+    dense_quadratic_form_diagonal,
+    symmetric_inverse,
+)
 from mixedlm.utils import _format_pvalue, _get_signif_code
 from mixedlm.utils.simulation import simulate_random_effects, simulation_parameters
 from mixedlm.utils.validation import _validate_confidence_level
@@ -548,7 +552,7 @@ class LmerResult(MerResultMixin):
         q = self.matrices.n_random
         if not include_re or q == 0:
             vcov_beta = self.vcov()
-            return np.maximum(np.sum((X @ vcov_beta) * X, axis=1), 0.0)
+            return np.maximum(dense_quadratic_form_diagonal(X, vcov_beta), 0.0)
 
         Z_pred: sparse.csr_matrix
         prior_var: NDArray[np.floating]
@@ -566,7 +570,7 @@ class LmerResult(MerResultMixin):
 
         transformed_Z = (Z_pred @ projection.lambda_matrix).tocsr()
         adjusted_X = X - np.asarray(transformed_Z @ projection.random_fixed_map)
-        var_fixed = np.sum((adjusted_X @ vcov_beta) * adjusted_X, axis=1)
+        var_fixed = dense_quadratic_form_diagonal(adjusted_X, vcov_beta)
         var_random = self.sigma**2 * projection.random_factor.quadratic_diagonal(transformed_Z)
 
         return np.maximum(var_fixed + var_random + prior_var, 0.0)
