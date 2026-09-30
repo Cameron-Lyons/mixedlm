@@ -156,7 +156,7 @@ def test_invalid_final_evaluations_raise_even_after_optimizer_success(
     optimizer.use_rust = native
     evaluation = [-12.0, np.array([5.0, 1.0, -0.5]), np.zeros((2, 1)), 1.0]
     evaluation[component] = value
-    target = "_nlmm_deviance_rust" if native else "nlmm_deviance"
+    target = "_nlmm_deviance_rust" if native else "_nlmm_deviance"
     with (
         patch.object(nlmm, target, return_value=tuple(evaluation)) as backend,
         patch.object(nlmm, "minimize", side_effect=stop_at_start),
@@ -186,7 +186,7 @@ def test_invalid_final_variance_parameters_raise(data, value):
 def test_failed_trial_can_be_followed_by_a_valid_fit(data, native):
     optimizer = make_optimizer(data, native)
     optimizer.use_rust = native
-    target = "_nlmm_deviance_rust" if native else "nlmm_deviance"
+    target = "_nlmm_deviance_rust" if native else "_nlmm_deviance"
     good = (-12.0, np.array([5.0, 1.0, -0.5]), np.zeros((2, 1)), 1.0)
 
     def evaluate(theta, *args, **kwargs):
@@ -222,7 +222,7 @@ def test_finite_valid_fits_keep_optimizer_status(data, success, deviance):
         return OptimizeResult(x=theta, success=success, nit=7)
 
     with (
-        patch.object(nlmm, "nlmm_deviance", return_value=evaluation),
+        patch.object(nlmm, "_nlmm_deviance", return_value=evaluation),
         patch.object(nlmm, "minimize", side_effect=finished),
     ):
         result = optimizer.optimize()
