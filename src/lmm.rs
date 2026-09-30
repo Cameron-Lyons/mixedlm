@@ -253,55 +253,7 @@ fn apply_dlambda_transpose_vector(
 }
 
 fn compute_ztwz_sparse(z: &CscMatrix, weights: &[f64]) -> Mat<f64> {
-    let n = z.nrows();
-    let q = z.ncols();
-    let nnz = z.values().len();
-    let mut row_offsets = vec![0_usize; n + 1];
-
-    for &row in z.row_indices() {
-        row_offsets[row + 1] += 1;
-    }
-    for row in 0..n {
-        row_offsets[row + 1] += row_offsets[row];
-    }
-
-    let mut next_position = row_offsets[..n].to_vec();
-    let mut row_columns = vec![0_usize; nnz];
-    let mut row_values = vec![0.0; nnz];
-
-    for column in 0..q {
-        for index in z.col_offsets()[column]..z.col_offsets()[column + 1] {
-            let row = z.row_indices()[index];
-            let position = next_position[row];
-            row_columns[position] = column;
-            row_values[position] = z.values()[index];
-            next_position[row] += 1;
-        }
-    }
-
-    let mut ztwz = Mat::zeros(q, q);
-
-    for row in 0..n {
-        let start = row_offsets[row];
-        let end = row_offsets[row + 1];
-        let weight = weights[row];
-
-        for left in start..end {
-            let left_column = row_columns[left];
-            let weighted_left = weight * row_values[left];
-
-            for right in left..end {
-                let right_column = row_columns[right];
-                let value = weighted_left * row_values[right];
-                ztwz[(left_column, right_column)] += value;
-                if left_column != right_column {
-                    ztwz[(right_column, left_column)] += value;
-                }
-            }
-        }
-    }
-
-    ztwz
+    z.weighted_crossproduct(weights)
 }
 
 fn mat_from_flat_array(data: &[f64], q: usize) -> Mat<f64> {
