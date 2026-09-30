@@ -40,6 +40,59 @@ def _contrast_moments(
     return estimates, variances
 
 
+_MAX_REFERENCE_GRID_ELEMENTS = 1_000_000
+
+
+def _marginal_mean_coefficients(
+    model: LmerResult | GlmerResult,
+    result_names: list[str],
+    levels: dict[str, list[Any]],
+) -> tuple[NDArray[np.float64], pd.DataFrame]:
+    """Average the fitted design over reference dimensions in bounded batches."""
+    averaged_names = [name for name in levels if name not in result_names]
+    all_names = result_names + averaged_names
+    result_grid = pd.DataFrame(
+        itertools.product(*(levels[name] for name in result_names)), columns=result_names
+    )
+    n_results = len(result_grid)
+    n_averaged = prod(len(levels[name]) for name in averaged_names)
+    n_beta = len(model.beta)
+    coefficients = np.empty((n_results, n_beta), dtype=np.float64)
+    if n_results == 0 or n_averaged == 0:
+        coefficients.fill(np.nan)
+        return coefficients, result_grid
+
+    batch_rows = max(1, _MAX_REFERENCE_GRID_ELEMENTS // max(1, len(all_names), n_beta))
+    combinations = itertools.product(*(levels[name] for name in all_names))
+
+    if n_averaged <= batch_rows:
+        # Keep each mean's reference rows together whenever they fit in a batch.
+        results_per_batch = batch_rows // n_averaged
+        for start in range(0, n_results, results_per_batch):
+            count = min(results_per_batch, n_results - start)
+            grid = pd.DataFrame(
+                itertools.islice(combinations, count * n_averaged), columns=all_names
+            )
+            design = model._prediction_fixed_matrix(grid)
+            coefficients[start : start + count] = design.reshape(count, n_averaged, n_beta).mean(
+                axis=1
+            )
+            del grid, design
+    else:
+        # A single mean can span a large Cartesian product of nuisance levels.
+        for result_index in range(n_results):
+            total = np.zeros(n_beta, dtype=np.float64)
+            for start in range(0, n_averaged, batch_rows):
+                count = min(batch_rows, n_averaged - start)
+                grid = pd.DataFrame(itertools.islice(combinations, count), columns=all_names)
+                design = model._prediction_fixed_matrix(grid)
+                total += design.sum(axis=0)
+                del grid, design
+            coefficients[result_index] = total / n_averaged
+
+    return coefficients, result_grid
+
+
 def _rowwise_quadratic_form(
     coefficients: NDArray[np.floating],
     covariance: NDArray[np.floating],
@@ -531,16 +584,8 @@ def emmeans(
     beta = model.beta
     family = getattr(model, "family", None)
     df = np.inf if family is not None else float(model.df_residual())
-    averaged_names = [name for name in levels if name not in result_names]
-    all_names = result_names + averaged_names
-    grid = pd.DataFrame(itertools.product(*(levels[name] for name in all_names)), columns=all_names)
-    X_grid = model._prediction_fixed_matrix(grid)
-    result_grid = pd.DataFrame(
-        itertools.product(*(levels[name] for name in result_names)), columns=result_names
-    )
+    L, result_grid = _marginal_mean_coefficients(model, result_names, levels)
     offsets = _reference_offsets(model, offset, len(result_grid))
-    n_averaged = prod(len(levels[name]) for name in averaged_names)
-    L = X_grid.reshape(len(result_grid), n_averaged, len(beta)).mean(axis=1)
     vcov = model.vcov()
 
     em_values = L @ beta + offsets
