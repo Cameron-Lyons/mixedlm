@@ -259,6 +259,8 @@ def _pnls_step(
     reg_phi = _PNLS_REGULARIZATION * np.eye(n_phi)
 
     for _iteration in range(_PNLS_MAX_ITER):
+        # After the first iteration b and b_new share storage.
+        b_previous = b.copy()
         resid_total = np.zeros(n, dtype=np.float64)
         grad_total = np.zeros((n, n_phi), dtype=np.float64)
 
@@ -340,7 +342,7 @@ def _pnls_step(
 
         max_delta = max(
             float(np.max(np.abs(phi_new - phi))),
-            float(np.max(np.abs(b_new - b))),
+            float(np.max(np.abs(b_new - b_previous))),
         )
 
         phi = phi_new
