@@ -169,38 +169,9 @@ class MerResultMixin:
         default: float,
     ) -> NDArray[np.float64]:
         """Resolve and validate a scalar, array, or named column for prediction rows."""
-        from mixedlm.utils.dataframe import dataframe_length, ensure_dataframe
+        from mixedlm.models.shared_utils import resolve_prediction_vector
 
-        data = ensure_dataframe(newdata)
-        n_rows = dataframe_length(data)
-        if value is None:
-            return np.full(n_rows, default, dtype=np.float64)
-
-        raw_value: ArrayLike
-        if isinstance(value, str):
-            if value not in get_columns(data):
-                raise ValueError(f"New data is missing {name} column '{value}'.")
-            raw_value = get_column_numpy(data, value)
-        else:
-            raw_value = value
-
-        try:
-            values = np.asarray(raw_value, dtype=np.float64)
-        except (TypeError, ValueError):
-            raise ValueError(f"Prediction {name} must contain numeric values.") from None
-
-        if values.ndim == 0:
-            values = np.full(n_rows, float(values), dtype=np.float64)
-        elif values.ndim != 1:
-            raise ValueError(f"Prediction {name} must be a scalar or one-dimensional array.")
-        elif len(values) != n_rows:
-            raise ValueError(
-                f"Prediction {name} has length {len(values)}; expected {n_rows} for new data."
-            )
-
-        if not np.all(np.isfinite(values)):
-            raise ValueError(f"Prediction {name} must contain only finite values.")
-        return values
+        return resolve_prediction_vector(newdata, value, name=name, default=default)
 
     def _model_frame(self) -> Any:
         import pandas as pd

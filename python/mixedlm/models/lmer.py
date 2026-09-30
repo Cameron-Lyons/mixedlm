@@ -459,8 +459,9 @@ class LmerResult(MerResultMixin):
                 return pred
             X = self.matrices.X
         else:
+            prediction_offset = self._prediction_offset(newdata, offset)
             X = self._prediction_fixed_matrix(newdata)
-            pred = X @ self.beta + self._prediction_offset(newdata, offset)
+            pred = X @ self.beta + prediction_offset
 
             if include_re:
                 pred = self._add_random_effects_to_pred(pred, newdata, allow_new_levels)

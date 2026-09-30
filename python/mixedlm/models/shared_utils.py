@@ -5,11 +5,16 @@ from functools import cached_property
 from typing import Any
 
 import numpy as np
-from numpy.typing import NDArray
+from numpy.typing import ArrayLike, NDArray
 from scipy import linalg, sparse
 from scipy.sparse import linalg as sparse_linalg
 
-from mixedlm.utils.dataframe import dataframe_length, get_column_numpy, get_columns
+from mixedlm.utils.dataframe import (
+    dataframe_length,
+    ensure_dataframe,
+    get_column_numpy,
+    get_columns,
+)
 
 _MAX_QUADRATIC_FORM_ELEMENTS = 1_000_000
 _SPARSE_PROJECTION_MIN_RANDOM = 256
@@ -100,6 +105,61 @@ def dense_quadratic_form_diagonal(
         result[start:stop] = np.einsum("ij,ij->i", projected, chunk)
         del projected
     return result
+
+
+def resolve_prediction_vector(
+    data: Any,
+    value: ArrayLike | str | None,
+    *,
+    name: str,
+    default: float,
+) -> NDArray[np.float64]:
+    """Validate prediction rows, retaining scalar inputs as broadcast views."""
+    data = ensure_dataframe(data)
+    n_rows = dataframe_length(data)
+    if value is None:
+        # Defaults are internal scalar constants; no user array needs conversion.
+        scalar = np.asarray(default, dtype=np.float64)
+        if not np.isfinite(scalar):
+            raise ValueError(f"Prediction {name} must contain only finite values.")
+        return np.broadcast_to(scalar, (n_rows,))
+    raw: ArrayLike
+    if isinstance(value, str):
+        if value not in get_columns(data):
+            raise ValueError(f"New data is missing {name} column '{value}'.")
+        raw = get_column_numpy(data, value)
+    else:
+        raw = value
+    if np.ma.is_masked(raw):
+        raise ValueError(f"Prediction {name} must not contain masked values.")
+    try:
+        values = np.asarray(raw)
+    except (TypeError, ValueError):
+        raise ValueError(f"Prediction {name} must contain numeric values.") from None
+    if (
+        values.dtype.kind in "mMV"
+        or np.iscomplexobj(values)
+        or (values.dtype.kind == "O" and any(np.iscomplexobj(item) for item in values.flat))
+    ):
+        raise ValueError(f"Prediction {name} must contain real numeric values.")
+    if values.dtype.kind == "O" and any(np.ma.is_masked(item) for item in values.flat):
+        raise ValueError(f"Prediction {name} must not contain masked values.")
+    try:
+        with np.errstate(over="ignore", invalid="ignore"):
+            values = np.asarray(values, dtype=np.float64)
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError(f"Prediction {name} must contain numeric values.") from None
+    if values.ndim > 1:
+        raise ValueError(f"Prediction {name} must be a scalar or one-dimensional array.")
+    if values.ndim == 1 and len(values) != n_rows:
+        raise ValueError(
+            f"Prediction {name} has length {len(values)}; expected {n_rows} for new data."
+        )
+    if not np.all(np.isfinite(values)):
+        raise ValueError(f"Prediction {name} must contain only finite values.")
+    if values.ndim == 0:
+        return np.broadcast_to(values, (n_rows,))
+    return values
 
 
 def sparse_quadratic_form_diagonal(
