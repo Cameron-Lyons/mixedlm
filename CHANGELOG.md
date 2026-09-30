@@ -74,6 +74,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Python nonlinear fitting honors arbitrary integer group labels and matches native sorted-label ordering
 
 - Python nonlinear least squares checks random-effect changes against the previous iteration, preventing premature convergence when fixed parameters are already stationary
+
+- Nonlinear fits and refits now reject invalid final evaluations instead of reporting convergence with a failure penalty and starting estimates
 - Poisson and other unbounded GLMM families no longer clamp fitted means below one
 - Unsupported family and link combinations no longer route through the native fast path
 
