@@ -190,35 +190,6 @@ fn csc_from_scipy(
     CscMatrix::try_from_i64(data, indices, indptr, shape)
 }
 
-fn forward_solve_vec(l: &DMatrix<f64>, b: &DVector<f64>) -> DVector<f64> {
-    let n = l.nrows();
-    let mut x = DVector::zeros(n);
-    for i in 0..n {
-        let mut sum = b[i];
-        for j in 0..i {
-            sum -= l[(i, j)] * x[j];
-        }
-        x[i] = sum / l[(i, i)];
-    }
-    x
-}
-
-fn forward_solve_mat(l: &DMatrix<f64>, b: &DMatrix<f64>) -> DMatrix<f64> {
-    let n = l.nrows();
-    let ncols = b.ncols();
-    let mut result = DMatrix::zeros(n, ncols);
-    for col in 0..ncols {
-        for i in 0..n {
-            let mut sum = b[(i, col)];
-            for j in 0..i {
-                sum -= l[(i, j)] * result[(j, col)];
-            }
-            result[(i, col)] = sum / l[(i, i)];
-        }
-    }
-    result
-}
-
 fn max_abs_diff(left: &DVector<f64>, right: &DVector<f64>) -> f64 {
     left.iter()
         .zip(right.iter())
@@ -399,21 +370,34 @@ pub fn pirls_impl(
 
         let spherical_ztwx = lambda.transpose_apply(ztwx);
         let spherical_ztwz = lambda.transpose_apply_vector(&ztwz_vec);
-        let l_c = chol_c.L().to_owned();
-        let rzx = forward_solve_mat(&l_c, &spherical_ztwx);
-        let cu = forward_solve_vec(&l_c, &spherical_ztwz);
+        // Solve all fixed-effect and response columns together, borrowing the
+        // Cholesky factor instead of copying its q-by-q storage each iteration.
+        let mut rhs = DMatrix::from_fn(q, p + 1, |i, j| {
+            if j == p {
+                spherical_ztwz[i]
+            } else {
+                spherical_ztwx[(i, j)]
+            }
+        });
+        chol_c.L().solve_lower_triangular_in_place(&mut rhs);
+        let rzx = rhs.subcols(0, p);
+        let cu = rhs.col(p);
 
-        let xtvinvx = &xtwx - &(rzx.transpose() * &rzx);
-        let xtvinvz = &xtwz_vec - &(rzx.transpose() * &cu);
+        let xtvinvx = &xtwx - &(rzx.transpose() * rzx);
+        let xtvinvz = &xtwz_vec - &(rzx.transpose() * cu);
 
         let beta_new = match Llt::new(xtvinvx.as_ref(), Side::Lower) {
             Ok(chol) => chol.solve(&xtvinvz),
             Err(_) => xtvinvx.partial_piv_lu().solve(&xtvinvz),
         };
 
-        let fixed_contribution = &spherical_ztwx * &beta_new;
-        let spherical_rhs = &spherical_ztwz - &fixed_contribution;
-        let spherical_new = chol_c.solve(&spherical_rhs);
+        // The batched solve already applied L^-1 to both terms. Reuse those
+        // columns so recovering the random effects only needs L^-T.
+        let mut spherical_new = cu - rzx * &beta_new;
+        chol_c
+            .L()
+            .transpose()
+            .solve_upper_triangular_in_place(&mut spherical_new);
 
         let delta_beta = max_abs_diff(&beta_new, &beta);
         let delta_u = if q > 0 {

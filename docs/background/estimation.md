@@ -276,6 +276,12 @@ native solver uses the same starting-mean convention as Python, including prior
 weights and offsets. Its inner convergence flag remains false if an update or
 final deviance is nonfinite.
 
+The native PIRLS solver handles the fixed-effect and working-response columns in
+one triangular solve, borrowing the Cholesky factor. It reuses the transformed
+columns to recover random effects with a transpose triangular solve. This avoids
+copying the full factor and repeating a forward solve on each iteration. The
+random-effect Cholesky factorization remains dense.
+
 ## Nonlinear Mixed Models
 
 ### The Model
