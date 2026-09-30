@@ -62,6 +62,10 @@ class ModelMatrices:
     trials: NDArray[np.floating] | None = field(default=None)
     category_levels: dict[str, list[Any]] = field(default_factory=dict)
     contrasts: dict[str, str | NDArray[np.floating]] | None = field(default=None)
+    # Retain column identity when rank checks remove formula columns whose
+    # display names may coincide with other variables or encoded factors.
+    fixed_source_names: tuple[str, ...] | None = field(default=None, repr=False)
+    fixed_column_indices: tuple[int, ...] | None = field(default=None, repr=False)
 
     @cached_property
     def Zt(self) -> sparse.csc_matrix:

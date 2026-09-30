@@ -253,11 +253,20 @@ def run_model_checks(
         fixed_names = [
             name for index, name in enumerate(matrices.fixed_names) if index not in dropped
         ]
+        source_names = matrices.fixed_source_names
+        source_indices = matrices.fixed_column_indices
+        if source_names is None or source_indices is None:
+            source_names = tuple(matrices.fixed_names)
+            source_indices = tuple(range(len(matrices.fixed_names)))
         matrices = replace(
             matrices,
             X=X_new,
             fixed_names=fixed_names,
             n_fixed=X_new.shape[1],
+            fixed_source_names=source_names,
+            fixed_column_indices=tuple(
+                source for index, source in enumerate(source_indices) if index not in dropped
+            ),
         )
 
     return matrices, dropped_cols

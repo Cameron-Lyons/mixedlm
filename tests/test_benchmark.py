@@ -397,3 +397,40 @@ def test_benchmark_large_leverage(benchmark, large_crossed_sparse_data, kind):
 
     assert values.shape == (len(large_crossed_sparse_data),)
     assert np.all((values >= 0) & (values < 1))
+
+
+@pytest.mark.benchmark(group="prediction-column-alignment")
+@pytest.mark.parametrize("kind", ["lmm", "glmm"])
+def test_benchmark_wide_numeric_prediction(benchmark, kind):
+    from mixedlm import families
+    from mixedlm.models.glmer import GlmerResult
+    from mixedlm.models.lmer import LmerResult
+
+    rng = np.random.default_rng(245)
+    data = pd.DataFrame(
+        rng.normal(scale=0.1, size=(50_000, 64)), columns=[f"x{i}" for i in range(64)]
+    )
+    formula = parse_formula("y ~ " + " + ".join(data.columns))
+    training = data.iloc[:256].copy()
+    training["y"] = 1.0
+    matrices = build_model_matrices(formula, training)
+    common = dict(
+        formula=formula,
+        matrices=matrices,
+        theta=np.empty(0),
+        beta=np.ones(65),
+        u=np.empty(0),
+        deviance=0.0,
+        converged=True,
+        n_iter=0,
+    )
+    model = (
+        LmerResult(**common, sigma=0.7, REML=True)
+        if kind == "lmm"
+        else GlmerResult(**common, family=families.Poisson(), nAGQ=1)
+    )
+    predicted = benchmark(model.predict, data, re_form="NA")
+    expected = 1 + data.to_numpy().sum(axis=1)
+    if kind == "glmm":
+        expected = np.exp(expected)
+    np.testing.assert_allclose(predicted, expected, rtol=1e-12, atol=1e-12)

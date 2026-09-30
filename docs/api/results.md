@@ -190,6 +190,13 @@ Generate predictions.
 
 **Returns:** An array, or a `PredictResult` when standard errors or intervals are requested.
 
+New-data predictions use the fitted fixed-effect column order and omit columns
+removed by rank checks. Distinct formula columns can share a display name (for example,
+a categorical contrast `a.1` and a quoted numeric variable named `a.1`); their fitted
+positions distinguish them during prediction and refitting. Older or manually constructed
+results without that position information raise an error when a reduced schema is
+ambiguous; refit those models before predicting new data.
+
 For conditional LMM predictions, uncertainty is evaluated from the joint fixed- and
 random-effect covariance. This includes covariance between fixed and random estimates,
 covariance among correlated random slopes, and covariance across crossed structures. For an
