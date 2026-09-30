@@ -1504,3 +1504,18 @@ def test_benchmark_native_prepared_lmm(benchmark, large_data, new_response):
             return optimizer.objective(theta)
 
     assert benchmark(evaluate) == expected
+
+
+@pytest.mark.benchmark(group="nonlinear-bootstrap-workers")
+@pytest.mark.parametrize("n_jobs", [1, 2])
+def test_benchmark_nonlinear_bootstrap_workers(benchmark, n_jobs):
+    from mixedlm.inference.bootstrap import bootstrap_nlmer
+
+    from tests.test_nonlinear_bootstrap_workers import fitted_model
+
+    fitted = fitted_model()
+    expected = bootstrap_nlmer(fitted, n_boot=8, seed=2026)
+    actual = benchmark(bootstrap_nlmer, fitted, n_boot=8, seed=2026, n_jobs=n_jobs)
+    assert actual.n_failed == expected.n_failed
+    for field in ("phi_samples", "theta_samples", "sigma_samples"):
+        np.testing.assert_array_equal(getattr(actual, field), getattr(expected, field))

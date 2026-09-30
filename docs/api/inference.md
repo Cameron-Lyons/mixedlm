@@ -566,10 +566,10 @@ boot = mlm.bootMer(model, nsim=500, seed=42)
 - `model`: Fitted model
 - `nsim`: Number of bootstrap simulations
 - `seed`: Optional reproducibility seed
-- `n_jobs`: Positive worker count or `-1` for available CPUs for linear and
-  generalized bootstrap; default 1
+- `n_jobs`: Positive worker count or `-1` for available CPUs for all model
+  types; default 1
 
-**Returns:** BootstrapResult object
+**Returns:** `BootstrapResult`, or `NlmerBootstrapResult` for nonlinear models
 
 Linear and generalized parametric bootstrap use local random streams for each
 replicate and leave NumPy's global random state unchanged, including in worker
@@ -631,7 +631,22 @@ positive integers.
 Nonlinear bootstrap (`bootstrap_nlmer()`, `bootMer()` on an `NlmerResult`, and
 `NlmerResult.confint(method="boot")`) uses a local random stream shared across
 replicates. Integer seeds retain the previous simulation sequence without
-changing NumPy's global random state. Supply `seed` for reproducibility.
+changing NumPy's global random state. These interfaces also accept a reusable
+NumPy `RandomState` or `Generator` as `seed`.
+
+Set `n_jobs=2` on any nonlinear bootstrap interface to refit with two worker
+processes. Simulation stays in the calling process and follows the same draw
+sequence as serial execution; completed samples retain replicate order.
+Fitted numerical data are transferred once per worker, and at most two response
+vectors per worker are queued. The original data frame is excluded from worker
+payloads. Worker counts are validated before drawing responses and capped at
+the number of replicates.
+
+Custom nonlinear model classes must be importable and picklable, with
+deterministic prediction and gradient methods. Each worker refit receives a
+separate copy of the model. In scripts that use process spawning, start parallel
+bootstrap inside an `if __name__ == "__main__":` guard. Process startup can
+outweigh the gain for small bootstrap jobs; `n_jobs=1` remains the default.
 
 ### bootCI
 
