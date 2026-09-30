@@ -3,6 +3,7 @@ from __future__ import annotations
 import itertools
 from collections.abc import Callable
 from dataclasses import dataclass
+from math import prod
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -13,6 +14,27 @@ from scipy import stats
 if TYPE_CHECKING:
     from mixedlm.models.glmer import GlmerResult
     from mixedlm.models.lmer import LmerResult
+
+_MAX_CONTRAST_ELEMENTS = 1_000_000
+
+
+def _contrast_moments(
+    n_contrasts: int,
+    coefficients: Callable[[slice], NDArray[np.floating]],
+    beta: NDArray[np.floating],
+    covariance: NDArray[np.floating],
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    """Evaluate contrasts with bounded coefficient and projection buffers."""
+    estimates = np.empty(n_contrasts, dtype=np.float64)
+    variances = np.empty(n_contrasts, dtype=np.float64)
+    chunk_size = max(1, _MAX_CONTRAST_ELEMENTS // max(1, len(beta)))
+    for start in range(0, n_contrasts, chunk_size):
+        rows = slice(start, min(start + chunk_size, n_contrasts))
+        chunk = coefficients(rows)
+        estimates[rows] = chunk @ beta
+        variances[rows] = _rowwise_quadratic_form(chunk, covariance)
+        del chunk
+    return estimates, variances
 
 
 def _rowwise_quadratic_form(
@@ -137,10 +159,12 @@ class Emmeans:
             f"{grid_labels[i]} - {grid_labels[j]}"
             for i, j in zip(left_indices, right_indices, strict=True)
         ]
-        L_contrast = self._L[left_indices] - self._L[right_indices]
-
-        estimates = L_contrast @ self._beta
-        var_contrast = _rowwise_quadratic_form(L_contrast, self._vcov)
+        estimates, var_contrast = _contrast_moments(
+            len(left_indices),
+            lambda rows: self._L[left_indices[rows]] - self._L[right_indices[rows]],
+            self._beta,
+            self._vcov,
+        )
         se_contrast = np.sqrt(np.maximum(var_contrast, 0))
 
         t_ratio = estimates / se_contrast
@@ -189,9 +213,12 @@ class Emmeans:
 
         treatment_indices = np.delete(np.arange(n_levels), ctrl_idx)
         contrast_labels = [f"{grid_labels[i]} - {grid_labels[ctrl_idx]}" for i in treatment_indices]
-        L_contrast = self._L[treatment_indices] - self._L[ctrl_idx]
-        estimates = L_contrast @ self._beta
-        var_contrast = _rowwise_quadratic_form(L_contrast, self._vcov)
+        estimates, var_contrast = _contrast_moments(
+            len(treatment_indices),
+            lambda rows: self._L[treatment_indices[rows]] - self._L[ctrl_idx],
+            self._beta,
+            self._vcov,
+        )
         se_contrast = np.sqrt(np.maximum(var_contrast, 0))
         t_ratio = estimates / se_contrast
         raw_p = 2 * stats.t.sf(np.abs(t_ratio), self._df)
@@ -214,9 +241,9 @@ class Emmeans:
         level: float = 0.95,
     ) -> ContrastResult:
         n_contrasts = C.shape[0]
-        L_contrast = C @ self._L
-        estimates = L_contrast @ self._beta
-        var_contrast = _rowwise_quadratic_form(L_contrast, self._vcov)
+        estimates, var_contrast = _contrast_moments(
+            n_contrasts, lambda rows: C[rows] @ self._L, self._beta, self._vcov
+        )
         se_contrast = np.sqrt(np.maximum(var_contrast, 0))
         t_ratio = estimates / se_contrast
         raw_p = 2 * stats.t.sf(np.abs(t_ratio), self._df)
@@ -346,18 +373,9 @@ def emmeans(
         all_vars = specs
         all_levels = spec_levels
 
-    grid_data: dict[str, list[Any]] = {var: [] for var in all_vars}
-    for cov_var in covariate_vars:
-        grid_data[cov_var] = []
-
-    combinations = list(itertools.product(*all_levels))
-    for combo in combinations:
-        for i, var in enumerate(all_vars):
-            grid_data[var].append(combo[i])
-        for cov_var, cov_val in covariate_vars.items():
-            grid_data[cov_var].append(cov_val)
-
-    grid = pd.DataFrame(grid_data)
+    grid = pd.DataFrame(itertools.product(*all_levels), columns=all_vars)
+    for cov_var, cov_val in covariate_vars.items():
+        grid[cov_var] = cov_val
 
     X_grid = model._prediction_fixed_matrix(grid)
 
@@ -365,15 +383,10 @@ def emmeans(
     n_emmeans = len(spec_combinations)
     n_beta = len(beta)
 
-    L = np.zeros((n_emmeans, n_beta), dtype=np.float64)
-
-    for i, spec_combo in enumerate(spec_combinations):
-        mask = np.ones(len(grid), dtype=bool)
-        for j, spec in enumerate(specs):
-            mask &= grid[spec] == spec_combo[j]
-
-        X_subset = X_grid[mask]
-        L[i] = X_subset.mean(axis=0)
+    # The Cartesian grid puts requested factors first, so each requested
+    # combination owns one contiguous block of equally weighted nuisance levels.
+    n_averaged = prod(len(levels) for levels in other_factors.values())
+    L = X_grid.reshape(n_emmeans, n_averaged, n_beta).mean(axis=1)
 
     em_values = L @ beta
     var_em = _rowwise_quadratic_form(L, vcov)
