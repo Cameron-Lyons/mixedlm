@@ -451,6 +451,19 @@ predictions = nlmm_result.predict(
 )
 ```
 
+### confint
+
+`result.confint(method="boot", n_boot=1000, seed=42)` returns percentile
+intervals using the same samples and failure handling as `bootstrap_nlmer()`.
+`n_boot` must be a positive integer. `parm` selects one name or a list of names;
+unknown names are omitted.
+
+Failed simulations or refits and refits with nonfinite or incorrectly shaped
+estimates are excluded from all bootstrap components. They are never replaced
+with the original fitted estimates. When all replicates fail, confidence bounds
+are `NaN`. Use `bootstrap_nlmer(result, n_boot=1000, seed=42)` or
+`bootMer(result, nsim=1000, seed=42)` to inspect `n_failed` and sample arrays.
+
 ## VarCorr
 
 Variance-covariance structure of random effects.

@@ -62,6 +62,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - New-data LMM and GLMM predictions preserve distinct fixed-effect columns with colliding display names, including after rank reduction and refitting
 
 - Fixed-effect tables and summaries preserve repeated coefficient names and keep inference aligned by position; ambiguous named selections and dictionary results raise clear errors
+
+- Nonlinear bootstrap confidence intervals exclude failed refits instead of substituting original estimates, validate requests before refitting, and share sample handling with `bootstrap_nlmer()`
 - Poisson and other unbounded GLMM families no longer clamp fitted means below one
 - Unsupported family and link combinations no longer route through the native fast path
 
