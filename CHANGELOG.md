@@ -82,6 +82,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Nonlinear fitting and refitting preserve custom prediction and gradient methods instead of selecting a built-in native formula by display name
 
 - Sparse-cache correctness tests no longer depend on single-run timing comparisons; paired cached and uncached measurements now use the benchmark suite
+
+- Linear and generalized model simulation and parametric bootstrap preserve NumPy's global random state and accept reusable random streams without changing integer-seeded draws
 - Poisson and other unbounded GLMM families no longer clamp fitted means below one
 - Unsupported family and link combinations no longer route through the native fast path
 

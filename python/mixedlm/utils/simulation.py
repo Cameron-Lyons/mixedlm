@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 import numpy as np
 from numpy.typing import NDArray
 
@@ -11,13 +13,16 @@ def simulate_random_effects(
     theta: NDArray[np.floating],
     structures: list[RandomEffectStructure],
     sigma: float = 1.0,
+    *,
+    rng: Any | None = None,
 ) -> NDArray[np.float64]:
     """Draw one set of random effects using the fitted covariance factors."""
+    rng = np.random if rng is None else rng
     result = np.empty(sum(s.n_levels * s.n_terms for s in structures), dtype=np.float64)
     start = 0
     for structure, factor in zip(structures, _build_lambda_blocks(theta, structures), strict=True):
         size = structure.n_levels * structure.n_terms
-        standard = np.random.randn(structure.n_levels, structure.n_terms)
+        standard = rng.standard_normal((structure.n_levels, structure.n_terms))
         result[start : start + size] = (standard @ factor.T).ravel()
         start += size
     result *= sigma

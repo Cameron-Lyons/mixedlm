@@ -305,13 +305,33 @@ These weights do not rescale the random effects.
 
 **Parameters:**
 
-- `nsim`: Number of simulations.
-- `seed`: Optional seed for reproducible draws.
-- `use_re`: Draw new random effects when `True` (the default).
-- `re_form`: Set to `"~0"` or `"NA"` to omit random effects.
+- `nsim`: Positive integer number of simulations.
+- `seed`: Integer seed, NumPy `RandomState` or `Generator`, or `None` for a fresh stream.
+- `use_re`: Include newly sampled random effects (default `True`).
+- `re_form`: `"~0"` or `"NA"` excludes random effects.
 
-**Returns:** Array of shape `(n_obs,)` for one simulation, or `(n_obs, nsim)` for
-multiple simulations. Grouped-binomial GLMM simulations return success counts.
+**Returns:** A vector of shape `(n_obs,)` for one simulation, or an array of shape
+`(n_obs, nsim)` for multiple simulations.
+
+For linear and generalized models, simulation leaves NumPy's global random state
+unchanged. Pass an integer seed for repeatable calls, or reuse a stream to continue
+drawing new samples:
+
+```python
+import numpy as np
+
+rng = np.random.default_rng(42)
+first = result.simulate(nsim=10, seed=rng)
+next_batch = result.simulate(nsim=10, seed=rng)
+```
+
+An integer seed preserves the previous draw sequence for the same backend and
+call shape. Batch sizes and native-backend availability can affect the sequence.
+Calling `np.random.seed()` separately no longer controls these simulations; pass
+`seed` explicitly instead. Custom family `simulate(mu, rng=...)` methods should
+use the supplied stream for their response draws.
+
+Grouped-binomial GLMM simulations return success counts.
 
 #### confint
 

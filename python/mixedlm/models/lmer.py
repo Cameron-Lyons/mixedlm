@@ -30,6 +30,7 @@ from mixedlm.models.shared_utils import (
     symmetric_inverse,
 )
 from mixedlm.utils import _format_pvalue, _get_signif_code
+from mixedlm.utils.random import RandomSeed, native_seed, random_stream, validate_simulation_count
 from mixedlm.utils.simulation import simulate_random_effects, simulation_parameters
 from mixedlm.utils.validation import _validate_confidence_level
 
@@ -1736,27 +1737,30 @@ class LmerResult(MerResultMixin):
     def simulate(
         self,
         nsim: int = 1,
-        seed: int | None = None,
+        seed: RandomSeed = None,
         use_re: bool = True,
         re_form: str | None = None,
     ) -> NDArray[np.floating]:
-        if nsim < 1:
-            raise ValueError("nsim must be at least 1")
+        """Simulate responses using an isolated or caller-provided random stream.
 
-        if seed is not None:
-            np.random.seed(seed)
+        ``seed`` accepts an integer, ``RandomState``, ``Generator``, or ``None``.
+        Integer seeds preserve the existing draw sequence for the selected backend.
+        Reusing a stream continues it across calls without changing NumPy's global state.
+        """
+        validate_simulation_count(nsim)
+        rng = random_stream(seed)
 
         n = self.matrices.n_obs
         q = self.matrices.n_random
 
         if nsim == 1:
-            return self._simulate_once(use_re, re_form)
+            return self._simulate_once(use_re, re_form, rng)
 
         include_re = use_re and q > 0 and re_form not in ("~0", "NA")
 
         if not include_re:
             fixed_part = self.matrices.X @ self.beta + self.matrices.offset
-            result = np.random.randn(nsim, n).T
+            result = rng.standard_normal((nsim, n)).T
             result *= (self.sigma / np.sqrt(self.matrices.weights))[:, None]
             result += fixed_part[:, None]
             return result
@@ -1764,13 +1768,13 @@ class LmerResult(MerResultMixin):
         try:
             from mixedlm._rust import simulate_re_batch
 
-            return self._simulate_batch_rust(nsim, seed, simulate_re_batch)
+            return self._simulate_batch_rust(nsim, native_seed(seed, rng), simulate_re_batch, rng)
         except ImportError:
             pass
 
         result = np.zeros((n, nsim), dtype=np.float64)
         for i in range(nsim):
-            result[:, i] = self._simulate_once(use_re, re_form)
+            result[:, i] = self._simulate_once(use_re, re_form, rng)
 
         return result
 
@@ -1779,7 +1783,9 @@ class LmerResult(MerResultMixin):
         nsim: int,
         seed: int | None,
         simulate_re_batch: Any,
+        rng: Any | None = None,
     ) -> NDArray[np.floating]:
+        rng = np.random if rng is None else rng
         n = self.matrices.n_obs
 
         fixed_part = self.matrices.X @ self.beta + self.matrices.offset
@@ -1802,7 +1808,7 @@ class LmerResult(MerResultMixin):
 
         result = np.asarray(Z @ u_batch.T, dtype=np.float64)
         result += fixed_part[:, None]
-        noise = np.random.randn(nsim, n).T
+        noise = rng.standard_normal((nsim, n)).T
         noise *= (self.sigma / np.sqrt(self.matrices.weights))[:, None]
         result += noise
         return result
@@ -1811,7 +1817,9 @@ class LmerResult(MerResultMixin):
         self,
         use_re: bool = True,
         re_form: str | None = None,
+        rng: Any | None = None,
     ) -> NDArray[np.floating]:
+        rng = np.random if rng is None else rng
         n = self.matrices.n_obs
         q = self.matrices.n_random
 
@@ -1820,10 +1828,12 @@ class LmerResult(MerResultMixin):
         if re_form == "~0" or re_form == "NA" or not use_re or q == 0:
             random_part = np.zeros(n)
         else:
-            u_new = simulate_random_effects(self.theta, self.matrices.random_structures, self.sigma)
+            u_new = simulate_random_effects(
+                self.theta, self.matrices.random_structures, self.sigma, rng=rng
+            )
             random_part = self.matrices.Z @ u_new
 
-        noise = np.random.randn(n) * self.sigma / np.sqrt(self.matrices.weights)
+        noise = rng.standard_normal(n) * self.sigma / np.sqrt(self.matrices.weights)
 
         return fixed_part + random_part + noise
 
