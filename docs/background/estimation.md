@@ -189,6 +189,14 @@ For fitting GLMMs, mixedlm uses Penalized Iteratively Reweighted Least Squares (
 
 This is nested within the outer optimization over variance parameters.
 
+The native solver stores one small covariance factor per random-effect
+structure and applies it across the grouping levels. It transforms weighted
+crossproducts in place, preserving contributions between levels and grouping
+factors without constructing a full block-diagonal covariance factor during
+normal fitting. The penalized random-effect system and its Cholesky factor
+remain dense, so their storage still grows quadratically with the number of
+random-effect coefficients.
+
 The random effects are solved in spherical coordinates,
 
 \[

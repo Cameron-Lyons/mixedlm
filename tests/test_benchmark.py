@@ -15,6 +15,83 @@ from mixedlm.utils.variance import cov2sdcor, sdcor2cov
 from scipy import sparse
 
 
+@pytest.mark.benchmark(group="native-glmm-covariance")
+@pytest.mark.parametrize("n_groups", [20, 150])
+@pytest.mark.parametrize("layout", ["intercept", "correlated", "diagonal", "mixed"])
+def test_benchmark_native_glmm_covariance(benchmark, n_groups, layout):
+    from mixedlm.estimation.laplace import _laplace_deviance_rust, laplace_deviance
+    from mixedlm.families import Poisson
+
+    rng = np.random.default_rng(913)
+    n_obs = 10 * n_groups
+    rows = rng.permutation(n_obs)
+    x, z, w = rng.uniform(-1.0, 1.0, (3, n_obs))
+    groups = rows % n_groups
+    offset = 0.1 * np.sin(rows)
+    eta = 0.3 + 0.2 * x - 0.1 * z + 0.15 * np.cos(groups) + offset
+    data = pd.DataFrame(
+        {
+            "y": rng.poisson(np.exp(eta)).astype(float),
+            "x": x,
+            "z": z,
+            "w": w,
+            "g": groups,
+            "h": rows % (n_groups // 2),
+        }
+    )
+    random = {
+        "intercept": "(1 | g)",
+        "correlated": "(x + z | g)",
+        "diagonal": "(x + z || g)",
+        "mixed": "(x + z | g) + (w || h)",
+    }[layout]
+    matrices = build_model_matrices(
+        parse_formula("y ~ x + z + " + random),
+        data,
+        weights=np.linspace(0.5, 1.5, n_obs),
+        offset=offset,
+    )
+    parameters = []
+    for structure in matrices.random_structures:
+        width = structure.n_terms
+        lower = np.diag(np.linspace(0.45, 0.85, width))
+        if structure.correlated:
+            lower[np.tril_indices(width, -1)] = 0.1
+            parameters.extend(lower[np.tril_indices(width)])
+        else:
+            parameters.extend(lower.diagonal())
+    theta = np.asarray(parameters)
+    family = Poisson()
+    expected = laplace_deviance(theta, matrices, family)
+    actual = benchmark(_laplace_deviance_rust, theta, matrices, family)
+    for left, right in zip(actual, expected, strict=True):
+        np.testing.assert_allclose(left, right, rtol=2e-7, atol=2e-7)
+
+
+@pytest.mark.benchmark(group="native-glmm-covariance")
+@pytest.mark.parametrize("n_terms", [16, 64])
+def test_benchmark_native_glmm_wide_covariance(benchmark, n_terms):
+    from mixedlm.estimation.laplace import _laplace_deviance_rust, laplace_deviance
+    from mixedlm.families import Poisson
+
+    rng = np.random.default_rng(342)
+    names = [f"x{i}" for i in range(n_terms)]
+    data = pd.DataFrame(rng.normal(scale=0.1, size=(400, n_terms)), columns=names)
+    data["y"] = rng.poisson(1.5, size=400).astype(float)
+    data["g"] = 0
+    matrices = build_model_matrices(
+        parse_formula("y ~ 1 + (0 + " + " + ".join(names) + " | g)"), data
+    )
+    lower = np.diag(np.full(n_terms, 0.5))
+    lower[np.tril_indices(n_terms, -1)] = 0.02
+    theta = lower[np.tril_indices(n_terms)]
+    family = Poisson()
+    expected = laplace_deviance(theta, matrices, family)
+    actual = benchmark(_laplace_deviance_rust, theta, matrices, family)
+    for left, right in zip(actual, expected, strict=True):
+        np.testing.assert_allclose(left, right, rtol=2e-7, atol=2e-7)
+
+
 @pytest.fixture
 def sleepstudy_data():
     np.random.seed(42)

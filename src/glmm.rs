@@ -5,6 +5,8 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use rayon::prelude::*;
 
+use crate::covariance::CovarianceFactor;
+pub use crate::covariance::RandomEffectStructure;
 use crate::csc::CscMatrix;
 use crate::linalg::LinalgError;
 use crate::quadrature::gauss_hermite_nodes_weights;
@@ -160,13 +162,6 @@ fn parse_family_and_link(family: &str, link: &str) -> PyResult<(FamilyType, Link
     Ok((family_type, link_function))
 }
 
-#[derive(Debug, Clone)]
-pub struct RandomEffectStructure {
-    pub n_levels: usize,
-    pub n_terms: usize,
-    pub correlated: bool,
-}
-
 fn csc_from_scipy(
     data: &[f64],
     indices: &[i64],
@@ -174,64 +169,6 @@ fn csc_from_scipy(
     shape: (usize, usize),
 ) -> Result<CscMatrix, LinalgError> {
     CscMatrix::try_from_i64(data, indices, indptr, shape)
-}
-
-fn build_lambda_dense(theta: &[f64], structures: &[RandomEffectStructure]) -> DMatrix<f64> {
-    let mut total_dim = 0;
-    for s in structures {
-        total_dim += s.n_levels * s.n_terms;
-    }
-
-    if total_dim == 0 {
-        return DMatrix::zeros(0, 0);
-    }
-
-    let mut lambda = DMatrix::zeros(total_dim, total_dim);
-    let mut theta_idx = 0;
-    let mut block_offset = 0;
-
-    for structure in structures {
-        let q = structure.n_terms;
-        let n_levels = structure.n_levels;
-
-        let l_block: Vec<Vec<f64>> = if structure.correlated {
-            let n_theta = q * (q + 1) / 2;
-            let theta_block = &theta[theta_idx..theta_idx + n_theta];
-            theta_idx += n_theta;
-
-            let mut l = vec![vec![0.0; q]; q];
-            let mut idx = 0;
-            for (i, row) in l.iter_mut().enumerate() {
-                for cell in row.iter_mut().take(i + 1) {
-                    *cell = theta_block[idx];
-                    idx += 1;
-                }
-            }
-            l
-        } else {
-            let theta_block = &theta[theta_idx..theta_idx + q];
-            theta_idx += q;
-
-            let mut l = vec![vec![0.0; q]; q];
-            for i in 0..q {
-                l[i][i] = theta_block[i];
-            }
-            l
-        };
-
-        for level in 0..n_levels {
-            let level_offset = block_offset + level * q;
-            for i in 0..q {
-                for j in 0..=i {
-                    lambda[(level_offset + i, level_offset + j)] = l_block[i][j];
-                }
-            }
-        }
-
-        block_offset += n_levels * q;
-    }
-
-    lambda
 }
 
 fn forward_solve_vec(l: &DMatrix<f64>, b: &DVector<f64>) -> DVector<f64> {
@@ -316,18 +253,17 @@ pub fn pirls_impl(
         }
     };
 
-    let lambda = build_lambda_dense(theta, structures);
+    let lambda = CovarianceFactor::new(theta, structures);
     let mut spherical = if let Some(u_init) = u_start {
-        lambda.col_piv_qr().solve_lstsq(u_init)
+        lambda.to_dense().col_piv_qr().solve_lstsq(u_init)
     } else {
         DVector::zeros(q)
     };
-    let lambda_t = lambda.transpose();
 
     let mut converged = false;
 
     for _iter in 0..maxiter {
-        let random_effects = &lambda * &spherical;
+        let random_effects = lambda.apply(&spherical);
         let mut eta = x * &beta + offset;
         for j in 0..q {
             let col_start = z.col_offsets()[j];
@@ -422,8 +358,7 @@ pub fn pirls_impl(
             ztwz_vec[j] = sum;
         }
 
-        let mut c =
-            lambda_t.as_ref() * ztwz.as_ref() * lambda.as_ref() + DMatrix::<f64>::identity(q, q);
+        let mut c = lambda.penalized_crossproduct(ztwz);
         let chol_c = match Llt::new(c.as_ref(), Side::Lower) {
             Ok(ch) => ch,
             Err(_) => {
@@ -445,8 +380,8 @@ pub fn pirls_impl(
             }
         };
 
-        let spherical_ztwx = lambda_t.as_ref() * ztwx.as_ref();
-        let spherical_ztwz = lambda_t.as_ref() * ztwz_vec.as_ref();
+        let spherical_ztwx = lambda.transpose_apply(ztwx);
+        let spherical_ztwz = lambda.transpose_apply_vector(&ztwz_vec);
         let l_c = chol_c.L().to_owned();
         let rzx = forward_solve_mat(&l_c, &spherical_ztwx);
         let cu = forward_solve_vec(&l_c, &spherical_ztwz);
@@ -479,7 +414,7 @@ pub fn pirls_impl(
         }
     }
 
-    let random_effects = &lambda * &spherical;
+    let random_effects = lambda.apply(&spherical);
     let mut eta_final = x * &beta + offset;
     for j in 0..q {
         let col_start = z.col_offsets()[j];
@@ -562,7 +497,7 @@ pub fn laplace_deviance_impl(
     let u = result.u;
     let spherical = result.spherical;
 
-    let lambda = build_lambda_dense(theta, structures);
+    let lambda = CovarianceFactor::new(theta, structures);
 
     let mut eta = x * &beta + offset;
     for j in 0..q {
@@ -619,7 +554,7 @@ pub fn laplace_deviance_impl(
         }
     }
 
-    let h = lambda.transpose() * &ztwz * &lambda + DMatrix::<f64>::identity(q, q);
+    let h = lambda.penalized_crossproduct(ztwz);
 
     let logdet_h = match Llt::new(h.as_ref(), Side::Lower) {
         Ok(chol) => {
@@ -645,7 +580,7 @@ fn compute_group_log_integral(
     n_terms: usize,
     spherical: &DVector<f64>,
     h: &DMatrix<f64>,
-    lambda: &DMatrix<f64>,
+    lambda: &CovarianceFactor,
     nodes: &[f64],
     weights: &[f64],
     y: &DVector<f64>,
@@ -688,7 +623,7 @@ fn compute_group_log_integral(
         for i in 0..n_terms {
             spherical_quad[idx_start + i] = spherical_mode[i] + sqrt2 * scale * node;
         }
-        let random_effects = lambda * &spherical_quad;
+        let random_effects = lambda.apply(&spherical_quad);
 
         let mut eta_quad = x * beta + offset;
         for j in 0..q {
@@ -781,7 +716,7 @@ pub fn adaptive_gh_deviance_impl(
     let spherical = result.spherical;
 
     let n = y.nrows();
-    let lambda = build_lambda_dense(theta, structures);
+    let lambda = CovarianceFactor::new(theta, structures);
 
     let mut eta = x * &beta + offset;
     for j in 0..q {
@@ -834,7 +769,7 @@ pub fn adaptive_gh_deviance_impl(
         }
     }
 
-    let h = lambda.transpose() * &ztwz * &lambda + DMatrix::<f64>::identity(q, q);
+    let h = lambda.penalized_crossproduct(ztwz);
 
     let (nodes, gh_weights) = gauss_hermite_nodes_weights(n_agq);
 

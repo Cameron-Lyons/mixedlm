@@ -7,15 +7,10 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
 use crate::blocked_chol::{BlockedCholesky, BlockedMatrix};
+pub use crate::covariance::RandomEffectStructure;
+use crate::covariance::build_lambda_blocks;
 use crate::csc::CscMatrix;
 use crate::linalg::LinalgError;
-
-#[derive(Debug, Clone, Copy)]
-pub struct RandomEffectStructure {
-    pub n_levels: usize,
-    pub n_terms: usize,
-    pub correlated: bool,
-}
 
 fn validate_prior_weights(weights: ArrayView1<'_, f64>, n: usize) -> PyResult<(Vec<f64>, f64)> {
     if weights.len() != n {
@@ -49,44 +44,6 @@ fn csc_from_scipy(
     shape: (usize, usize),
 ) -> Result<CscMatrix, LinalgError> {
     CscMatrix::try_from_i64(data, indices, indptr, shape)
-}
-
-fn build_lambda_blocks(theta: &[f64], structures: &[RandomEffectStructure]) -> Vec<Mat<f64>> {
-    let mut blocks = Vec::new();
-    let mut theta_idx = 0;
-
-    for structure in structures {
-        let q = structure.n_terms;
-
-        let l_block = if structure.correlated {
-            let n_theta = q * (q + 1) / 2;
-            let theta_block = &theta[theta_idx..theta_idx + n_theta];
-            theta_idx += n_theta;
-
-            let mut l = Mat::zeros(q, q);
-            let mut idx = 0;
-            for i in 0..q {
-                for j in 0..=i {
-                    l[(i, j)] = theta_block[idx];
-                    idx += 1;
-                }
-            }
-            l
-        } else {
-            let theta_block = &theta[theta_idx..theta_idx + q];
-            theta_idx += q;
-
-            let mut l = Mat::zeros(q, q);
-            for i in 0..q {
-                l[(i, i)] = theta_block[i];
-            }
-            l
-        };
-
-        blocks.push(l_block);
-    }
-
-    blocks
 }
 
 fn build_lambda_derivative_blocks(structures: &[RandomEffectStructure]) -> Vec<Vec<Mat<f64>>> {
