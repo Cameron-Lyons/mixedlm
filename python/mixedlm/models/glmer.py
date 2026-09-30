@@ -502,6 +502,8 @@ class GlmerResult(MerResultMixin):
         return eta
 
     def vcov(self) -> NDArray[np.floating]:
+        if self.matrices.n_fixed == 0:
+            return np.empty((0, 0), dtype=np.float64)
         return self._working_projection.information_inv.copy()
 
     @cached_property
@@ -560,10 +562,14 @@ class GlmerResult(MerResultMixin):
         -----
         For GLMMs, Cook's distance is computed using Pearson residuals
         and the working weights from the IRLS algorithm.
+        Models without fixed effects return NaN because this normalization
+        divides by the number of fixed-effect parameters.
         """
+        p = self.matrices.n_fixed
+        if p == 0:
+            return np.full(self.matrices.n_obs, np.nan)
         h = self.hatvalues()
         resid = self.residuals(type="pearson")
-        p = self.matrices.n_fixed
 
         h = np.clip(h, 0, 1 - 1e-10)
 

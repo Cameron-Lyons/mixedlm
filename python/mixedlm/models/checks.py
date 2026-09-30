@@ -164,6 +164,9 @@ def check_rankX(
     X = matrices.X
     p = X.shape[1]
 
+    if p == 0:
+        return X, None
+
     rank = np.linalg.matrix_rank(X)
 
     if rank == p:
