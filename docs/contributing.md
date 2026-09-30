@@ -60,6 +60,30 @@ pytest tests/test_lmer.py
 pytest tests/test_lmer.py::test_random_intercept
 ```
 
+### Performance Benchmarks
+
+Run performance measurements with the benchmark fixture and save the results:
+
+```bash
+pytest tests/test_benchmark.py --benchmark-only --benchmark-json=benchmark.json
+```
+
+The symbolic Cholesky cache has paired cached and uncached benchmarks for repeated
+factorizations of banded and irregular sparse matrices, with one or sixteen
+right-hand sides:
+
+```bash
+pytest tests/test_benchmark.py -k sparse_symbolic_repeated \
+  --benchmark-only --benchmark-json=symbolic-cache-benchmark.json
+```
+
+Both cases use the same matrix values and solve work; the uncached case also
+repeats symbolic analysis. Input preparation and numerical validation happen
+outside the timed region. Compare repeated timing statistics on the same machine
+under similar load. Correctness tests check solutions and log-determinants
+independently of elapsed time, including reuse of earlier numeric factors after
+later factorizations.
+
 ## Code Style
 
 This project uses:
