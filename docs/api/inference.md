@@ -389,6 +389,47 @@ t probabilities. Holm and FDR adjustments preserve the input comparison order
 and keep undefined p-values as `NaN`; the adjustment count includes all
 comparisons in the supplied family.
 
+Contrast results provide `confint()` for a table containing the contrast label,
+estimate, standard error, degrees of freedom, and `lower`/`upper` confidence bounds:
+
+```python
+comparisons = em.pairs(adjust="tukey", level=0.90)
+intervals = comparisons.confint()  # uses the requested 90% confidence level
+pointwise = comparisons.confint(level=0.95, adjust="none")
+```
+
+The table preserves comparison order and reports its confidence level and actual
+interval adjustment in `intervals.attrs["level"]` and `intervals.attrs["adjust"]`.
+Overrides affect only the returned intervals. The estimates, p-values, and stored
+defaults remain unchanged. Interval calculations are performed on request and
+reuse scalar critical values for families with the same settings.
+
+Unadjusted intervals use the result's Student's t reference, or the normal
+reference when `df=inf`. Tukey intervals use the studentized range with the
+number of means in the pairwise family; treatment-versus-control differences
+can also use this adjustment. Custom rows with exactly two nonzero, opposite
+coefficients are recognized as scaled pairwise differences and support Tukey
+tests and intervals. The family includes all marginal means represented by
+the matrix columns, even when only a subset of pairs is requested. General
+custom linear combinations reject Tukey and can use other adjustments instead.
+Holm, FDR/BH, and the current Dunnett approximation
+use Bonferroni intervals; both the requested and actual methods are recorded
+in the table's attributes. The Holm/FDR fallback follows the
+[emmeans interval convention](https://rvlenth.github.io/emmeans/reference/summary.emmGrid.html#p-value-adjustments).
+
+Intervals remain on the linear predictor scale, including when marginal means
+were displayed with `type="response"`. Tables can be edited independently of
+the contrast result, and empty contrast sets return empty tables.
+
+Custom coefficients accept rectangular two-dimensional arrays, nested lists,
+or data frames, with one row per comparison and one column per marginal mean
+in the comparison family.
+Malformed shapes, complex values, and nonfinite or masked coefficients raise
+clear errors before covariance calculations. Numeric coefficient matrices are
+validated in bounded batches. The legacy `"dunnett"` option remains a Bonferroni approximation and
+counts the comparisons actually requested; it does not compute the exact
+Dunnett distribution.
+
 **Example:**
 
 ```python

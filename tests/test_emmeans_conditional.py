@@ -267,6 +267,10 @@ def test_grouped_contrasts_match_separate_reference_grids(kind, method, adjust):
     values = {"site": ["west", "east"], "x": [2.0, -1.0]}
     means = emmeans(model, "treatment", by=["site", "x"], at=values)
     coefficients = np.array([[-1.0, 0.5, 0.5], [1.0, -1.0, 0.0]])
+    if method == "custom" and adjust == "tukey":
+        with pytest.raises(ValueError, match="Tukey adjustment requires pairwise differences"):
+            means.contrast(coefficients, adjust=adjust)
+        coefficients = np.array([[-1.0, 1.0, 0.0], [1.0, -1.0, 0.0]])
 
     def compare(means):
         if method == "pairwise":
@@ -274,11 +278,18 @@ def test_grouped_contrasts_match_separate_reference_grids(kind, method, adjust):
         return means.contrast(coefficients if method == "custom" else method, adjust=adjust)
 
     actual = compare(means)
+    intervals = actual.confint(level=0.9)
     assert actual.grid.columns.tolist() == ["site", "x"]
     offset = 0
     for site, x in itertools.product(values["site"], values["x"]):
         expected = compare(emmeans(model, "treatment", at={"site": site, "x": x}))
         stop = offset + len(expected.estimate)
+        expected_intervals = expected.confint(level=0.9)
+        assert_allclose(
+            intervals.iloc[offset:stop][["lower", "upper"]],
+            expected_intervals[["lower", "upper"]],
+            atol=1e-13,
+        )
         for field in ("estimate", "se", "t_ratio", "p_value"):
             assert_allclose(
                 getattr(actual, field)[offset:stop], getattr(expected, field), atol=1e-13

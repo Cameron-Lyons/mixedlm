@@ -846,3 +846,69 @@ def test_benchmark_streamed_marginal_reference_grid(benchmark):
     reference["treatment"] = np.repeat(["A", "B", "C"], 7)
     expected = model.predict(reference, re_form="~0").reshape(3, 7).mean(axis=1)
     np.testing.assert_allclose(result.result.emmean, expected, rtol=1e-12, atol=1e-12)
+
+
+@pytest.mark.benchmark(group="contrast-confidence")
+@pytest.mark.parametrize("adjust", ["none", "tukey"])
+def test_benchmark_contrast_confidence_intervals(benchmark, adjust):
+    from mixedlm.inference.emmeans import ContrastResult
+
+    n_means = 16
+    n_comparisons = n_means * (n_means - 1) // 2
+    result = ContrastResult(
+        contrast=[f"C{i}" for i in range(n_comparisons)],
+        estimate=np.linspace(-2.0, 2.0, n_comparisons),
+        se=np.linspace(0.2, 0.5, n_comparisons),
+        df=80.0,
+        t_ratio=np.zeros(n_comparisons),
+        p_value=np.ones(n_comparisons),
+        adjust=adjust,
+        _families=((0, n_comparisons, n_means),),
+    )
+    result.confint()
+
+    intervals = benchmark(result.confint)
+
+    assert intervals.shape == (n_comparisons, 6)
+    assert np.all(intervals.lower < result.estimate)
+    assert np.all(intervals.upper > result.estimate)
+    np.testing.assert_allclose((intervals.lower + intervals.upper) / 2, result.estimate)
+
+
+@pytest.mark.benchmark(group="custom-contrast-validation")
+@pytest.mark.parametrize("kind", ["general", "pairwise"])
+def test_benchmark_custom_contrast_validation(benchmark, kind):
+    from mixedlm.inference.emmeans import EmmeanResult, Emmeans
+
+    rng = np.random.default_rng(929)
+    n_means, n_contrasts = 64, 2048
+    coefficients = rng.normal(size=(n_means, 24))
+    beta = rng.normal(size=24)
+    values = coefficients @ beta
+    zeros = np.zeros(n_means)
+    means = Emmeans(
+        EmmeanResult(
+            values, zeros, 80.0, zeros, zeros, pd.DataFrame({"treatment": range(n_means)}), 0.95
+        ),
+        coefficients,
+        np.eye(24),
+        beta,
+        80.0,
+        ["treatment"],
+        [list(range(n_means))],
+    )
+    if kind == "general":
+        custom = rng.normal(size=(n_contrasts, n_means))
+    else:
+        custom = np.zeros((n_contrasts, n_means))
+        left = np.arange(n_contrasts) % n_means
+        custom[np.arange(n_contrasts), left] = 1.0
+        custom[np.arange(n_contrasts), (left + 1) % n_means] = -1.0
+
+    result = benchmark(means.contrast, custom, adjust="none")
+
+    expected_coefficients = custom @ coefficients
+    np.testing.assert_allclose(
+        result.estimate, expected_coefficients @ beta, rtol=1e-12, atol=1e-12
+    )
+    np.testing.assert_allclose(result.se, np.linalg.norm(expected_coefficients, axis=1), rtol=1e-12)
