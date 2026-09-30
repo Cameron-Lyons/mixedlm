@@ -232,6 +232,12 @@ mixedlm uses a first-order linearization approach:
 
 This is similar to the Lindstrom-Bates algorithm.
 
+The inner penalized nonlinear least-squares loop checks changes in both the
+fixed parameters and every group-specific random effect. Each change is
+measured against the preceding iteration before deciding whether to stop;
+stationary fixed parameters alone do not establish convergence. The iteration
+limit still bounds the work for problems that do not converge.
+
 ## EM-REML Initialization
 
 ### The Algorithm

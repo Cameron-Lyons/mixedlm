@@ -31,6 +31,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Consolidated duplicate CI and security checks while preserving coverage
 
 ### Fixed
+- Python nonlinear least squares checks random-effect changes against the previous iteration, preventing premature convergence when fixed parameters are already stationary
 - Poisson and other unbounded GLMM families no longer clamp fitted means below one
 - Unsupported family and link combinations no longer route through the native fast path
 
