@@ -956,3 +956,40 @@ def test_benchmark_large_adjusted_effect_grid(benchmark):
     assert np.isfinite(actual["std.error"]).all()
     assert np.all(actual["conf.low"] <= actual.predicted)
     assert np.all(actual["conf.high"] >= actual.predicted)
+
+
+@pytest.mark.benchmark(group="formula-encoding")
+@pytest.mark.parametrize("kind", ["categorical", "numeric", "small", "deep"])
+def test_benchmark_repeated_formula_factors(benchmark, kind):
+    from mixedlm.matrices.design import build_fixed_matrix
+
+    n = 16 if kind == "small" else 50_000
+    rng = np.random.default_rng(721)
+    data = pd.DataFrame(
+        {
+            "a": pd.Categorical(rng.integers(0, 5, n), categories=range(5)),
+            "b": pd.Categorical(rng.integers(0, 5, n), categories=range(5)),
+            "c": pd.Categorical(rng.integers(0, 5, n), categories=range(5)),
+            "x": rng.normal(size=n),
+            "z": rng.normal(size=n),
+        }
+    )
+    if kind == "deep":
+        data = pd.DataFrame(
+            {name: pd.Categorical(rng.integers(0, 3, n), categories=range(3)) for name in "abcdefg"}
+        )
+    rhs = {
+        "categorical": "a*b*c",
+        "numeric": "x*z + I(x**2)*I(z**3)",
+        "small": "x",
+        "deep": "a:b:c:d:e:f:g",
+    }
+    formula = parse_formula(f"y ~ {rhs[kind]}")
+    matrix, names = benchmark(build_fixed_matrix, formula, data)
+    assert matrix.shape == (n, {"categorical": 125, "numeric": 7, "small": 2, "deep": 129}[kind])
+    assert len(names) == matrix.shape[1]
+    np.testing.assert_array_equal(matrix[:, 0], np.ones(n))
+    if kind == "numeric":
+        np.testing.assert_array_equal(
+            matrix[:, -1], data["x"].to_numpy() ** 2 * data["z"].to_numpy() ** 3
+        )
