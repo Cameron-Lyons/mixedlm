@@ -22,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Root-level CHANGELOG.md
 
 ### Changed
+- Formula matrix construction now reuses base-factor encodings and streams fixed-effect interaction columns into a single output matrix
 - Multi-draw GLMM simulation now batches random effects and response generation
 - EM-REML algorithm generalized from single random intercept to arbitrary unstructured covariance models
 - Replaced the Py-BOBYQA dependency and default optimizer with SciPy COBYQA

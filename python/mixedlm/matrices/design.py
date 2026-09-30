@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from functools import cached_property
+from itertools import product
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -223,28 +225,33 @@ def build_fixed_matrix(
     category_levels: dict[str, list[Any]] | None = None,
 ) -> tuple[NDArray[np.floating], list[str]]:
     n = dataframe_length(data)
-    columns: list[NDArray[np.floating]] = []
-    names: list[str] = []
-
-    if formula.fixed.has_intercept:
-        columns.append(np.ones(n, dtype=np.float64))
-        names.append("(Intercept)")
-
-    term_columns, term_names = _encode_terms(
-        formula.fixed.terms,
-        data,
-        has_intercept=formula.fixed.has_intercept,
-        contrasts=contrasts,
-        category_levels=category_levels,
+    factors = list(
+        _term_factors(
+            formula.fixed.terms,
+            data,
+            has_intercept=formula.fixed.has_intercept,
+            contrasts=contrasts,
+            category_levels=category_levels,
+        )
     )
-    columns.extend(term_columns)
-    names.extend(term_names)
+    names = ["(Intercept)"] if formula.fixed.has_intercept else []
+    for term_factors in factors:
+        names.extend(_factor_names(term_factors))
 
-    if not columns:
-        columns.append(np.ones(n, dtype=np.float64))
-        names.append("(Intercept)")
+    if not names:
+        return np.ones((n, 1), dtype=np.float64), ["(Intercept)"]
 
-    X = np.column_stack(columns)
+    # Allocate the final matrix once; retain base encodings but stream interaction
+    # products instead of keeping a second matrix's worth of product columns.
+    X = np.empty((n, len(names)), dtype=np.float64)
+    column_index = 0
+    if formula.fixed.has_intercept:
+        X[:, 0] = 1.0
+        column_index = 1
+    for term_factors in factors:
+        for column in _factor_columns(term_factors, n):
+            X[:, column_index] = column
+            column_index += 1
     return X, names
 
 
@@ -312,16 +319,31 @@ def _encode_categorical(
     return columns, names
 
 
-def _encode_terms(
+_EncodedFactor = tuple[list[NDArray[np.floating]], list[str]]
+
+
+def _term_factors(
     terms: tuple[InterceptTerm | VariableTerm | PowerTerm | InteractionTerm, ...],
     data: Any,
     has_intercept: bool,
     contrasts: dict[str, str | NDArray[np.floating]] | None = None,
     category_levels: dict[str, list[Any]] | None = None,
-) -> tuple[list[NDArray[np.floating]], list[str]]:
-    """Encode model terms, using full indicators for the first factor without an intercept."""
-    columns: list[NDArray[np.floating]] = []
-    names: list[str] = []
+) -> Iterator[list[_EncodedFactor]]:
+    """Encode each base factor once, keeping full and reduced rank encodings distinct."""
+    cache: dict[tuple[str | PowerTerm, bool], _EncodedFactor] = {}
+
+    def encode(variable: str | PowerTerm, full_rank: bool = False) -> _EncodedFactor:
+        key = (variable, full_rank)
+        if key not in cache:
+            cache[key] = (
+                _encode_power(variable, data)
+                if isinstance(variable, PowerTerm)
+                else _encode_variable(
+                    variable, data, contrasts, category_levels, full_rank=full_rank
+                )
+            )
+        return cache[key]
+
     use_full_rank_factor = not has_intercept
 
     for term in terms:
@@ -332,67 +354,67 @@ def _encode_terms(
                 data, term.name
             )
             full_rank = use_full_rank_factor and is_categorical
-            term_columns, term_names = _encode_variable(
-                term.name,
-                data,
-                contrasts,
-                category_levels,
-                full_rank=full_rank,
-            )
+            yield [encode(term.name, full_rank)]
             if full_rank:
                 use_full_rank_factor = False
         elif isinstance(term, PowerTerm):
-            term_columns, term_names = _encode_power(term, data)
+            yield [encode(term)]
         else:
-            term_columns, term_names = _encode_interaction(
-                term.variables,
-                data,
-                contrasts,
-                category_levels,
-            )
-
-        columns.extend(term_columns)
-        names.extend(term_names)
-
-    return columns, names
+            yield [encode(variable) for variable in term.variables]
 
 
-def _encode_interaction(
-    variables: tuple[str | PowerTerm, ...],
+def _factor_names(factors: list[_EncodedFactor]) -> Iterator[str]:
+    for names in product(*(factor[1] for factor in factors)):
+        name = ""
+        for part in names:
+            name = f"{name}:{part}" if name else part
+        yield name
+
+
+def _factor_columns(factors: list[_EncodedFactor], n: int) -> Iterator[NDArray[np.floating]]:
+    if not factors:
+        yield np.ones(n, dtype=np.float64)
+        return
+    if len(factors) == 1:
+        yield from factors[0][0]
+        return
+
+    # Depth-first traversal reuses common multiplication prefixes while retaining
+    # only one partial product per factor, without a recursive closure.
+    iterators = [iter(factors[0][0])]
+    prefixes: list[NDArray[np.floating]] = []
+    while iterators:
+        try:
+            column = next(iterators[-1])
+        except StopIteration:
+            iterators.pop()
+            if prefixes:
+                prefixes.pop()
+            continue
+        if prefixes:
+            column = prefixes[-1] * column
+        if len(iterators) == len(factors):
+            yield column
+        else:
+            prefixes.append(column)
+            iterators.append(iter(factors[len(iterators)][0]))
+
+
+def _encode_terms(
+    terms: tuple[InterceptTerm | VariableTerm | PowerTerm | InteractionTerm, ...],
     data: Any,
+    has_intercept: bool,
     contrasts: dict[str, str | NDArray[np.floating]] | None = None,
     category_levels: dict[str, list[Any]] | None = None,
 ) -> tuple[list[NDArray[np.floating]], list[str]]:
-    encoded_vars: list[tuple[list[NDArray[np.floating]], list[str]]] = []
-    for var in variables:
-        if isinstance(var, PowerTerm):
-            cols, nms = _encode_power(var, data)
-        else:
-            cols, nms = _encode_variable(var, data, contrasts, category_levels)
-        encoded_vars.append((cols, nms))
-
-    result_cols: list[NDArray[np.floating]] = []
-    result_names: list[str] = []
-
-    def _product(
-        idx: int,
-        current_col: NDArray[np.floating],
-        current_name: str,
-    ) -> None:
-        if idx >= len(encoded_vars):
-            result_cols.append(current_col)
-            result_names.append(current_name)
-            return
-
-        cols, nms = encoded_vars[idx]
-        for col, nm in zip(cols, nms, strict=False):
-            new_col = current_col * col
-            new_name = f"{current_name}:{nm}" if current_name else nm
-            _product(idx + 1, new_col, new_name)
-
+    """Materialize columns for sparse random-effect construction."""
+    columns: list[NDArray[np.floating]] = []
+    names: list[str] = []
     n = dataframe_length(data)
-    _product(0, np.ones(n, dtype=np.float64), "")
-    return result_cols, result_names
+    for factors in _term_factors(terms, data, has_intercept, contrasts, category_levels):
+        columns.extend(_factor_columns(factors, n))
+        names.extend(_factor_names(factors))
+    return columns, names
 
 
 def _build_sparse_Z_block(
