@@ -209,6 +209,12 @@ well-defined, and uses the same system for the PIRLS mode, Laplace determinant, 
 covariance, and leverage calculations. Adaptive quadrature uses the normalized standard-normal
 prior in these coordinates and evaluates each grouping level's likelihood contribution once.
 
+The native PIRLS solver handles the fixed-effect and working-response columns in
+one triangular solve, borrowing the Cholesky factor. It reuses the transformed
+columns to recover random effects with a transpose triangular solve. This avoids
+copying the full factor and repeating a forward solve on each iteration. The
+random-effect Cholesky factorization remains dense.
+
 ## Nonlinear Mixed Models
 
 ### The Model
