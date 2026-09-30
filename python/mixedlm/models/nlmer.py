@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, cast
 
 import numpy as np
-from numpy.typing import NDArray
+from numpy.typing import ArrayLike, NDArray
 from scipy import linalg
 
 if TYPE_CHECKING:
@@ -127,6 +127,8 @@ class NlmerResult:
         newdata: pd.DataFrame | None = None,
         x_var: str | None = None,
         group_var: str | None = None,
+        *,
+        offset: ArrayLike | str | None = None,
     ) -> NDArray[np.floating]:
         """Predict responses for new observations.
 
@@ -140,6 +142,12 @@ class NlmerResult:
         group_var : str, optional
             Grouping column used to add fitted random effects for known
             levels. Unknown levels receive population-level predictions.
+        offset : array-like, scalar, or str, optional
+            Known offset added to new-data response predictions. A string selects
+            a column from ``newdata``. Scalars apply to every row; arrays must
+            supply one finite real value per row. Omitted offsets default to zero
+            for new data. Without ``newdata``, fitted offsets are already included
+            and an explicit offset is not accepted.
 
         Returns
         -------
@@ -147,8 +155,17 @@ class NlmerResult:
             Predicted responses in the same row order as ``newdata``.
         """
         if newdata is None:
+            if offset is not None:
+                raise ValueError("Prediction offset can only be supplied with newdata.")
             return self.fitted()
 
+        from mixedlm.models.shared_utils import resolve_prediction_vector
+
+        prediction_offset = (
+            None
+            if offset is None
+            else resolve_prediction_vector(newdata, offset, name="offset", default=0.0)
+        )
         if x_var is None:
             x_var = self._x_var
         x_new = newdata[x_var].to_numpy(dtype=np.float64)
@@ -172,7 +189,7 @@ class NlmerResult:
                     params[self.random_params] += self.b[group_index]
                 pred[row_indices] = self.model.predict(params, x_new[row_indices])
 
-        return pred
+        return pred if prediction_offset is None else pred + prediction_offset
 
     def VarCorr(self) -> NlmerVarCorr:
         n_random = len(self.random_params)

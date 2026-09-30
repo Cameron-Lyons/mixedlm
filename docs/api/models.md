@@ -88,15 +88,22 @@ print(f"Estimated theta: {model.family.theta}")
 Fit a nonlinear mixed model.
 
 ```python
-result = mlm.nlmer(formula, data, start, control=None)
+result = mlm.nlmer(
+    model, data, x_var, y_var, group_var,
+    random_params=None, start=None, weights=None, offset=None,
+)
 ```
 
 **Parameters:**
 
-- `formula`: Model formula with nonlinear function (e.g., `"y ~ SSasymp(x, Asym, R0, lrc) + (Asym | group)"`)
+- `model`: A nonlinear model instance, such as `SSasymp()` or `SSlogis()`
 - `data`: DataFrame
-- `start`: Dictionary of starting values for parameters
-- `control`: Optional control object
+- `x_var`, `y_var`, `group_var`: Predictor, response, and grouping column names
+- `random_params`: Parameter names or indexes with random effects; defaults to all parameters
+- `start`: Optional dictionary of starting parameter values; otherwise initialized automatically
+- `weights`: Positive prior observation weights
+- `offset`: Known observation offsets added to the nonlinear response mean
+- `**kwargs`: Optimizer settings such as `method` and `maxiter`
 
 **Returns:** NlmerResult object
 
@@ -105,11 +112,13 @@ result = mlm.nlmer(formula, data, start, control=None)
 ```python
 from mixedlm.nlme import SSlogis
 
-start = SSlogis.get_start(data, 'y', 'x')
 model = mlm.nlmer(
-    "y ~ SSlogis(x, Asym, xmid, scal) + (Asym | group)",
+    SSlogis(),
     data,
-    start=start
+    x_var="time",
+    y_var="response",
+    group_var="subject",
+    random_params=["Asym"],
 )
 ```
 

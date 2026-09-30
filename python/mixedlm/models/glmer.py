@@ -417,8 +417,9 @@ class GlmerResult(MerResultMixin):
                 eta = self.matrices.X @ self.beta + self.matrices.offset
             X = self.matrices.X
         else:
+            prediction_offset = self._prediction_offset(newdata, offset)
             X = self._prediction_fixed_matrix(newdata)
-            eta = X @ self.beta + self._prediction_offset(newdata, offset)
+            eta = X @ self.beta + prediction_offset
 
             if include_re:
                 eta = self._add_random_effects_to_eta(eta, newdata, allow_new_levels)
