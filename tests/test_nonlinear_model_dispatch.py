@@ -55,7 +55,7 @@ def assert_python_evaluation(model, phi):
         patch.object(nlmm, "_HAS_RUST", True),
         patch.object(
             nlmm,
-            "_nlmm_deviance_rust",
+            "_nlmm_deviance_rust_with_status",
             side_effect=AssertionError("custom model reached native evaluator"),
         ) as native,
     ):
@@ -117,11 +117,13 @@ def test_original_builtin_uses_native_formula_even_with_a_different_display_name
 ):
     model = model_type()
     y, x, groups = problem(model, phi)
-    output = (-12.0, np.asarray(phi), np.zeros((4, 1)), 0.1)
+    output = (-12.0, np.asarray(phi), np.zeros((4, 1)), 0.1, True)
     with (
         patch.object(nlmm, "_HAS_RUST", True),
         patch.object(model_type, "name", property(lambda self: "display label")),
-        patch.object(nlmm, "_rust_nlmm_deviance", return_value=output, create=True) as native,
+        patch.object(
+            nlmm, "_rust_nlmm_deviance_with_status", return_value=output, create=True
+        ) as native,
     ):
         optimizer = nlmm.NLMMOptimizer(y, x, groups, model, [0])
         optimizer._start_phi = np.asarray(phi)
@@ -138,7 +140,7 @@ def test_python_fallback_when_native_is_unavailable_or_disabled(available, reque
     with (
         patch.object(nlmm, "_HAS_RUST", available),
         patch.object(
-            nlmm, "_nlmm_deviance_rust", side_effect=AssertionError("native disabled")
+            nlmm, "_nlmm_deviance_rust_with_status", side_effect=AssertionError("native disabled")
         ) as native,
     ):
         optimizer = optimizer_for(SSasymp(), [10.0, 2.0, -1.0], use_rust=requested)
@@ -154,7 +156,7 @@ def test_native_wrapper_rejects_unsupported_models_before_calling_extension(mode
     with (
         patch.object(
             nlmm,
-            "_rust_nlmm_deviance",
+            "_rust_nlmm_deviance_with_status",
             side_effect=AssertionError("unsupported native model"),
             create=True,
         ) as native,
@@ -213,7 +215,7 @@ def test_customized_model_fits_and_refits_match_its_python_implementation(kind, 
         patch.object(nlmm, "_HAS_RUST", True),
         patch.object(
             nlmm,
-            "_nlmm_deviance_rust",
+            "_nlmm_deviance_rust_with_status",
             side_effect=AssertionError("custom model reached native evaluator"),
         ) as native,
     ):

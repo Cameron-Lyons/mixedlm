@@ -274,12 +274,14 @@ class TestNLMMOptimizer:
 
     def test_downweighting_outlier_recovers_clean_fit(self, simple_nlmm_data):
         x, y, groups = simple_nlmm_data
-        clean = NLMMOptimizer(y, x, groups, SSasymp(), [0], use_rust=False).optimize(maxiter=100)
+        clean = NLMMOptimizer(
+            y, x, groups, SSasymp(), [0], use_rust=False, pnls_maxiter=2000
+        ).optimize(maxiter=100)
 
         contaminated_y = y.copy()
         contaminated_y[0] += 50.0
         unweighted = NLMMOptimizer(
-            contaminated_y, x, groups, SSasymp(), [0], use_rust=False
+            contaminated_y, x, groups, SSasymp(), [0], use_rust=False, pnls_maxiter=2000
         ).optimize(maxiter=100)
         weights = np.ones(len(y))
         weights[0] = 1e-5
@@ -290,12 +292,14 @@ class TestNLMMOptimizer:
             SSasymp(),
             [0],
             use_rust=False,
+            pnls_maxiter=2000,
             weights=weights,
         ).optimize(maxiter=100)
 
         weighted_error = np.linalg.norm(weighted.phi - clean.phi)
         unweighted_error = np.linalg.norm(unweighted.phi - clean.phi)
-        assert clean.converged and unweighted.converged and weighted.converged
+        assert clean.converged and weighted.converged
+        assert not unweighted.converged and not unweighted.pnls_converged
         assert weighted_error < unweighted_error
 
     @pytest.mark.parametrize(
@@ -330,7 +334,7 @@ class TestNLMMOptimizer:
         model = SSasymp()
         random_params = [0]
 
-        optimizer = NLMMOptimizer(y, x, groups, model, random_params)
+        optimizer = NLMMOptimizer(y, x, groups, model, random_params, pnls_maxiter=2000)
         result = optimizer.optimize(maxiter=50)
 
         assert isinstance(result, NLMMOptimizationResult)

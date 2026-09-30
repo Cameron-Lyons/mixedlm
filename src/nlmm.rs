@@ -314,6 +314,7 @@ pub struct PnlsResult {
     pub phi: Vec<f64>,
     pub b: DMatrix<f64>,
     pub sigma: f64,
+    pub converged: bool,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -328,6 +329,8 @@ pub fn pnls_step_impl(
     psi: &DMatrix<f64>,
     _sigma: f64,
     random_params: &[usize],
+    maxiter: usize,
+    tol: f64,
 ) -> PnlsResult {
     let group_indices = grouped_observation_indices(groups);
     pnls_step_with_groups(
@@ -340,6 +343,8 @@ pub fn pnls_step_impl(
         b,
         psi,
         random_params,
+        maxiter,
+        tol,
     )
 }
 
@@ -354,6 +359,8 @@ fn pnls_step_with_groups(
     b: &DMatrix<f64>,
     psi: &DMatrix<f64>,
     random_params: &[usize],
+    maxiter: usize,
+    tol: f64,
 ) -> PnlsResult {
     let n = y.len();
     let n_phi = phi.len();
@@ -373,7 +380,8 @@ fn pnls_step_with_groups(
     let mut phi_new: Vec<f64> = phi.to_vec();
     let mut b_new = b.clone();
 
-    for _iteration in 0..PNLS_MAX_ITER {
+    let mut converged = false;
+    for _iteration in 0..maxiter {
         let phi_previous = phi_new.clone();
         let b_previous = b_new.clone();
         let mut resid_total = vec![0.0; n];
@@ -494,7 +502,8 @@ fn pnls_step_with_groups(
             }
         }
 
-        if max_delta < PNLS_TOLERANCE {
+        if max_delta < tol {
+            converged = true;
             break;
         }
     }
@@ -529,9 +538,11 @@ fn pnls_step_with_groups(
         phi: phi_new,
         b: b_new,
         sigma: sigma_new,
+        converged,
     }
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub fn nlmm_deviance_impl(
     theta: &[f64],
@@ -545,6 +556,38 @@ pub fn nlmm_deviance_impl(
     random_params: &[usize],
     _sigma: f64,
 ) -> (f64, Vec<f64>, DMatrix<f64>, f64) {
+    let (deviance, phi, b, sigma, _) = nlmm_deviance_with_status_impl(
+        theta,
+        y,
+        x,
+        groups,
+        weights,
+        model,
+        phi,
+        b,
+        random_params,
+        _sigma,
+        PNLS_MAX_ITER,
+        PNLS_TOLERANCE,
+    );
+    (deviance, phi, b, sigma)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn nlmm_deviance_with_status_impl(
+    theta: &[f64],
+    y: &[f64],
+    x: &[f64],
+    groups: &[i64],
+    weights: &[f64],
+    model: NlmeModel,
+    phi: &[f64],
+    b: &DMatrix<f64>,
+    random_params: &[usize],
+    _sigma: f64,
+    maxiter: usize,
+    tol: f64,
+) -> (f64, Vec<f64>, DMatrix<f64>, f64, bool) {
     let n = y.len();
     let group_indices = grouped_observation_indices(groups);
     let n_groups = group_indices.len();
@@ -564,6 +607,8 @@ pub fn nlmm_deviance_impl(
         b,
         &psi,
         random_params,
+        maxiter,
+        tol,
     );
 
     let phi_new = result.phi;
@@ -645,7 +690,7 @@ pub fn nlmm_deviance_impl(
                     .iter()
                     .any(|value| *value <= 0.0 || !value.is_finite())
                 {
-                    return (1e100, phi_new, b_new, sigma_sq.sqrt());
+                    return (1e100, phi_new, b_new, sigma_sq.sqrt(), false);
                 }
                 eigenvalues.iter().map(|value| value.ln()).sum()
             }
@@ -656,7 +701,17 @@ pub fn nlmm_deviance_impl(
     let deviance =
         n as f64 * (1.0 + (2.0 * std::f64::consts::PI * sigma_sq).ln()) + laplace_correction;
 
-    (deviance, phi_new, b_new, sigma_sq.sqrt())
+    (deviance, phi_new, b_new, sigma_sq.sqrt(), result.converged)
+}
+
+fn validate_pnls_controls(maxiter: usize, tol: f64) -> Result<(), &'static str> {
+    if maxiter == 0 {
+        return Err("pnls_maxiter must be a positive integer");
+    }
+    if !tol.is_finite() || tol <= 0.0 {
+        return Err("pnls_tol must be positive and finite");
+    }
+    Ok(())
 }
 
 #[pyfunction]
@@ -670,7 +725,9 @@ pub fn nlmm_deviance_impl(
     theta,
     sigma,
     random_params,
-    weights=None
+    weights=None,
+    maxiter=PNLS_MAX_ITER,
+    tol=PNLS_TOLERANCE
 ))]
 #[allow(clippy::too_many_arguments)]
 pub fn pnls_step<'py>(
@@ -684,7 +741,10 @@ pub fn pnls_step<'py>(
     sigma: f64,
     random_params: Vec<usize>,
     weights: Option<numpy::PyArrayLike1<'py, f64>>,
+    maxiter: usize,
+    tol: f64,
 ) -> PyResult<(Vec<f64>, Vec<Vec<f64>>, f64)> {
+    validate_pnls_controls(maxiter, tol).map_err(pyo3::exceptions::PyValueError::new_err)?;
     let model = match model_name.to_lowercase().as_str() {
         "ssasymp" => NlmeModel::SSasymp,
         "sslogis" => NlmeModel::SSlogis,
@@ -735,6 +795,8 @@ pub fn pnls_step<'py>(
         &psi,
         sigma,
         &random_params,
+        maxiter,
+        tol,
     );
 
     let b_out: Vec<Vec<f64>> = (0..n_groups)
@@ -755,7 +817,9 @@ pub fn pnls_step<'py>(
     b,
     random_params,
     sigma,
-    weights=None
+    weights=None,
+    maxiter=PNLS_MAX_ITER,
+    tol=PNLS_TOLERANCE
 ))]
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn nlmm_deviance<'py>(
@@ -769,7 +833,57 @@ pub fn nlmm_deviance<'py>(
     random_params: Vec<usize>,
     sigma: f64,
     weights: Option<numpy::PyArrayLike1<'py, f64>>,
+    maxiter: usize,
+    tol: f64,
 ) -> PyResult<(f64, Vec<f64>, Vec<Vec<f64>>, f64)> {
+    let (deviance, phi, b, sigma, _) = nlmm_deviance_with_status(
+        theta,
+        y,
+        x,
+        groups,
+        model_name,
+        phi,
+        b,
+        random_params,
+        sigma,
+        weights,
+        maxiter,
+        tol,
+    )?;
+    Ok((deviance, phi, b, sigma))
+}
+
+#[pyfunction]
+#[pyo3(signature = (
+    theta,
+    y,
+    x,
+    groups,
+    model_name,
+    phi,
+    b,
+    random_params,
+    sigma,
+    weights=None,
+    maxiter=PNLS_MAX_ITER,
+    tol=PNLS_TOLERANCE
+))]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+pub fn nlmm_deviance_with_status<'py>(
+    theta: numpy::PyArrayLike1<'py, f64>,
+    y: numpy::PyArrayLike1<'py, f64>,
+    x: numpy::PyArrayLike1<'py, f64>,
+    groups: numpy::PyArrayLike1<'py, i64>,
+    model_name: &str,
+    phi: numpy::PyArrayLike1<'py, f64>,
+    b: numpy::PyArrayLike2<'py, f64>,
+    random_params: Vec<usize>,
+    sigma: f64,
+    weights: Option<numpy::PyArrayLike1<'py, f64>>,
+    maxiter: usize,
+    tol: f64,
+) -> PyResult<(f64, Vec<f64>, Vec<Vec<f64>>, f64, bool)> {
+    validate_pnls_controls(maxiter, tol).map_err(pyo3::exceptions::PyValueError::new_err)?;
     let model = match model_name.to_lowercase().as_str() {
         "ssasymp" => NlmeModel::SSasymp,
         "sslogis" => NlmeModel::SSlogis,
@@ -807,7 +921,7 @@ pub fn nlmm_deviance<'py>(
     let n_random = b_arr.ncols();
     let b_mat = DMatrix::from_fn(n_groups, n_random, |i, j| b_arr[[i, j]]);
 
-    let (deviance, phi_new, b_new, sigma_new) = nlmm_deviance_impl(
+    let (deviance, phi_new, b_new, sigma_new, converged) = nlmm_deviance_with_status_impl(
         &theta_vec,
         &y_vec,
         &x_vec,
@@ -818,18 +932,71 @@ pub fn nlmm_deviance<'py>(
         &b_mat,
         &random_params,
         sigma,
+        maxiter,
+        tol,
     );
 
     let b_out: Vec<Vec<f64>> = (0..n_groups)
         .map(|i| (0..n_random).map(|j| b_new[(i, j)]).collect())
         .collect();
 
-    Ok((deviance, phi_new, b_out, sigma_new))
+    Ok((deviance, phi_new, b_out, sigma_new, converged))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pnls_controls_separate_iteration_limit_from_convergence() {
+        let grid = [0.2, 0.5, 1.0, 2.0, 3.0, 5.0];
+        let x: Vec<f64> = grid.into_iter().cycle().take(18).collect();
+        let groups: Vec<i64> = (0..18).map(|row| row / 6).collect();
+        let y: Vec<f64> = x
+            .iter()
+            .enumerate()
+            .map(|(row, x)| (2.8 + 0.3 * groups[row] as f64) * x / (0.9 + x))
+            .collect();
+        let weights: Vec<f64> = (0..18).map(|row| 0.5 + row as f64 / 17.0).collect();
+        let b = DMatrix::from_fn(3, 1, |row, _| (row as f64 - 1.0) * 0.1);
+        let evaluate = |maxiter, tol| {
+            nlmm_deviance_with_status_impl(
+                &[0.4],
+                &y,
+                &x,
+                &groups,
+                &weights,
+                NlmeModel::SSmicmen,
+                &[2.0, 1.2],
+                &b,
+                &[0],
+                0.3,
+                maxiter,
+                tol,
+            )
+        };
+        let limited = evaluate(1, 1e-12);
+        let loose = evaluate(1, 1e6);
+        let complete = evaluate(1000, 1e-10);
+        assert!(!limited.4);
+        assert!(loose.4 && complete.4);
+        assert_eq!(limited.0, loose.0);
+        assert_eq!(limited.1, loose.1);
+        assert_eq!(limited.3, loose.3);
+        for row in 0..3 {
+            assert_eq!(limited.2[(row, 0)], loose.2[(row, 0)]);
+        }
+        assert!((complete.1[0] - limited.1[0]).abs() > 1e-3);
+    }
+
+    #[test]
+    fn pnls_controls_reject_invalid_limits_and_tolerances() {
+        assert!(validate_pnls_controls(0, 1e-6).is_err());
+        for tol in [0.0, -1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(validate_pnls_controls(50, tol).is_err());
+        }
+        assert!(validate_pnls_controls(1, 1e-6).is_ok());
+    }
 
     #[test]
     fn group_indices_preserve_label_and_observation_order() {

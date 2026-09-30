@@ -119,7 +119,13 @@ result = mlm.nlmer(
 - `start`: Optional dictionary of starting parameter values; otherwise initialized automatically
 - `weights`: Positive prior observation weights
 - `offset`: Known observation offsets added to the nonlinear response mean
-- `**kwargs`: Optimizer settings such as `method` and `maxiter`
+- `**kwargs`: Outer optimizer settings `method` and `maxiter`, plus inner PNLS
+  controls `pnls_maxiter` (positive integer, default 50) and `pnls_tol` (positive,
+  finite absolute parameter-update tolerance, default `1e-6`).
+
+Results expose `pnls_converged` separately; overall `converged` requires both
+inner and outer convergence. `refit()` and `update()` retain the inner controls
+and accept overrides. Bootstrap intervals exclude unconverged refits.
 
 **Returns:** NlmerResult object
 
