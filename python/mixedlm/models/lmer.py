@@ -392,8 +392,9 @@ class LmerResult(MerResultMixin):
 
         Parameters
         ----------
-        newdata : DataFrame, optional
-            New data for prediction. If None, returns fitted values.
+        newdata : pandas or Polars DataFrame or LazyFrame, optional
+            New data for prediction. If None, returns fitted values. Lazy queries
+            are projected to prediction columns and collected once per call.
         re_form : str, optional
             Formula for random effects. Use "NA" or "~0" for fixed effects only.
         allow_new_levels : bool, default False
@@ -439,13 +440,20 @@ class LmerResult(MerResultMixin):
                 raise ValueError("Prediction weights can only be supplied with newdata.")
             if interval != "prediction":
                 raise ValueError("Prediction weights require interval='prediction'.")
+
+        include_re = re_form != "NA" and re_form != "~0"
+        if newdata is not None:
+            newdata = self._prepare_prediction_data(
+                newdata,
+                include_re=include_re,
+                extra_columns=tuple(value for value in (offset, weights) if isinstance(value, str)),
+            )
+        if weights is not None:
             prediction_weights = self._prediction_vector(
                 newdata, weights, name="weights", default=1.0
             )
             if np.any(prediction_weights <= 0):
                 raise ValueError("Prediction weights must be strictly positive.")
-
-        include_re = re_form != "NA" and re_form != "~0"
         pred_matrices: ModelMatrices | None = None
 
         if newdata is None:

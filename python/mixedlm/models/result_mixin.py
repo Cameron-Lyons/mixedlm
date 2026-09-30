@@ -105,6 +105,40 @@ class MerResultMixin:
             return (self.matrices.X, self.matrices.Z)
         raise ValueError(f"Unknown type '{type}'. Use 'fixed', 'random', 'X', 'Z', or 'both'.")
 
+    def _prepare_prediction_data(
+        self,
+        newdata: Any,
+        *,
+        include_re: bool,
+        extra_columns: Sequence[str] = (),
+    ) -> Any:
+        """Collect a lazy prediction query once, projecting to relevant columns."""
+        from mixedlm.utils.dataframe import _is_polars_lazy, ensure_dataframe
+
+        if not _is_polars_lazy(newdata):
+            return ensure_dataframe(newdata)
+
+        variables = self.formula.fixed_variables | set(extra_columns)
+        if include_re:
+            variables |= self.formula.random_variables | self.formula.grouping_factors
+            # Preserve direct nested-group keys and encoded slope columns accepted
+            # by the existing random-effect prediction path.
+            for structure in self.matrices.random_structures:
+                variables.add(structure.grouping_factor)
+                variables.update(name for name in structure.term_names if name != "(Intercept)")
+        columns = [name for name in get_columns(newdata) if name in variables]
+        if columns:
+            return ensure_dataframe(newdata, columns=columns)
+
+        import pandas as pd
+        import polars as pl
+
+        # An intercept-only grid still needs its row count. Polars select([])
+        # loses that count; an index-only pandas frame retains it without a column.
+        count = pl.len() if hasattr(pl, "len") else pl.count()
+        n_rows = int(newdata.select(count).collect().item())
+        return pd.DataFrame(index=pd.RangeIndex(n_rows))
+
     def _validated_prediction_data(self, newdata: Any, variables: set[str], kind: str) -> Any:
         """Validate required columns and reuse the fitted predictor categories."""
         import pandas as pd

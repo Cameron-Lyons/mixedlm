@@ -202,6 +202,11 @@ categories of a random-effect predictor still require a fitted encoding and are 
 **Parameters:**
 
 - `newdata`: New data for prediction. If None, uses original data.
+  Accepts pandas or Polars DataFrames and Polars LazyFrames. A lazy query is
+  collected once per call, selecting fixed-effect predictors, requested
+  random-effect predictors/grouping columns, and named offset columns. Unused response
+  columns and unrelated output expressions are not selected. Fixed-effect-only
+  predictions do not select random-effect columns.
 - `re_form`: Formula for random effects. Use `"~0"` to exclude random effects.
 - `type`: For GLMMs, `"response"` or `"link"`.
 - `offset`: Numeric offset for new rows, a scalar, or the name of an offset
@@ -231,6 +236,13 @@ uncertainty and the delta method on the response scale.
 Fixed-coefficient covariance projections are evaluated in batches for both model
 types, bounding each temporary projection to one million elements (or one row
 when the fitted coefficient count exceeds that limit).
+
+Lazy query filters and ordering are preserved, so array offsets follow the
+resulting row order. The collected frame is reused for all prediction work in
+that call and is not cached on the fitted model. Intercept-only predictions with
+no required columns collect a row-count query, preserving empty and nonempty
+grids; expressions needed to determine that count may still be evaluated.
+The selected frame and returned predictions remain in memory.
 
 For conditional LMM predictions, uncertainty is evaluated from the joint fixed- and
 random-effect covariance. This includes covariance between fixed and random estimates,

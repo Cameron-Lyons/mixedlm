@@ -24,6 +24,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Prediction offsets reject complex, masked, and non-finite values before evaluating
   a model. Scalar offsets use constant-size storage even for large prediction grids.
 
+- LMM and GLMM predictions collect Polars lazy queries once, projecting to prediction
+  columns and preserving row order and intercept-only grid sizes. Conditional lazy
+  predictions no longer fail when checking the number of rows.
+
 ## [1.2.0] - 2026-08-18
 
 ### Added
