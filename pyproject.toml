@@ -77,6 +77,7 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-v"
+pythonpath = ["."]
 
 [dependency-groups]
 # Mirror the `dev` extra so both `uv sync` and `pip install .[dev]`

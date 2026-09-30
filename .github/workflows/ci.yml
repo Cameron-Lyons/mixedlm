@@ -74,10 +74,10 @@ jobs:
           uv pip install ruff
 
       - name: Run ruff check
-        run: uv run ruff check python/ tests/
+        run: uv run ruff check python/ tests/ tools/
 
       - name: Run ruff format check
-        run: uv run ruff format --check python/ tests/
+        run: uv run ruff format --check python/ tests/ tools/
 
   typecheck:
     runs-on: ubuntu-latest
@@ -96,7 +96,7 @@ jobs:
           uv pip install mypy numpy pandas scipy
 
       - name: Run mypy type check
-        run: uv run mypy python/ --ignore-missing-imports
+        run: uv run mypy python/ tools/ --ignore-missing-imports
 
   test:
     runs-on: ubuntu-latest

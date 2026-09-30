@@ -237,16 +237,24 @@ using only columns that occur together in a row of the sparse design matrix.
 It builds this row layout once per likelihood evaluation and reuses it as the
 working weights change. Dense designs accumulate one column pair at a time,
 using direct dot products for fully populated matrices. Linear and generalized
-linear models share this implementation. The GLMM random-effect system is still factored
-as a dense matrix, so large numbers of random-effect coefficients can remain costly.
+linear models share this implementation for dense systems. Larger sparse GLMM
+systems use the sparse precision pattern described below.
 
 The native solver stores one small covariance factor per random-effect
-structure and applies it across the grouping levels. It transforms weighted
-crossproducts in place, preserving contributions between levels and grouping
-factors without constructing a full block-diagonal covariance factor during
-normal fitting. The penalized random-effect system and its Cholesky factor
-remain dense, so their storage still grows quadratically with the number of
-random-effect coefficients.
+structure and applies it across the grouping levels. For sufficiently sparse
+models with at least 128 random-effect coefficients, it forms the scaled design
+and penalized random-effect system in sparse storage. A fill-reducing ordering
+keeps nested and crossed group structures sparse when possible. The row layout,
+precision pattern, and symbolic factorization are reused as the PIRLS working
+weights change, including the final Laplace determinant.
+
+All contributions between levels and grouping factors are retained, including
+correlated slopes and zero variance components. Small systems, dense designs,
+and patterns with excessive factor fill use dense kernels. Dense covariance
+transforms operate in place without constructing a full block-diagonal factor.
+For independent random intercepts, the sparse precision and factor each store
+one entry per group. Storage for the fixed-effect design and its crossproducts
+still depends on the numbers of observations and fixed-effect coefficients.
 
 The random effects are solved in spherical coordinates,
 
@@ -275,6 +283,12 @@ large counts from producing an excessively large initial linear predictor. The
 native solver uses the same starting-mean convention as Python, including prior
 weights and offsets. Its inner convergence flag remains false if an update or
 final deviance is nonfinite.
+
+The native PIRLS solver handles the fixed-effect and working-response columns in
+one triangular solve, borrowing the Cholesky factor. It reuses the transformed
+columns to recover random effects with a transpose triangular solve. This avoids
+copying the full factor and repeating a forward solve on each iteration. The
+random-effect factorization uses the sparse or dense path selected for the model.
 
 ## Nonlinear Mixed Models
 
