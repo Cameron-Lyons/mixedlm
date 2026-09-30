@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, replace
+from numbers import Integral
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -713,7 +714,7 @@ def bootstrap_nlmer(
     result : NlmerResult
         A fitted nonlinear mixed model.
     n_boot : int, default 1000
-        Number of bootstrap samples.
+        Positive integer number of bootstrap samples.
     seed : int, optional
         Random seed for reproducibility.
     verbose : bool, default False
@@ -725,6 +726,14 @@ def bootstrap_nlmer(
         Bootstrap results containing parameter samples and methods
         for computing confidence intervals and standard errors.
 
+    Notes
+    -----
+    Simulation or refit exceptions, nonfinite estimates, and incompatible
+    parameter shapes count as failed samples. All components of a failed
+    sample remain NaN and are excluded from confidence intervals and
+    standard errors. Inspect ``n_failed`` before interpreting the results.
+    If every sample fails, confidence bounds are NaN.
+
     Examples
     --------
     >>> from mixedlm.nlme.models import SSasymp
@@ -732,6 +741,11 @@ def bootstrap_nlmer(
     >>> boot = bootstrap_nlmer(result, n_boot=500, seed=42)
     >>> boot.ci(level=0.95)
     """
+    if isinstance(n_boot, bool | np.bool_) or not isinstance(n_boot, Integral):
+        raise TypeError("n_boot must be a positive integer")
+    if n_boot < 1:
+        raise ValueError("n_boot must be a positive integer")
+
     n_params = len(result.phi)
     n_theta = len(result.theta)
 
@@ -752,9 +766,24 @@ def bootstrap_nlmer(
             y_sim = result.simulate(nsim=1, use_re=True)
             boot_result = result.refit(y_sim)
 
-            phi_samples[b, :] = boot_result.phi
-            theta_samples[b, :] = boot_result.theta
-            sigma_samples[b] = boot_result.sigma
+            # Validate every component before writing any part of the sample.
+            phi = np.asarray(boot_result.phi, dtype=np.float64)
+            theta = np.asarray(boot_result.theta, dtype=np.float64)
+            sigma = np.asarray(boot_result.sigma, dtype=np.float64)
+            if (
+                phi.shape != (n_params,)
+                or theta.shape != (n_theta,)
+                or sigma.shape != ()
+                or not np.all(np.isfinite(phi))
+                or not np.all(np.isfinite(theta))
+                or not np.isfinite(sigma)
+            ):
+                n_failed += 1
+                continue
+
+            phi_samples[b, :] = phi
+            theta_samples[b, :] = theta
+            sigma_samples[b] = float(sigma)
 
         except Exception:
             n_failed += 1

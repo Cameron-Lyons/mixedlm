@@ -345,6 +345,14 @@ ci = boot.ci()
 print(ci)
 ```
 
+For nonlinear fits, `bootMer()` returns `NlmerBootstrapResult`, with
+`phi_samples` in place of `beta_samples`. Each failed simulation or refit leaves
+an entire sample row as `NaN`; nonfinite or incorrectly shaped estimates also
+count as failures. Check `n_failed` before interpreting intervals. Confidence
+intervals and standard errors exclude failed samples, and all-failed intervals
+have `NaN` bounds. `NlmerResult.confint(method="boot")` uses this same bootstrap
+path. Nonlinear bootstrap counts (`nsim` or `n_boot`) must be positive integers.
+
 ### bootCI
 
 Create tidy confidence intervals for fixed effects, variance parameters, and
