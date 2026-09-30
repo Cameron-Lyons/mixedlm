@@ -389,3 +389,8 @@ The Python ML/REML evaluator keeps large random-effect systems sparse and reuses
 one factorization for the fixed-effect and random-effect solves. Small systems
 use dense Cholesky. Both paths support observation weights, offsets, and
 unstructured, independent, compound-symmetry, and AR(1) random effects.
+
+Native sparse solves process multiple right-hand sides together, reusing the
+factor for every column. Cached and uncached solves share this implementation
+and solve directly in the returned array's storage, leaving the input unchanged
+even for strided or read-only arrays.
