@@ -8,6 +8,7 @@ import pandas as pd
 from numpy.typing import NDArray
 
 if TYPE_CHECKING:
+    from mixedlm.matrices.design import RandomEffectStructure
     from mixedlm.models.glmer import GlmerResult
     from mixedlm.models.lmer import LmerResult
     from mixedlm.models.nlmer import NlmerResult
@@ -857,7 +858,7 @@ def devcomp(model: MerMod) -> DevComp:
 
 def vcconv(
     theta: NDArray[np.floating],
-    random_structures: list,
+    random_structures: list[RandomEffectStructure],
     sigma: float = 1.0,
     to: str = "sdcorr",
 ) -> dict[str, dict]:
@@ -870,7 +871,9 @@ def vcconv(
     Parameters
     ----------
     theta : array-like
-        The theta (relative covariance) parameters.
+        Fitted theta parameters. Unstructured factors use lower-triangular
+        row order; compound-symmetry and AR(1) structures use scale and
+        correlation (scale only for a single coefficient).
     random_structures : list
         List of random effect structures from the model.
     sigma : float, default 1.0
@@ -879,13 +882,24 @@ def vcconv(
         Target parameterization:
         - "sdcorr": Standard deviations and correlations
         - "varcov": Variances and covariances
-        - "theta": Relative covariance (theta) parameters
+        - "theta": Original fitted parameters, without residual scaling
 
     Returns
     -------
     dict
-        Dictionary mapping grouping factors to their variance components
-        in the requested parameterization.
+        Dictionary mapping covariance block names to their variance components
+        in the requested parameterization. Repeated grouping factors receive
+        unique suffixes, reserving existing group names. Each entry includes
+        the original ``grouping_factor`` and coefficient names in ``terms``.
+        Off-diagonal values use upper-
+        triangular row order: (0, 1), (0, 2), ..., (1, 2), .... Independent
+        unstructured terms have empty correlation/covariance lists.
+
+    Raises
+    ------
+    ValueError
+        If the target is unknown, theta has an incompatible length or contains
+        non-finite values, or sigma is not finite and non-negative.
 
     Examples
     --------
@@ -902,80 +916,59 @@ def vcconv(
     --------
     VarCorr : Extract variance-covariance from model.
     """
+    from mixedlm.estimation.reml import _build_lambda_blocks, _count_theta
+    from mixedlm.utils.variance import _covariance_block_names, cov2sdcor
+
+    if to not in ("sdcorr", "varcov", "theta"):
+        raise ValueError("to must be 'sdcorr', 'varcov', or 'theta'")
+    if not np.isfinite(sigma) or sigma < 0:
+        raise ValueError("sigma must be finite and non-negative")
+    theta = np.asarray(theta, dtype=np.float64)
+    counts = [_count_theta([struct]) for struct in random_structures]
+    if theta.ndim != 1 or theta.size != sum(counts):
+        raise ValueError(f"theta must be one-dimensional with exactly {sum(counts)} values")
+    if not np.all(np.isfinite(theta)):
+        raise ValueError("theta must contain only finite values")
+
+    names = _covariance_block_names(random_structures)
     result: dict[str, dict] = {}
-    theta_idx = 0
+    if to == "theta":
+        start = 0
+        for name, struct, count in zip(names, random_structures, counts, strict=True):
+            result[name] = {
+                "theta": theta[start : start + count].tolist(),
+                "terms": list(struct.term_names),
+                "grouping_factor": struct.grouping_factor,
+            }
+            start += count
+        return result
 
-    for struct in random_structures:
-        n_terms = struct.n_terms
-        group = struct.grouping_factor
-
-        if struct.correlated:
-            n_theta = n_terms * (n_terms + 1) // 2
-            theta_block = theta[theta_idx : theta_idx + n_theta]
-            theta_idx += n_theta
-
-            L = np.zeros((n_terms, n_terms))
-            idx = 0
-            for j in range(n_terms):
-                for i in range(j, n_terms):
-                    L[i, j] = theta_block[idx]
-                    idx += 1
-
-            cov = L @ L.T * sigma**2
-
-            if to == "varcov":
-                diag_var = np.diag(cov)
-                cov_offdiag = []
-                for i in range(n_terms):
-                    for j in range(i + 1, n_terms):
-                        cov_offdiag.append(cov[i, j])
-                result[group] = {
-                    "var": diag_var.tolist(),
-                    "cov": cov_offdiag,
-                    "terms": struct.term_names,
-                }
-            elif to == "sdcorr":
-                sd = np.sqrt(np.diag(cov))
-                corr = []
-                for i in range(n_terms):
-                    for j in range(i + 1, n_terms):
-                        if sd[i] > 0 and sd[j] > 0:
-                            corr.append(cov[i, j] / (sd[i] * sd[j]))
-                        else:
-                            corr.append(0.0)
-                result[group] = {
-                    "sd": sd.tolist(),
-                    "corr": corr,
-                    "terms": struct.term_names,
-                }
-            else:
-                result[group] = {
-                    "theta": theta_block.tolist(),
-                    "terms": struct.term_names,
-                }
+    start = 0
+    for name, struct, count in zip(names, random_structures, counts, strict=True):
+        theta_block = theta[start : start + count]
+        start += count
+        correlated = struct.correlated or getattr(struct, "cov_type", "us") in ("cs", "ar1")
+        if not correlated:
+            sd = np.abs(theta_block) * sigma
+            converted = (
+                {"var": (sd**2).tolist(), "cov": []}
+                if to == "varcov"
+                else {"sd": sd.tolist(), "corr": []}
+            )
         else:
-            theta_block = theta[theta_idx : theta_idx + n_terms]
-            theta_idx += n_terms
-
+            factor = _build_lambda_blocks(theta_block, [struct])[0]
+            cov = factor @ factor.T * sigma**2
+            off_diagonal = np.triu_indices(struct.n_terms, k=1)
             if to == "varcov":
-                independent_var = (theta_block * sigma) ** 2
-                result[group] = {
-                    "var": independent_var.tolist(),
-                    "cov": [],
-                    "terms": struct.term_names,
-                }
-            elif to == "sdcorr":
-                sd = np.abs(theta_block) * sigma
-                result[group] = {
-                    "sd": sd.tolist(),
-                    "corr": [],
-                    "terms": struct.term_names,
-                }
+                converted = {"var": np.diag(cov).tolist(), "cov": cov[off_diagonal].tolist()}
             else:
-                result[group] = {
-                    "theta": theta_block.tolist(),
-                    "terms": struct.term_names,
-                }
+                sd, corr = cov2sdcor(cov)
+                converted = {"sd": sd.tolist(), "corr": corr[off_diagonal].tolist()}
+        result[name] = {
+            **converted,
+            "terms": list(struct.term_names),
+            "grouping_factor": struct.grouping_factor,
+        }
 
     return result
 
