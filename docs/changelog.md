@@ -8,16 +8,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- New-data LMM prediction intervals accept scalar, array, or column-based residual precision weights
 
-
+- New-data LMM prediction intervals accept scalar, array, or column-based residual precision weights.
 - `ggpredict()` accepts one known link-scale offset per prediction-grid row.
+- Nonlinear new-data predictions accept scalar, array, or column-based response offsets.
 
 ### Changed
 
 - `ggpredict()` and `allEffects()` now default to the unweighted mean of fitted
   link-scale offsets after missing-value omission. Pass `offset=0` for the previous
   behavior, including per-unit rates from models fitted with log-exposure offsets.
+
+### Fixed
+
+- Prediction offsets reject complex, masked, and non-finite values before evaluating
+  a model. Scalar offsets use constant-size storage even for large prediction grids.
 
 ## [1.2.0] - 2026-08-18
 

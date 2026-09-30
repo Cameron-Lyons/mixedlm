@@ -205,7 +205,11 @@ categories of a random-effect predictor still require a fitted encoding and are 
 - `re_form`: Formula for random effects. Use `"~0"` to exclude random effects.
 - `type`: For GLMMs, `"response"` or `"link"`.
 - `offset`: Numeric offset for new rows, a scalar, or the name of an offset
-  column in `newdata`. GLMM offsets are applied on the link scale.
+  column in `newdata`. GLMM offsets are applied on the link scale. Values must
+  be finite and real; complex and masked values are rejected. Arrays and columns
+  supply exactly one value per row and use positional order, including pandas
+  Series with custom indexes. New-data offsets default to zero. Without
+  `newdata`, fitted offsets are already included and an override is not accepted.
 - `weights`: LMM residual precision weights for new-data prediction intervals.
   Accepts a positive finite scalar, an array in row order, or a column name.
   Requires `newdata` and `interval="prediction"`; defaults to one.
@@ -389,6 +393,32 @@ The distribution family used.
 ## NlmerResult
 
 The result object returned by `nlmer()`. Has similar methods to LmerResult.
+
+### predict
+
+```python
+nlmm_result.predict(newdata=None, x_var=None, group_var=None, offset=None)
+```
+
+With no `newdata`, return fitted responses including the fitted offsets.
+For new observations, `x_var` defaults to the predictor used for fitting.
+Supply `group_var` to add fitted random effects for known groups; unknown groups
+receive population-level predictions. Omitting `group_var` requests
+population-level predictions.
+
+`offset` accepts a finite real scalar, a one-dimensional array with one value per
+new row, or the name of a column in `newdata`. It is added to the nonlinear
+response mean after applying any group effects. New-data offsets default to
+zero and do not reuse the fitted observation offsets. Explicit offsets require
+`newdata`; complex, masked, missing, and infinite offsets are rejected.
+
+```python
+predictions = nlmm_result.predict(
+    newdata,
+    group_var="subject",
+    offset="known_shift",
+)
+```
 
 ## VarCorr
 
