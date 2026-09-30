@@ -104,7 +104,9 @@ def test_grouped_response_fit_matches_manual_proportion_and_weights() -> None:
     grouped = glmer("incidence / size ~ period + (1 | herd)", data)
     manual = glmer("y ~ period + (1 | herd)", manual_data, weights="size")
 
-    assert grouped.converged
+    # Period 4 has no successes; both encodings must report the same status.
+    assert grouped.converged == manual.converged
+    assert grouped.pirls_converged == manual.pirls_converged
     assert np.allclose(grouped.beta, manual.beta)
     assert np.allclose(grouped.theta, manual.theta)
     assert grouped.deviance == pytest.approx(manual.deviance)

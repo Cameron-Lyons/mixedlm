@@ -119,12 +119,18 @@ class GlmerMod:
             converged=opt_result.converged,
             n_iter=opt_result.n_iter,
             nAGQ=nAGQ,
+            pirls_converged=opt_result.pirls_converged,
         )
 
         if ctrl.check_conv and not result.converged:
             warnings.warn(
-                "Model failed to converge. Consider increasing maxiter or "
-                "trying a different optimizer.",
+                (
+                    "Model failed to converge: the inner PIRLS solver did not converge. "
+                    "Inspect the response and model specification."
+                    if not result.pirls_converged
+                    else "Model failed to converge. Consider increasing maxiter or "
+                    "trying a different optimizer."
+                ),
                 category=UserWarning,
                 stacklevel=2,
             )

@@ -173,6 +173,7 @@ fn _rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(lmm::profiled_deviance_with_gradient, m)?)?;
     m.add_function(wrap_pyfunction!(glmm::pirls, m)?)?;
     m.add_function(wrap_pyfunction!(glmm::laplace_deviance, m)?)?;
+    m.add_function(wrap_pyfunction!(glmm::glmm_deviance, m)?)?;
     m.add_function(wrap_pyfunction!(glmm::adaptive_gh_deviance, m)?)?;
     m.add_function(wrap_pyfunction!(nlmm::pnls_step, m)?)?;
     m.add_function(wrap_pyfunction!(nlmm::nlmm_deviance, m)?)?;
