@@ -259,6 +259,24 @@ model = mlm.glmer(
 )
 ```
 
+## Likelihood Confidence Intervals
+
+Use likelihood profiles when the shape of the likelihood matters:
+
+```python
+intervals = model.confint(parm="x", method="profile")
+profiles = model.profile(which="x", n_points=20)
+profiles["x"].plot()
+```
+
+Profiling re-optimizes the other coefficients and covariance parameters and
+can produce asymmetric intervals. It refines the joint likelihood optimum
+before tracing each curve; a warning reports a material shift from the original
+coefficient estimate. The fitted model remains unchanged. Profiling retains
+`nAGQ`, weights, offsets, and PIRLS controls and requires converged solves.
+`n_points` controls the curve resolution; confidence limits use root finding.
+The default `model.confint()` continues to provide faster Wald intervals.
+
 ## Model Comparison
 
 ### Likelihood Ratio Tests

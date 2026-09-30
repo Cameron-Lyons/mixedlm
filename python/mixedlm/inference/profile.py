@@ -759,51 +759,19 @@ def profile_glmer(
     n_points: int = 20,
     level: float = 0.95,
 ) -> dict[str, ProfileResult]:
-    level = _validate_confidence_level(level)
-    if which is None:
-        which = result.matrices.fixed_names
-    elif isinstance(which, str):
-        which = [which]
+    """Profile fixed effects using constrained integrated-likelihood fits.
 
-    from mixedlm.utils.names import _check_unique_coefficient_names
+    Other fixed coefficients and covariance parameters are re-optimized at
+    every point. The joint optimum is refined before profiling, so a profile's
+    ``mle`` can differ from the original fit's PIRLS coefficient estimate.
+    Quadrature and inner solver controls are inherited from the fitted model.
+    ``n_points`` controls plotting resolution; interval endpoints are solved
+    independently using the likelihood-ratio cutoff. Failed fits or unbracketed
+    intervals raise an error instead of substituting a Wald interval.
+    """
+    from mixedlm.inference.glmm_profile import likelihood_profiles
 
-    _check_unique_coefficient_names(
-        result.matrices.fixed_names,
-        which,
-        alternative="Rename colliding formula variables before requesting named profiles.",
-    )
-
-    profiles: dict[str, ProfileResult] = {}
-    alpha = 1 - level
-    z_crit = stats.norm.isf(alpha / 2)
-
-    vcov = result.vcov()
-
-    for param in which:
-        if param not in result.matrices.fixed_names:
-            continue
-
-        idx = result.matrices.fixed_names.index(param)
-        mle = result.beta[idx]
-        se = np.sqrt(vcov[idx, idx])
-
-        ci_lower = mle - z_crit * se
-        ci_upper = mle + z_crit * se
-
-        param_values = np.linspace(mle - 3 * se, mle + 3 * se, n_points)
-        zeta_values = (param_values - mle) / se
-
-        profiles[param] = ProfileResult(
-            parameter=param,
-            values=param_values,
-            zeta=zeta_values,
-            mle=mle,
-            ci_lower=ci_lower,
-            ci_upper=ci_upper,
-            level=level,
-        )
-
-    return profiles
+    return likelihood_profiles(result, which, n_points, level)
 
 
 def logProf(profile: ProfileResult) -> ProfileResult:
