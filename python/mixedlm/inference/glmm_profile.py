@@ -11,6 +11,7 @@ from numpy.typing import NDArray
 from scipy import optimize, stats
 
 from mixedlm.estimation.joint_glmm import JointGLMMObjective
+from mixedlm.estimation.optimizers import run_optimizer
 from mixedlm.inference.profile_types import ProfileResult
 from mixedlm.utils.names import _check_unique_coefficient_names
 from mixedlm.utils.validation import _validate_confidence_level
@@ -73,13 +74,14 @@ class _GLMMProfileLikelihood:
         if not np.any(free):
             return self.deviance(template), template
         bounds = [bound for bound, keep in zip(self.bounds, free, strict=True) if keep]
-        fitted = optimize.minimize(
+        fitted = run_optimizer(
             objective,
             template[free],
             method="L-BFGS-B",
             jac="3-point",
             bounds=bounds,
             options={"maxiter": 1000, "ftol": 1e-12, "gtol": 1e-6},
+            restart_edge=True,
         )
         if not fitted.success:
             raise RuntimeError(f"GLMM profile nuisance optimization failed: {fitted.message}")

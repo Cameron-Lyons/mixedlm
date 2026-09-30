@@ -186,10 +186,13 @@ def test_sparse_serial_and_parallel_profiles_match_dense_profiles(monkeypatch):
     expected_slice = slice2D(replace(result), "(Intercept)", "x", n_points=5)
     monkeypatch.setattr(shared_utils, "_SPARSE_PROJECTION_MIN_RANDOM", 0)
     monkeypatch.setattr(reml_module, "_SPARSE_PROFILE_MIN_RANDOM", 0)
-    monkeypatch.setattr(profile_module, "ProcessPoolExecutor", ThreadPoolExecutor)
+    process_executor = profile_module.ProcessPoolExecutor
     monkeypatch.setattr(profile_module, "_SLICE2D_PARALLEL_MIN_TASKS", 0)
 
     for jobs in (1, 2):
+        # Full profiles optimize independently in processes. Keep the actual
+        # executor instead of forcing concurrent SciPy solvers into threads.
+        monkeypatch.setattr(profile_module, "ProcessPoolExecutor", process_executor)
         actual = profile_lmer(replace(result), n_points=7, n_jobs=jobs)
         for name, reference in expected_profiles.items():
             # Nuisance fits and interval roots have optimization tolerance;
@@ -202,6 +205,7 @@ def test_sparse_serial_and_parallel_profiles_match_dense_profiles(monkeypatch):
                 rtol=1e-8,
                 atol=1e-8,
             )
+        monkeypatch.setattr(profile_module, "ProcessPoolExecutor", ThreadPoolExecutor)
         actual_slice = slice2D(replace(result), "(Intercept)", "x", n_points=5, n_jobs=jobs)
         assert_allclose(actual_slice.values1, expected_slice.values1, rtol=1e-12, atol=1e-12)
         assert_allclose(actual_slice.values2, expected_slice.values2, rtol=1e-12, atol=1e-12)

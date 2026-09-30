@@ -109,6 +109,7 @@ class GlmerMod:
             method=opt_method,
             maxiter=opt_maxiter,
             options=opt_options,
+            restart_edge=ctrl.restart_edge,
         )
 
         result = GlmerResult(

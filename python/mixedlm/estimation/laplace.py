@@ -1027,11 +1027,13 @@ class GLMMOptimizer:
         method: str = "L-BFGS-B",
         maxiter: int = 1000,
         options: dict[str, Any] | None = None,
+        *,
+        restart_edge: bool = True,
     ) -> GLMMOptimizationResult:
         """Optimize theta and beta jointly, or use the nAGQ=0 PIRLS approximation."""
         _validate_quadrature(self.nAGQ, self.matrices)
         if self.nAGQ == 0:
-            return self._optimize_pirls(start, method, maxiter, options)
+            return self._optimize_pirls(start, method, maxiter, options, restart_edge=restart_edge)
         exact_pirls = self.matrices.n_random == 0 or (
             self.nAGQ == 1
             and (
@@ -1040,7 +1042,9 @@ class GLMMOptimizer:
             )
         )
         if exact_pirls:
-            fitted = self._optimize_pirls(start, method, maxiter, options)
+            fitted = self._optimize_pirls(
+                start, method, maxiter, options, restart_edge=restart_edge
+            )
             return replace(fitted, joint_fit=fitted.pirls_converged)
         if start is None:
             start = self.get_start_theta()
@@ -1052,7 +1056,7 @@ class GLMMOptimizer:
                 nAGQ=0,
                 pirls_maxiter=self.pirls_maxiter,
                 pirls_tol=self.pirls_tol,
-            )._optimize_pirls(start, method, maxiter, options)
+            )._optimize_pirls(start, method, maxiter, options, restart_edge=restart_edge)
             theta, beta = initial.theta, initial.beta
             initial_iterations = initial.n_iter
             initial_converged = initial.pirls_converged
@@ -1107,6 +1111,7 @@ class GLMMOptimizer:
             jac="3-point"
             if method in {"L-BFGS-B", "BFGS", "TNC", "SLSQP", "trust-constr"}
             else None,
+            restart_edge=restart_edge,
         )
         optimum = result.x * scale
         theta, beta = optimum[: self.n_theta], optimum[self.n_theta :]
@@ -1129,6 +1134,8 @@ class GLMMOptimizer:
         method: str = "L-BFGS-B",
         maxiter: int = 1000,
         options: dict[str, Any] | None = None,
+        *,
+        restart_edge: bool = True,
     ) -> GLMMOptimizationResult:
         _validate_quadrature(self.nAGQ, self.matrices)
         if start is None:
@@ -1156,6 +1163,7 @@ class GLMMOptimizer:
             bounds=bounds,
             options=opt_options,
             callback=callback,
+            restart_edge=restart_edge,
         )
 
         theta_opt = result.x
