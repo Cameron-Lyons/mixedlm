@@ -91,24 +91,7 @@ impl SparseCholeskyNumeric {
     ) -> PyResult<Py<PyArray2<f64>>> {
         let b_array = b.as_array();
         let (n, m) = (b_array.nrows(), b_array.ncols());
-        if n != self.inner.n() {
-            return Err(linalg::LinalgError::DimensionMismatch(format!(
-                "right-hand side has {n} rows, expected {}",
-                self.inner.n()
-            ))
-            .into());
-        }
-
-        let mut result = vec![0.0; n * m];
-
-        for j in 0..m {
-            let col: Vec<f64> = b_array.column(j).to_vec();
-            let x = self.inner.solve(&col)?;
-            for (i, value) in x.into_iter().enumerate() {
-                result[i * m + j] = value;
-            }
-        }
-
+        let result = self.inner.solve(b_array)?;
         owned_array2(py, result, (n, m))
     }
 

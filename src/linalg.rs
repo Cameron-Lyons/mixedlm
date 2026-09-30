@@ -75,14 +75,7 @@ pub fn sparse_cholesky_solve(
     let (n, m) = (b.nrows(), b.ncols());
     let cache = SymbolicCholeskyCache::new(a.row_indices(), a.col_offsets(), n)?;
     let factor = cache.factor(a.values(), a.row_indices(), a.col_offsets())?;
-    let mut result = vec![0.0; n * m];
-    for column in 0..m {
-        let rhs: Vec<f64> = b.column(column).iter().copied().collect();
-        let solution = factor.solve(&rhs)?;
-        for (row, value) in solution.into_iter().enumerate() {
-            result[row * m + column] = value;
-        }
-    }
+    let result = factor.solve(b)?;
 
     Ok((result, n, m))
 }

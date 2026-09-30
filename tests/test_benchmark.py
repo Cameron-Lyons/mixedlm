@@ -506,6 +506,25 @@ def test_benchmark_sparse_cholesky_solve(benchmark, sparse_spd_system):
     assert np.asarray(result).shape == rhs.shape
 
 
+@pytest.mark.benchmark(group="rust-sparse-rhs")
+@pytest.mark.parametrize("cached", [False, True], ids=["uncached", "cached"])
+@pytest.mark.parametrize("n_rhs", [1, 16, 128])
+def test_benchmark_sparse_multiple_rhs(benchmark, sparse_spd_system, cached, n_rhs):
+    data, indices, indptr, shape, _ = sparse_spd_system
+    rhs = np.random.default_rng(42).standard_normal((shape[0], n_rhs))
+    if cached:
+        symbolic = SparseCholeskySymbolic(indices, indptr, shape[0])
+        solve = symbolic.factor(data).solve
+    else:
+
+        def solve(rhs):
+            return sparse_cholesky_solve(data, indices, indptr, shape, rhs)
+
+    result = benchmark(solve, rhs)
+    matrix = sparse.csc_matrix((data, indices, indptr), shape=shape)
+    np.testing.assert_allclose(matrix @ result, rhs, rtol=2e-12, atol=2e-12)
+
+
 @pytest.mark.benchmark(group="rust-sparse-cholesky")
 def test_benchmark_sparse_cholesky_logdet(benchmark, sparse_spd_system):
     data, indices, indptr, shape, _rhs = sparse_spd_system
