@@ -73,7 +73,8 @@ def test_detached_errors_do_not_damage_shared_problem():
         assert_array_equal(value, reference)
 
 
-def test_evaluation_releases_interpreter_lock_and_snapshots_parameters():
+@pytest.mark.parametrize("change_layout", [False, True])
+def test_evaluation_releases_interpreter_lock_and_snapshots_parameters(change_layout):
     if not getattr(sys, "_is_gil_enabled", lambda: True)():
         pytest.skip("Interpreter lock is already disabled")
     # Isolate the long switch interval from the test runner and other tests.
@@ -116,6 +117,8 @@ def test_evaluation_releases_interpreter_lock_and_snapshots_parameters():
             np.testing.assert_array_equal(actual, reference)
         print(json.dumps({'progressed': progressed}))
     """)
+    if change_layout:
+        script = script.replace("theta[:] = 2", "theta[:] = 2; theta.shape = ()")
     env = dict(os.environ, OPENBLAS_NUM_THREADS="1", OMP_NUM_THREADS="1", RAYON_NUM_THREADS="1")
     result = subprocess.run(
         [sys.executable, "-c", script], env=env, text=True, capture_output=True, timeout=40

@@ -454,10 +454,12 @@ impl GlmmProblem {
     ) -> PyResult<(f64, Vec<f64>, Vec<f64>, bool)> {
         validate_pirls_controls(maxiter, tol)?;
         validate_agq_structure(n_agq, self.z.ncols(), &self.structures)?;
-        let theta = theta.as_slice()?;
-        validate_theta_length(theta.len(), self.n_theta).map_err(PyValueError::new_err)?;
-        // Per-call NumPy parameters must be owned before releasing Python's lock.
-        let theta = theta.to_vec();
+        let theta_values = theta.as_slice()?;
+        validate_theta_length(theta_values.len(), self.n_theta).map_err(PyValueError::new_err)?;
+        // Own the parameters and release the NumPy borrow before detaching.
+        // The caller may change the array's layout while the solve is running.
+        let theta_values = theta_values.to_vec();
+        drop(theta);
         let override_offset = if let Some(offset) = offset {
             let offset = offset.as_array();
             if offset.len() != self.y.nrows() {
@@ -486,7 +488,7 @@ impl GlmmProblem {
                 &self.z,
                 &self.weights,
                 offset,
-                &theta,
+                &theta_values,
                 &self.structures,
                 self.family,
                 self.link,
