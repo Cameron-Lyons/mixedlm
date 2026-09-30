@@ -27,6 +27,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - LMM and GLMM predictions collect Polars lazy queries once, projecting to prediction
   columns and preserving row order and intercept-only grid sizes. Conditional lazy
   predictions no longer fail when checking the number of rows.
+- GLMM fitting accepts `pirls_maxiter` to limit inner iterations independently of outer optimization; fitted results and refits retain the inner controls
+
+### Fixed
+- `GlmerControl.tolPwrss` now governs PIRLS stopping in native and Python likelihoods, quadrature, modular fitting, and final extraction; invalid inner controls are rejected before solving
 
 ## [1.2.0] - 2026-08-18
 
