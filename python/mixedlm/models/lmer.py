@@ -1724,7 +1724,7 @@ class LmerResult(MerResultMixin):
             return result
 
         elif method == "profile":
-            profiles = profile_lmer(self, which=parm, level=level)
+            profiles = profile_lmer(self, which=parm, level=level, n_points=3)
             return {p: (profiles[p].ci_lower, profiles[p].ci_upper) for p in parm if p in profiles}
 
         elif method == "boot":

@@ -376,12 +376,14 @@ Compute information criteria.
 result.profile(which=None, n_points=20, level=0.95)
 ```
 
-Compute fixed-effect likelihood profiles. GLMM profiles re-optimize nuisance
+Compute fixed-effect likelihood profiles. LMM profiles re-optimize covariance
+parameters, other fixed coefficients, and residual scale using ML, including for
+REML inputs. The returned center records the ML estimate. GLMM profiles re-optimize nuisance
 fixed coefficients and covariance parameters using the fitted quadrature and
 inner solver controls. The refined profile center can differ from the fitted
 coefficient, particularly for `nAGQ=0` fits, which are profiled using the joint
 Laplace likelihood. Default joint fits usually retain their center within
-optimization tolerance; the original result is unchanged. GLMM `n_points` must be at least
+optimization tolerance; the original result is unchanged. `n_points` must be at least
 3 and affects the plotted curve, not the interval endpoint accuracy. See
 [profile likelihood](inference.md#profile-likelihood) for convergence behavior.
 

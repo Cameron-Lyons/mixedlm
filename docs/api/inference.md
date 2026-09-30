@@ -636,11 +636,23 @@ because a dictionary cannot represent both coefficients under one key.
 
 ## Profile Likelihood
 
-LMM fixed-effect profiles hold the fitted covariance parameters (`theta`) fixed
-while recomputing the remaining fixed effects and residual scale. The
-one-parameter curves and two-parameter slices reuse the fitted precision
-solver. Large random-effect systems stay sparse, including calculations in
-parallel workers.
+LMM fixed-effect profiles re-optimize covariance parameters, remaining fixed
+coefficients, and residual scale at each constrained value. They use maximum
+likelihood, including an ML refit when the input used REML. The original result
+is unchanged. `ProfileResult.mle` records the ML center, which can differ from
+the input coefficient; a warning reports shifts above 0.001 ML standard errors.
+
+Weighted design crossproducts are reused across constrained fits, and large
+random-effect systems remain sparse. `n_jobs` supports parallel profiling of
+coefficients, with serial fallback if process workers cannot be created.
+Confidence limits use likelihood-ratio cutoffs and adaptive bracketing. A failed
+gradient optimization retries the same likelihood with COBYQA. Fits starting at
+zero variance use COBYQA directly so constrained optima can leave that boundary.
+Gradient fits that reach zero variance are also checked with COBYQA.
+If optimization does not converge, or an interval cannot be bracketed, the
+calculation raises an error. The calculation costs more than the former
+covariance-fixed approximation; Wald intervals remain available for faster
+inference.
 
 GLMM fixed-effect profiles re-optimize every other fixed coefficient and the
 covariance parameters at each constrained value, using the fitted model's
@@ -680,19 +692,32 @@ mlm.plot_profiles(profiles)
 
 ### slice2D
 
-Compute 2D profile likelihood slice.
+Compute a conditional slice or a full two-parameter likelihood profile.
 
 ```python
 profile_2d = mlm.slice2D(model, param1, param2, n_points=20)
+
+# Re-optimize covariance for a joint likelihood-ratio region:
+joint_profile = mlm.slice2D(
+    model, param1, param2, n_points=15, profile_covariance=True
+)
 ```
 
 **Parameters:**
 
 - `model`: Fitted model
-- `param1`, `param2`: Parameter names to profile
+- `param1`, `param2`: Two distinct fixed-coefficient names
 - `n_points`: Number of grid points per dimension
+- `profile_covariance`: Default `False` retains the conditional slice at the
+  fitted covariance parameters. `True` re-optimizes covariance, other fixed
+  coefficients, and residual scale at every grid point using ML. Its grid spans
+  the coordinate ranges of the requested joint likelihood-ratio region and
+  includes the ML center. Use this mode for joint likelihood-ratio inference.
+- `n_jobs`: Positive worker count or `-1` for available CPUs. Full profiles can
+  evaluate grid rows in parallel.
 
-**Returns:** Profile2DResult with `plot()` method
+**Returns:** `Profile2DResult` with a `plot()` method and `profile_covariance`
+metadata identifying the calculation used.
 
 ## Convergence Checking
 

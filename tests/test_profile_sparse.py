@@ -6,6 +6,7 @@ from dataclasses import replace
 import numpy as np
 import pandas as pd
 import pytest
+from mixedlm.estimation import reml as reml_module
 from mixedlm.estimation.reml import _build_lambda
 from mixedlm.formula.parser import parse_formula, set_cov_type
 from mixedlm.inference import profile as profile_module
@@ -180,21 +181,26 @@ def test_large_profile_never_densifies_random_precision(builder, monkeypatch):
 def test_sparse_serial_and_parallel_profiles_match_dense_profiles(monkeypatch):
     result = _result("crossed")
     monkeypatch.setattr(shared_utils, "_SPARSE_PROJECTION_MIN_RANDOM", np.inf)
+    monkeypatch.setattr(reml_module, "_SPARSE_PROFILE_MIN_RANDOM", np.inf)
     expected_profiles = profile_lmer(replace(result), n_points=7)
     expected_slice = slice2D(replace(result), "(Intercept)", "x", n_points=5)
     monkeypatch.setattr(shared_utils, "_SPARSE_PROJECTION_MIN_RANDOM", 0)
+    monkeypatch.setattr(reml_module, "_SPARSE_PROFILE_MIN_RANDOM", 0)
     monkeypatch.setattr(profile_module, "ProcessPoolExecutor", ThreadPoolExecutor)
     monkeypatch.setattr(profile_module, "_SLICE2D_PARALLEL_MIN_TASKS", 0)
 
     for jobs in (1, 2):
         actual = profile_lmer(replace(result), n_points=7, n_jobs=jobs)
         for name, reference in expected_profiles.items():
-            assert_allclose(actual[name].values, reference.values, rtol=1e-12, atol=1e-12)
+            # Nuisance fits and interval roots have optimization tolerance;
+            # the conditional slices below still agree to linear-solve precision.
+            assert_allclose(actual[name].values, reference.values, rtol=1e-8, atol=1e-8)
             assert_allclose(actual[name].zeta, reference.zeta, rtol=1e-10, atol=1e-7)
             assert_allclose(
                 [actual[name].ci_lower, actual[name].ci_upper],
                 [reference.ci_lower, reference.ci_upper],
-                rtol=1e-10,
+                rtol=1e-8,
+                atol=1e-8,
             )
         actual_slice = slice2D(replace(result), "(Intercept)", "x", n_points=5, n_jobs=jobs)
         assert_allclose(actual_slice.values1, expected_slice.values1, rtol=1e-12, atol=1e-12)
