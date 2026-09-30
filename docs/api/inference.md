@@ -308,6 +308,20 @@ one row per batch). The full reference grid and returned data frame still scale
 with the requested number of combinations. These calculations also apply to each
 grid returned by `allEffects()`.
 
+Both adjusted-effect functions default to `offset=None`, using the unweighted
+mean of the model's fitted link-scale offsets after missing-value omission.
+Set `offset=0` to request per-unit rates for a count model with a log-exposure
+offset, or pass another finite scalar to choose a reference exposure. This
+changes the previous default of zero for models fitted with nonzero offsets.
+Offsets are treated as known and add no coefficient uncertainty.
+
+`ggpredict()` also accepts one finite offset per returned grid row, in the
+Cartesian order of `terms` with the last term varying fastest. Values are
+positional, including when passed as a pandas Series; they are not recycled.
+For example, `offset=np.log([10, 20, 30])` requests three different exposures
+for a three-row grid. The result's `attrs["offset"]` records the resolved scalar
+or an immutable tuple of row offsets.
+
 ### allEffects
 
 Compute a separate adjusted prediction grid for every fixed-effect variable.
@@ -328,6 +342,9 @@ as a scalar or a one-element iterable. Use `ggpredict()` with all relevant terms
 for a joint grid with several values per variable. Invalid options and unknown
 `at` variables raise an error even when the model has no fixed-effect predictors
 and `allEffects()` would otherwise return an empty dictionary.
+
+`allEffects()` uses the same scalar offset for every grid. Call `ggpredict()`
+separately when different grids require different row offsets.
 
 Both functions are batched, use the fitted fixed-effect covariance matrix, and
 require no plotting package. Prediction grids automatically reuse fitted

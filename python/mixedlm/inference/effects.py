@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pandas as pd
-from numpy.typing import NDArray
+from numpy.typing import ArrayLike, NDArray
 from scipy import stats
 
 from mixedlm.formula.terms import InteractionTerm, PowerTerm, VariableTerm
@@ -182,6 +182,57 @@ def _normalize_terms(terms: str | Sequence[str]) -> list[str]:
     return result
 
 
+def _effect_offset(
+    model: LmerResult | GlmerResult, offset: ArrayLike | None, *, allow_vector: bool = True
+) -> float | NDArray[np.float64]:
+    """Resolve a known link-scale offset without allocating a broadcast vector."""
+    if not hasattr(model, "formula") or not hasattr(model, "matrices"):
+        raise TypeError("model must be a fitted linear or generalized linear mixed model")
+    raw = model.matrices.offset if offset is None else offset
+    if np.ma.is_masked(raw):
+        raise TypeError("offset must not contain masked values")
+    try:
+        values = np.asarray(raw)
+    except (TypeError, ValueError):
+        raise TypeError("offset must be a finite numeric scalar or 1-D sequence") from None
+    if (
+        values.dtype.kind in "mMV"
+        or np.iscomplexobj(values)
+        or (values.dtype.kind == "O" and any(np.iscomplexobj(value) for value in values.flat))
+    ):
+        raise TypeError("offset must contain real numeric values")
+    if values.dtype.kind == "O" and any(np.ma.is_masked(value) for value in values.flat):
+        raise TypeError("offset must not contain masked values")
+    try:
+        with np.errstate(over="ignore", invalid="ignore"):
+            values = np.asarray(values, dtype=np.float64)
+    except (TypeError, ValueError, OverflowError):
+        raise TypeError("offset must be a finite numeric scalar or 1-D sequence") from None
+    if values.ndim > 1 or not values.size:
+        raise ValueError("offset must be a finite scalar or nonempty 1-D sequence")
+    if not np.all(np.isfinite(values)):
+        raise ValueError("offset must be finite")
+    if offset is None:
+        with np.errstate(over="ignore", invalid="ignore"):
+            mean = float(np.mean(values))
+        if not np.isfinite(mean):
+            scale = np.max(np.abs(values))
+            mean = float(np.mean(values / scale) * scale)
+        return mean
+    if values.ndim == 0:
+        return float(values)
+    if not allow_vector:
+        raise ValueError(
+            "allEffects offset must be a scalar or None; use ggpredict for row offsets"
+        )
+    return values
+
+
+def _validate_offset_length(offset: float | NDArray[np.float64], n_rows: int) -> None:
+    if isinstance(offset, np.ndarray) and len(offset) != n_rows:
+        raise ValueError(f"offset must have one value per prediction-grid row ({n_rows} values)")
+
+
 class _EffectGrid:
     """Prepare reference values once, then build independent prediction grids."""
 
@@ -282,29 +333,27 @@ def _validate_prediction_options(
     type: str,
     level: float,
     n_points: int,
-    offset: float,
-) -> float:
+    offset: ArrayLike | None,
+    *,
+    allow_vector: bool = True,
+) -> float | NDArray[np.float64]:
     if type not in {"response", "link"}:
         raise ValueError("type must be 'response' or 'link'")
     _validate_confidence_level(level)
     if isinstance(n_points, bool) or not isinstance(n_points, int) or n_points < 2:
         raise ValueError("n_points must be an integer of at least 2")
-    try:
-        offset_value = float(offset)
-    except (TypeError, ValueError) as exc:
-        raise TypeError("offset must be a finite scalar") from exc
-    if not np.isfinite(offset_value):
-        raise ValueError("offset must be finite")
-    if not hasattr(model, "formula") or not hasattr(model, "matrices"):
-        raise TypeError("model must be a fitted linear or generalized linear mixed model")
-    return offset_value
+    return _effect_offset(model, offset, allow_vector=allow_vector)
 
 
 class _EffectPrediction:
     """Share coefficient uncertainty and display settings within one request."""
 
     def __init__(
-        self, model: LmerResult | GlmerResult, type: str, level: float, offset: float
+        self,
+        model: LmerResult | GlmerResult,
+        type: str,
+        level: float,
+        offset: float | NDArray[np.float64],
     ) -> None:
         self.beta = np.asarray(model.beta, dtype=np.float64)
         self.model = model
@@ -363,7 +412,9 @@ class _EffectPrediction:
             {
                 "type": self.type,
                 "level": self.level,
-                "offset": self.offset,
+                "offset": tuple(self.offset)
+                if isinstance(self.offset, np.ndarray)
+                else self.offset,
                 "adjustment": "numeric means and categorical reference levels",
             }
         )
@@ -378,7 +429,7 @@ def ggpredict(
     type: str = "response",
     level: float = 0.95,
     n_points: int = 25,
-    offset: float = 0.0,
+    offset: ArrayLike | None = None,
     contrasts: dict[str, str | NDArray[np.floating]] | None = None,
 ) -> pd.DataFrame:
     """Compute adjusted fixed-effect predictions over a compact value grid.
@@ -406,8 +457,12 @@ def ggpredict(
         Confidence level.
     n_points : int, default 25
         Maximum number of automatically generated values per numeric variable.
-    offset : float, default 0.0
-        Constant offset added to the linear predictor.
+    offset : scalar or array-like, optional
+        Known offset on the link scale. None uses the unweighted mean of the
+        fitted offsets after missing-value omission. A scalar or one value per
+        prediction-grid row overrides this reference. Grid order follows
+        ``terms``, with the last term varying fastest. Use zero for per-unit
+        rates in a count model fitted with log-exposure offsets.
     contrasts : dict, optional
         Defaults to the fitted categorical contrasts. An explicit mapping
         overrides them and should match the fitted coefficient parameterization.
@@ -424,6 +479,7 @@ def ggpredict(
     builder = _EffectGrid(model, at, n_points)
     builder.validate_terms(normalized_terms)
     grid = builder.build(normalized_terms, contrasts)
+    _validate_offset_length(offset_value, len(grid))
     prediction = _EffectPrediction(model, type, level, offset_value)
     return prediction.predict(normalized_terms, grid, contrasts)
 
@@ -435,7 +491,7 @@ def allEffects(
     type: str = "response",
     level: float = 0.95,
     n_points: int = 25,
-    offset: float = 0.0,
+    offset: float | None = None,
     contrasts: dict[str, str | NDArray[np.floating]] | None = None,
 ) -> dict[str, pd.DataFrame]:
     """Compute one grid per fixed-effect variable, sharing setup within this call.
@@ -447,7 +503,9 @@ def allEffects(
     other grids.
     """
     level = _validate_confidence_level(level)
-    offset_value = _validate_prediction_options(model, type, level, n_points, offset)
+    offset_value = _validate_prediction_options(
+        model, type, level, n_points, offset, allow_vector=False
+    )
     builder = _EffectGrid(model, at, n_points)
     for variable in builder.variables:
         builder.validate_terms([variable])
