@@ -29,6 +29,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Prepared native LMM likelihoods release Python's interpreter lock during ML and REML evaluation. Calls snapshot covariance parameters and keep solve state local, allowing concurrent evaluations of shared designs and responses.
+
 - Prepared native GLMM likelihoods release Python's interpreter lock during evaluation, allowing independent solves from Python threads. Per-call covariance parameters and offset overrides are copied before release, and scratch state remains local to each solve.
 
 - Native GLMM iterations and final mode calculations reuse a linear-predictor buffer. Mode-only updates start directly from the fixed-effect offset, avoiding empty matrix multiplication, and adaptive quadrature uses the same predictor update.
