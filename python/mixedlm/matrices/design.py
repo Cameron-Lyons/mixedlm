@@ -436,6 +436,30 @@ def _build_sparse_Z_block(
     )
 
 
+def _random_term_columns(
+    rterm: RandomTerm,
+    data: Any,
+    n: int,
+    contrasts: dict[str, str | NDArray[np.floating]] | None = None,
+    category_levels: dict[str, list[Any]] | None = None,
+) -> tuple[list[NDArray[np.floating]], list[str]]:
+    """Encode within-group random terms consistently for fitting and prediction."""
+    columns: list[NDArray[np.floating]] = (
+        [np.ones(n, dtype=np.float64)] if rterm.has_intercept else []
+    )
+    names = ["(Intercept)"] if rterm.has_intercept else []
+    encoded_columns, encoded_names = _encode_terms(
+        rterm.expr,
+        data,
+        has_intercept=rterm.has_intercept,
+        contrasts=contrasts,
+        category_levels=category_levels,
+    )
+    columns.extend(encoded_columns)
+    names.extend(encoded_names)
+    return columns, names
+
+
 def build_random_matrix(
     formula: Formula,
     data: Any,
@@ -481,19 +505,7 @@ def _build_random_block(
     level_indices, level_map = factorize_levels(group_values)
     n_levels = len(level_map)
 
-    term_cols: list[NDArray[np.floating]] = (
-        [np.ones(n, dtype=np.float64)] if rterm.has_intercept else []
-    )
-    term_names = ["(Intercept)"] if rterm.has_intercept else []
-    encoded_cols, encoded_names = _encode_terms(
-        rterm.expr,
-        data,
-        has_intercept=rterm.has_intercept,
-        contrasts=contrasts,
-        category_levels=category_levels,
-    )
-    term_cols.extend(encoded_cols)
-    term_names.extend(encoded_names)
+    term_cols, term_names = _random_term_columns(rterm, data, n, contrasts, category_levels)
 
     n_terms = len(term_cols)
 
@@ -526,19 +538,7 @@ def _build_nested_random_block(
     level_indices, level_map = factorize_levels(combined_group)
     n_levels = len(level_map)
 
-    term_cols: list[NDArray[np.floating]] = (
-        [np.ones(n, dtype=np.float64)] if rterm.has_intercept else []
-    )
-    term_names = ["(Intercept)"] if rterm.has_intercept else []
-    encoded_cols, encoded_names = _encode_terms(
-        rterm.expr,
-        data,
-        has_intercept=rterm.has_intercept,
-        contrasts=contrasts,
-        category_levels=category_levels,
-    )
-    term_cols.extend(encoded_cols)
-    term_names.extend(encoded_names)
+    term_cols, term_names = _random_term_columns(rterm, data, n, contrasts, category_levels)
 
     n_terms = len(term_cols)
 

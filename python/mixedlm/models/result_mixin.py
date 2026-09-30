@@ -12,11 +12,14 @@ from mixedlm.matrices.design import (
     ModelMatrices,
     RandomEffectStructure,
     _normalize_grouped_binomial_response,
+    _random_term_columns,
 )
 from mixedlm.models.lmer_types import ModelTerms, RanefResult
 from mixedlm.utils.dataframe import (
     concat_columns_as_string,
     copy_dataframe,
+    dataframe_length,
+    ensure_dataframe,
     get_column_numpy,
     get_columns,
 )
@@ -102,32 +105,34 @@ class MerResultMixin:
             return (self.matrices.X, self.matrices.Z)
         raise ValueError(f"Unknown type '{type}'. Use 'fixed', 'random', 'X', 'Z', or 'both'.")
 
-    def _prediction_fixed_matrix(self, newdata: pd.DataFrame) -> NDArray[np.floating]:
-        """Build a fixed-effects matrix using the fitted encoding schema."""
+    def _validated_prediction_data(self, newdata: Any, variables: set[str], kind: str) -> Any:
+        """Validate required columns and reuse the fitted predictor categories."""
         import pandas as pd
-
-        from mixedlm.matrices.design import build_fixed_matrix
-        from mixedlm.utils.dataframe import ensure_dataframe, get_column_numpy, get_columns
 
         data = ensure_dataframe(newdata)
         columns = set(get_columns(data))
-        missing = sorted(self.formula.fixed_variables - columns)
+        missing = sorted(variables - columns)
         if missing:
             names = ", ".join(repr(name) for name in missing)
-            raise ValueError(f"New data is missing fixed-effect variable(s): {names}.")
+            raise ValueError(f"New data is missing {kind} variable(s): {names}.")
 
         for name, fitted_levels in self.matrices.category_levels.items():
-            if name not in self.formula.fixed_variables or name not in columns:
+            if name not in variables:
                 continue
-            unknown_levels: list[object] = []
-            for value in get_column_numpy(data, name):
-                if pd.isna(value) or value in fitted_levels or value in unknown_levels:
-                    continue
-                unknown_levels.append(value)
-            if unknown_levels:
+            values = pd.Index(get_column_numpy(data, name)).dropna().unique()
+            unknown_levels = values[~values.isin(fitted_levels)]
+            if len(unknown_levels):
                 levels = ", ".join(repr(value) for value in unknown_levels)
-                raise ValueError(f"New level(s) {levels} in fixed-effect factor '{name}'.")
+                raise ValueError(f"New level(s) {levels} in {kind} factor '{name}'.")
+        return data
 
+    def _prediction_fixed_matrix(self, newdata: pd.DataFrame) -> NDArray[np.floating]:
+        """Build a fixed-effects matrix using the fitted encoding schema."""
+        from mixedlm.matrices.design import build_fixed_matrix
+
+        data = self._validated_prediction_data(
+            newdata, self.formula.fixed_variables, "fixed-effect"
+        )
         X, fixed_names = build_fixed_matrix(
             self.formula,
             data,
@@ -356,25 +361,24 @@ class MerResultMixin:
     ) -> NDArray[np.floating]:
         import pandas as pd
 
-        n = len(newdata)
+        data = self._validated_prediction_data(
+            newdata,
+            self.formula.random_variables | self.formula.grouping_factors,
+            "random-effect",
+        )
+        n = dataframe_length(data)
         contrib = np.zeros(n, dtype=np.float64)
         u_idx = 0
-        columns = set(get_columns(newdata))
-
-        for struct in self.matrices.random_structures:
+        for rterm, struct in zip(self.formula.random, self.matrices.random_structures, strict=True):
             group_col = struct.grouping_factor
             n_terms = struct.n_terms
             n_levels = struct.n_levels
             n_u = n_levels * n_terms
 
-            if group_col in columns:
-                group_values = get_column_numpy(newdata, group_col)
+            if rterm.is_nested:
+                group_values = concat_columns_as_string(data, list(rterm.grouping_factors))
             else:
-                nested_cols = group_col.split("/")
-                if len(nested_cols) < 2 or not all(col in columns for col in nested_cols):
-                    u_idx += n_u
-                    continue
-                group_values = concat_columns_as_string(newdata, nested_cols)
+                group_values = get_column_numpy(data, group_col)
 
             string_level_map = {str(level): idx for level, idx in struct.level_map.items()}
             group_series = pd.Series(group_values, copy=False)
@@ -399,15 +403,20 @@ class MerResultMixin:
             u_block = u[u_idx : u_idx + n_u].reshape(n_levels, n_terms)
             u_idx += n_u
 
-            block_contrib = np.zeros(level_idx.shape[0], dtype=np.float64)
-            for i, term_name in enumerate(struct.term_names):
-                if term_name == "(Intercept)":
-                    term_values = np.ones(n, dtype=np.float64)
-                elif term_name in columns:
-                    term_values = get_column_numpy(newdata, term_name, dtype=np.float64)
-                else:
-                    continue
+            term_columns, term_names = _random_term_columns(
+                rterm,
+                data,
+                n,
+                self.matrices.contrasts,
+                self.matrices.category_levels,
+            )
+            if term_names != struct.term_names:
+                raise ValueError(
+                    f"New data produced incompatible random-effect columns for '{group_col}'"
+                )
 
+            block_contrib = np.zeros(level_idx.shape[0], dtype=np.float64)
+            for i, term_values in enumerate(term_columns):
                 block_contrib += u_block[level_idx, i] * term_values[known_mask]
 
             contrib[known_mask] += block_contrib

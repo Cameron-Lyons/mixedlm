@@ -177,6 +177,12 @@ glmm_result.predict(
 
 Generate predictions.
 
+Conditional predictions use the fitted coding for random-effect terms, including
+interactions, powers, categorical slopes, and custom contrasts. Supply all random-effect
+predictors and grouping columns in `newdata`, or use `re_form="NA"` for fixed effects only.
+`allow_new_levels=True` accepts unseen grouping levels with zero random effects; unseen
+categories of a random-effect predictor still require a fitted encoding and are rejected.
+
 **Parameters:**
 
 - `newdata`: New data for prediction. If None, uses original data.
