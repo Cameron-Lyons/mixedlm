@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from typing import Any
 
 import numpy as np
 from numpy.typing import NDArray
@@ -54,6 +55,16 @@ class JointGLMMObjective:
         self._native_problem = _prepare_native_glmm(self.mode_matrices, family)
         self.bounds = _build_theta_bounds(matrices.random_structures, self.n_theta)
         self.bounds += [(None, None)] * matrices.n_fixed
+
+    def __getstate__(self) -> dict[str, Any]:
+        # Rebuild the mode-only native problem in the receiving process.
+        state = self.__dict__.copy()
+        state.pop("_native_problem", None)
+        return state
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        self.__dict__.update(state)
+        self._native_problem = _prepare_native_glmm(self.mode_matrices, self.family)
 
     def evaluate(
         self, parameters: NDArray[np.floating]
