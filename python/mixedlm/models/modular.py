@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -10,6 +10,7 @@ from numpy.typing import NDArray
 if TYPE_CHECKING:
     import pandas as pd
 
+    from mixedlm.estimation.joint_glmm import JointGLMMObjective
     from mixedlm.estimation.laplace import GLMMOptimizer
     from mixedlm.families.base import Family
     from mixedlm.formula.terms import Formula
@@ -182,6 +183,9 @@ class GlmerDevfun:
     vectors evaluate the joint likelihood; theta-only vectors estimate beta
     through PIRLS at the configured quadrature order.
 
+    Repeated joint calls reuse preparation until the optimizer or its solver
+    settings change. Treat the optimizer's model arrays and family as immutable.
+
     Attributes
     ----------
     parsed : GlmerParsedFormula
@@ -193,6 +197,32 @@ class GlmerDevfun:
     parsed: GlmerParsedFormula
     optimizer: GLMMOptimizer
     control: GlmerControl | None = None
+    _joint_cache: tuple[GLMMOptimizer, JointGLMMObjective] | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
+
+    def _joint_objective(self) -> JointGLMMObjective:
+        optimizer = self.optimizer
+        cached = self._joint_cache
+        if cached is not None and cached[0] is optimizer:
+            from mixedlm.estimation.laplace import _validate_quadrature
+            from mixedlm.estimation.pirls_control import validate_pirls_controls
+
+            # Settings remain editable. Validate even when equality would hide
+            # an invalid replacement such as nAGQ=True after nAGQ=1. A cache miss
+            # is validated by the objective's constructor instead.
+            _validate_quadrature(optimizer.nAGQ, optimizer.matrices)
+            validate_pirls_controls(optimizer.pirls_maxiter, optimizer.pirls_tol)
+            objective = cached[1]
+            if (objective.nAGQ, objective.pirls_maxiter, objective.pirls_tol) == (
+                optimizer.nAGQ,
+                optimizer.pirls_maxiter,
+                optimizer.pirls_tol,
+            ):
+                return objective
+        objective = optimizer.joint_objective()
+        self._joint_cache = (optimizer, objective)
+        return objective
 
     def __call__(self, theta: NDArray[np.floating]) -> float:
         """Evaluate theta with PIRLS beta, or a full [theta, beta] vector.
@@ -208,7 +238,7 @@ class GlmerDevfun:
             The deviance approximation at the configured quadrature setting.
         """
         if len(theta) == self.parsed.n_theta + self.parsed.n_fixed and self.parsed.n_fixed:
-            return self.optimizer.joint_objective()(theta)
+            return self._joint_objective()(theta)
         return self.optimizer.objective(theta)
 
     def get_start(self, *, joint: bool = False) -> NDArray[np.floating]:

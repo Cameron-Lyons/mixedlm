@@ -284,6 +284,12 @@ these estimation objects; construct a new object when the inputs change. Public
 fits and refits prepare their current inputs automatically. Custom families,
 links, and covariance structures retain the Python implementation.
 
+Modular `GlmerDevfun` calls with full `[theta, beta]` vectors prepare the joint
+objective on first use and reuse it for later parameter values. Changing its
+optimizer, quadrature order, or inner solver controls refreshes this preparation.
+Covariance-only calls do not allocate a joint objective. The cached objective
+keeps its native mode-solve inputs alive for the deviance callable's lifetime.
+
 These objectives and modular `GlmerDevfun` callables support copying and Python
 pickling when their model inputs and custom family are serializable. Deep copies and
 unpickled objects rebuild native preparation from the retained Python inputs,
