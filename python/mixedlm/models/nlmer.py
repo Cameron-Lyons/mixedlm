@@ -13,10 +13,15 @@ from scipy import linalg
 if TYPE_CHECKING:
     import pandas as pd
 
-from mixedlm.estimation.nlmm import NLMMOptimizer, _as_prior_weights, _build_psi_matrix
+from mixedlm.estimation.nlmm import (
+    NLMMOptimizer,
+    _as_prior_weights,
+    _build_psi_matrix,
+    _grouped_observation_indices,
+)
 from mixedlm.models.lmer_types import LogLik
 from mixedlm.nlme.models import NonlinearModel
-from mixedlm.utils.random import RandomSeed
+from mixedlm.utils.random import RandomSeed, RandomStream
 from mixedlm.utils.validation import _validate_confidence_level
 
 _COV_REGULARIZATION = 1e-8
@@ -27,6 +32,68 @@ _HAT_CLIP_MAX = 1 - 1e-10
 _DEFAULT_MAXITER = 500
 _DEFAULT_N_BOOT = 1000
 _DEFAULT_SINGULAR_TOL = 1e-4
+
+
+@dataclass
+class _NlmerSimulation:
+    """Preparation for a single simulation or bootstrap call with fixed model data."""
+
+    result: NlmerResult
+    group_rows: list[NDArray[np.intp]] | None
+    offset: NDArray[np.floating]
+    residual_scale: NDArray[np.floating]
+    factor: NDArray[np.floating] | None
+    fixed_mean: NDArray[np.floating] | None
+
+    @classmethod
+    def prepare(
+        cls,
+        result: NlmerResult,
+        include_re: bool,
+        *,
+        cache_fixed_mean: bool = False,
+        cache_group_rows: bool = True,
+    ) -> _NlmerSimulation:
+        n_groups = len(result.group_levels)
+        n_random = len(result.random_params)
+        rows = (
+            _grouped_observation_indices(result.groups, n_groups=n_groups)
+            if cache_group_rows
+            else None
+        )
+        offset = result.offset(copy=False)
+        residual_scale = result.sigma / np.sqrt(result.weights(copy=False))
+        factor = None
+        fixed_mean = None
+        if include_re and n_random > 0:
+            covariance = _build_psi_matrix(result.theta, n_random) * result.sigma**2
+            covariance = covariance + _COV_REGULARIZATION * np.eye(n_random)
+            # Preserve RandomState.multivariate_normal's transform and draw order.
+            _, singular_values, vectors = np.linalg.svd(covariance)
+            factor = np.sqrt(singular_values)[:, None] * vectors
+        elif cache_fixed_mean:
+            fixed_mean = (
+                result._conditional_mean(
+                    random_effects=np.zeros((n_groups, n_random)), group_rows=rows
+                )
+                + offset
+            )
+        return cls(result, rows, offset, residual_scale, factor, fixed_mean)
+
+    def draw(self, rng: RandomStream) -> NDArray[np.floating]:
+        mean = self.fixed_mean
+        if mean is None:
+            shape = (len(self.result.group_levels), len(self.result.random_params))
+            effects = (
+                rng.standard_normal(shape) @ self.factor
+                if self.factor is not None
+                else np.zeros(shape)
+            )
+            mean = (
+                self.result._conditional_mean(random_effects=effects, group_rows=self.group_rows)
+                + self.offset
+            )
+        return mean + rng.standard_normal(len(self.residual_scale)) * self.residual_scale
 
 
 @dataclass
@@ -115,8 +182,12 @@ class NlmerResult:
         base_params = self.phi if phi is None else phi
         effects = self.b if random_effects is None else random_effects
         pred = np.zeros(len(self.y), dtype=np.float64)
+        n_groups = len(self.group_levels)
+        # Direct masks avoid sorting overhead when there are very few groups.
+        if group_rows is None and n_groups >= 8:
+            group_rows = _grouped_observation_indices(self.groups, n_groups=len(self.group_levels))
 
-        for group_idx in range(len(self.group_levels)):
+        for group_idx in range(n_groups):
             rows = self.groups == group_idx if group_rows is None else group_rows[group_idx]
             params = base_params.copy()
             for effect_idx, param_idx in enumerate(self.random_params):
@@ -436,36 +507,13 @@ class NlmerResult:
             if isinstance(seed, np.random.RandomState | np.random.Generator)
             else np.random.RandomState(seed)
         )
-        n_groups = len(self.group_levels)
-        n_random = len(self.random_params)
-        include_re = use_re and re_form not in ("~0", "NA") and n_random > 0
-        offset = self.offset(copy=False)
-        residual_scale = self.sigma / np.sqrt(self.weights(copy=False))
-        group_rows = []
-
-        if include_re:
-            Psi = _build_psi_matrix(self.theta, n_random)
-            cov = Psi * self.sigma**2
-            cov = cov + _COV_REGULARIZATION * np.eye(n_random)
-            # Match RandomState.multivariate_normal's transform and draw order.
-            _, singular_values, vectors = np.linalg.svd(cov)
-            factor = np.sqrt(singular_values)[:, None] * vectors
-            if nsim > 1:
-                for group_idx in range(n_groups):
-                    rows = np.flatnonzero(self.groups == group_idx)
-                    group_rows.append(rows)
-        else:
-            mean = self._conditional_mean(random_effects=np.zeros((n_groups, n_random))) + offset
-
+        include_re = use_re and re_form not in ("~0", "NA")
+        prepared = _NlmerSimulation.prepare(
+            self, include_re, cache_fixed_mean=True, cache_group_rows=nsim > 1
+        )
         simulations = np.empty((n, nsim), dtype=np.float64)
         for i in range(nsim):
-            if include_re:
-                b_new = rng.standard_normal((n_groups, n_random)) @ factor
-                mean = (
-                    self._conditional_mean(random_effects=b_new, group_rows=group_rows or None)
-                    + offset
-                )
-            simulations[:, i] = mean + rng.standard_normal(n) * residual_scale
+            simulations[:, i] = prepared.draw(rng)
 
         return simulations[:, 0] if nsim == 1 else simulations
 
@@ -980,6 +1028,10 @@ class NlmerResult:
 
     def __repr__(self) -> str:
         return f"NlmerResult(model={self.model.name}, deviance={self.deviance:.4f})"
+
+
+# Retain the original method identity so custom simulation overrides remain active.
+_DEFAULT_NLMER_SIMULATE = NlmerResult.simulate
 
 
 class NlmerMod:

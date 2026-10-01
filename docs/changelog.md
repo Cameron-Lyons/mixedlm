@@ -27,6 +27,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Nonlinear prediction uses stable group row indexing, and nonlinear bootstrap reuses simulation preparation across responses. Seeded draw order, custom simulation overrides, and per-replicate failure handling are preserved.
+
 - Native LMM likelihood evaluations reuse weighted design products across covariance steps. Linear bootstrap shares this preparation across responses, with an independent workspace per worker. `LMMOptimizer.with_response()` supports the same reuse on both backends.
 
 - Parallel LMM and GLMM bootstrap reuse model data within each worker and bound queued tasks, reducing serialization and scheduling memory. Worker counts are validated before drawing seeds and capped at the number of replicates.
