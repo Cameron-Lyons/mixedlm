@@ -48,116 +48,74 @@ fn csc_from_scipy(
     CscMatrix::try_from_i64(data, indices, indptr, shape)
 }
 
-fn build_lambda_derivative_blocks(structures: &[RandomEffectStructure]) -> Vec<Vec<Mat<f64>>> {
-    let mut all_derivs = Vec::new();
+/// A covariance parameter selects one entry of a repeated factor block.
+struct LambdaDerivative {
+    offset: usize,
+    n_levels: usize,
+    n_terms: usize,
+    row: usize,
+    column: usize,
+}
 
-    for structure in structures {
-        let q = structure.n_terms;
-        let mut block_derivs = Vec::new();
-
-        if structure.correlated {
-            let n_theta = q * (q + 1) / 2;
-            for k in 0..n_theta {
-                let mut dl = Mat::zeros(q, q);
-                let mut idx = 0;
-                for i in 0..q {
-                    for j in 0..=i {
-                        if idx == k {
-                            dl[(i, j)] = 1.0;
-                        }
-                        idx += 1;
-                    }
-                }
-                block_derivs.push(dl);
-            }
+impl LambdaDerivative {
+    fn apply<const TRANSPOSE: bool>(&self, matrix: &Mat<f64>) -> Mat<f64> {
+        let mut result = Mat::zeros(matrix.nrows(), matrix.ncols());
+        let (source, target) = if TRANSPOSE {
+            (self.row, self.column)
         } else {
-            for i in 0..q {
-                let mut dl = Mat::zeros(q, q);
-                dl[(i, i)] = 1.0;
-                block_derivs.push(dl);
+            (self.column, self.row)
+        };
+        for column in 0..matrix.ncols() {
+            for level in 0..self.n_levels {
+                let offset = self.offset + level * self.n_terms;
+                result[(offset + target, column)] = matrix[(offset + source, column)];
             }
         }
-
-        all_derivs.push(block_derivs);
+        result
     }
 
-    all_derivs
-}
-
-fn compute_dv_dtheta(
-    ztwz_lambda: &Mat<f64>,
-    dlambda: &Mat<f64>,
-    block_idx: usize,
-    structures: &[RandomEffectStructure],
-) -> Mat<f64> {
-    // Differentiate Lambda' Z'WZ Lambda without dropping products between
-    // levels of the same structure. The second term is the first's transpose.
-    let dimension = ztwz_lambda.nrows();
-    let structure = &structures[block_idx];
-    let start: usize = structures[..block_idx]
-        .iter()
-        .map(|s| s.n_levels * s.n_terms)
-        .sum();
-    let width = structure.n_terms;
-    let mut derivative = Mat::zeros(dimension, dimension);
-    for level in 0..structure.n_levels {
-        let offset = start + level * width;
-        for i in 0..width {
-            for j in 0..width {
-                let scale = dlambda[(j, i)];
-                if scale != 0.0 {
-                    for column in 0..dimension {
-                        let value = scale * ztwz_lambda[(offset + j, column)];
-                        derivative[(offset + i, column)] += value;
-                        derivative[(column, offset + i)] += value;
-                    }
+    fn crossproduct_derivative(&self, ztwz_lambda: &Mat<f64>) -> Mat<f64> {
+        // d(Lambda' Z'WZ Lambda) = dLambda' (Z'WZ Lambda) + its transpose.
+        // Retain products across every level and structure, including overlap.
+        let dimension = ztwz_lambda.nrows();
+        let mut derivative = Mat::zeros(dimension, dimension);
+        for level in 0..self.n_levels {
+            let offset = self.offset + level * self.n_terms;
+            for column in 0..dimension {
+                let value = ztwz_lambda[(offset + self.row, column)];
+                if value != 0.0 {
+                    derivative[(offset + self.column, column)] += value;
+                    derivative[(column, offset + self.column)] += value;
                 }
             }
         }
+        derivative
     }
-    derivative
 }
 
-fn apply_dlambda_transpose_vector(
-    v: &Mat<f64>,
-    dlambda: &Mat<f64>,
-    block_idx: usize,
-    structures: &[RandomEffectStructure],
-) -> Mat<f64> {
-    let q = v.nrows();
-    let mut result = Mat::zeros(q, v.ncols());
-
-    let structure = &structures[block_idx];
-    let qi = structure.n_terms;
-    let ni = structure.n_levels;
-    let dlambda_t = dlambda.transpose();
-
-    let mut block_offset = 0;
-    for (idx, s) in structures.iter().enumerate() {
-        if idx == block_idx {
-            break;
-        }
-        block_offset += s.n_levels * s.n_terms;
-    }
-
-    for level in 0..ni {
-        let offset = block_offset + level * qi;
-
-        for col in 0..v.ncols() {
-            let mut block_v = Mat::zeros(qi, 1);
-            for i in 0..qi {
-                block_v[(i, 0)] = v[(offset + i, col)];
-            }
-
-            let transformed = dlambda_t * &block_v;
-
-            for i in 0..qi {
-                result[(offset + i, col)] = transformed[(i, 0)];
+fn lambda_derivatives(structures: &[RandomEffectStructure]) -> Vec<LambdaDerivative> {
+    let mut derivatives = Vec::new();
+    let mut offset = 0;
+    for structure in structures {
+        for row in 0..structure.n_terms {
+            let columns = if structure.correlated {
+                0..row + 1
+            } else {
+                row..row + 1
+            };
+            for column in columns {
+                derivatives.push(LambdaDerivative {
+                    offset,
+                    n_levels: structure.n_levels,
+                    n_terms: structure.n_terms,
+                    row,
+                    column,
+                });
             }
         }
+        offset += structure.n_levels * structure.n_terms;
     }
-
-    result
+    derivatives
 }
 
 fn compute_ztwz_sparse(z: &CscMatrix, weights: &[f64]) -> Mat<f64> {
@@ -166,43 +124,6 @@ fn compute_ztwz_sparse(z: &CscMatrix, weights: &[f64]) -> Mat<f64> {
 
 fn mat_from_flat_array(data: &[f64], q: usize) -> Mat<f64> {
     Mat::from_fn(q, q, |i, j| data[i * q + j])
-}
-
-fn apply_lambda_transpose_vector(
-    v: &Mat<f64>,
-    lambda_blocks: &[Mat<f64>],
-    structures: &[RandomEffectStructure],
-) -> Mat<f64> {
-    let q = v.nrows();
-    let mut result = Mat::zeros(q, v.ncols());
-
-    let mut block_offset = 0;
-    for (structure, lambda) in structures.iter().zip(lambda_blocks.iter()) {
-        let qi = structure.n_terms;
-        let ni = structure.n_levels;
-        let lambda_t = lambda.transpose();
-
-        for level in 0..ni {
-            let offset = block_offset + level * qi;
-
-            for col in 0..v.ncols() {
-                let mut block_v = Mat::zeros(qi, 1);
-                for i in 0..qi {
-                    block_v[(i, 0)] = v[(offset + i, col)];
-                }
-
-                let transformed = lambda_t * &block_v;
-
-                for i in 0..qi {
-                    result[(offset + i, col)] = transformed[(i, 0)];
-                }
-            }
-        }
-
-        block_offset += ni * qi;
-    }
-
-    result
 }
 
 fn compute_ztwy_sparse(z: &CscMatrix, w: &[f64], y: &[f64], q: usize) -> Mat<f64> {
@@ -508,10 +429,11 @@ impl PreparedLmmResponse {
 
         let logdet_v = chol_v.logdet();
 
-        let cu = apply_lambda_transpose_vector(ztwy, &lambda_blocks, structures);
+        let factor = CovarianceFactor::from_blocks(lambda_blocks, structures);
+        let cu = factor.transpose_apply(ztwy.as_ref());
         let cu_star = chol_v.solve_lower(&cu);
 
-        let lambdat_ztwx = apply_lambda_transpose_vector(ztwx, &lambda_blocks, structures);
+        let lambdat_ztwx = factor.transpose_apply(ztwx.as_ref());
         let rzx = chol_v.solve_lower(&lambdat_ztwx);
 
         let rzx_t_rzx = rzx.transpose() * &rzx;
@@ -529,11 +451,10 @@ impl PreparedLmmResponse {
         let mut resid = marginal_residual(x, &beta, y_adj);
 
         let zt_w_resid = compute_ztwy_sparse(z, w, &resid, q);
-        let lambda_t_zt_resid =
-            apply_lambda_transpose_vector(&zt_w_resid, &lambda_blocks, structures);
+        let lambda_t_zt_resid = factor.transpose_apply(zt_w_resid.as_ref());
         let u_star = chol_v.solve(&lambda_t_zt_resid);
 
-        let random = CovarianceFactor::new(theta, structures).apply(&u_star.col(0).to_owned());
+        let random = factor.apply(&u_star.col(0).to_owned());
         subtract_random_prediction(&mut resid, z, &random);
         // Use conditional residuals and the spherical penalty for both the
         // objective and final scale. Subtracting marginal quadratic forms loses
@@ -810,7 +731,6 @@ pub fn profiled_deviance_with_gradient_impl(
 
     let z = csc_from_scipy(z_data, z_indices, z_indptr, z_shape)?;
     let lambda_blocks = build_lambda_blocks(theta, structures);
-    let dlambda_blocks = build_lambda_derivative_blocks(structures);
 
     let ztwz = if let Some(cached_data) = ztwz_cache {
         mat_from_flat_array(cached_data, q)
@@ -827,13 +747,14 @@ pub fn profiled_deviance_with_gradient_impl(
     let logdet_v = chol_v.logdet();
 
     let ztwy = compute_ztwy_sparse(&z, &w, &y_adj, q);
-    let cu = apply_lambda_transpose_vector(&ztwy, &lambda_blocks, structures);
+    let factor = CovarianceFactor::from_blocks(lambda_blocks, structures);
+    let cu = factor.transpose_apply(ztwy.as_ref());
     let cu_star = chol_v.solve_lower(&cu);
 
     let wx = Mat::from_fn(n, p, |i, j| sqrt_w[i] * x[(i, j)]);
 
     let ztwx = compute_ztwx_sparse(&z, &w, &x, q, p);
-    let lambdat_ztwx = apply_lambda_transpose_vector(&ztwx, &lambda_blocks, structures);
+    let lambdat_ztwx = factor.transpose_apply(ztwx.as_ref());
     let rzx = chol_v.solve_lower(&lambdat_ztwx);
 
     let xtwx = wx.transpose() * &wx;
@@ -864,10 +785,9 @@ pub fn profiled_deviance_with_gradient_impl(
     let mut resid = marginal_residual(&x, &beta, &y_adj);
 
     let zt_w_resid = compute_ztwy_sparse(&z, &w, &resid, q);
-    let lambda_t_zt_resid = apply_lambda_transpose_vector(&zt_w_resid, &lambda_blocks, structures);
+    let lambda_t_zt_resid = factor.transpose_apply(zt_w_resid.as_ref());
     let u_star = chol_v.solve(&lambda_t_zt_resid);
 
-    let factor = CovarianceFactor::new(theta, structures);
     let random = factor.apply(&u_star.col(0).to_owned());
     subtract_random_prediction(&mut resid, &z, &random);
     let wrss: f64 = (0..n).map(|i| w[i] * resid[i] * resid[i]).sum();
@@ -894,71 +814,56 @@ pub fn profiled_deviance_with_gradient_impl(
     let ztwz_lambda = factor.transpose_apply(ztwz.as_ref()).transpose().to_owned();
     let mut gradient = Vec::with_capacity(n_theta);
 
-    for (block_idx, (structure, block_derivs)) in
-        structures.iter().zip(dlambda_blocks.iter()).enumerate()
-    {
-        let n_block_theta = if structure.correlated {
-            structure.n_terms * (structure.n_terms + 1) / 2
-        } else {
-            structure.n_terms
-        };
+    for derivative in lambda_derivatives(structures) {
+        let dv = derivative.crossproduct_derivative(&ztwz_lambda);
 
-        for dlambda in block_derivs.iter().take(n_block_theta) {
-            let dv = compute_dv_dtheta(&ztwz_lambda, dlambda, block_idx, structures);
-
-            let mut d_logdet_v = 0.0;
-            for i in 0..q {
-                for j in 0..q {
-                    d_logdet_v += v_inv[(i, j)] * dv[(j, i)];
-                }
+        let mut d_logdet_v = 0.0;
+        for i in 0..q {
+            for j in 0..q {
+                d_logdet_v += v_inv[(i, j)] * dv[(j, i)];
             }
-
-            let dc = apply_dlambda_transpose_vector(&zt_w_resid, dlambda, block_idx, structures);
-            let dv_u = &dv * &u_star;
-            let d_u = chol_v.solve(&(&dc - &dv_u));
-            let lambda_d_u = factor.apply(&d_u.col(0).to_owned());
-            let d_lambda_u = apply_dlambda_transpose_vector(
-                &u_star,
-                &dlambda.transpose().to_owned(),
-                block_idx,
-                structures,
-            );
-            // Differentiate the conditional residual norm and spherical penalty
-            // through the mode solve. Holding beta fixed is valid at its optimum.
-            // This avoids cancellation between large marginal quadratic forms,
-            // and remains valid when a covariance factor is singular.
-            let d_pwrss = 2.0
-                * (0..q)
-                    .map(|i| {
-                        u_star[(i, 0)] * d_u[(i, 0)]
-                            - zt_w_conditional[(i, 0)] * (d_lambda_u[(i, 0)] + lambda_d_u[i])
-                    })
-                    .sum::<f64>();
-
-            let mut grad_k = d_logdet_v + denom / pwrss * d_pwrss;
-
-            if let Some(xtvinvx_inv) = &xtvinvx_inv {
-                let db = apply_dlambda_transpose_vector(&ztwx, dlambda, block_idx, structures);
-                let dv_v_inv_b = &dv * &v_inv_b;
-                let mut d_logdet_xtvinvx = 0.0;
-
-                for i in 0..p {
-                    for j in 0..p {
-                        let mut dm_ji = 0.0;
-                        for r in 0..q {
-                            dm_ji -= db[(r, j)] * v_inv_b[(r, i)];
-                            dm_ji -= v_inv_b[(r, j)] * db[(r, i)];
-                            dm_ji += v_inv_b[(r, j)] * dv_v_inv_b[(r, i)];
-                        }
-                        d_logdet_xtvinvx += xtvinvx_inv[(i, j)] * dm_ji;
-                    }
-                }
-
-                grad_k += d_logdet_xtvinvx;
-            }
-
-            gradient.push(grad_k);
         }
+
+        let dc = derivative.apply::<true>(&zt_w_resid);
+        let dv_u = &dv * &u_star;
+        let d_u = chol_v.solve(&(&dc - &dv_u));
+        let lambda_d_u = factor.apply(&d_u.col(0).to_owned());
+        let d_lambda_u = derivative.apply::<false>(&u_star);
+        // Differentiate the conditional residual norm and spherical penalty
+        // through the mode solve. Holding beta fixed is valid at its optimum.
+        // This avoids cancellation between large marginal quadratic forms,
+        // and remains valid when a covariance factor is singular.
+        let d_pwrss = 2.0
+            * (0..q)
+                .map(|i| {
+                    u_star[(i, 0)] * d_u[(i, 0)]
+                        - zt_w_conditional[(i, 0)] * (d_lambda_u[(i, 0)] + lambda_d_u[i])
+                })
+                .sum::<f64>();
+
+        let mut grad_k = d_logdet_v + denom / pwrss * d_pwrss;
+
+        if let Some(xtvinvx_inv) = &xtvinvx_inv {
+            let db = derivative.apply::<true>(&ztwx);
+            let dv_v_inv_b = &dv * &v_inv_b;
+            let mut d_logdet_xtvinvx = 0.0;
+
+            for i in 0..p {
+                for j in 0..p {
+                    let mut dm_ji = 0.0;
+                    for r in 0..q {
+                        dm_ji -= db[(r, j)] * v_inv_b[(r, i)];
+                        dm_ji -= v_inv_b[(r, j)] * db[(r, i)];
+                        dm_ji += v_inv_b[(r, j)] * dv_v_inv_b[(r, i)];
+                    }
+                    d_logdet_xtvinvx += xtvinvx_inv[(i, j)] * dm_ji;
+                }
+            }
+
+            grad_k += d_logdet_xtvinvx;
+        }
+
+        gradient.push(grad_k);
     }
 
     Ok((dev, gradient))
@@ -1182,6 +1087,89 @@ pub fn profiled_deviance_with_gradient<'py>(
 mod prepared_tests {
     use super::*;
     use numpy::ndarray::ArrayView1;
+
+    #[test]
+    fn coordinate_derivatives_match_full_matrix_products() {
+        let structures = [
+            RandomEffectStructure {
+                n_levels: 0,
+                n_terms: 1,
+                correlated: true,
+            },
+            RandomEffectStructure {
+                n_levels: 2,
+                n_terms: 3,
+                correlated: true,
+            },
+            RandomEffectStructure {
+                n_levels: 2,
+                n_terms: 2,
+                correlated: false,
+            },
+            RandomEffectStructure {
+                n_levels: 1,
+                n_terms: 1,
+                correlated: true,
+            },
+        ];
+        let coordinates = [
+            (0, 0, 1, 0, 0),
+            (0, 2, 3, 0, 0),
+            (0, 2, 3, 1, 0),
+            (0, 2, 3, 1, 1),
+            (0, 2, 3, 2, 0),
+            (0, 2, 3, 2, 1),
+            (0, 2, 3, 2, 2),
+            (6, 2, 2, 0, 0),
+            (6, 2, 2, 1, 1),
+            (10, 1, 1, 0, 0),
+        ];
+        let derivatives = lambda_derivatives(&structures);
+        assert_eq!(derivatives.len(), coordinates.len());
+        for (derivative, (offset, levels, width, row, column)) in
+            derivatives.iter().zip(coordinates)
+        {
+            assert_eq!(
+                (
+                    derivative.offset,
+                    derivative.n_levels,
+                    derivative.n_terms,
+                    derivative.row,
+                    derivative.column
+                ),
+                (offset, levels, width, row, column),
+            );
+            let mut dense = Mat::<f64>::zeros(11, 11);
+            for level in 0..levels {
+                dense[(
+                    offset + level * width + row,
+                    offset + level * width + column,
+                )] = 1.0;
+            }
+            for ncols in [0, 1, 4] {
+                let matrix = Mat::from_fn(11, ncols, |i, j| (i + 3 * j) as f64 - 5.0);
+                assert_eq!(derivative.apply::<false>(&matrix), &dense * &matrix);
+                assert_eq!(
+                    derivative.apply::<true>(&matrix),
+                    dense.transpose() * &matrix
+                );
+            }
+            for sparse in [false, true] {
+                let product = Mat::from_fn(11, 11, |i, j| {
+                    if sparse && i / 3 != j / 3 {
+                        0.0
+                    } else {
+                        (i + 3 * j) as f64 - 5.0
+                    }
+                });
+                let term = dense.transpose() * &product;
+                assert_eq!(
+                    derivative.crossproduct_derivative(&product),
+                    &term + term.transpose()
+                );
+            }
+        }
+    }
 
     fn intercept_design() -> Arc<PreparedLmmDesign> {
         let x = Mat::from_fn(4, 1, |_, _| 1.0);
