@@ -558,6 +558,7 @@ impl LmmDesign {
     #[new]
     #[allow(clippy::too_many_arguments)]
     fn new(
+        py: Python<'_>,
         x: numpy::PyArrayLike2<'_, f64>,
         z_data: numpy::PyArrayLike1<'_, f64>,
         z_indices: numpy::PyArrayLike1<'_, i64>,
@@ -578,8 +579,10 @@ impl LmmDesign {
         if z_shape.1 == usize::MAX {
             return Err(PyValueError::new_err("random-effect dimensions overflow"));
         }
-        let view = x.as_array();
-        let x = Mat::from_fn(view.nrows(), view.ncols(), |i, j| view[[i, j]]);
+        let x_owned = {
+            let view = x.as_array();
+            Mat::from_fn(view.nrows(), view.ncols(), |i, j| view[[i, j]])
+        };
         let z = csc_from_scipy(
             z_data.as_slice()?,
             z_indices.as_slice()?,
@@ -596,15 +599,16 @@ impl LmmDesign {
                 correlated,
             })
             .collect();
-        let inner = PreparedLmmDesign::new(
-            x,
-            z,
-            weights.as_array().to_vec(),
-            offset.as_array().to_vec(),
-            structures,
-            None,
-        )
-        .map_err(PyValueError::new_err)?;
+        let weights_owned = weights.as_array().to_vec();
+        let offset_owned = offset.as_array().to_vec();
+        // Drop every NumPy borrow before preprocessing the owned snapshot, so
+        // the caller may change input values or layouts while Python is detached.
+        drop((x, z_data, z_indices, z_indptr, weights, offset));
+        let inner = py
+            .detach(|| {
+                PreparedLmmDesign::new(x_owned, z, weights_owned, offset_owned, structures, None)
+            })
+            .map_err(PyValueError::new_err)?;
         Ok(Self {
             inner: Arc::new(inner),
         })

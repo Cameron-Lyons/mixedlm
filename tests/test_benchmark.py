@@ -1506,6 +1506,35 @@ def test_benchmark_native_prepared_lmm(benchmark, large_data, new_response):
     assert benchmark(evaluate) == expected
 
 
+@pytest.mark.benchmark(group="lmm-design-preparation-threads")
+@pytest.mark.parametrize("layout", ["fixed_only", "intercept", "slope"])
+@pytest.mark.parametrize("workers", [1, 2, 4])
+def test_benchmark_lmm_design_preparation_threads(benchmark, layout, workers):
+    from concurrent.futures import ThreadPoolExecutor
+
+    from mixedlm import _rust
+
+    from tests.test_glmm_final_state import mode_problem
+    from tests.test_lmm_prepared_design import native_arguments
+
+    matrices, _, theta = mode_problem("gaussian", layout, n_obs=16384, n_groups=16)
+    arguments = native_arguments(matrices)
+
+    def prepare(_):
+        return _rust.LmmDesign(**arguments)
+
+    expected = prepare(0).with_response(matrices.y).deviance(theta)
+    assert np.isfinite(expected) and expected != 1e10
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+
+        def run():
+            return list(pool.map(prepare, range(8)))
+
+        actual = benchmark(run)
+    for design in actual:
+        assert design.with_response(matrices.y).deviance(theta) == expected
+
+
 @pytest.mark.benchmark(group="prepared-lmm-threads")
 @pytest.mark.parametrize("reml", [False, True])
 @pytest.mark.parametrize("workers", [1, 2, 4])
