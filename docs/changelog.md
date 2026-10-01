@@ -29,6 +29,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Native LMM design preparation releases Python's interpreter lock after snapshotting its inputs, allowing weighted crossproduct preparation to overlap across independent fits.
+
 - Prepared native LMM likelihoods release Python's interpreter lock during ML and REML evaluation. Calls snapshot covariance parameters and keep solve state local, allowing concurrent evaluations of shared designs and responses.
 
 - Prepared native GLMM likelihoods release Python's interpreter lock during evaluation, allowing independent solves from Python threads. Per-call covariance parameters and offset overrides are copied before release, and scratch state remains local to each solve.
