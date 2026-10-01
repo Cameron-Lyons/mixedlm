@@ -16,6 +16,7 @@ if TYPE_CHECKING:
 from mixedlm.estimation.nlmm import NLMMOptimizer, _as_prior_weights, _build_psi_matrix
 from mixedlm.models.lmer_types import LogLik
 from mixedlm.nlme.models import NonlinearModel
+from mixedlm.utils.random import RandomSeed
 from mixedlm.utils.validation import _validate_confidence_level
 
 _COV_REGULARIZATION = 1e-8
@@ -691,7 +692,9 @@ class NlmerResult:
         level: float = 0.95,
         method: str = "boot",
         n_boot: int = _DEFAULT_N_BOOT,
-        seed: int | None = None,
+        seed: RandomSeed = None,
+        *,
+        n_jobs: int = 1,
     ) -> dict[str, tuple[float, float]]:
         """Compute confidence intervals for fixed effects.
 
@@ -707,8 +710,11 @@ class NlmerResult:
             - "Wald": Wald intervals based on vcov (less accurate)
         n_boot : int, default 1000
             Positive integer number of bootstrap samples (if method="boot").
-        seed : int, optional
-            Random seed.
+        seed : int, RandomState, or Generator, optional
+            Local random seed or reusable stream.
+        n_jobs : int, default 1
+            Positive bootstrap refit worker count, or -1 for available CPUs.
+            Used only with method="boot".
 
         Returns
         -------
@@ -757,7 +763,7 @@ class NlmerResult:
             from mixedlm.inference.bootstrap import _validate_ci_options, bootstrap_nlmer
 
             _validate_ci_options(level, "percentile")
-            boot = bootstrap_nlmer(self, n_boot=n_boot, seed=seed)
+            boot = bootstrap_nlmer(self, n_boot=n_boot, seed=seed, n_jobs=n_jobs)
             intervals = boot.ci(level=level)
             return {p: intervals[p] for p in parm if p in intervals}
 

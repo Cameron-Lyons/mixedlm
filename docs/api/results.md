@@ -495,6 +495,10 @@ intervals using the same samples and failure handling as `bootstrap_nlmer()`.
 `n_boot` must be a positive integer. `parm` selects one name or a list of names;
 unknown names are omitted.
 
+Pass `n_jobs=2` to refit bootstrap samples in two worker processes, or `-1` for
+available CPUs. The same integer seed produces the same samples across worker
+counts. `seed` also accepts a reusable NumPy `RandomState` or `Generator`.
+
 Failed simulations or refits and refits with nonfinite or incorrectly shaped
 estimates are excluded from all bootstrap components. They are never replaced
 with the original fitted estimates. When all replicates fail, confidence bounds
