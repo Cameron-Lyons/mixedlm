@@ -25,6 +25,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Native LMM likelihood evaluations reuse weighted design products across covariance steps. Linear bootstrap shares this preparation across responses, with an independent workspace per worker. `LMMOptimizer.with_response()` supports the same reuse on both backends.
+
 - Parallel LMM and GLMM bootstrap reuse model data within each worker and bound queued tasks, reducing serialization and scheduling memory. Worker counts are validated before drawing seeds and capped at the number of replicates.
 
 - Nonlinear fitting uses joint fixed/random parameter updates with a backtracking line search on both backends. Group systems keep the solves small, and Python consumes group results with bounded worker queues.

@@ -21,7 +21,7 @@ from mixedlm.utils.simulation import simulate_random_effects
 
 if TYPE_CHECKING:
     from mixedlm.estimation.laplace import GLMMOptimizationResult
-    from mixedlm.estimation.reml import OptimizationResult
+    from mixedlm.estimation.reml import LMMOptimizer, OptimizationResult
     from mixedlm.families.base import Family
     from mixedlm.matrices.design import ModelMatrices
     from mixedlm.models.glmer import GlmerResult
@@ -223,6 +223,11 @@ def _initialize_bootstrap_worker(
     data: tuple[Any, ...],
 ) -> None:
     # Thread-local storage also isolates independent pools in threaded callers.
+    if worker is _lmer_bootstrap_worker:
+        from mixedlm.estimation.reml import LMMOptimizer
+
+        # Construct native state after process startup; it is never pickled.
+        data = (*data, LMMOptimizer(data[0], REML=data[-1], use_rust=True))
     _bootstrap_worker_state.worker = worker
     _bootstrap_worker_state.data = data
 
@@ -269,12 +274,17 @@ def _refit_lmer_response(
     response: NDArray[np.floating],
     theta: NDArray[np.floating],
     REML: bool,
+    *,
+    optimizer: LMMOptimizer | None = None,
 ) -> OptimizationResult:
     """Refit an LMM response against the original validated design matrices."""
     from mixedlm.estimation.reml import LMMOptimizer
 
-    bootstrap_matrices = replace(matrices, y=np.ascontiguousarray(response))
-    optimizer = LMMOptimizer(bootstrap_matrices, REML=REML, use_rust=True)
+    if optimizer is None:
+        bootstrap_matrices = replace(matrices, y=np.ascontiguousarray(response))
+        optimizer = LMMOptimizer(bootstrap_matrices, REML=REML, use_rust=True)
+    else:
+        optimizer = optimizer.with_response(response)
     return optimizer.optimize(start=theta)
 
 
@@ -312,13 +322,16 @@ def _lmer_bootstrap_worker(
         theta,
         sigma,
         REML,
+        *prepared,
     ) = args
 
     rng = np.random.RandomState(seed)
 
     try:
         y_sim = _simulate_lmer_components(matrices, beta, theta, sigma, rng)
-        boot_result = _refit_lmer_response(matrices, y_sim, theta, REML)
+        boot_result = _refit_lmer_response(
+            matrices, y_sim, theta, REML, optimizer=prepared[0] if prepared else None
+        )
 
         _require_bootstrap_convergence(boot_result.converged)
         beta_sample = _bootstrap_sample_vector(boot_result.beta, matrices.n_fixed)
@@ -397,7 +410,8 @@ def bootstrap_lmer(
 
     ``n_jobs`` must be a positive integer or -1 for available CPUs. Parallel
     workers reuse the fitted design and keep only a bounded number of tasks
-    outstanding; the worker count never exceeds ``n_boot``.
+    outstanding; the worker count never exceeds ``n_boot``. Weighted design
+    products are prepared once per serial call or parallel worker.
     """
     validate_simulation_count(n_boot, "n_boot")
     workers = _bootstrap_worker_count(n_jobs, n_boot)
@@ -412,6 +426,9 @@ def bootstrap_lmer(
     seeds = random_seeds(rng, n_boot)
 
     if n_jobs == 1:
+        from mixedlm.estimation.reml import LMMOptimizer
+
+        optimizer = LMMOptimizer(result.matrices, REML=result.REML, use_rust=True)
         n_failed = 0
 
         for b in range(n_boot):
@@ -427,6 +444,7 @@ def bootstrap_lmer(
                     y_sim,
                     result.theta,
                     result.REML,
+                    optimizer=optimizer,
                 )
 
                 _require_bootstrap_convergence(boot_result.converged)

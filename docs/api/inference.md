@@ -594,6 +594,10 @@ samples retain replicate order. Output arrays still retain every sample.
 Invalid worker counts fail before consuming a supplied random stream. Queued
 tasks are cancelled if the run is interrupted or the worker pool fails.
 
+Linear bootstrap also prepares weighted design products once per serial call
+or parallel worker. Each replicate updates only the response-dependent products
+and starts optimization from the original fitted covariance parameters.
+
 **Methods:**
 
 - `ci(level=0.95, method="percentile")`: Fixed-effect confidence intervals
