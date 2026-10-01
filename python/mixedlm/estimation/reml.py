@@ -642,7 +642,8 @@ class LMMOptimizer:
         matrices.Zt = self.matrices.Zt
         optimizer = copy(self)
         optimizer.matrices = matrices
-        optimizer._crossproducts = self._crossproducts.with_response(matrices)
+        if not self.use_rust or not self.matrices.n_random or "_crossproducts" in self.__dict__:
+            optimizer._crossproducts = self._crossproducts.with_response(matrices)
         if self._rust_cache is not None:
             optimizer._rust_cache = self._rust_cache.with_response(matrices.y)
         return optimizer
@@ -794,6 +795,26 @@ class LMMOptimizer:
         return _LMMCrossproducts.from_matrices(self.matrices)
 
     def _evaluate_core(self, theta: NDArray[np.floating]) -> _DevianceCoreResult | None:
+        # Fixed-only fits retain the existing least-squares fallback and rank
+        # behavior. Mixed models can extract estimates from their native products.
+        if self.use_rust and self._rust_cache is not None and self.matrices.n_random:
+            native = self._rust_cache.response.evaluate(theta, self.REML)
+            if native is not None:
+                deviance, beta, sigma, u, ldL2, ldRX2, wrss, ussq, pwrss, information = native
+                p = self.matrices.n_fixed
+                return _DevianceCoreResult(
+                    deviance=deviance,
+                    beta=np.asarray(beta),
+                    sigma=sigma,
+                    u=np.asarray(u),
+                    ldL2=ldL2,
+                    ldRX2=ldRX2,
+                    wrss=wrss,
+                    ussq=ussq,
+                    pwrss=pwrss,
+                    fixed_information=np.asarray(information).reshape(p, p),
+                )
+            return None
         return _profiled_deviance_core(
             theta,
             self.matrices,

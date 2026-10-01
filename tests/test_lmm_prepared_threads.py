@@ -48,36 +48,40 @@ def test_shared_design_and_responses_match_independent_likelihoods_in_threads(ki
 
 
 @pytest.mark.parametrize("reml", [False, True])
-def test_invalid_parameters_do_not_damage_shared_response(reml):
+@pytest.mark.parametrize("method", ["deviance", "evaluate"])
+def test_invalid_parameters_do_not_damage_shared_response(reml, method):
     matrices = matrices_fixture()
     response = _rust.LmmDesign(**native_arguments(matrices)).with_response(matrices.y)
     theta = parameters(matrices)
-    expected = response.deviance(theta, reml)
+    likelihood = getattr(response, method)
+    expected = likelihood(theta, reml)
 
     def evaluate(index):
         if index % 2:
             with pytest.raises(ValueError, match="theta must contain"):
-                response.deviance(np.array([np.nan]), reml)
+                likelihood(np.array([np.nan]), reml)
         else:
-            assert response.deviance(theta, reml) == expected
+            assert likelihood(theta, reml) == expected
 
     with ThreadPoolExecutor(max_workers=4) as pool:
         list(pool.map(evaluate, range(16)))
-    assert response.deviance(theta, reml) == expected
+    assert likelihood(theta, reml) == expected
 
 
 @pytest.mark.parametrize("reml", [False, True])
-def test_detached_singular_system_preserves_failure_value(reml):
+@pytest.mark.parametrize("method,expected", [("deviance", 1e10), ("evaluate", None)])
+def test_detached_singular_system_preserves_failure_value(reml, method, expected):
     matrices = matrices_fixture("fixed")
     matrices = replace(matrices, X=np.zeros_like(matrices.X))
     response = _rust.LmmDesign(**native_arguments(matrices)).with_response(matrices.y)
     with ThreadPoolExecutor(max_workers=4) as pool:
-        actual = list(pool.map(lambda _: response.deviance(np.array([]), reml), range(16)))
-    assert actual == [1e10] * 16
+        actual = list(pool.map(lambda _: getattr(response, method)(np.array([]), reml), range(16)))
+    assert actual == [expected] * 16
 
 
 @pytest.mark.parametrize("change_layout", [False, True])
-def test_evaluation_releases_interpreter_lock_and_snapshots_parameters(change_layout):
+@pytest.mark.parametrize("method", ["deviance", "evaluate"])
+def test_evaluation_releases_interpreter_lock_and_snapshots_parameters(change_layout, method):
     if not getattr(sys, "_is_gil_enabled", lambda: True)():
         pytest.skip("Interpreter lock is already disabled")
     # Isolate the long switch interval from the test runner. A large random-
@@ -100,8 +104,10 @@ def test_evaluation_releases_interpreter_lock_and_snapshots_parameters(change_la
         )
         response = design.with_response(rng.normal(size=n))
         theta = np.array([.8])
-        expected = response.deviance(theta)
-        assert np.isfinite(expected) and expected != 1e10
+        likelihood = getattr(response, sys.argv[1])
+        expected = likelihood(theta)
+        objective = expected if sys.argv[1] == 'deviance' else expected[0]
+        assert np.isfinite(objective) and objective != 1e10
         started = threading.Event()
         finished = threading.Event()
         outcome = []
@@ -109,7 +115,7 @@ def test_evaluation_releases_interpreter_lock_and_snapshots_parameters(change_la
         def evaluate():
             started.set()
             try:
-                outcome.append(response.deviance(theta))
+                outcome.append(likelihood(theta))
             finally:
                 finished.set()
 
@@ -128,7 +134,7 @@ def test_evaluation_releases_interpreter_lock_and_snapshots_parameters(change_la
         script = script.replace("theta[:] = 2", "theta[:] = 2; theta.shape = ()")
     env = dict(os.environ, OPENBLAS_NUM_THREADS="1", OMP_NUM_THREADS="1", RAYON_NUM_THREADS="1")
     result = subprocess.run(
-        [sys.executable, "-c", script], env=env, text=True, capture_output=True, timeout=50
+        [sys.executable, "-c", script, method], env=env, text=True, capture_output=True, timeout=50
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert json.loads(result.stdout)["progressed"], result.stdout

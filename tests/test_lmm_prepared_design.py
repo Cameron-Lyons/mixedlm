@@ -148,13 +148,17 @@ def test_response_refits_share_design_and_match_independent_fits(native, kind, r
     fitted = original.with_response(y)
     y[:] = -100  # The new optimizer owns its response.
     fresh = LMMOptimizer(replace(matrices, y=matrices.y[::-1].copy()), REML=reml, use_rust=native)
-    assert fitted._crossproducts.XtWX is original._crossproducts.XtWX
-    assert fitted._crossproducts.ZtWZ is original._crossproducts.ZtWZ
-    assert fitted._crossproducts.ZtWX is original._crossproducts.ZtWX
     assert fitted.matrices.Zt is original.matrices.Zt
     if original.use_rust:
         assert fitted._rust_cache.design is original._rust_cache.design
         assert fitted._rust_cache.response is not original._rust_cache.response
+    if original.use_rust and matrices.n_random:
+        assert "_crossproducts" not in original.__dict__
+        assert "_crossproducts" not in fitted.__dict__
+    else:
+        assert fitted._crossproducts.XtWX is original._crossproducts.XtWX
+        assert fitted._crossproducts.ZtWZ is original._crossproducts.ZtWZ
+        assert fitted._crossproducts.ZtWX is original._crossproducts.ZtWX
     assert_array_equal(fitted.objective(theta), fresh.objective(theta))
     assert_allclose(
         fitted.objective(theta), observation_likelihood(fitted.matrices, theta, reml), rtol=2e-13
@@ -287,7 +291,8 @@ def test_serial_bootstrap_prepares_design_once_and_matches_fresh_refits():
         ) as python,
     ):
         actual = bootstrap.bootstrap_lmer(result, n_boot=4, seed=56)
-    assert native.call_count == python.call_count == 1
+    assert native.call_count == 1
+    assert python.call_count == 0
     refit = bootstrap._refit_lmer_response
 
     def independent(matrices, response, theta, reml, **kwargs):
@@ -349,7 +354,8 @@ def test_worker_prepares_design_once_for_multiple_responses():
     ):
         bootstrap._initialize_bootstrap_worker(bootstrap._lmer_bootstrap_worker, data)
         samples = [bootstrap._run_bootstrap_task((i, 23 + i)) for i in range(3)]
-    assert native.call_count == python.call_count == 1
+    assert native.call_count == 1
+    assert python.call_count == 0
     assert all(sample.fixed is not None for sample in samples)
 
 

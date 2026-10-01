@@ -10,7 +10,7 @@ use pyo3::prelude::*;
 
 use crate::blocked_chol::{BlockedCholesky, BlockedMatrix};
 pub use crate::covariance::RandomEffectStructure;
-use crate::covariance::build_lambda_blocks;
+use crate::covariance::{CovarianceFactor, build_lambda_blocks};
 use crate::csc::CscMatrix;
 use crate::linalg::LinalgError;
 
@@ -428,6 +428,20 @@ struct PreparedLmmResponse {
     ztwy: Mat<f64>,
 }
 
+// deviance, beta, sigma, u, ldL2, ldRX2, wrss, ussq, pwrss, row-major fixed information.
+type LmmEvaluation = (
+    f64,
+    Vec<f64>,
+    f64,
+    Vec<f64>,
+    f64,
+    f64,
+    f64,
+    f64,
+    f64,
+    Vec<f64>,
+);
+
 impl PreparedLmmResponse {
     fn validate_parameters(&self, theta: &[f64], reml: bool) -> Result<(), &'static str> {
         if theta.len() != self.design.n_theta || theta.iter().any(|v| !v.is_finite()) {
@@ -440,6 +454,11 @@ impl PreparedLmmResponse {
     }
 
     fn deviance(&self, theta: &[f64], reml: bool) -> f64 {
+        self.evaluate::<false>(theta, reml)
+            .map_or(1e10, |evaluation| evaluation.0)
+    }
+
+    fn evaluate<const ESTIMATES: bool>(&self, theta: &[f64], reml: bool) -> Option<LmmEvaluation> {
         let design = &self.design;
         let (x, z, w) = (&design.x, &design.z, &design.weights);
         let (n, p, q) = (x.nrows(), x.ncols(), z.ncols());
@@ -448,10 +467,7 @@ impl PreparedLmmResponse {
         let structures = &design.structures;
         let logdet_w = design.logdet_weights;
         if q == 0 {
-            let chol = match Llt::new(xtwx.as_ref(), Side::Lower) {
-                Ok(c) => c,
-                Err(_) => return 1e10,
-            };
+            let chol = Llt::new(xtwx.as_ref(), Side::Lower).ok()?;
 
             let beta = chol.solve(xtwy);
 
@@ -480,16 +496,34 @@ impl PreparedLmmResponse {
                 dev += logdet_xtwx;
             }
 
-            return dev;
+            return Some((
+                dev,
+                if ESTIMATES {
+                    (0..p).map(|i| beta[(i, 0)]).collect()
+                } else {
+                    Vec::new()
+                },
+                if ESTIMATES { sigma2.sqrt() } else { 0.0 },
+                Vec::new(),
+                0.0,
+                logdet_xtwx,
+                wrss,
+                0.0,
+                wrss,
+                if ESTIMATES {
+                    (0..p)
+                        .flat_map(|i| (0..p).map(move |j| xtwx[(i, j)]))
+                        .collect()
+                } else {
+                    Vec::new()
+                },
+            ));
         }
 
         let lambda_blocks = build_lambda_blocks(theta, structures);
 
         let blocked_v = BlockedMatrix::from_lambda_ztwz(ztwz, &lambda_blocks, structures, true);
-        let chol_v = match BlockedCholesky::factor(&blocked_v) {
-            Ok(c) => c,
-            Err(_) => return 1e10,
-        };
+        let chol_v = BlockedCholesky::factor(&blocked_v).ok()?;
 
         let logdet_v = chol_v.logdet();
 
@@ -502,10 +536,7 @@ impl PreparedLmmResponse {
         let rzx_t_rzx = rzx.transpose() * &rzx;
         let xtvinvx = xtwx - &rzx_t_rzx;
 
-        let chol_xtvinvx = match Llt::new(xtvinvx.as_ref(), Side::Lower) {
-            Ok(c) => c,
-            Err(_) => return 1e10,
-        };
+        let chol_xtvinvx = Llt::new(xtvinvx.as_ref(), Side::Lower).ok()?;
 
         let l_xtvinvx = chol_xtvinvx.L();
         let logdet_xtvinvx: f64 = 2.0 * (0..p).map(|i| l_xtvinvx[(i, i)].ln()).sum::<f64>();
@@ -528,11 +559,31 @@ impl PreparedLmmResponse {
             apply_lambda_transpose_vector(&zt_w_resid, &lambda_blocks, structures);
         let u_star = chol_v.solve(&lambda_t_zt_resid);
 
-        let w_resid_sq: f64 = (0..n).map(|i| w[i] * resid[i] * resid[i]).sum();
-        let random_reduction: f64 = (0..q)
-            .map(|i| lambda_t_zt_resid[(i, 0)] * u_star[(i, 0)])
-            .sum();
-        let pwrss = w_resid_sq - random_reduction;
+        let (u, wrss, ussq, pwrss) = if ESTIMATES {
+            let random = CovarianceFactor::new(theta, structures).apply(&u_star.col(0).to_owned());
+            let mut prediction = vec![0.0; n];
+            for j in 0..q {
+                for index in z.col_offsets()[j]..z.col_offsets()[j + 1] {
+                    prediction[z.row_indices()[index]] += z.values()[index] * random[j];
+                }
+            }
+            // Final scale uses the conditional residual and spherical penalty,
+            // avoiding subtraction of nearly equal marginal quadratic forms.
+            let wrss = (0..n)
+                .map(|i| {
+                    let conditional = resid[i] - prediction[i];
+                    w[i] * conditional * conditional
+                })
+                .sum::<f64>();
+            let ussq = (0..q).map(|i| u_star[(i, 0)] * u_star[(i, 0)]).sum::<f64>();
+            ((0..q).map(|i| random[i]).collect(), wrss, ussq, wrss + ussq)
+        } else {
+            let w_resid_sq: f64 = (0..n).map(|i| w[i] * resid[i] * resid[i]).sum();
+            let random_reduction: f64 = (0..q)
+                .map(|i| lambda_t_zt_resid[(i, 0)] * u_star[(i, 0)])
+                .sum();
+            (Vec::new(), 0.0, 0.0, w_resid_sq - random_reduction)
+        };
 
         let denom = if reml { n - p } else { n } as f64;
         let sigma2 = pwrss / denom;
@@ -543,7 +594,29 @@ impl PreparedLmmResponse {
             dev += logdet_xtvinvx;
         }
 
-        dev
+        Some((
+            dev,
+            if ESTIMATES {
+                (0..p).map(|i| beta[(i, 0)]).collect()
+            } else {
+                Vec::new()
+            },
+            if ESTIMATES { sigma2.sqrt() } else { 0.0 },
+            u,
+            logdet_v,
+            if reml { logdet_xtvinvx } else { 0.0 },
+            wrss,
+            ussq,
+            pwrss,
+            if ESTIMATES {
+                let information = &xtvinvx;
+                (0..p)
+                    .flat_map(|i| (0..p).map(move |j| information[(i, j)]))
+                    .collect()
+            } else {
+                Vec::new()
+            },
+        ))
     }
 }
 
@@ -630,6 +703,24 @@ pub struct LmmResponse {
 
 #[pymethods]
 impl LmmResponse {
+    /// Return estimates and likelihood components, or None on factorization failure.
+    /// Final residual scale uses conditional residuals plus the spherical penalty.
+    #[pyo3(signature = (theta, reml = true))]
+    fn evaluate(
+        &self,
+        py: Python<'_>,
+        theta: numpy::PyArrayLike1<'_, f64>,
+        reml: bool,
+    ) -> PyResult<Option<LmmEvaluation>> {
+        let values = theta.as_slice()?;
+        self.inner
+            .validate_parameters(values, reml)
+            .map_err(PyValueError::new_err)?;
+        let values = values.to_vec();
+        drop(theta);
+        Ok(py.detach(|| self.inner.evaluate::<true>(&values, reml)))
+    }
+
     #[pyo3(signature = (theta, reml = true))]
     fn deviance(
         &self,
