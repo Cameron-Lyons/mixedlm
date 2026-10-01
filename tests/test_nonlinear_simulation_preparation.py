@@ -1,5 +1,6 @@
 """Simulation preparation is local to one call and does not change draw order."""
 
+from importlib import import_module
 from unittest.mock import patch
 
 import numpy as np
@@ -41,8 +42,9 @@ def test_bootstrap_prepares_groups_and_covariance_once(jobs, random_params):
         patch.object(bootstrap, "ProcessPoolExecutor", ImmediateExecutor),
         patch.object(bootstrap, "_nlmer_bootstrap_refit", side_effect=record),
         patch.object(_NlmerSimulation, "prepare", wraps=_NlmerSimulation.prepare) as prepare,
-        patch(
-            "mixedlm.models.nlmer._grouped_observation_indices",
+        patch.object(
+            import_module("mixedlm.models.nlmer"),
+            "_grouped_observation_indices",
             wraps=_grouped_observation_indices,
         ) as rows,
         patch.object(np.linalg, "svd", wraps=np.linalg.svd) as svd,
