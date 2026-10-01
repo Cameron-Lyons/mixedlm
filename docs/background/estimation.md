@@ -291,6 +291,11 @@ the offset, so their mode solves skip the empty fixed-effect system and use the
 two triangular random-effect solves directly. Working-weight floors, convergence
 checks, and the final likelihood correction use the same formulas.
 
+Binomial/logit iterations select a specialized working-value loop once per
+iteration. Separate contiguous input and output slices let the compiler
+vectorize this loop while retaining the existing derivative, variance, and
+weight-floor arithmetic. Other family/link combinations use the general loop.
+
 Modular `GlmerDevfun` calls with full `[theta, beta]` vectors prepare the joint
 objective on first use and reuse it for later parameter values. Changing its
 optimizer, quadrature order, or inner solver controls refreshes this preparation.

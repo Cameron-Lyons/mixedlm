@@ -29,6 +29,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Native binomial/logit iterations use a specialized working-value loop that enables compiler vectorization, preserving the existing arithmetic and weight floors.
+
 - Native GLMM iterations reuse working buffers and avoid intermediate derivative and variance vectors. Mode-only solves, including joint likelihood evaluations, skip empty fixed-effect matrix construction and factorization.
 
 - Modular GLMM deviance callables reuse joint likelihood preparation across `[theta, beta]` evaluations, refreshing it when the optimizer or solver settings change. Covariance-only calls do not construct a joint objective.
