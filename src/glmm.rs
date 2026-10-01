@@ -1,5 +1,6 @@
 use faer::linalg::solvers::{Llt, Solve, SolveLstsq};
 use faer::{Col as DVector, Mat as DMatrix, Side};
+use numpy::ndarray::{ArrayView1, ArrayView2};
 use pyo3::PyResult;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -205,6 +206,154 @@ fn csc_from_scipy(
     shape: (usize, usize),
 ) -> Result<CscMatrix, LinalgError> {
     CscMatrix::try_from_i64(data, indices, indptr, shape)
+}
+
+/// Validate and prepare the common inputs for native GLMM entry points.
+struct GlmmInputs<'a> {
+    y: DVector<f64>,
+    x: DMatrix<f64>,
+    z: CscMatrix,
+    weights: &'a [f64],
+    offset: DVector<f64>,
+    theta: &'a [f64],
+    structures: Vec<RandomEffectStructure>,
+    family: FamilyType,
+    link: LinkFunction,
+}
+
+fn validate_glmm_dimensions(
+    n: usize,
+    x_rows: usize,
+    z_shape: (usize, usize),
+    weights_len: usize,
+    offset_len: usize,
+    theta_len: usize,
+    structures: &[RandomEffectStructure],
+) -> Result<(), String> {
+    if n == 0 {
+        return Err("y must contain at least one observation".into());
+    }
+    if x_rows != n {
+        return Err(format!("x must have {n} rows to match y, got {x_rows}"));
+    }
+    if z_shape.0 != n {
+        return Err(format!(
+            "z must have {n} rows to match y, got {}",
+            z_shape.0
+        ));
+    }
+    if weights_len != n {
+        return Err(format!("weights must have length {n}, got {weights_len}"));
+    }
+    if offset_len != n {
+        return Err(format!("offset must have length {n}, got {offset_len}"));
+    }
+    let mut columns = 0usize;
+    let mut parameters = 0usize;
+    for structure in structures {
+        let terms = structure.n_terms;
+        if terms == 0 || structure.n_levels == 0 {
+            return Err("random-effect structures must have positive dimensions".into());
+        }
+        columns = structure
+            .n_levels
+            .checked_mul(terms)
+            .and_then(|size| columns.checked_add(size))
+            .ok_or("random-effect dimensions overflow")?;
+        let count = if structure.correlated {
+            terms
+                .checked_add(1)
+                .and_then(|next| terms.checked_mul(next))
+                .map(|product| product / 2)
+                .ok_or("random-effect parameter count overflows")?
+        } else {
+            terms
+        };
+        parameters = parameters
+            .checked_add(count)
+            .ok_or("random-effect parameter count overflows")?;
+    }
+    if columns != z_shape.1 {
+        return Err(format!(
+            "random-effect structures describe {columns} columns, but z has {}",
+            z_shape.1
+        ));
+    }
+    if theta_len != parameters {
+        return Err(format!(
+            "theta must have length {parameters}, got {theta_len}"
+        ));
+    }
+    Ok(())
+}
+
+impl<'a> GlmmInputs<'a> {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        y: ArrayView1<'_, f64>,
+        x: ArrayView2<'_, f64>,
+        z_data: &[f64],
+        z_indices: &[i64],
+        z_indptr: &[i64],
+        z_shape: (usize, usize),
+        weights: &'a [f64],
+        offset: ArrayView1<'_, f64>,
+        theta: &'a [f64],
+        n_levels: Vec<usize>,
+        n_terms: Vec<usize>,
+        correlated: Vec<bool>,
+        family: &str,
+        link: &str,
+        n_agq: usize,
+    ) -> PyResult<Self> {
+        if n_agq == 0 {
+            return Err(PyValueError::new_err("n_agq must be a positive integer"));
+        }
+        if n_levels.len() != n_terms.len() || n_levels.len() != correlated.len() {
+            return Err(PyValueError::new_err(
+                "n_levels, n_terms, and correlated must have equal lengths",
+            ));
+        }
+        let structures: Vec<_> = n_levels
+            .into_iter()
+            .zip(n_terms)
+            .zip(correlated)
+            .map(|((n_levels, n_terms), correlated)| RandomEffectStructure {
+                n_levels,
+                n_terms,
+                correlated,
+            })
+            .collect();
+        validate_glmm_dimensions(
+            y.len(),
+            x.nrows(),
+            z_shape,
+            weights.len(),
+            offset.len(),
+            theta.len(),
+            &structures,
+        )
+        .map_err(PyValueError::new_err)?;
+        if n_agq > 1 && z_shape.1 > 0 && (structures.len() != 1 || structures[0].n_terms != 1) {
+            return Err(PyValueError::new_err(
+                "n_agq > 1 requires one random-effect term with one coefficient per group; use n_agq=1 for this model",
+            ));
+        }
+        let (family, link) = parse_family_and_link(family, link)?;
+        // Validate before indexing views or allocating the owned dense matrices.
+        let z = csc_from_scipy(z_data, z_indices, z_indptr, z_shape)?;
+        Ok(Self {
+            y: y.iter().copied().collect(),
+            x: DMatrix::from_fn(x.nrows(), x.ncols(), |i, j| x[[i, j]]),
+            z,
+            weights,
+            offset: offset.iter().copied().collect(),
+            theta,
+            structures,
+            family,
+            link,
+        })
+    }
 }
 
 fn dense_penalized_crossproduct(
@@ -790,44 +939,34 @@ pub fn pirls<'py>(
     tol: f64,
 ) -> PyResult<(Vec<f64>, Vec<f64>, f64, bool)> {
     validate_pirls_controls(maxiter, tol)?;
-    let structures: Vec<RandomEffectStructure> = n_levels
-        .into_iter()
-        .zip(n_terms)
-        .zip(correlated)
-        .map(|((nl, nt), c)| RandomEffectStructure {
-            n_levels: nl,
-            n_terms: nt,
-            correlated: c,
-        })
-        .collect();
-
-    let (family_type, link_fn) = parse_family_and_link(family, link)?;
-
-    let y_arr = y.as_array();
-    let x_arr = x.as_array();
-    let n = y_arr.len();
-    let p = x_arr.ncols();
-
-    let y_vec: DVector<f64> = y_arr.iter().copied().collect();
-    let x_mat = DMatrix::from_fn(n, p, |i, j| x_arr[[i, j]]);
-    let z_mat = csc_from_scipy(
+    let inputs = GlmmInputs::new(
+        y.as_array(),
+        x.as_array(),
         z_data.as_slice()?,
         z_indices.as_slice()?,
         z_indptr.as_slice()?,
         z_shape,
+        weights.as_slice()?,
+        offset.as_array(),
+        theta.as_slice()?,
+        n_levels,
+        n_terms,
+        correlated,
+        family,
+        link,
+        1,
     )?;
-    let offset_vec: DVector<f64> = offset.as_array().iter().copied().collect();
 
     let result = pirls_impl(
-        &y_vec,
-        &x_mat,
-        &z_mat,
-        weights.as_slice()?,
-        &offset_vec,
-        theta.as_slice()?,
-        &structures,
-        family_type,
-        link_fn,
+        &inputs.y,
+        &inputs.x,
+        &inputs.z,
+        inputs.weights,
+        &inputs.offset,
+        inputs.theta,
+        &inputs.structures,
+        inputs.family,
+        inputs.link,
         None,
         None,
         maxiter,
@@ -978,53 +1117,34 @@ pub fn glmm_deviance<'py>(
     tol: f64,
 ) -> PyResult<(f64, Vec<f64>, Vec<f64>, bool)> {
     validate_pirls_controls(maxiter, tol)?;
-    let structures: Vec<RandomEffectStructure> = n_levels
-        .into_iter()
-        .zip(n_terms)
-        .zip(correlated)
-        .map(|((nl, nt), c)| RandomEffectStructure {
-            n_levels: nl,
-            n_terms: nt,
-            correlated: c,
-        })
-        .collect();
-
-    if n_agq == 0 {
-        return Err(PyValueError::new_err("n_agq must be a positive integer"));
-    }
-    if n_agq > 1 && z_shape.1 > 0 && (structures.len() != 1 || structures[0].n_terms != 1) {
-        return Err(PyValueError::new_err(
-            "n_agq > 1 requires one random-effect term with one coefficient per group; use n_agq=1 for this model",
-        ));
-    }
-
-    let (family_type, link_fn) = parse_family_and_link(family, link)?;
-
-    let y_arr = y.as_array();
-    let x_arr = x.as_array();
-    let n = y_arr.len();
-    let p = x_arr.ncols();
-
-    let y_vec: DVector<f64> = y_arr.iter().copied().collect();
-    let x_mat = DMatrix::from_fn(n, p, |i, j| x_arr[[i, j]]);
-    let z_mat = csc_from_scipy(
+    let inputs = GlmmInputs::new(
+        y.as_array(),
+        x.as_array(),
         z_data.as_slice()?,
         z_indices.as_slice()?,
         z_indptr.as_slice()?,
         z_shape,
+        weights.as_slice()?,
+        offset.as_array(),
+        theta.as_slice()?,
+        n_levels,
+        n_terms,
+        correlated,
+        family,
+        link,
+        n_agq,
     )?;
-    let offset_vec: DVector<f64> = offset.as_array().iter().copied().collect();
 
     let (deviance, beta, u, converged) = adaptive_gh_deviance_impl(
-        &y_vec,
-        &x_mat,
-        &z_mat,
-        weights.as_slice()?,
-        &offset_vec,
-        theta.as_slice()?,
-        &structures,
-        family_type,
-        link_fn,
+        &inputs.y,
+        &inputs.x,
+        &inputs.z,
+        inputs.weights,
+        &inputs.offset,
+        inputs.theta,
+        &inputs.structures,
+        inputs.family,
+        inputs.link,
         n_agq,
         None,
         None,
@@ -1337,5 +1457,31 @@ mod final_mode_tests {
         assert_eq!(state.covariance.apply(&state.spherical), state.u);
         let expected_mean = LinkFunction::Log.inverse(&(&x * &state.beta));
         assert_eq!(state.mean, expected_mean);
+    }
+}
+
+#[cfg(test)]
+mod input_dimension_tests {
+    use super::*;
+
+    #[test]
+    fn mixed_covariance_structures_have_exact_counts() {
+        let structures = [
+            RandomEffectStructure {
+                n_levels: 3,
+                n_terms: 2,
+                correlated: true,
+            },
+            RandomEffectStructure {
+                n_levels: 4,
+                n_terms: 2,
+                correlated: false,
+            },
+        ];
+        assert!(validate_glmm_dimensions(8, 8, (8, 14), 8, 8, 5, &structures).is_ok());
+        assert!(validate_glmm_dimensions(8, 8, (8, 14), 8, 8, 4, &structures).is_err());
+        assert!(validate_glmm_dimensions(8, 8, (8, 14), 8, 8, 6, &structures).is_err());
+        assert!(validate_glmm_dimensions(8, 8, (8, 13), 8, 8, 5, &structures).is_err());
+        assert!(validate_glmm_dimensions(8, 8, (8, 0), 8, 8, 0, &[]).is_ok());
     }
 }
