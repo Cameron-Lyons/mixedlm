@@ -1673,6 +1673,30 @@ def test_benchmark_lmm_covariance_transforms(benchmark, width, independent, oper
     np.testing.assert_allclose(actual, expected, rtol=2e-12, atol=2e-11)
 
 
+@pytest.mark.benchmark(group="prepared-lmm-gradients")
+@pytest.mark.parametrize("layout", ["fixed_only", "mode_only", "slope", "crossed"])
+@pytest.mark.parametrize("size", [64, 65536])
+@pytest.mark.parametrize("workers", [1, 4])
+def test_benchmark_prepared_lmm_gradients(benchmark, layout, size, workers):
+    from concurrent.futures import ThreadPoolExecutor
+
+    from mixedlm import _rust
+
+    from tests.test_glmm_final_state import mode_problem
+    from tests.test_lmm_prepared_design import native_arguments, parameters
+
+    matrices, _, _ = mode_problem("gaussian", layout, n_obs=size, n_groups=16)
+    arguments = native_arguments(matrices)
+    response = _rust.LmmDesign(**arguments).with_response(matrices.y)
+    theta = parameters(matrices)
+    expected = _rust.profiled_deviance_with_gradient(theta=theta, y=matrices.y, **arguments)
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        results = benchmark(lambda: list(pool.map(response.deviance_with_gradient, [theta] * 8)))
+    for value, gradient in results:
+        assert value == expected[0]
+        np.testing.assert_array_equal(gradient, expected[1])
+
+
 @pytest.mark.benchmark(group="lmm-gradient-validation")
 @pytest.mark.parametrize("layout", ["fixed_only", "mode_only", "slope", "crossed"])
 @pytest.mark.parametrize("size", [64, 65536])

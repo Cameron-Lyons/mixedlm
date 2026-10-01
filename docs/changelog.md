@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Prepared native LMM responses expose `deviance_with_gradient(theta, reml=True)`, reusing validated design and response products for analytic covariance gradients. Calls snapshot parameters and release the interpreter lock, allowing concurrent evaluations and direct use with SciPy's `jac=True` interface.
+
 - Bootstrap results expose ordered, immutable `BootstrapFailure` records with sample indices, failure stages, and error messages. Summaries include stage counts, and custom simulated responses are validated before refitting.
 
 - Nonlinear bootstrap and bootstrap confidence intervals accept `n_jobs` for parallel refits. `bootMer()` honors the worker count for nonlinear models, preserving seeded samples and failure handling. Nonlinear bootstrap also accepts reusable NumPy random streams.
