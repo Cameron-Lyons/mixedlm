@@ -17,7 +17,7 @@ from mixedlm.estimation.optimizers import (
     nlminbwrap,
     run_optimizer,
 )
-from numpy.testing import assert_allclose
+from numpy.testing import assert_allclose, assert_array_equal
 
 
 def rosenbrock(x):
@@ -202,6 +202,28 @@ class TestNlminbwrap:
 
 
 class TestRunOptimizer:
+    @pytest.mark.parametrize("analytic", [False, True])
+    def test_trust_constr_reports_objective_gradient_and_adapts_callback(self, analytic):
+        points = []
+
+        def derivative(x):
+            return 2 * (x - np.array([2.0, 3.0]))
+
+        result = run_optimizer(
+            quadratic,
+            np.array([0.5, 0.5]),
+            "trust-constr",
+            [(0.0, 1.0), (0.0, 1.0)],
+            jac=derivative if analytic else None,
+            callback=lambda x: points.append(x.copy()),
+            options={"gtol": 1e-8},
+        )
+        assert result.success
+        assert_allclose(result.x, [1.0, 1.0], atol=1e-3)
+        assert_allclose(result.jac, derivative(result.x), atol=1e-6)
+        assert points
+        assert_array_equal(points[-1], result.x)
+
     def test_lbfgsb(self):
         bounds = [(None, None), (None, None)]
         result = run_optimizer(quadratic, np.array([0.0, 0.0]), "L-BFGS-B", bounds)

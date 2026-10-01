@@ -602,6 +602,30 @@ def profiled_reml(
     return profiled_deviance(theta, matrices, REML=True)
 
 
+class _LMMGradientObjective:
+    """Keep one owned value/gradient pair local to an optimization run."""
+
+    def __init__(
+        self,
+        evaluate: Callable[[NDArray[np.floating]], tuple[float, NDArray[np.floating]]],
+    ) -> None:
+        self.evaluate = evaluate
+        self.theta: NDArray[np.floating] | None = None
+        self.value = 0.0
+        self.derivative: NDArray[np.floating] = np.empty(0)
+
+    def __call__(self, theta: NDArray[np.floating]) -> float:
+        if self.theta is None or not np.array_equal(theta, self.theta):
+            snapshot = np.array(theta, dtype=np.float64, copy=True)
+            value, derivative = self.evaluate(snapshot)
+            self.theta, self.value, self.derivative = snapshot, value, derivative
+        return self.value
+
+    def gradient(self, theta: NDArray[np.floating]) -> NDArray[np.floating]:
+        self(theta)
+        return self.derivative.copy()
+
+
 class LMMOptimizer:
     """Optimize theta for a fixed design, optionally sharing it with new responses.
 
@@ -828,6 +852,28 @@ class LMMOptimizer:
         result = self._evaluate_core(theta)
         return 1e10 if result is None else result.deviance
 
+    def _optimization_functions(
+        self, method: str, use_analytic_gradient: bool
+    ) -> tuple[
+        Callable[[NDArray[np.floating]], float],
+        Callable[[NDArray[np.floating]], NDArray[np.floating]] | None,
+    ]:
+        if not isinstance(use_analytic_gradient, (bool, np.bool_)):
+            raise ValueError("use_analytic_gradient must be a boolean")
+        if (
+            use_analytic_gradient
+            and method in {"L-BFGS-B", "BFGS", "TNC", "SLSQP", "trust-constr"}
+            and self.use_rust
+            and self._rust_cache is not None
+            and self.n_theta
+        ):
+            response, reml = self._rust_cache.response, self.REML
+            objective = _LMMGradientObjective(
+                lambda theta: response.deviance_with_gradient(theta, reml)
+            )
+            return objective, objective.gradient
+        return self.objective, None
+
     def _final_evaluation(self, theta: NDArray[np.floating]) -> _DevianceCoreResult:
         """Extract and validate the estimates at the final parameter vector."""
         try:
@@ -880,17 +926,26 @@ class LMMOptimizer:
         options: dict[str, Any] | None = None,
         *,
         restart_edge: bool = True,
+        use_analytic_gradient: bool = False,
     ) -> OptimizationResult:
+        """Fit covariance parameters with optional prepared native gradients.
+
+        Analytic gradients support L-BFGS-B, BFGS, TNC, SLSQP, and trust-constr.
+        They share value/gradient evaluations within this call; other backends
+        and covariance structures retain the solver's numerical derivatives.
+        Large random-effect systems can make analytic evaluation more expensive.
+        """
         if start is None:
             start = self.get_start_theta()
 
         bounds = _build_theta_bounds(self.matrices.random_structures, len(start))
+        objective, gradient = self._optimization_functions(method, use_analytic_gradient)
 
         callback: Callable[[NDArray[np.floating]], None] | None = None
         if self.verbose > 0:
 
             def callback(x: NDArray[np.floating]) -> None:
-                dev = self.objective(x)
+                dev = objective(x)
                 print(f"theta = {x}, deviance = {dev:.6f}")
 
         opt_options = {"maxiter": maxiter}
@@ -898,12 +953,13 @@ class LMMOptimizer:
             opt_options.update(options)
 
         result = run_optimizer(
-            self.objective,
+            objective,
             start,
             method=method,
             bounds=bounds,
             options=opt_options,
             callback=callback,
+            jac=gradient,
             restart_edge=restart_edge,
         )
 

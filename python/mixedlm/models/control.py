@@ -179,6 +179,11 @@ class LmerControl:
         Whether to calculate gradient/Hessian for variance-covariance.
     use_rust : bool, default True
         Whether to use Rust backend for optimization (if available).
+    use_analytic_gradient : bool, default False
+        Use prepared analytic gradients with the native backend and L-BFGS-B,
+        BFGS, TNC, SLSQP, or trust-constr. False retains numerical derivatives.
+        Python and structured-covariance fits retain numerical derivatives when
+        required. Analytic gradients can be slower for large random-effect systems.
     em_init : bool, default False
         Whether to use EM-REML algorithm for initialization before
         switching to direct optimization. Can improve convergence for
@@ -224,8 +229,11 @@ class LmerControl:
     check_scaleX: str = "warning"
     optCtrl: dict[str, Any] = field(default_factory=dict)
     restart_edge: bool = True
+    use_analytic_gradient: bool = False
 
     def __post_init__(self) -> None:
+        if not isinstance(self.use_analytic_gradient, (bool, np.bool_)):
+            raise ValueError("use_analytic_gradient must be a boolean")
         _validate_common_control(
             optimizer=self.optimizer,
             maxiter=self.maxiter,
@@ -423,6 +431,7 @@ def lmerControl(
     check_scaleX: str = "warning",
     optCtrl: dict[str, Any] | None = None,
     restart_edge: bool = True,
+    use_analytic_gradient: bool = False,
 ) -> LmerControl:
     """Create a control object for lmer().
 
@@ -440,6 +449,7 @@ def lmerControl(
     >>> result = lmer("y ~ x + (1|group)", data, control=ctrl)
     """
     return LmerControl(
+        use_analytic_gradient=use_analytic_gradient,
         restart_edge=restart_edge,
         optimizer=optimizer,
         maxiter=maxiter,

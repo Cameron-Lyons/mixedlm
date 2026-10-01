@@ -260,17 +260,24 @@ def _optimize_scipy(
         _move_option_alias(scipy_options, "fatol", "ftol")
 
     scipy_bounds = None if method in _SCIPY_METHODS_WITHOUT_BOUNDS else bounds
+
+    def scipy_callback(x: NDArray[np.floating], *state: Any) -> None:
+        # trust-constr supplies an additional OptimizeResult argument.
+        if callback is not None:
+            return callback(x)
+
     result = minimize(
         fun,
         x0,
         method=method,
         bounds=scipy_bounds,
         options=scipy_options,
-        callback=callback,
+        callback=scipy_callback if method == "trust-constr" and callback is not None else callback,
         jac=jac,
     )
 
-    jac_val = result.jac if hasattr(result, "jac") else None
+    # trust-constr's jac contains constraint Jacobians; grad is the objective gradient.
+    jac_val = result.grad if method == "trust-constr" else getattr(result, "jac", None)
     nfev_val = result.nfev if hasattr(result, "nfev") else 0
 
     return OptimizeResult(
