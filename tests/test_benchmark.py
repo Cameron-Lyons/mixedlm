@@ -127,6 +127,29 @@ def test_benchmark_native_sparse_input_crossproducts(benchmark, n, noncanonical)
     np.testing.assert_allclose(actual, expected, rtol=2e-13, atol=1e-12)
 
 
+@pytest.mark.benchmark(group="native-partially-dense-crossproducts")
+@pytest.mark.parametrize("columns", [16, 32, 64])
+@pytest.mark.parametrize("density", [0.3, 0.6, 0.9, 0.99, 1.0])
+def test_benchmark_partially_dense_crossproducts(benchmark, columns, density):
+    from mixedlm import _rust
+
+    rng = np.random.default_rng(431)
+    dense = rng.normal(size=(96, columns))
+    dense[rng.random(dense.shape) > density] = 0.0
+    z = sparse.csc_matrix(dense)
+    weights = np.geomspace(0.2, 2.0, dense.shape[0])
+    expected = dense.T @ (weights[:, None] * dense)
+    actual = benchmark(
+        _rust.compute_ztwz,
+        z.data,
+        z.indices.astype(np.int64),
+        z.indptr.astype(np.int64),
+        z.shape,
+        weights,
+    ).reshape(columns, columns)
+    np.testing.assert_allclose(actual, expected, rtol=2e-12, atol=2e-12)
+
+
 @pytest.mark.benchmark(group="native-glmm-crossproducts")
 @pytest.mark.parametrize(
     ("layout", "n_obs", "n_groups"),

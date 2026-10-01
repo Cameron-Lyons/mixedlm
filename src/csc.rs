@@ -190,8 +190,8 @@ impl CscMatrix {
                 }
             }
             _ => {
-                // Very sparse designs, dense designs, and callers with cached
-                // crossproducts need no new layout or traversal of empty rows.
+                // Very sparse and fully populated designs, and callers with
+                // cached crossproducts, need no new traversal of empty rows.
                 for column in 0..self.ncols {
                     for index in self.col_offsets[column]..self.col_offsets[column + 1] {
                         output[self.row_indices[index]] -= self.values[index] * vector[column];
@@ -209,10 +209,14 @@ impl CscMatrix {
         if self.values.is_empty() {
             return result;
         }
-        // At high density, accumulating one column pair at a time avoids
-        // repeatedly updating the output matrix and needs no row workspace.
+        // Keep column accumulation for small and nearly full designs.
+        // Larger incomplete designs amortize a row layout across column pairs.
         if self.values.len() / self.nrows > self.ncols / 4 {
             let fully_dense = self.values.len() / self.nrows == self.ncols;
+            if self.ncols >= 32 && self.values.len() / self.nrows < self.ncols - self.ncols / 32 {
+                self.accumulate_dense_rows(weights, &mut result);
+                return result;
+            }
             for left in 0..self.ncols {
                 for right in 0..=left {
                     let sum = self.weighted_column_product(weights, left, right, fully_dense);
@@ -240,6 +244,32 @@ impl CscMatrix {
             }
         }
         result
+    }
+
+    fn accumulate_dense_rows(&self, weights: &[f64], result: &mut Mat<f64>) {
+        let rows = self.rows.get_or_init(|| RowStorage::new(self));
+        let mut weighted = vec![0.0; self.ncols];
+        // Match the column path: preweight the higher-column operand,
+        // and add each cell's contributions in ascending row order.
+        for (row, &weight) in weights.iter().enumerate() {
+            let start = rows.offsets[row];
+            let end = rows.offsets[row + 1];
+            for entry in start..end {
+                weighted[entry - start] = rows.values[entry] * weight;
+            }
+            for low in start..end {
+                let column = rows.columns[low];
+                for high in low..end {
+                    result[(rows.columns[high], column)] +=
+                        weighted[high - start] * rows.values[low];
+                }
+            }
+        }
+        for column in 0..self.ncols {
+            for row in column + 1..self.ncols {
+                result[(column, row)] = result[(row, column)];
+            }
+        }
     }
 
     fn weighted_column_product(
@@ -748,6 +778,83 @@ mod tests {
                 .unwrap_err()
                 .to_string();
             assert!(error.contains(expected), "{error}");
+        }
+    }
+
+    #[test]
+    fn dense_row_products_preserve_column_order_and_missing_entries() {
+        for q in [31, 32, 33] {
+            for layout in ["partial", "nearly_full", "full"] {
+                let mut values = Vec::new();
+                let mut rows = Vec::new();
+                let mut offsets = vec![0];
+                for column in 0..q {
+                    for row in 0..12 {
+                        if (layout == "partial" && (row == 4 || (row + column) % 5 == 0))
+                            || (layout == "nearly_full" && row == 4 && column == 0)
+                        {
+                            continue;
+                        }
+                        let value = match row {
+                            0 => 1e16,
+                            1 => 1.0,
+                            2 => -1e16,
+                            3 => -0.0,
+                            5 => f64::MIN_POSITIVE,
+                            6 => -f64::MIN_POSITIVE,
+                            _ => (row + column) as f64 / 8.0,
+                        };
+                        values.push(value * if column % 2 == 0 { 1.0 } else { -0.5 });
+                        rows.push(row);
+                    }
+                    offsets.push(rows.len());
+                }
+                let matrix = CscMatrix::try_from_usize(&values, &rows, &offsets, (12, q)).unwrap();
+                for weights in [
+                    [1.0; 12],
+                    [
+                        1.0, -2.0, -1.0, 0.0, 3.0, 1e-308, 2.0, 0.3, 1.1, 1.0, 2.0, 1.0,
+                    ],
+                    [
+                        1.0,
+                        2.0,
+                        0.25,
+                        f64::INFINITY,
+                        f64::NAN,
+                        0.0,
+                        2.0,
+                        0.5,
+                        4.0,
+                        1.0,
+                        2.0,
+                        1.0,
+                    ],
+                ] {
+                    let actual = matrix.weighted_crossproduct(&weights);
+                    for left in 0..q {
+                        for right in 0..=left {
+                            let right_start = offsets[right];
+                            let right_rows = &rows[right_start..offsets[right + 1]];
+                            let mut expected = 0.0;
+                            for entry in offsets[left]..offsets[left + 1] {
+                                if let Ok(position) = right_rows.binary_search(&rows[entry]) {
+                                    expected += values[entry]
+                                        * weights[rows[entry]]
+                                        * values[right_start + position];
+                                }
+                            }
+                            for value in [actual[(left, right)], actual[(right, left)]] {
+                                if expected.is_nan() {
+                                    assert!(value.is_nan());
+                                } else {
+                                    assert_eq!(value.to_bits(), expected.to_bits());
+                                }
+                            }
+                        }
+                    }
+                    assert_eq!(matrix.rows.get().is_some(), q >= 32 && layout == "partial");
+                }
+            }
         }
     }
 
