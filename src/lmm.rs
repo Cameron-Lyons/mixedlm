@@ -484,7 +484,7 @@ impl PreparedLmmResponse {
             None
         };
 
-        let ztwz_lambda = factor.transpose_apply(ztwz.as_ref()).transpose().to_owned();
+        let ztwz_lambda = factor.right_apply(ztwz.as_ref());
         let derivative_rhs = Mat::from_fn(q, 1 + v_inv_b.ncols(), |row, column| {
             if column == 0 {
                 u_star[(row, 0)]
