@@ -1,5 +1,6 @@
-use faer::linalg::solvers::Llt;
-use faer::{Mat, MatMut, MatRef, Side};
+use faer::dyn_stack::{MemBuffer, MemStack};
+use faer::linalg::cholesky::llt::factor::{cholesky_in_place, cholesky_in_place_scratch};
+use faer::{Mat, MatMut, MatRef};
 use rayon::prelude::*;
 
 use crate::covariance::{right_apply_repeated_in_place, transpose_apply_repeated_in_place};
@@ -308,7 +309,7 @@ impl BlockedCholesky {
                         rank_update_subtract(&mut aii, lik, lik)?;
                     }
 
-                    let lii = chol_block(&aii)?;
+                    let lii = chol_block(aii)?;
                     row_blocks.push(lii);
                 } else {
                     let mut aij = a_block.clone();
@@ -455,57 +456,55 @@ impl BlockedCholesky {
     }
 }
 
-fn chol_block(block: &BlockType) -> Result<BlockType, LinalgError> {
-    match block {
-        BlockType::Dense(m) => {
-            let chol =
-                Llt::new(m.as_ref(), Side::Lower).map_err(|_| LinalgError::NotPositiveDefinite)?;
-            Ok(BlockType::Dense(chol.L().to_owned()))
+fn chol_dense_in_place(matrix: &mut Mat<f64>) -> Result<(), LinalgError> {
+    assert_eq!(matrix.nrows(), matrix.ncols());
+    let parallelism = faer::get_global_parallelism();
+    let mut scratch = MemBuffer::new(cholesky_in_place_scratch::<f64>(
+        matrix.nrows(),
+        parallelism,
+        Default::default(),
+    ));
+    cholesky_in_place(
+        matrix.as_mut(),
+        Default::default(),
+        parallelism,
+        MemStack::new(&mut scratch),
+        Default::default(),
+    )
+    .map_err(|_| LinalgError::NotPositiveDefinite)?;
+    // The factorization reads the lower triangle only. Clear the unused input
+    // entries before the factor participates in full matrix products.
+    for column in 0..matrix.ncols() {
+        for row in 0..column {
+            matrix[(row, column)] = 0.0;
         }
-        BlockType::Diagonal(d) => {
-            let l: Result<Vec<f64>, LinalgError> = d
-                .iter()
-                .map(|&x| {
-                    if x <= 0.0 {
-                        Err(LinalgError::NotPositiveDefinite)
-                    } else {
-                        Ok(x.sqrt())
-                    }
-                })
-                .collect();
-            Ok(BlockType::Diagonal(l?))
+    }
+    Ok(())
+}
+
+fn chol_block(mut block: BlockType) -> Result<BlockType, LinalgError> {
+    // These buffers already hold the Schur complement and belong to this solve.
+    // Factor them directly instead of copying into and out of an Llt wrapper.
+    match &mut block {
+        BlockType::Dense(matrix) => chol_dense_in_place(matrix)?,
+        BlockType::Diagonal(diagonal) => {
+            for value in diagonal {
+                if *value <= 0.0 {
+                    return Err(LinalgError::NotPositiveDefinite);
+                }
+                *value = value.sqrt();
+            }
         }
-        BlockType::BlockDiagonal { block_size, blocks } => {
+        BlockType::BlockDiagonal { blocks, .. } => {
             #[cfg(miri)]
-            let results: Result<Vec<Mat<f64>>, LinalgError> = blocks
-                .iter()
-                .map(|b| {
-                    let chol = Llt::new(b.as_ref(), Side::Lower)
-                        .map_err(|_| LinalgError::NotPositiveDefinite)?;
-                    Ok(chol.L().to_owned())
-                })
-                .collect();
+            blocks.iter_mut().try_for_each(chol_dense_in_place)?;
 
             #[cfg(not(miri))]
-            let results: Result<Vec<Mat<f64>>, LinalgError> = blocks
-                .par_iter()
-                .map(|b| {
-                    let chol = Llt::new(b.as_ref(), Side::Lower)
-                        .map_err(|_| LinalgError::NotPositiveDefinite)?;
-                    Ok(chol.L().to_owned())
-                })
-                .collect();
-
-            Ok(BlockType::BlockDiagonal {
-                block_size: *block_size,
-                blocks: results?,
-            })
+            blocks.par_iter_mut().try_for_each(chol_dense_in_place)?;
         }
-        BlockType::Zero { rows, cols } => Ok(BlockType::Zero {
-            rows: *rows,
-            cols: *cols,
-        }),
+        BlockType::Zero { .. } => {}
     }
+    Ok(block)
 }
 
 fn rank_update_subtract_inplace(target: &mut BlockType, l: &BlockType, r: &BlockType) {
@@ -807,7 +806,122 @@ fn block_logdet(block: &BlockType) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use faer::linalg::solvers::Solve;
+    use faer::Side;
+    use faer::linalg::solvers::{Llt, Solve};
+
+    #[test]
+    fn owned_factors_match_lower_triangle_reference_and_reuse_buffers() {
+        let widths: &[usize] = if cfg!(miri) {
+            &[0, 1, 2]
+        } else {
+            &[0, 1, 2, 3, 16, 17, 65, 129]
+        };
+        for &width in widths {
+            let matrix = Mat::from_fn(width, width, |row, column| {
+                if row < column {
+                    f64::NAN
+                } else if row == column {
+                    2.0 + row as f64 / 8.0
+                } else {
+                    0.125 / (row - column) as f64
+                }
+            });
+            let expected = Llt::new(matrix.as_ref(), Side::Lower)
+                .unwrap()
+                .L()
+                .to_owned();
+            let pointer = matrix.as_ptr();
+            let BlockType::Dense(actual) = chol_block(BlockType::Dense(matrix)).unwrap() else {
+                panic!("dense block changed representation");
+            };
+            assert_eq!(actual.as_ptr(), pointer);
+            assert_eq!(actual, expected);
+
+            let blocks: Vec<_> = (0..3).map(|_| &expected * expected.transpose()).collect();
+            let pointers: Vec<_> = blocks.iter().map(Mat::as_ptr).collect();
+            let references: Vec<_> = blocks
+                .iter()
+                .map(|matrix| {
+                    Llt::new(matrix.as_ref(), Side::Lower)
+                        .unwrap()
+                        .L()
+                        .to_owned()
+                })
+                .collect();
+            let BlockType::BlockDiagonal { block_size, blocks } =
+                chol_block(BlockType::BlockDiagonal {
+                    block_size: width,
+                    blocks,
+                })
+                .unwrap()
+            else {
+                panic!("level blocks changed representation");
+            };
+            assert_eq!(block_size, width);
+            for ((actual, pointer), expected) in blocks.iter().zip(pointers).zip(references) {
+                assert_eq!(actual.as_ptr(), pointer);
+                assert_eq!(actual, &expected);
+            }
+        }
+        let diagonal = vec![0.25, 1.0, 4.0];
+        let pointer = diagonal.as_ptr();
+        let BlockType::Diagonal(actual) = chol_block(BlockType::Diagonal(diagonal)).unwrap() else {
+            panic!("diagonal block changed representation");
+        };
+        assert_eq!(actual.as_ptr(), pointer);
+        assert_eq!(actual, [0.5, 1.0, 2.0]);
+        assert!(matches!(
+            chol_block(BlockType::Zero { rows: 0, cols: 0 }).unwrap(),
+            BlockType::Zero { rows: 0, cols: 0 }
+        ));
+    }
+
+    #[test]
+    fn factor_preserves_input_on_success_and_nonpositive_pivots() {
+        for pivot in [2.0, 0.0, -1.0] {
+            let dense = Mat::from_fn(2, 2, |row, column| {
+                if row == column {
+                    if row == 0 { 4.0 } else { pivot }
+                } else if row < column {
+                    123.0
+                } else {
+                    0.0
+                }
+            });
+            for block in [
+                BlockType::Dense(dense.clone()),
+                BlockType::Diagonal(vec![4.0, pivot]),
+                BlockType::BlockDiagonal {
+                    block_size: 2,
+                    blocks: vec![Mat::identity(2, 2), dense.clone()],
+                },
+            ] {
+                let dimension = block.to_dense().nrows();
+                let input = BlockedMatrix {
+                    block_dims: vec![dimension],
+                    blocks: vec![vec![block]],
+                };
+                let before = input.to_dense();
+                let result = BlockedCholesky::factor(&input);
+                assert_eq!(input.to_dense(), before);
+                if pivot > 0.0 {
+                    let factor = result.unwrap();
+                    let rhs = Mat::from_fn(dimension, 2, |row, column| (row + column + 1) as f64);
+                    let expected = Llt::new(before.as_ref(), Side::Lower).unwrap().solve(&rhs);
+                    let actual = factor.solve(&rhs);
+                    for row in 0..dimension {
+                        for column in 0..2 {
+                            assert!(
+                                (actual[(row, column)] - expected[(row, column)]).abs() < 1e-12
+                            );
+                        }
+                    }
+                } else {
+                    assert!(matches!(result, Err(LinalgError::NotPositiveDefinite)));
+                }
+            }
+        }
+    }
 
     #[test]
     fn stacked_level_assembly_matches_full_crossproducts() {
@@ -1223,6 +1337,7 @@ mod tests {
         let dense_v = blocked.to_dense();
 
         let blocked_chol = BlockedCholesky::factor(&blocked).expect("Blocked Cholesky failed");
+        assert_eq!(blocked.to_dense(), dense_v);
 
         let dense_chol = Llt::new(dense_v.as_ref(), Side::Lower).expect("Dense Cholesky failed");
 
@@ -1425,7 +1540,7 @@ mod tests {
             blocks,
         };
 
-        let chol = chol_block(&block_diag).expect("Cholesky failed");
+        let chol = chol_block(block_diag).expect("Cholesky failed");
 
         if let BlockType::BlockDiagonal {
             blocks: l_blocks, ..
