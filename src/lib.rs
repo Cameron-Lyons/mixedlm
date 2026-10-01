@@ -163,6 +163,8 @@ fn update_cholesky_factor<'py>(
 #[pymodule]
 fn _rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("_source_fingerprint", env!("MIXEDLM_SOURCE_FINGERPRINT"))?;
+    m.add_class::<lmm::LmmDesign>()?;
+    m.add_class::<lmm::LmmResponse>()?;
     m.add_class::<SparseCholeskySymbolic>()?;
     m.add_class::<SparseCholeskyNumeric>()?;
     m.add_function(wrap_pyfunction!(sparse_cholesky_solve, m)?)?;

@@ -161,7 +161,7 @@ def test_custom_family_receives_the_supplied_stream(path):
     assert family.received is rng
 
 
-def fake_refit(matrices, response, theta, *args):
+def fake_refit(matrices, response, theta, *args, **kwargs):
     return SimpleNamespace(
         beta=np.array([np.mean(response), np.std(response)]),
         theta=np.array([np.var(response)]),

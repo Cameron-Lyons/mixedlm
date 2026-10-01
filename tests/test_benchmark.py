@@ -1483,3 +1483,24 @@ def test_benchmark_native_sparse_glmm(benchmark, groups):
     np.testing.assert_allclose(actual[0], expected, rtol=1e-11, atol=1e-9)
     np.testing.assert_allclose(actual[1], beta, rtol=1e-11, atol=1e-11)
     np.testing.assert_allclose(actual[2], theta * spherical, rtol=1e-11, atol=1e-11)
+
+
+@pytest.mark.benchmark(group="native-lmm-prepared-design")
+@pytest.mark.parametrize("new_response", [False, True])
+def test_benchmark_native_prepared_lmm(benchmark, large_data, new_response):
+    matrices = build_model_matrices(parse_formula("y ~ x + (1 | group)"), large_data)
+    optimizer = LMMOptimizer(matrices, use_rust=True)
+    theta = np.array([0.8])
+    response = matrices.y[::-1].copy()
+    if new_response:
+        expected = optimizer.with_response(response).objective(theta)
+
+        def evaluate():
+            return optimizer.with_response(response).objective(theta)
+    else:
+        expected = optimizer.objective(theta)
+
+        def evaluate():
+            return optimizer.objective(theta)
+
+    assert benchmark(evaluate) == expected
