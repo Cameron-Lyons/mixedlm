@@ -25,6 +25,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Nonlinear fitting uses joint fixed/random parameter updates with a backtracking line search on both backends. Group systems keep the solves small, and Python consumes group results with bounded worker queues.
+
 - Python nonlinear fits reuse group and weight preparation across covariance evaluations, share one worker pool per fit, and compute final residual variance once per evaluation.
 
 - Python LMM likelihood evaluation uses scalar solves for diagonal random-effect systems, avoiding covariance-matrix assembly and factorization during fitting and likelihood profiling.

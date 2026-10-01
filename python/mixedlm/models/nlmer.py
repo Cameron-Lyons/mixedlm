@@ -965,7 +965,7 @@ class NlmerResult:
             lines.append(f"convergence: no ({self.n_iter} iterations)")
 
         if not self.pnls_converged:
-            lines.append("inner PNLS convergence: no (iteration limit reached)")
+            lines.append("inner PNLS convergence: no")
 
         return "\n".join(lines)
 
@@ -1142,7 +1142,7 @@ def nlmer(
         Additional optimizer arguments: ``method`` and ``maxiter`` for outer
         covariance optimization, and ``pnls_maxiter`` (default 50) and
         ``pnls_tol`` (default 1e-6) for the inner parameter updates. The inner
-        tolerance bounds the largest absolute fixed or random parameter update.
+        tolerance bounds the largest absolute proposed fixed or random parameter update.
 
     Returns
     -------
