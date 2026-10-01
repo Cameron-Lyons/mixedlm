@@ -1673,6 +1673,45 @@ def test_benchmark_lmm_covariance_transforms(benchmark, width, independent, oper
     np.testing.assert_allclose(actual, expected, rtol=2e-12, atol=2e-11)
 
 
+@pytest.mark.benchmark(group="lmm-residual-rows")
+@pytest.mark.parametrize("layout", ["intercept", "slope"])
+@pytest.mark.parametrize("size", [64, 65536])
+@pytest.mark.parametrize("operation", ["prepare", "objective", "cached"])
+def test_benchmark_lmm_residual_rows(benchmark, layout, size, operation):
+    from mixedlm import _rust
+    from mixedlm.estimation.reml import _profiled_deviance_core
+
+    from tests.test_lmm_prepared_design import native_arguments, parameters
+    from tests.test_lmm_residual_rows import residual_problem
+
+    matrices = residual_problem(layout, size, "disjoint")
+    theta = parameters(matrices)
+    expected = _profiled_deviance_core(theta, matrices).deviance
+    if operation == "prepare":
+        prepared = benchmark(LMMOptimizer, matrices, use_rust=True)
+        actual = prepared.objective(theta)
+    elif operation == "objective":
+        prepared = LMMOptimizer(matrices, use_rust=True)
+        actual = benchmark(prepared.objective, theta)
+    else:
+        arguments = native_arguments(matrices)
+        products = _rust.compute_ztwz(
+            arguments["z_data"],
+            arguments["z_indices"],
+            arguments["z_indptr"],
+            arguments["z_shape"],
+            arguments["weights"],
+        )
+        actual = benchmark(
+            _rust.profiled_deviance_cached,
+            theta=theta,
+            y=matrices.y,
+            ztwz_cache=products,
+            **arguments,
+        )
+    np.testing.assert_allclose(actual, expected, rtol=2e-12, atol=2e-9)
+
+
 @pytest.mark.benchmark(group="prepared-lmm-threads")
 @pytest.mark.parametrize("reml", [False, True])
 @pytest.mark.parametrize("workers", [1, 2, 4])

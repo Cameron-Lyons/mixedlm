@@ -172,6 +172,35 @@ impl CscMatrix {
         &self.values
     }
 
+    /// Subtract a matrix-vector product without allocating a prediction vector.
+    pub fn subtract_product(&self, vector: faer::ColRef<'_, f64>, output: &mut [f64]) {
+        assert_eq!(vector.nrows(), self.ncols);
+        assert_eq!(output.len(), self.nrows);
+        match self.rows.get() {
+            Some(rows) if self.values.len() > self.nrows => {
+                // The cached rows reduce output updates when there are more
+                // entries than observations. Sorted columns retain the CSC
+                // subtraction order, including cancellation-sensitive values.
+                for (row, value) in output.iter_mut().enumerate() {
+                    let mut residual = *value;
+                    for index in rows.offsets[row]..rows.offsets[row + 1] {
+                        residual -= rows.values[index] * vector[rows.columns[index]];
+                    }
+                    *value = residual;
+                }
+            }
+            _ => {
+                // Very sparse designs, dense designs, and callers with cached
+                // crossproducts need no new layout or traversal of empty rows.
+                for column in 0..self.ncols {
+                    for index in self.col_offsets[column]..self.col_offsets[column + 1] {
+                        output[self.row_indices[index]] -= self.values[index] * vector[column];
+                    }
+                }
+            }
+        }
+    }
+
     /// Compute Z' diag(weights) Z, using row accumulation for sparse designs.
     /// The immutable row layout is built once and reused as PIRLS weights change.
     pub fn weighted_crossproduct(&self, weights: &[f64]) -> Mat<f64> {
@@ -339,6 +368,100 @@ fn checked_indices(values: &[i64], field_name: &str) -> Result<Vec<usize>, Linal
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn product_subtraction_handles_irregular_columns_and_both_layouts() {
+        // Duplicate, unsorted entries, explicit zeros, and empty rows/columns.
+        for q in [3, 8] {
+            let mut offsets = vec![0, 3, 3];
+            offsets.resize(q + 1, 6);
+            let matrix = CscMatrix::try_from_usize(
+                &[2.0, 1.0, 3.0, 0.0, -2.0, 4.0],
+                &[2, 0, 2, 1, 0, 2],
+                &offsets,
+                (4, q),
+            )
+            .unwrap();
+            let vector = faer::Col::from_fn(q, |i| i as f64 - 1.0);
+            let mut residual = [1.0, -2.0, 3.0, 4.0];
+            matrix.subtract_product(vector.as_ref(), &mut residual);
+            assert_eq!(residual, [4.0, -2.0, 4.0, 4.0]);
+            assert!(matrix.rows.get().is_none());
+            matrix.weighted_crossproduct(&[0.25, 2.0, 3.0, 0.5]);
+            assert_eq!(matrix.rows.get().is_some(), q == 8);
+            let mut repeated = [1.0, -2.0, 3.0, 4.0];
+            matrix.subtract_product(vector.as_ref(), &mut repeated);
+            assert_eq!(repeated, residual);
+        }
+    }
+
+    #[test]
+    fn cached_product_subtraction_preserves_cancellation_order() {
+        let matrix = CscMatrix::try_from_usize(
+            &[1e16, 1.0, -1e16],
+            &[0, 0, 0],
+            &[0, 1, 2, 3, 3, 3, 3, 3, 3],
+            (2, 8),
+        )
+        .unwrap();
+        let vector = faer::Col::from_fn(8, |_| 1.0);
+        let mut before = [1.0, 2.0];
+        matrix.subtract_product(vector.as_ref(), &mut before);
+        // Forming Z * vector first and then subtracting would return 1 here.
+        assert_eq!(before, [0.0, 2.0]);
+        matrix.weighted_crossproduct(&[1.0; 2]);
+        assert!(matrix.rows.get().is_some());
+        let mut after = [1.0, 2.0];
+        matrix.subtract_product(vector.as_ref(), &mut after);
+        assert_eq!(after, before);
+    }
+
+    #[test]
+    fn product_subtraction_preserves_empty_rows_and_dimensions() {
+        for (n, q) in [(0, 0), (0, 3), (4, 0), (4, 3)] {
+            let matrix = CscMatrix::try_from_usize(&[], &[], &vec![0; q + 1], (n, q)).unwrap();
+            let vector = faer::Col::from_fn(q, |_| 1.0);
+            let mut residual = vec![2.0; n];
+            matrix.subtract_product(vector.as_ref(), &mut residual);
+            assert_eq!(residual, vec![2.0; n]);
+            matrix.weighted_crossproduct(&vec![1.0; n]);
+            matrix.subtract_product(vector.as_ref(), &mut residual);
+            assert_eq!(residual, vec![2.0; n]);
+            assert!(matrix.rows.get().is_none());
+        }
+    }
+
+    #[test]
+    fn product_subtraction_can_share_a_cache_being_initialized() {
+        let matrix = CscMatrix::try_from_usize(
+            &[1.0, 3.0, 2.0],
+            &[0, 0, 1],
+            &[0, 1, 2, 3, 3, 3, 3, 3, 3],
+            (2, 8),
+        )
+        .unwrap();
+        std::thread::scope(|scope| {
+            let matrix = &matrix;
+            let handles: Vec<_> = (0..8)
+                .map(|index| {
+                    scope.spawn(move || {
+                        if index % 2 == 0 {
+                            matrix.weighted_crossproduct(&[1.0, 2.0]);
+                        }
+                        let scale = index as f64 + 1.0;
+                        let vector = faer::Col::from_fn(8, |_| scale);
+                        let mut residual = [10.0; 2];
+                        matrix.subtract_product(vector.as_ref(), &mut residual);
+                        assert_eq!(residual, [10.0 - 4.0 * scale, 10.0 - 2.0 * scale]);
+                    })
+                })
+                .collect();
+            for handle in handles {
+                handle.join().unwrap();
+            }
+        });
+        assert!(matrix.rows.get().is_some());
+    }
 
     #[test]
     fn canonical_owned_indices_are_reused_and_values_are_snapshotted() {
