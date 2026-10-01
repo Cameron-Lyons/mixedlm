@@ -92,6 +92,7 @@ def clear_lambda_cache() -> None:
 
 
 try:
+    from mixedlm._rust import GlmmProblem as _RustGlmmProblem
     from mixedlm._rust import adaptive_gh_deviance as _rust_adaptive_gh_deviance
     from mixedlm._rust import glmm_deviance as _rust_glmm_deviance
     from mixedlm._rust import laplace_deviance as _rust_laplace_deviance
@@ -717,6 +718,38 @@ def _native_glmm_args(
     )
 
 
+def _prepare_native_glmm(matrices: ModelMatrices, family: Family) -> Any | None:
+    """Snapshot eligible native inputs once for the lifetime of an objective."""
+    if (
+        not _HAS_RUST
+        or (_get_family_name(family), _get_link_name(family)) not in _NATIVE_FAMILY_LINKS
+        or not _native_covariance_supported(matrices)
+    ):
+        return None
+    args = _native_glmm_args(np.empty(0), matrices, family)
+    return _RustGlmmProblem(*args[:8], *args[9:])
+
+
+def _evaluate_native_problem(
+    problem: Any,
+    theta: NDArray[np.floating],
+    nAGQ: int,
+    *,
+    offset: NDArray[np.floating] | None = None,
+    pirls_maxiter: int | None = None,
+    pirls_tol: float = 1e-6,
+) -> tuple[float, NDArray[np.floating], NDArray[np.floating], bool]:
+    validate_pirls_controls(pirls_maxiter, pirls_tol)
+    deviance, beta, u, converged = problem.evaluate(
+        np.ascontiguousarray(theta, dtype=np.float64),
+        max(1, nAGQ),
+        offset=offset,
+        maxiter=100 if pirls_maxiter is None else pirls_maxiter,
+        tol=pirls_tol,
+    )
+    return deviance, np.array(beta), np.array(u), converged
+
+
 def _laplace_deviance_rust(
     theta: NDArray[np.floating],
     matrices: ModelMatrices,
@@ -901,6 +934,12 @@ def glmm_deviance_with_status(
 
 
 class GLMMOptimizer:
+    """Optimize a fixed GLMM problem, reusing native input preparation.
+
+    Treat the model arrays and family as immutable for this object's lifetime.
+    Construct a new optimizer when the response, design, weights or offsets change.
+    """
+
     def __init__(
         self,
         matrices: ModelMatrices,
@@ -924,6 +963,7 @@ class GLMMOptimizer:
         self.verbose = verbose
         self.nAGQ = nAGQ
         self.n_theta = _count_theta(matrices.random_structures)
+        self._native_problem = _prepare_native_glmm(matrices, family)
 
     def get_start_theta(self) -> NDArray[np.floating]:
         theta_list: list[float] = []
@@ -943,6 +983,14 @@ class GLMMOptimizer:
         return np.array(theta_list, dtype=np.float64)
 
     def objective(self, theta: NDArray[np.floating]) -> float:
+        if self._native_problem is not None and (self.nAGQ <= 1 or self.matrices.n_random):
+            return _evaluate_native_problem(
+                self._native_problem,
+                theta,
+                self.nAGQ,
+                pirls_maxiter=self.pirls_maxiter,
+                pirls_tol=self.pirls_tol,
+            )[0]
         if self.nAGQ > 1:
             dev, _, _ = adaptive_gh_deviance_fast(
                 theta,

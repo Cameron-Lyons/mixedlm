@@ -191,16 +191,22 @@ def test_profiles_preserve_quadrature_controls_and_input_arrays(order, backend):
             array.copy()
             for array in (fitted.beta, fitted.theta, fitted.matrices.X, fitted.matrices.offset)
         ]
-        evaluate = joint_glmm.glmm_deviance_with_status
+        name = "_evaluate_native_problem" if backend == "native" else "glmm_deviance_with_status"
+        evaluate = getattr(joint_glmm, name)
         calls = []
 
-        def record(theta, matrices, family, **kwargs):
-            calls.append(kwargs)
-            return evaluate(theta, matrices, family, **kwargs)
+        def record(*args, **kwargs):
+            controls = kwargs.copy()
+            controls.pop("offset", None)
+            if backend == "native":
+                controls["nAGQ"] = args[2]
+            calls.append(controls)
+            return evaluate(*args, **kwargs)
 
-        with patch.object(joint_glmm, "glmm_deviance_with_status", side_effect=record):
+        with patch.object(joint_glmm, name, side_effect=record):
             profile = fitted.profile(n_points=3)["(Intercept)"]
     assert np.isfinite(profile.zeta).all()
+    assert calls
     assert all(c == {"nAGQ": order, "pirls_maxiter": 200, "pirls_tol": 1e-10} for c in calls)
     for before, after in zip(
         originals,
@@ -236,6 +242,7 @@ def test_solver_failures_do_not_return_wald_intervals():
         fitted.confint(method="profile")
     with (
         patch.object(joint_glmm, "glmm_deviance_with_status", return_value=(1, [], [], False)),
+        patch.object(joint_glmm, "_evaluate_native_problem", return_value=(1, [], [], False)),
         pytest.raises(RuntimeError, match="converged inner PIRLS solve"),
     ):
         fitted.profile()

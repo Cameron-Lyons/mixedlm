@@ -274,6 +274,16 @@ weight, and offset row counts. They also check covariance parameter counts and
 random-effect structure dimensions. Mismatched row counts, vector lengths, or
 metadata, and dimension overflows raise `ValueError` before fitting.
 
+Native fitting prepares an owned response, design, prior weights, offsets, and
+starting coefficients once per objective. `GLMMOptimizer` and
+`JointGLMMObjective` reuse this preparation across parameter evaluations; joint
+fits supply a new combined fixed-effect offset for each solve. Each evaluation
+starts independently, so parameter order and earlier failed evaluations do not
+change its result. Treat the model arrays and family as immutable while using
+these estimation objects; construct a new object when the inputs change. Public
+fits and refits prepare their current inputs automatically. Custom families,
+links, and covariance structures retain the Python implementation.
+
 A fitted GLMM reports `converged=True` only when both the outer optimizer and the
 inner PIRLS solver converge. `result.pirls_converged` exposes the inner status,
 including on refitted and modular results. For example, all-zero Poisson responses
