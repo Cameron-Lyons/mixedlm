@@ -186,12 +186,14 @@ def test_valid_fits_keep_status_and_use_recomputed_deviance(data, mode, success,
     with (
         patch.object(laplace, "_HAS_RUST", mode.endswith("native")),
         backend_patch(optimizer, mode, evaluation),
-        patch.object(module, "run_optimizer", return_value=result),
+        patch.object(
+            module, "run_optimizer", side_effect=lambda fun, x0, **kwargs: replace(result, x=x0)
+        ),
     ):
         fitted = optimizer.optimize(start=np.ones(1))
     assert fitted.converged is success
     assert fitted.deviance == deviance
-    assert fitted.n_iter == 7
+    assert fitted.n_iter == (7 if mode == "linear" else 14)
     if mode == "linear":
         assert fitted.message == "iteration limit"
         assert fitted.function_evals == 9

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import warnings
-from dataclasses import replace
 from numbers import Integral
 from typing import TYPE_CHECKING
 
@@ -11,8 +10,7 @@ import numpy as np
 from numpy.typing import NDArray
 from scipy import optimize, stats
 
-from mixedlm.estimation.laplace import glmm_deviance_with_status
-from mixedlm.estimation.reml import _build_theta_bounds
+from mixedlm.estimation.joint_glmm import JointGLMMObjective
 from mixedlm.inference.profile_types import ProfileResult
 from mixedlm.utils.names import _check_unique_coefficient_names
 from mixedlm.utils.validation import _validate_confidence_level
@@ -29,8 +27,14 @@ class _GLMMProfileLikelihood:
         self.n_theta = len(result.theta)
         self.scale = np.r_[np.maximum(np.abs(result.theta), 1.0), standard_errors]
         self.start = np.r_[result.theta, result.beta] / self.scale
-        bounds = _build_theta_bounds(result.matrices.random_structures, self.n_theta)
-        bounds += [(None, None)] * len(result.beta)
+        self.objective = JointGLMMObjective(
+            result.matrices,
+            result.family,
+            result.nAGQ,
+            pirls_maxiter=result.pirls_maxiter,
+            pirls_tol=result.pirls_tol,
+        )
+        bounds = self.objective.bounds
         self.bounds = [
             (
                 None if lower is None else lower / scale,
@@ -38,31 +42,9 @@ class _GLMMProfileLikelihood:
             )
             for (lower, upper), scale in zip(bounds, self.scale, strict=True)
         ]
-        # Fixed coefficients enter through the offset. PIRLS then optimizes only
-        # random effects, so its joint beta/mode approximation cannot substitute
-        # for minimization of the integrated likelihood over nuisance beta.
-        self.matrices = replace(
-            result.matrices,
-            X=np.empty((result.matrices.n_obs, 0), dtype=np.float64),
-            n_fixed=0,
-            fixed_names=[],
-        )
 
     def deviance(self, scaled: NDArray[np.floating]) -> float:
-        parameters = scaled * self.scale
-        matrices = replace(
-            self.matrices,
-            offset=self.result.matrices.offset
-            + self.result.matrices.X @ parameters[self.n_theta :],
-        )
-        deviance, _, _, converged = glmm_deviance_with_status(
-            parameters[: self.n_theta],
-            matrices,
-            self.result.family,
-            nAGQ=self.result.nAGQ,
-            pirls_maxiter=self.result.pirls_maxiter,
-            pirls_tol=self.result.pirls_tol,
-        )
+        deviance, _, _, converged = self.objective.evaluate(scaled * self.scale)
         if not converged or not np.isfinite(deviance):
             raise RuntimeError(
                 "GLMM likelihood profiling requires a finite, converged inner PIRLS solve; "

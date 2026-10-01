@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+import numpy as np
+
 _VALID_OPTIMIZERS = {
     "L-BFGS-B",
     "BFGS",
@@ -271,7 +273,7 @@ class GlmerControl:
         - "Powell": Powell's method
         - "trust-constr": Trust-region constrained
     maxiter : int, default 1000
-        Maximum number of iterations for the optimizer.
+        Maximum iterations per optimization stage; n_iter sums both stages.
     ftol : float, default 1e-8
         Function tolerance for convergence.
     gtol : float, default 1e-5
@@ -294,8 +296,10 @@ class GlmerControl:
     compDev : bool, default True
         Whether to compute deviance (vs just optimize parameters).
     nAGQ0initStep : bool, default True
-        Whether to start with nAGQ=0 step before switching to
-        the requested nAGQ value.
+        Whether to optimize the nAGQ=0 approximation to initialize a joint
+        likelihood fit. False uses the supplied/default theta and its PIRLS
+        coefficients directly. Exact single-stage cases and nAGQ=0 need no
+        additional initialization stage.
     em_init : bool, default False
         Whether to use EM-REML algorithm for initialization before
         switching to direct optimization. Runs a linear mixed model
@@ -348,6 +352,8 @@ class GlmerControl:
         from mixedlm.estimation.pirls_control import validate_pirls_controls
 
         validate_pirls_controls(self.pirls_maxiter, self.tolPwrss, tol_name="tolPwrss")
+        if not isinstance(self.nAGQ0initStep, (bool, np.bool_)):
+            raise ValueError("nAGQ0initStep must be a boolean")
         _validate_common_control(
             optimizer=self.optimizer,
             maxiter=self.maxiter,

@@ -117,7 +117,7 @@ def test_optimizer_combines_status_without_repeating_pirls(outer_success, inner_
         patch.object(laplace, "run_optimizer", return_value=outer),
         patch.object(laplace, "_pirls_state", return_value=state) as solve,
     ):
-        result = laplace.GLMMOptimizer(matrices, family).optimize()
+        result = laplace.GLMMOptimizer(matrices, family, nAGQ=0).optimize()
     assert solve.call_count == 1
     assert result.pirls_converged is inner_success
     assert result.converged == (outer_success and inner_success)

@@ -379,11 +379,21 @@ result.profile(which=None, n_points=20, level=0.95)
 Compute fixed-effect likelihood profiles. GLMM profiles re-optimize nuisance
 fixed coefficients and covariance parameters using the fitted quadrature and
 inner solver controls. The refined profile center can differ from the fitted
-coefficient; the original result is unchanged. GLMM `n_points` must be at least
+coefficient, particularly for `nAGQ=0` fits, which are profiled using the joint
+Laplace likelihood. Default joint fits usually retain their center within
+optimization tolerance; the original result is unchanged. GLMM `n_points` must be at least
 3 and affects the plotted curve, not the interval endpoint accuracy. See
 [profile likelihood](inference.md#profile-likelihood) for convergence behavior.
 
 **Returns:** Dictionary mapping parameter names to `ProfileResult` objects.
+
+#### as_function
+
+`result.as_function(type="deviance")` reconstructs the GLMM objective with its
+quadrature and inner solver controls. For `result.joint_fit=True`, a full vector
+`np.r_[result.theta, result.beta]` evaluates the joint likelihood. A theta-only
+vector holds the fitted beta fixed; it does not re-optimize nuisance coefficients.
+For `joint_fit=False`, the callable retains the theta-only PIRLS objective.
 
 #### drop1
 

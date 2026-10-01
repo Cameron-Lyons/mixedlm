@@ -147,7 +147,7 @@ def test_modular_fitting_uses_inner_controls_in_objective_and_result(backend):
     control = glmerControl(tolPwrss=1e-12, pirls_maxiter=1)
     with (
         patch.object(laplace, "_HAS_RUST", backend == "native"),
-        patch("scipy.optimize.minimize", side_effect=stopped_optimizer),
+        patch.object(laplace, "run_optimizer", side_effect=stopped_optimizer),
     ):
         devfun = mkGlmerDevfun(parsed, control=control)
         expected = laplace.glmm_deviance_with_status(
@@ -359,7 +359,7 @@ def test_bootstrap_uses_fitted_controls_in_serial_and_worker_paths(n_jobs):
         ):
             samples = bootstrap.bootstrap_glmer(result, n_boot=3, seed=25, n_jobs=n_jobs)
     assert samples.n_failed == 0
-    assert settings == [(1, 1e6)] * 3
+    assert settings == [(1, 1e6)] * 6
     assert np.isfinite(samples.beta_samples).all()
 
 

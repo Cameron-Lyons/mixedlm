@@ -654,8 +654,10 @@ interval = model.confint(parm="x", method="profile", level=0.95)
 ```
 
 The profiler first refines the joint likelihood optimum over fixed coefficients
-and covariance parameters. This can shift the center from the original fit's
-joint PIRLS approximation. `ProfileResult.mle` records the refined center, and
+and covariance parameters. Default joint fits usually retain their center within
+optimization tolerance. For a fit made with `nAGQ=0`, profiling uses the joint
+Laplace likelihood and can shift the center from the preliminary PIRLS estimate.
+`ProfileResult.mle` records the refined center, and
 a warning identifies shifts greater than 0.001 fitted standard errors. The
 original fitted result is unchanged.
 
