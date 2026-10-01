@@ -39,6 +39,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Bootstrap refits require convergence and finite real estimates of the expected shapes in both serial and parallel execution. Failed samples stay entirely missing, and all confidence interval methods require at least two valid samples per parameter.
+
 - Nonlinear fits no longer report convergence when the inner PNLS iteration limit is reached. Summaries identify unfinished inner solves, and nonlinear bootstrap intervals exclude unconverged refits.
 
 - LMM and GLMM fitting, modular optimization, and profiles detect zero variance scales with a zero gradient but a better nearby likelihood. Restarts retain the selected optimizer, share its remaining budget, and report nonconvergence if an improvement cannot be resolved.

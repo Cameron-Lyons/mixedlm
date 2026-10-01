@@ -166,7 +166,10 @@ def _interval_rows(
             sample_mean = float(np.mean(samples))
             bias = sample_mean - estimate
             standard_error = float(np.std(samples, ddof=1)) if n_success > 1 else np.nan
-            lower_quantile, upper_quantile = np.quantile(samples, quantiles)
+            if n_success > 1:
+                lower_quantile, upper_quantile = np.quantile(samples, quantiles)
+            else:
+                lower_quantile = upper_quantile = np.nan
         else:
             sample_mean = np.nan
             bias = np.nan
@@ -234,6 +237,12 @@ def bootCI(
         One row per parameter and interval method, including the original
         estimate, bootstrap mean, bias, sample standard error, interval bounds,
         and successful replicate count.
+
+    Notes
+    -----
+    Nonfinite samples are excluded per parameter. Confidence bounds and sample
+    standard errors are NaN with fewer than two finite samples. A single sample
+    still contributes its mean, bias, and successful replicate count.
     """
     try:
         level_value = float(level)

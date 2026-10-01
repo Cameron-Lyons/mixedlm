@@ -324,8 +324,8 @@ print(refined.converged, refined.pnls_converged)
 
 Inspect convergence before using the estimates. `bootstrap_nlmer()`, `bootMer()`,
 and bootstrap confidence intervals count refits that fail or do not converge as
-failed replicates and exclude them from their intervals. If every replicate
-fails, interval bounds are NaN.
+failed replicates and exclude them from their intervals. With fewer than two
+successful replicates, interval bounds and standard errors are NaN.
 
 NLMMs are particularly sensitive to:
 

@@ -166,6 +166,8 @@ def fake_refit(matrices, response, theta, *args):
         beta=np.array([np.mean(response), np.std(response)]),
         theta=np.array([np.var(response)]),
         sigma=float(np.std(response)),
+        converged=True,
+        pirls_converged=True,
     )
 
 

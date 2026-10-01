@@ -34,6 +34,29 @@ def _validate_ci_options(level: float, method: str) -> None:
         raise ValueError(f"Unknown method: {method}")
 
 
+def _require_bootstrap_convergence(*flags: bool) -> None:
+    if not all(isinstance(flag, bool | np.bool_) and flag for flag in flags):
+        raise ValueError("Bootstrap refit did not converge")
+
+
+def _bootstrap_sample_vector(values: Any, size: int) -> NDArray[np.float64]:
+    array = np.asarray(values)
+    if array.shape != (size,) or not np.isrealobj(array) or not np.all(np.isfinite(array)):
+        raise ValueError("Bootstrap refit estimates must have the expected shape and be finite")
+    with np.errstate(over="raise", invalid="raise"):
+        return array.astype(np.float64, copy=True)
+
+
+def _bootstrap_sample_scale(value: Any) -> float:
+    array = np.asarray(value)
+    if array.shape != () or not np.isrealobj(array) or not np.isfinite(array) or array <= 0.0:
+        raise ValueError("Bootstrap refit scale must be a finite positive scalar")
+    scale = float(array)
+    if not np.isfinite(scale) or scale <= 0.0:
+        raise ValueError("Bootstrap refit scale must fit in a finite positive float64")
+    return scale
+
+
 def _finite_bootstrap_samples(
     samples: NDArray[np.floating],
     column: int,
@@ -61,7 +84,7 @@ def _bootstrap_ci(
 
     for i, name in enumerate(names):
         parameter_samples = _finite_bootstrap_samples(samples, i)
-        if len(parameter_samples) == 0:
+        if len(parameter_samples) < 2:
             result[name] = (np.nan, np.nan)
             continue
 
@@ -78,9 +101,6 @@ def _bootstrap_ci(
             lower = 2.0 * original[i] - upper_sample
             upper = 2.0 * original[i] - lower_sample
         else:
-            if len(parameter_samples) < 2:
-                result[name] = (np.nan, np.nan)
-                continue
             standard_error = np.std(parameter_samples, ddof=1)
             bias = np.mean(parameter_samples) - original[i]
             center = original[i] - bias
@@ -231,7 +251,11 @@ def _lmer_bootstrap_worker(
         y_sim = _simulate_lmer_components(matrices, beta, theta, sigma, rng)
         boot_result = _refit_lmer_response(matrices, y_sim, theta, REML)
 
-        return (boot_idx, boot_result.beta.copy(), boot_result.theta.copy(), boot_result.sigma)
+        _require_bootstrap_convergence(boot_result.converged)
+        beta_sample = _bootstrap_sample_vector(boot_result.beta, matrices.n_fixed)
+        theta_sample = _bootstrap_sample_vector(boot_result.theta, len(theta))
+        sigma_sample = _bootstrap_sample_scale(boot_result.sigma)
+        return (boot_idx, beta_sample, theta_sample, sigma_sample)
     except Exception:
         return (boot_idx, None, None, None)
 
@@ -257,7 +281,10 @@ def _glmer_bootstrap_worker(args: tuple[Any, ...]) -> tuple[int, NDArray | None,
             matrices, y_sim, theta, family, nAGQ, pirls_maxiter, pirls_tol
         )
 
-        return (boot_idx, boot_result.beta.copy(), boot_result.theta.copy())
+        _require_bootstrap_convergence(boot_result.converged, boot_result.pirls_converged)
+        beta_sample = _bootstrap_sample_vector(boot_result.beta, matrices.n_fixed)
+        theta_sample = _bootstrap_sample_vector(boot_result.theta, len(theta))
+        return (boot_idx, beta_sample, theta_sample)
     except Exception:
         return (boot_idx, None, None)
 
@@ -291,6 +318,12 @@ def bootstrap_lmer(
     n_jobs: int = 1,
     verbose: bool = False,
 ) -> BootstrapResult:
+    """Simulate and refit an LMM, excluding unsuccessful or invalid refits.
+
+    Failed replicates remain entirely NaN and increment ``n_failed`` in both
+    serial and parallel execution. Confidence bounds and standard errors
+    require at least two valid samples per parameter.
+    """
     validate_simulation_count(n_boot, "n_boot")
     p = result.matrices.n_fixed
     n_theta = len(result.theta)
@@ -320,9 +353,13 @@ def bootstrap_lmer(
                     result.REML,
                 )
 
-                beta_samples[b, :] = boot_result.beta
-                theta_samples[b, :] = boot_result.theta
-                sigma_samples[b] = boot_result.sigma
+                _require_bootstrap_convergence(boot_result.converged)
+                beta_sample = _bootstrap_sample_vector(boot_result.beta, p)
+                theta_sample = _bootstrap_sample_vector(boot_result.theta, n_theta)
+                sigma_sample = _bootstrap_sample_scale(boot_result.sigma)
+                beta_samples[b, :] = beta_sample
+                theta_samples[b, :] = theta_sample
+                sigma_samples[b] = sigma_sample
 
             except Exception:
                 n_failed += 1
@@ -413,6 +450,12 @@ def bootstrap_glmer(
     n_jobs: int = 1,
     verbose: bool = False,
 ) -> BootstrapResult:
+    """Simulate and refit a GLMM, requiring outer and inner convergence.
+
+    Failed or invalid replicates remain entirely NaN and increment ``n_failed``
+    in both serial and parallel execution. Confidence bounds and standard errors
+    require at least two valid samples per parameter.
+    """
     validate_simulation_count(n_boot, "n_boot")
     p = result.matrices.n_fixed
     n_theta = len(result.theta)
@@ -444,8 +487,11 @@ def bootstrap_glmer(
                     result.pirls_tol,
                 )
 
-                beta_samples[b, :] = boot_result.beta
-                theta_samples[b, :] = boot_result.theta
+                _require_bootstrap_convergence(boot_result.converged, boot_result.pirls_converged)
+                beta_sample = _bootstrap_sample_vector(boot_result.beta, p)
+                theta_sample = _bootstrap_sample_vector(boot_result.theta, n_theta)
+                beta_samples[b, :] = beta_sample
+                theta_samples[b, :] = theta_sample
 
             except Exception:
                 n_failed += 1
@@ -602,8 +648,12 @@ def bootMer(
     2. Refits the model to each simulated dataset
     3. Collects the parameter estimates
 
-    This provides valid inference even when standard errors may be
-    unreliable, such as for variance components or in small samples.
+    Refits must converge and return finite real estimates of the expected
+    shapes, with a positive residual scale where applicable. Failed replicates
+    remain entirely NaN and increment ``n_failed``. Confidence bounds and
+    standard errors require at least two valid samples per parameter; inspect
+    ``n_failed`` before interpreting the results. Interval accuracy still
+    depends on the fitted model and the number of successful replicates.
 
     See Also
     --------
@@ -718,7 +768,8 @@ def bootstrap_nlmer(
     parameter shapes count as failed samples. All components of a failed
     sample remain NaN and are excluded from confidence intervals and
     standard errors. Inspect ``n_failed`` before interpreting the results.
-    If every sample fails, confidence bounds are NaN.
+    Confidence bounds and standard errors are NaN when fewer than two samples
+    succeed. Residual scales must be positive, and estimates must be real.
 
     Examples
     --------
@@ -751,28 +802,15 @@ def bootstrap_nlmer(
             y_sim = result.simulate(nsim=1, seed=rng, use_re=True)
             boot_result = result.refit(y_sim)
 
-            if not boot_result.converged or not boot_result.pnls_converged:
-                n_failed += 1
-                continue
-
+            _require_bootstrap_convergence(boot_result.converged, boot_result.pnls_converged)
             # Validate every component before writing any part of the sample.
-            phi = np.asarray(boot_result.phi, dtype=np.float64)
-            theta = np.asarray(boot_result.theta, dtype=np.float64)
-            sigma = np.asarray(boot_result.sigma, dtype=np.float64)
-            if (
-                phi.shape != (n_params,)
-                or theta.shape != (n_theta,)
-                or sigma.shape != ()
-                or not np.all(np.isfinite(phi))
-                or not np.all(np.isfinite(theta))
-                or not np.isfinite(sigma)
-            ):
-                n_failed += 1
-                continue
+            phi = _bootstrap_sample_vector(boot_result.phi, n_params)
+            theta = _bootstrap_sample_vector(boot_result.theta, n_theta)
+            sigma = _bootstrap_sample_scale(boot_result.sigma)
 
             phi_samples[b, :] = phi
             theta_samples[b, :] = theta
-            sigma_samples[b] = float(sigma)
+            sigma_samples[b] = sigma
 
         except Exception:
             n_failed += 1

@@ -103,10 +103,8 @@ def test_simulation_failures_do_not_abort_later_replicates(result, entry):
     if entry != "confint":
         assert actual.n_failed == 1
         actual = actual.ci()
-    assert actual == {
-        name: (value, value)
-        for name, value in zip(result.model.param_names, result.phi, strict=True)
-    }
+    assert list(actual) == result.model.param_names
+    assert np.isnan(list(actual.values())).all()
 
 
 @pytest.mark.parametrize("entry", ["bootstrap_nlmer", "confint"])
@@ -114,16 +112,21 @@ def test_simulation_failures_do_not_abort_later_replicates(result, entry):
     ("field", "value"),
     [
         ("converged", False),
+        ("converged", "yes"),
         ("pnls_converged", False),
         ("phi", np.array([1.0, np.nan, 3.0])),
         ("phi", np.array([1.0, np.inf, 3.0])),
         ("phi", np.array([1.0])),
         ("phi", np.array([[1.0, 2.0, 3.0]])),
+        ("phi", np.array([1.0 + 1j, 2.0, 3.0])),
         ("theta", np.array([np.inf])),
         ("theta", np.array([np.nan])),
         ("theta", np.array([1.0, 2.0])),
         ("sigma", np.nan),
         ("sigma", np.inf),
+        ("sigma", 0.0),
+        ("sigma", -1.0),
+        ("sigma", 1.0 + 1j),
         ("sigma", np.array([2.0])),
         ("sigma", "invalid"),
     ],
@@ -143,10 +146,8 @@ def test_invalid_refits_leave_entire_sample_missing(result, entry, field, value)
         table = bootCI(actual, component="all")
         assert (table["n.success"] == 1).all()
         actual = actual.ci()
-    assert actual == {
-        name: (value, value)
-        for name, value in zip(result.model.param_names, result.phi, strict=True)
-    }
+    assert list(actual) == result.model.param_names
+    assert np.isnan(list(actual.values())).all()
 
 
 @pytest.mark.parametrize("entry", ["bootstrap_nlmer", "bootMer", "confint"])
