@@ -33,6 +33,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Native LMM covariance assembly reuses one intermediate transform per independent random-effect structure, reducing small-matrix allocations during likelihood and gradient evaluations.
+
 - Prepared native LMM designs store independent level crossproducts in compact blocks, avoiding a full square random-effect matrix during preparation and subsequent likelihood and gradient evaluations. Designs with rows spanning levels or grouping structures retain the general path, including tiny couplings and stored zeros. Supplied independent cached products also use compact internal storage.
 
 - Native LMM gradients share projected mode and adjoint vectors for random-effect structures wider than an intercept and slope. Each mode derivative then contracts only the selected factor entries, avoiding per-parameter derivative vectors and scans over all random-effect coefficients. Narrow structures retain direct contractions and their optimizer stopping behavior.
