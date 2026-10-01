@@ -284,12 +284,15 @@ these estimation objects; construct a new object when the inputs change. Public
 fits and refits prepare their current inputs automatically. Custom families,
 links, and covariance structures retain the Python implementation.
 
-Native PIRLS reuses its working-weight and working-response buffers across
-iterations and computes link derivatives and variances per observation without
-retaining separate vectors. Joint likelihoods pass fixed coefficients through
-the offset, so their mode solves skip the empty fixed-effect system and use the
-two triangular random-effect solves directly. Working-weight floors, convergence
-checks, and the final likelihood correction use the same formulas.
+Native PIRLS reuses its linear-predictor, working-weight, and working-response
+buffers across iterations and computes link derivatives and variances per
+observation without retaining separate vectors. Predictor updates overwrite the
+previous iteration's values before adding current random effects. Joint
+likelihoods pass fixed coefficients through the offset, so their mode solves
+start directly from that offset, skip the empty fixed-effect system, and use the
+two triangular random-effect solves directly. The final mode calculation reuses
+the predictor buffer. Working-weight floors, convergence checks, and the final
+likelihood correction use the same formulas.
 
 Binomial/logit iterations select a specialized working-value loop once per
 iteration. Separate contiguous input and output slices let the compiler
