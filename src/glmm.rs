@@ -1495,7 +1495,12 @@ mod quadrature_tests {
                 if let Some(factor) = state.constant_factor {
                     let expected =
                         dense_logdet(&z, &state.covariance, &DVector::from_fn(4, |i| weights[i]));
-                    assert_eq!(factor.logdet(), expected);
+                    // Separate factorizations can round differently, including
+                    // Miri's emulation of floating-point math functions.
+                    assert!(
+                        (factor.logdet() - expected).abs()
+                            <= 8.0 * f64::EPSILON * expected.abs().max(1.0)
+                    );
                 }
             }
         }
