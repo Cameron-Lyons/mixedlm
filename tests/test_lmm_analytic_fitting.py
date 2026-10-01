@@ -71,7 +71,9 @@ def test_gradient_solvers_match_independent_python_fit(method, reml):
     optimizer = LMMOptimizer(matrices, REML=reml, use_rust=True)
     options = {"gtol": 1e-8} if method not in {"SLSQP"} else {"ftol": 1e-10}
     if method == "BFGS":
-        options["gtol"] = 1e-6
+        # The line search can reach objective roundoff near a 1e-6 gradient
+        # with this uncentered response; retain the fit-accuracy checks below.
+        options["gtol"] = 1e-5
     if method in {"L-BFGS-B", "TNC"}:
         options["ftol"] = 1e-12
     actual = optimizer.optimize(
@@ -86,6 +88,8 @@ def test_gradient_solvers_match_independent_python_fit(method, reml):
     expected = optimizer._rust_cache.response.deviance_with_gradient(actual.theta, reml)
     assert actual.deviance == expected[0]
     assert_allclose(actual.gradient_norm, np.linalg.norm(expected[1]), atol=1e-12)
+    if method == "BFGS":
+        assert np.linalg.norm(expected[1], ord=np.inf) <= options["gtol"]
 
 
 @pytest.mark.parametrize("reml", [False, True])
