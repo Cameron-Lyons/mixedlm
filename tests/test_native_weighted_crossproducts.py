@@ -118,6 +118,24 @@ def test_crossproduct_matches_dense_reference(shape, noncanonical, weighted, zer
     assert_allclose(actual, actual.T, rtol=0, atol=0)
 
 
+@pytest.mark.parametrize("columns", [31, 32, 33])
+@pytest.mark.parametrize("density", [0.3, 0.6, 0.9, 0.99, 1.0])
+@pytest.mark.parametrize("noncanonical", [False, True])
+def test_partially_dense_crossproducts_at_row_layout_boundary(columns, density, noncanonical):
+    rng = np.random.default_rng(431)
+    dense = rng.normal(size=(96, columns))
+    dense[rng.random(dense.shape) > density] = 0.0
+    z = sparse.csc_matrix(dense)
+    if noncanonical:
+        z = _noncanonical(z)
+    weights = np.geomspace(0.2, 2.0, dense.shape[0])
+    actual = _rust.compute_ztwz(
+        z.data, z.indices.astype(np.int64), z.indptr.astype(np.int64), z.shape, weights
+    ).reshape(columns, columns)
+    assert_allclose(actual, dense.T @ (weights[:, None] * dense), rtol=2e-12, atol=2e-12)
+    assert_allclose(actual, actual.T, rtol=0, atol=0)
+
+
 @pytest.mark.parametrize("layout", ["intercept", "slopes", "crossed", "fixed", "dense"])
 @pytest.mark.parametrize("weighted", [False, True])
 @pytest.mark.parametrize("noncanonical", [False, True])

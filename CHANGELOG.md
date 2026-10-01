@@ -25,6 +25,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Native weighted crossproducts reuse row layouts for wide, partially dense random-effect designs, reducing repeated GLMM weight-update work while preserving accumulation order.
+
 - Native Gaussian GLMMs with the identity link reuse a constant working factor across PIRLS iterations and the final likelihood correction.
 
 - Native LMM factorization reuses its working covariance buffers, removing extra matrix copies for both independent levels and coupled random effects.
