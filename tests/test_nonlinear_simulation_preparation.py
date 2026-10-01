@@ -33,9 +33,9 @@ def test_bootstrap_prepares_groups_and_covariance_once(jobs, random_params):
     expected = legacy_draws(result, 5, 22)
     observed = []
 
-    def record(result, response):
+    def record(result, response, *, index=0):
         observed.append(response.copy())
-        return summarize_response(result, response)
+        return summarize_response(result, response, index=index)
 
     with (
         patch.object(bootstrap, "ProcessPoolExecutor", ImmediateExecutor),
@@ -59,9 +59,9 @@ def test_bootstrap_refreshes_preparation_after_result_changes(jobs):
     result = make_result()
     observed = []
 
-    def record(result, response):
+    def record(result, response, *, index=0):
         observed.append(response.copy())
-        return summarize_response(result, response)
+        return summarize_response(result, response, index=index)
 
     with (
         patch.object(bootstrap, "ProcessPoolExecutor", ImmediateExecutor),
@@ -107,7 +107,8 @@ def test_failed_preparation_or_draw_does_not_poison_later_responses(failure):
     rng = np.random.RandomState(23)
     with patch.object(target, name, side_effect=fail_once):
         actual = list(bootstrap._nlmer_bootstrap_responses(result, 3, rng))
-    assert actual[0][1] is expected[0] is None
+    assert isinstance(actual[0][1], bootstrap.BootstrapFailure)
+    assert expected[0] is None
     for (_, response), reference in zip(actual[1:], expected[1:], strict=True):
         assert_array_equal(response, reference)
     assert_array_equal(rng.get_state()[1], expected_state[1])
@@ -163,9 +164,9 @@ def test_custom_simulation_overrides_are_used(override, jobs):
         patched = patch.object(target, "simulate", custom_simulate)
     observed = []
 
-    def record(result, response):
+    def record(result, response, *, index=0):
         observed.append(response.copy())
-        return summarize_response(result, response)
+        return summarize_response(result, response, index=index)
 
     with (
         patched,
@@ -190,7 +191,7 @@ def test_fixed_only_bootstrap_still_evaluates_custom_predictions_each_draw():
     with patch.object(result.model, "predict", wraps=original) as predict:
         responses = list(bootstrap._nlmer_bootstrap_responses(result, 3, np.random.RandomState(2)))
     assert predict.call_count == 3 * len(result.group_levels)
-    assert all(response is not None for _, response in responses)
+    assert all(isinstance(response, np.ndarray) for _, response in responses)
 
 
 @pytest.mark.parametrize("inplace", [False, True])

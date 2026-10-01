@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Bootstrap results expose ordered, immutable `BootstrapFailure` records with sample indices, failure stages, and error messages. Summaries include stage counts, and custom simulated responses are validated before refitting.
+
 - Nonlinear bootstrap and bootstrap confidence intervals accept `n_jobs` for parallel refits. `bootMer()` honors the worker count for nonlinear models, preserving seeded samples and failure handling. Nonlinear bootstrap also accepts reusable NumPy random streams.
 
 - Nonlinear fits accept `pnls_maxiter` and `pnls_tol` for inner iteration control on both backends. Results expose `pnls_converged` and retain the controls for refits and updates.

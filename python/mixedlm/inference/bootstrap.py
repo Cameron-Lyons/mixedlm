@@ -7,9 +7,10 @@ from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wai
 from contextlib import closing
 from copy import deepcopy
 from dataclasses import dataclass, replace
+from functools import partial
 from numbers import Integral
 from threading import local
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, Any, Literal, TypeVar
 
 import numpy as np
 from numpy.typing import NDArray
@@ -39,27 +40,137 @@ def _validate_ci_options(level: float, method: str) -> None:
         raise ValueError(f"Unknown method: {method}")
 
 
-def _require_bootstrap_convergence(*flags: bool) -> None:
-    if not all(isinstance(flag, bool | np.bool_) and flag for flag in flags):
-        raise ValueError("Bootstrap refit did not converge")
+_FailureStage = Literal["simulation", "refit", "convergence", "validation"]
+_FAILURE_STAGES: tuple[_FailureStage, ...] = ("simulation", "refit", "convergence", "validation")
 
 
-def _bootstrap_sample_vector(values: Any, size: int) -> NDArray[np.float64]:
+@dataclass(frozen=True)
+class BootstrapFailure:
+    """A failed bootstrap replicate, indexed by its zero-based sample row.
+
+    ``stage`` is simulation, refit, convergence, or validation. Exceptions are
+    stored as type names and messages, without retaining exception objects or
+    tracebacks. Convergence and validation checks report their own ValueError
+    (or AttributeError if a required refit attribute is missing).
+    """
+
+    index: int
+    stage: _FailureStage
+    exception_type: str
+    message: str
+
+
+@dataclass
+class _BootstrapOutcome:
+    index: int
+    fixed: NDArray[np.float64] | None = None
+    theta: NDArray[np.float64] | None = None
+    sigma: float | None = None
+    failure: BootstrapFailure | None = None
+
+
+def _bootstrap_failure(index: int, stage: _FailureStage, error: Exception) -> BootstrapFailure:
+    try:
+        message = str(error)
+    except Exception:
+        message = "Exception message could not be formatted"
+    return BootstrapFailure(index, stage, type(error).__name__, message)
+
+
+def _require_bootstrap_convergence(fitted: Any, inner: str | None) -> None:
+    names = ("converged",) if inner is None else ("converged", inner)
+    failed = []
+    for name in names:
+        flag = getattr(fitted, name)
+        if not isinstance(flag, bool | np.bool_) or not flag:
+            failed.append(name)
+    if failed:
+        message = "Bootstrap refit did not converge: " + ", ".join(failed)
+        detail = getattr(fitted, "message", "")
+        if isinstance(detail, str) and detail:
+            message += f" ({detail})"
+        raise ValueError(message)
+
+
+def _bootstrap_sample_vector(values: Any, size: int, name: str) -> NDArray[np.float64]:
     array = np.asarray(values)
-    if array.shape != (size,) or not np.isrealobj(array) or not np.all(np.isfinite(array)):
-        raise ValueError("Bootstrap refit estimates must have the expected shape and be finite")
+    if array.shape != (size,):
+        raise ValueError(f"{name} must have shape ({size},), got {array.shape}")
+    if array.dtype.kind not in "biuf" or not np.all(np.isfinite(array)):
+        raise ValueError(f"{name} must contain finite real numbers")
     with np.errstate(over="raise", invalid="raise"):
         return array.astype(np.float64, copy=True)
 
 
 def _bootstrap_sample_scale(value: Any) -> float:
     array = np.asarray(value)
-    if array.shape != () or not np.isrealobj(array) or not np.isfinite(array) or array <= 0.0:
-        raise ValueError("Bootstrap refit scale must be a finite positive scalar")
+    if (
+        array.shape != ()
+        or array.dtype.kind not in "biuf"
+        or not np.isfinite(array)
+        or array <= 0.0
+    ):
+        raise ValueError("sigma must be a finite positive scalar")
     scale = float(array)
     if not np.isfinite(scale) or scale <= 0.0:
-        raise ValueError("Bootstrap refit scale must fit in a finite positive float64")
+        raise ValueError("sigma must fit in a finite positive float64")
     return scale
+
+
+def _bootstrap_simulation(
+    index: int, simulate: Callable[[], Any], n_obs: int
+) -> NDArray[np.float64] | BootstrapFailure:
+    try:
+        # Own the response storage before asynchronous process serialization.
+        return _bootstrap_sample_vector(simulate(), n_obs, "Simulated response")
+    except Exception as error:
+        return _bootstrap_failure(index, "simulation", error)
+
+
+def _bootstrap_refit(
+    index: int,
+    response: NDArray[np.floating] | BootstrapFailure,
+    refit: Callable[[NDArray[np.floating]], Any],
+    fixed_name: str,
+    n_fixed: int,
+    n_theta: int,
+    *,
+    inner: str | None = None,
+    has_scale: bool = True,
+) -> _BootstrapOutcome:
+    if isinstance(response, BootstrapFailure):
+        return _BootstrapOutcome(index, failure=response)
+    stage: _FailureStage = "refit"
+    try:
+        fitted = refit(response)
+        stage = "convergence"
+        _require_bootstrap_convergence(fitted, inner)
+        stage = "validation"
+        # Validate every component before publishing any part of the sample.
+        fixed = _bootstrap_sample_vector(getattr(fitted, fixed_name), n_fixed, fixed_name)
+        theta = _bootstrap_sample_vector(fitted.theta, n_theta, "theta")
+        sigma = _bootstrap_sample_scale(fitted.sigma) if has_scale else None
+        return _BootstrapOutcome(index, fixed, theta, sigma)
+    except Exception as error:
+        return _BootstrapOutcome(index, failure=_bootstrap_failure(index, stage, error))
+
+
+def _store_bootstrap_sample(
+    sample: _BootstrapOutcome,
+    fixed: NDArray[np.floating],
+    theta: NDArray[np.floating],
+    sigma: NDArray[np.floating] | None,
+    failures: list[BootstrapFailure],
+) -> None:
+    if sample.failure is not None:
+        failures.append(sample.failure)
+        return
+    assert sample.fixed is not None and sample.theta is not None
+    fixed[sample.index, :] = sample.fixed
+    theta[sample.index, :] = sample.theta
+    if sigma is not None:
+        assert sample.sigma is not None
+        sigma[sample.index] = sample.sigma
 
 
 def _finite_bootstrap_samples(
@@ -140,6 +251,7 @@ def _bootstrap_summary(
     samples: NDArray[np.floating],
     original: NDArray[np.floating],
     names: list[str],
+    failures: tuple[BootstrapFailure, ...],
 ) -> str:
     lines = [
         f"Parametric bootstrap with {n_boot} samples ({n_failed} failed)",
@@ -159,6 +271,13 @@ def _bootstrap_summary(
             f"{name:12} {original[i]:10.4f} {mean:10.4f} {bias:10.4f} {standard_error:10.4f}"
         )
 
+    if failures:
+        counts = {stage: 0 for stage in _FAILURE_STAGES}
+        for failure in failures:
+            counts[failure.stage] += 1
+        lines.extend(["", "Failed samples by stage:"])
+        lines.extend(f"  {stage}: {count}" for stage, count in counts.items() if count)
+
     return "\n".join(lines)
 
 
@@ -173,6 +292,7 @@ class BootstrapResult:
     original_theta: NDArray[np.floating]
     original_sigma: float | None
     n_failed: int
+    failures: tuple[BootstrapFailure, ...] = ()
 
     def ci(
         self,
@@ -197,6 +317,7 @@ class BootstrapResult:
             self.beta_samples,
             self.original_beta,
             self.fixed_names,
+            self.failures,
         )
 
 
@@ -325,7 +446,7 @@ def _refit_glmer_response(
 
 def _lmer_bootstrap_worker(
     args: tuple[Any, ...],
-) -> tuple[int, NDArray | None, NDArray | None, float | None]:
+) -> _BootstrapOutcome:
     (
         boot_idx,
         seed,
@@ -339,22 +460,24 @@ def _lmer_bootstrap_worker(
 
     rng = np.random.RandomState(seed)
 
-    try:
-        y_sim = _simulate_lmer_components(matrices, beta, theta, sigma, rng)
-        boot_result = _refit_lmer_response(
-            matrices, y_sim, theta, REML, optimizer=prepared[0] if prepared else None
-        )
+    response = _bootstrap_simulation(
+        boot_idx,
+        lambda: _simulate_lmer_components(matrices, beta, theta, sigma, rng),
+        matrices.n_obs,
+    )
+    return _bootstrap_refit(
+        boot_idx,
+        response,
+        lambda y: _refit_lmer_response(
+            matrices, y, theta, REML, optimizer=prepared[0] if prepared else None
+        ),
+        "beta",
+        matrices.n_fixed,
+        len(theta),
+    )
 
-        _require_bootstrap_convergence(boot_result.converged)
-        beta_sample = _bootstrap_sample_vector(boot_result.beta, matrices.n_fixed)
-        theta_sample = _bootstrap_sample_vector(boot_result.theta, len(theta))
-        sigma_sample = _bootstrap_sample_scale(boot_result.sigma)
-        return (boot_idx, beta_sample, theta_sample, sigma_sample)
-    except Exception:
-        return (boot_idx, None, None, None)
 
-
-def _glmer_bootstrap_worker(args: tuple[Any, ...]) -> tuple[int, NDArray | None, NDArray | None]:
+def _glmer_bootstrap_worker(args: tuple[Any, ...]) -> _BootstrapOutcome:
     (
         boot_idx,
         seed,
@@ -372,17 +495,25 @@ def _glmer_bootstrap_worker(args: tuple[Any, ...]) -> tuple[int, NDArray | None,
     try:
         # Each task previously deserialized its own family; preserve that isolation.
         family = deepcopy(family)
-        y_sim = _simulate_glmer_components(matrices, beta, theta, family, rng)
-        boot_result = _refit_glmer_response(
-            matrices, y_sim, theta, family, nAGQ, pirls_maxiter, pirls_tol
+    except Exception as error:
+        return _BootstrapOutcome(
+            boot_idx, failure=_bootstrap_failure(boot_idx, "simulation", error)
         )
-
-        _require_bootstrap_convergence(boot_result.converged, boot_result.pirls_converged)
-        beta_sample = _bootstrap_sample_vector(boot_result.beta, matrices.n_fixed)
-        theta_sample = _bootstrap_sample_vector(boot_result.theta, len(theta))
-        return (boot_idx, beta_sample, theta_sample)
-    except Exception:
-        return (boot_idx, None, None)
+    response = _bootstrap_simulation(
+        boot_idx,
+        lambda: _simulate_glmer_components(matrices, beta, theta, family, rng),
+        matrices.n_obs,
+    )
+    return _bootstrap_refit(
+        boot_idx,
+        response,
+        lambda y: _refit_glmer_response(matrices, y, theta, family, nAGQ, pirls_maxiter, pirls_tol),
+        "beta",
+        matrices.n_fixed,
+        len(theta),
+        inner="pirls_converged",
+        has_scale=False,
+    )
 
 
 def _prepare_lmer_worker_data(result: LmerResult) -> dict[str, Any]:
@@ -417,8 +548,9 @@ def bootstrap_lmer(
     """Simulate and refit an LMM, excluding unsuccessful or invalid refits.
 
     Failed replicates remain entirely NaN and increment ``n_failed`` in both
-    serial and parallel execution. Confidence bounds and standard errors
-    require at least two valid samples per parameter.
+    serial and parallel execution. Details are recorded in ``failures``.
+    Confidence bounds and standard errors require at least two valid samples
+    per parameter.
 
     ``n_jobs`` must be a positive integer or -1 for available CPUs. Parallel
     workers reuse the fitted design and keep only a bounded number of tasks
@@ -437,11 +569,12 @@ def bootstrap_lmer(
     rng = random_stream(seed, legacy=False)
     seeds = random_seeds(rng, n_boot)
 
+    failures: list[BootstrapFailure] = []
+
     if n_jobs == 1:
         from mixedlm.estimation.reml import LMMOptimizer
 
         optimizer = LMMOptimizer(result.matrices, REML=result.REML, use_rust=True)
-        n_failed = 0
 
         for b in range(n_boot):
             if verbose and (b + 1) % 100 == 0:
@@ -449,44 +582,33 @@ def bootstrap_lmer(
 
             simulation_rng = np.random.RandomState(int(seeds[b]))
 
-            try:
-                y_sim = _simulate_lmer(result, simulation_rng)
-                boot_result = _refit_lmer_response(
-                    result.matrices,
-                    y_sim,
-                    result.theta,
-                    result.REML,
-                    optimizer=optimizer,
-                )
-
-                _require_bootstrap_convergence(boot_result.converged)
-                beta_sample = _bootstrap_sample_vector(boot_result.beta, p)
-                theta_sample = _bootstrap_sample_vector(boot_result.theta, n_theta)
-                sigma_sample = _bootstrap_sample_scale(boot_result.sigma)
-                beta_samples[b, :] = beta_sample
-                theta_samples[b, :] = theta_sample
-                sigma_samples[b] = sigma_sample
-
-            except Exception:
-                n_failed += 1
-                continue
+            response = _bootstrap_simulation(
+                b, partial(_simulate_lmer, result, simulation_rng), result.matrices.n_obs
+            )
+            sample = _bootstrap_refit(
+                b,
+                response,
+                lambda y: _refit_lmer_response(
+                    result.matrices, y, result.theta, result.REML, optimizer=optimizer
+                ),
+                "beta",
+                p,
+                n_theta,
+            )
+            _store_bootstrap_sample(sample, beta_samples, theta_samples, sigma_samples, failures)
     else:
         worker_data = _prepare_lmer_worker_data(result)
-        n_failed = 0
         with closing(
             _parallel_bootstrap_samples(
                 _lmer_bootstrap_worker, tuple(worker_data.values()), seeds, workers
             )
         ) as samples:
-            for completed, (boot_idx, beta, theta, sigma) in enumerate(samples, start=1):
+            for completed, sample in enumerate(samples, start=1):
                 if verbose and completed % 100 == 0:
                     print(f"Bootstrap iteration {completed}/{n_boot}")
-                if beta is not None:
-                    beta_samples[boot_idx, :] = beta
-                    theta_samples[boot_idx, :] = theta
-                    sigma_samples[boot_idx] = sigma
-                else:
-                    n_failed += 1
+                _store_bootstrap_sample(
+                    sample, beta_samples, theta_samples, sigma_samples, failures
+                )
 
     return BootstrapResult(
         n_boot=n_boot,
@@ -497,7 +619,8 @@ def bootstrap_lmer(
         original_beta=result.beta,
         original_theta=result.theta,
         original_sigma=result.sigma,
-        n_failed=n_failed,
+        n_failed=len(failures),
+        failures=tuple(sorted(failures, key=lambda failure: failure.index)),
     )
 
 
@@ -539,8 +662,9 @@ def bootstrap_glmer(
     """Simulate and refit a GLMM, requiring outer and inner convergence.
 
     Failed or invalid replicates remain entirely NaN and increment ``n_failed``
-    in both serial and parallel execution. Confidence bounds and standard errors
-    require at least two valid samples per parameter.
+    in both serial and parallel execution. Details are recorded in ``failures``.
+    Confidence bounds and standard errors require at least two valid samples
+    per parameter.
 
     ``n_jobs`` must be a positive integer or -1 for available CPUs. Parallel
     workers reuse the fitted design and keep only a bounded number of tasks
@@ -557,52 +681,48 @@ def bootstrap_glmer(
     rng = random_stream(seed, legacy=False)
     seeds = random_seeds(rng, n_boot)
 
-    if n_jobs == 1:
-        n_failed = 0
+    failures: list[BootstrapFailure] = []
 
+    if n_jobs == 1:
         for b in range(n_boot):
             if verbose and (b + 1) % 100 == 0:
                 print(f"Bootstrap iteration {b + 1}/{n_boot}")
 
             simulation_rng = np.random.RandomState(int(seeds[b]))
 
-            try:
-                y_sim = _simulate_glmer(result, simulation_rng)
-                boot_result = _refit_glmer_response(
+            response = _bootstrap_simulation(
+                b, partial(_simulate_glmer, result, simulation_rng), result.matrices.n_obs
+            )
+            sample = _bootstrap_refit(
+                b,
+                response,
+                lambda y: _refit_glmer_response(
                     result.matrices,
-                    y_sim,
+                    y,
                     result.theta,
                     result.family,
                     result.nAGQ,
                     result.pirls_maxiter,
                     result.pirls_tol,
-                )
-
-                _require_bootstrap_convergence(boot_result.converged, boot_result.pirls_converged)
-                beta_sample = _bootstrap_sample_vector(boot_result.beta, p)
-                theta_sample = _bootstrap_sample_vector(boot_result.theta, n_theta)
-                beta_samples[b, :] = beta_sample
-                theta_samples[b, :] = theta_sample
-
-            except Exception:
-                n_failed += 1
-                continue
+                ),
+                "beta",
+                p,
+                n_theta,
+                inner="pirls_converged",
+                has_scale=False,
+            )
+            _store_bootstrap_sample(sample, beta_samples, theta_samples, None, failures)
     else:
         worker_data = _prepare_glmer_worker_data(result)
-        n_failed = 0
         with closing(
             _parallel_bootstrap_samples(
                 _glmer_bootstrap_worker, tuple(worker_data.values()), seeds, workers
             )
         ) as samples:
-            for completed, (boot_idx, beta, theta) in enumerate(samples, start=1):
+            for completed, sample in enumerate(samples, start=1):
                 if verbose and completed % 100 == 0:
                     print(f"Bootstrap iteration {completed}/{n_boot}")
-                if beta is not None:
-                    beta_samples[boot_idx, :] = beta
-                    theta_samples[boot_idx, :] = theta
-                else:
-                    n_failed += 1
+                _store_bootstrap_sample(sample, beta_samples, theta_samples, None, failures)
 
     return BootstrapResult(
         n_boot=n_boot,
@@ -613,7 +733,8 @@ def bootstrap_glmer(
         original_beta=result.beta,
         original_theta=result.theta,
         original_sigma=None,
-        n_failed=n_failed,
+        n_failed=len(failures),
+        failures=tuple(sorted(failures, key=lambda failure: failure.index)),
     )
 
 
@@ -688,6 +809,7 @@ def bootMer(
         - beta_samples: Fixed effects estimates from each sample
         - theta_samples: Variance parameter estimates from each sample
         - sigma_samples: Residual SD estimates (linear and nonlinear models)
+        - failures: Ordered BootstrapFailure records for unsuccessful samples
         - Methods: ci(), se(), summary()
 
         Nonlinear models provide ``phi_samples`` in place of ``beta_samples``.
@@ -723,8 +845,8 @@ def bootMer(
     shapes, with a positive residual scale where applicable. Failed replicates
     remain entirely NaN and increment ``n_failed``. Confidence bounds and
     standard errors require at least two valid samples per parameter; inspect
-    ``n_failed`` before interpreting the results. Interval accuracy still
-    depends on the fitted model and the number of successful replicates.
+    ``n_failed`` and ``failures`` before interpreting the results. Interval
+    accuracy still depends on the fitted model and the number of successful replicates.
 
     See Also
     --------
@@ -783,6 +905,7 @@ class NlmerBootstrapResult:
     original_theta: NDArray[np.floating]
     original_sigma: float
     n_failed: int
+    failures: tuple[BootstrapFailure, ...] = ()
 
     def ci(
         self,
@@ -807,44 +930,44 @@ class NlmerBootstrapResult:
             self.phi_samples,
             self.original_phi,
             self.param_names,
+            self.failures,
         )
 
 
 def _nlmer_bootstrap_refit(
     result: NlmerResult,
-    response: NDArray[np.floating],
-) -> tuple[NDArray | None, NDArray | None, float | None]:
-    try:
-        fitted = result.refit(response)
-        _require_bootstrap_convergence(fitted.converged, fitted.pnls_converged)
-        # Validate every component before publishing any part of the sample.
-        phi = _bootstrap_sample_vector(fitted.phi, len(result.phi))
-        theta = _bootstrap_sample_vector(fitted.theta, len(result.theta))
-        sigma = _bootstrap_sample_scale(fitted.sigma)
-        return phi, theta, sigma
-    except Exception:
-        return None, None, None
+    response: NDArray[np.floating] | BootstrapFailure,
+    *,
+    index: int = 0,
+) -> _BootstrapOutcome:
+    return _bootstrap_refit(
+        index,
+        response,
+        result.refit,
+        "phi",
+        len(result.phi),
+        len(result.theta),
+        inner="pnls_converged",
+    )
 
 
-def _nlmer_bootstrap_worker(
-    args: tuple[Any, ...],
-) -> tuple[int, NDArray | None, NDArray | None, float | None]:
+def _nlmer_bootstrap_worker(args: tuple[Any, ...]) -> _BootstrapOutcome:
     index, response, result = args
-    if response is None:
-        return index, None, None, None
+    if isinstance(response, BootstrapFailure):
+        return _BootstrapOutcome(index, failure=response)
     try:
         # A custom model's per-fit caches must not leak into later worker tasks.
         result = replace(result, model=deepcopy(result.model))
-    except Exception:
-        return index, None, None, None
-    return index, *_nlmer_bootstrap_refit(result, response)
+    except Exception as error:
+        return _BootstrapOutcome(index, failure=_bootstrap_failure(index, "refit", error))
+    return _nlmer_bootstrap_refit(result, response, index=index)
 
 
 def _nlmer_bootstrap_responses(
     result: NlmerResult,
     n_boot: int,
     rng: Any,
-) -> Generator[tuple[int, NDArray | None], None, None]:
+) -> Generator[tuple[int, NDArray[np.float64] | BootstrapFailure], None, None]:
     from mixedlm.models.nlmer import _DEFAULT_NLMER_SIMULATE, _NlmerSimulation
 
     # Draw in the caller to preserve the established sequential random stream.
@@ -852,17 +975,17 @@ def _nlmer_bootstrap_responses(
     use_prepared = getattr(result.simulate, "__func__", None) is _DEFAULT_NLMER_SIMULATE
     prepared = None
     for index in range(n_boot):
+        response: NDArray[np.float64] | BootstrapFailure
         try:
             if use_prepared:
                 if prepared is None:
                     prepared = _NlmerSimulation.prepare(result, include_re=True)
-                response = prepared.draw(rng)
+                draw = prepared.draw(rng)
             else:
-                response = result.simulate(nsim=1, seed=rng, use_re=True)
-                # Process serialization is asynchronous; own custom response storage.
-                response = np.array(response, copy=True)
-        except Exception:
-            response = None
+                draw = result.simulate(nsim=1, seed=rng, use_re=True)
+            response = _bootstrap_sample_vector(draw, len(result.y), "Simulated response")
+        except Exception as error:
+            response = _bootstrap_failure(index, "simulation", error)
         yield index, response
 
 
@@ -901,7 +1024,8 @@ def bootstrap_nlmer(
     Simulation or refit exceptions, nonconvergence, nonfinite estimates, and incompatible
     parameter shapes count as failed samples. All components of a failed
     sample remain NaN and are excluded from confidence intervals and
-    standard errors. Inspect ``n_failed`` before interpreting the results.
+    standard errors. Inspect ``n_failed`` and ``failures`` before interpreting
+    the results. Failure records identify the sample row, stage, and reason.
     Confidence bounds and standard errors are NaN when fewer than two samples
     succeed. Residual scales must be positive, and estimates must be real.
 
@@ -933,38 +1057,25 @@ def bootstrap_nlmer(
 
     rng = random_stream(seed)
     responses = _nlmer_bootstrap_responses(result, n_boot, rng)
-    n_failed = 0
+    failures: list[BootstrapFailure] = []
 
     if n_jobs == 1:
         for b in range(n_boot):
             if verbose and (b + 1) % 100 == 0:
                 print(f"Bootstrap iteration {b + 1}/{n_boot}")
-            _, y_sim = next(responses)
-            if y_sim is None:
-                n_failed += 1
-                continue
-            phi, theta, sigma = _nlmer_bootstrap_refit(result, y_sim)
-            if phi is None:
-                n_failed += 1
-            else:
-                phi_samples[b, :] = phi
-                theta_samples[b, :] = theta
-                sigma_samples[b] = sigma
+            _, response = next(responses)
+            sample = _nlmer_bootstrap_refit(result, response, index=b)
+            _store_bootstrap_sample(sample, phi_samples, theta_samples, sigma_samples, failures)
     else:
         # Refits only need the numerical model data, not the original frame.
         worker_result = replace(result, _data=None)
         with closing(
             _parallel_bootstrap_tasks(_nlmer_bootstrap_worker, (worker_result,), responses, workers)
         ) as samples:
-            for completed, (index, phi, theta, sigma) in enumerate(samples, start=1):
+            for completed, sample in enumerate(samples, start=1):
                 if verbose and completed % 100 == 0:
                     print(f"Bootstrap iteration {completed}/{n_boot}")
-                if phi is None:
-                    n_failed += 1
-                else:
-                    phi_samples[index, :] = phi
-                    theta_samples[index, :] = theta
-                    sigma_samples[index] = sigma
+                _store_bootstrap_sample(sample, phi_samples, theta_samples, sigma_samples, failures)
 
     return NlmerBootstrapResult(
         n_boot=n_boot,
@@ -975,5 +1086,6 @@ def bootstrap_nlmer(
         original_phi=result.phi.copy(),
         original_theta=result.theta.copy(),
         original_sigma=result.sigma,
-        n_failed=n_failed,
+        n_failed=len(failures),
+        failures=tuple(sorted(failures, key=lambda failure: failure.index)),
     )

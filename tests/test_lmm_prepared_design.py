@@ -350,7 +350,7 @@ def test_worker_prepares_design_once_for_multiple_responses():
         bootstrap._initialize_bootstrap_worker(bootstrap._lmer_bootstrap_worker, data)
         samples = [bootstrap._run_bootstrap_task((i, 23 + i)) for i in range(3)]
     assert native.call_count == python.call_count == 1
-    assert all(sample[1] is not None for sample in samples)
+    assert all(sample.fixed is not None for sample in samples)
 
 
 @pytest.mark.parametrize("field", ["x", "z_data", "offset", "weights"])

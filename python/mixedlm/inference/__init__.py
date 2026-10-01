@@ -2,6 +2,7 @@ from mixedlm.inference.allfit import AllFitResult, allfit_glmer, allfit_lmer
 from mixedlm.inference.anova import AnovaResult, anova
 from mixedlm.inference.boot_ci import bootCI
 from mixedlm.inference.bootstrap import (
+    BootstrapFailure,
     BootstrapResult,
     NlmerBootstrapResult,
     bootMer,
@@ -77,6 +78,7 @@ __all__ = [
     "sdProf",
     "as_dataframe",
     "confint_profile",
+    "BootstrapFailure",
     "BootstrapResult",
     "NlmerBootstrapResult",
     "bootstrap_lmer",

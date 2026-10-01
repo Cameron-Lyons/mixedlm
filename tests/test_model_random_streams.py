@@ -273,4 +273,4 @@ def test_bootstrap_workers_preserve_their_process_random_state(kind):
     state = np.random.get_state()
     output = worker((0, 42, *payload.values()))
     assert_global_state(state)
-    assert output[1] is not None
+    assert output.fixed is not None
