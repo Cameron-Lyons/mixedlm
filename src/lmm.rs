@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use faer::linalg::solvers::{Llt, Solve};
-use faer::{ColRef, Mat, Side};
+use faer::{ColRef, Mat, MatRef, Side};
 use numpy::PyArray1;
 use numpy::ndarray::{ArrayView1, ArrayView2};
 use pyo3::PyResult;
@@ -106,7 +106,7 @@ impl LambdaDerivative {
         result
     }
 
-    fn crossproduct_actions(
+    fn crossproduct_actions<const PRODUCT: bool>(
         &self,
         ztwz_lambda: &Mat<f64>,
         inverse: &Mat<f64>,
@@ -117,7 +117,7 @@ impl LambdaDerivative {
         // Contract it directly instead of allocating the q-by-q derivative.
         let q = ztwz_lambda.nrows();
         let mut trace = 0.0;
-        let mut product = Mat::zeros(q, rhs.ncols());
+        let mut product = Mat::zeros(q, if PRODUCT { rhs.ncols() } else { 0 });
         for column in 0..q {
             for level in 0..self.n_levels {
                 let offset = self.offset + level * self.n_terms;
@@ -126,7 +126,7 @@ impl LambdaDerivative {
                 let value = ztwz_lambda[(source, column)];
                 if value != 0.0 {
                     trace += value * (inverse[(column, target)] + inverse[(target, column)]);
-                    for right in 0..rhs.ncols() {
+                    for right in 0..if PRODUCT { rhs.ncols() } else { 0 } {
                         product[(target, right)] += value * rhs[(column, right)];
                         product[(column, right)] += value * rhs[(target, right)];
                     }
@@ -136,14 +136,14 @@ impl LambdaDerivative {
         (trace, product)
     }
 
-    fn level_crossproduct_actions(
+    fn level_crossproduct_actions<const PRODUCT: bool>(
         &self,
         ztwz_lambda: &Mat<f64>,
         inverse: &Mat<f64>,
         rhs: &Mat<f64>,
     ) -> (f64, Mat<f64>) {
         let mut trace = 0.0;
-        let mut product = Mat::zeros(rhs.nrows(), rhs.ncols());
+        let mut product = Mat::zeros(rhs.nrows(), if PRODUCT { rhs.ncols() } else { 0 });
         // Visit nonzero contributions in the same column order as the full contraction.
         for level in 0..self.n_levels {
             let local_offset = level * self.n_terms;
@@ -155,7 +155,7 @@ impl LambdaDerivative {
                         * (inverse[(local_offset + column, self.column)]
                             + inverse[(local_offset + self.column, column)]);
                     let global_column = self.offset + local_offset + column;
-                    for right in 0..rhs.ncols() {
+                    for right in 0..if PRODUCT { rhs.ncols() } else { 0 } {
                         product[(target, right)] += value * rhs[(global_column, right)];
                         product[(global_column, right)] += value * rhs[(target, right)];
                     }
@@ -243,6 +243,37 @@ impl<'a> ModeGradient<'a> {
             .sum::<f64>()
             - derivative.bilinear(self.conditional, self.mode))
     }
+    fn project(
+        &self,
+        marginal: &Mat<f64>,
+        products: &GradientCrossproducts,
+    ) -> ProjectedModeGradient<'_> {
+        ProjectedModeGradient {
+            mode: self.mode,
+            adjoint: self.adjoint.col(0),
+            marginal_residual: marginal - products.apply(self.mode.as_mat()),
+            adjusted_conditional: self.conditional.as_mat() + products.apply(self.adjoint.as_ref()),
+        }
+    }
+}
+
+/// Reuse two projections when wide factors have many covariance derivatives.
+struct ProjectedModeGradient<'a> {
+    mode: ColRef<'a, f64>,
+    adjoint: ColRef<'a, f64>,
+    marginal_residual: Mat<f64>,
+    adjusted_conditional: Mat<f64>,
+}
+
+impl ProjectedModeGradient<'_> {
+    fn derivative(&self, derivative: &LambdaDerivative) -> f64 {
+        // A = Z'WZ Lambda, a = V^-1(u - Lambda' c), E = dLambda.
+        // z and c are the marginal and conditional residual crossproducts.
+        // a'(E'z - (E'A + A'E)u) - c'Eu
+        //   = (E a)'(z - A u) - (E u)'(c + A a).
+        2.0 * (derivative.bilinear(self.marginal_residual.col(0), self.adjoint)
+            - derivative.bilinear(self.adjusted_conditional.col(0), self.mode))
+    }
 }
 
 /// Shared products for the REML fixed-information log determinant.
@@ -258,7 +289,7 @@ impl FixedEffectGradient {
         weighted: Mat<f64>,
         ztwx: &Mat<f64>,
     ) -> Self {
-        let mut residual = products.apply(projection);
+        let mut residual = products.apply(projection.as_ref());
         residual -= ztwx;
         Self { weighted, residual }
     }
@@ -307,7 +338,7 @@ impl GradientCrossproducts {
         }
     }
 
-    fn apply(&self, rhs: &Mat<f64>) -> Mat<f64> {
+    fn apply(&self, rhs: MatRef<'_, f64>) -> Mat<f64> {
         match self {
             Self::Dense { product, .. } => product * rhs,
             Self::Levels { products, .. } => {
@@ -357,16 +388,21 @@ impl GradientCrossproducts {
         }
     }
 
-    fn actions(&self, derivative: &LambdaDerivative, rhs: &Mat<f64>) -> (f64, Mat<f64>) {
+    fn actions<const PRODUCT: bool>(
+        &self,
+        derivative: &LambdaDerivative,
+        rhs: &Mat<f64>,
+    ) -> (f64, Mat<f64>) {
         match self {
             Self::Dense { product, inverse } => {
-                derivative.crossproduct_actions(product, inverse, rhs)
+                derivative.crossproduct_actions::<PRODUCT>(product, inverse, rhs)
             }
-            Self::Levels { products, inverses } => derivative.level_crossproduct_actions(
-                &products[derivative.structure],
-                &inverses[derivative.structure],
-                rhs,
-            ),
+            Self::Levels { products, inverses } => derivative
+                .level_crossproduct_actions::<PRODUCT>(
+                    &products[derivative.structure],
+                    &inverses[derivative.structure],
+                    rhs,
+                ),
         }
     }
 }
@@ -714,18 +750,28 @@ impl PreparedLmmResponse {
             None
         };
         let mode_gradient = ModeGradient::new(&u_star, &zt_w_conditional, &factor, &chol_v);
+        // Intercepts and slopes offer little reuse for two extra projections.
+        // Keep their direct arithmetic, including its optimizer stopping behavior.
+        let projected_mode = structures
+            .iter()
+            .any(|structure| structure.n_terms > 2)
+            .then(|| mode_gradient.project(&zt_w_resid, &gradient_products));
         let mut gradient = Vec::with_capacity(n_theta);
 
         for derivative in lambda_derivatives(structures) {
-            let (d_logdet_v, products) = gradient_products.actions(&derivative, &u_star);
-
-            let mut dc = derivative.apply::<true>(&zt_w_resid);
-            for row in 0..q {
-                dc[(row, 0)] -= products[(row, 0)];
-            }
-            // Holding beta fixed is valid at its optimum. This form remains
-            // valid for singular factors and avoids marginal quadratic forms.
-            let d_pwrss = mode_gradient.derivative(&derivative, &dc);
+            // Holding beta fixed is valid at its optimum. Both forms remain
+            // valid for singular factors and avoid marginal quadratic forms.
+            let (d_logdet_v, d_pwrss) = if let Some(projected) = &projected_mode {
+                let (trace, _) = gradient_products.actions::<false>(&derivative, &u_star);
+                (trace, projected.derivative(&derivative))
+            } else {
+                let (trace, products) = gradient_products.actions::<true>(&derivative, &u_star);
+                let mut dc = derivative.apply::<true>(&zt_w_resid);
+                for row in 0..q {
+                    dc[(row, 0)] -= products[(row, 0)];
+                }
+                (trace, mode_gradient.derivative(&derivative, &dc))
+            };
 
             let mut grad_k = d_logdet_v + denom / pwrss * d_pwrss;
 
@@ -1313,6 +1359,18 @@ mod prepared_tests {
                     Mat::<f64>::identity(q, q) + lambda.transpose() * &crossproduct * &lambda;
                 let dense_chol = Llt::new(information.as_ref(), Side::Lower).unwrap();
                 let shared = ModeGradient::new(&mode, &conditional, &factor, &chol);
+                let products = if independent {
+                    GradientCrossproducts::Levels {
+                        products: factor.right_apply_level_crossproducts(crossproduct.as_ref()),
+                        inverses: chol.independent_level_inverses().unwrap(),
+                    }
+                } else {
+                    GradientCrossproducts::Dense {
+                        product: &crossproduct * &lambda,
+                        inverse: chol.inverse(),
+                    }
+                };
+                let projected = shared.project(&marginal, &products);
                 let mut max_correction: f64 = 0.0;
                 for derivative in lambda_derivatives(&structures) {
                     let entry = derivative.apply::<false>(&Mat::identity(q, q));
@@ -1330,6 +1388,8 @@ mod prepared_tests {
                             .sum::<f64>();
                     let actual = shared.derivative(&derivative, &rhs);
                     assert!((actual - expected).abs() < 1e-11 * expected.abs().max(1.0));
+                    let projected_actual = projected.derivative(&derivative);
+                    assert!((projected_actual - expected).abs() < 1e-11 * expected.abs().max(1.0));
                     let stationary = -2.0 * derivative.bilinear(conditional.col(0), mode.col(0));
                     max_correction = max_correction.max((actual - stationary).abs());
                 }
@@ -1442,16 +1502,19 @@ mod prepared_tests {
         let compact = GradientCrossproducts::Levels { products, inverses };
         for columns in [0, 1, 4, 17] {
             let rhs = Mat::from_fn(q, columns, |i, j| ((2 * i + j) % 11) as f64 / 4.0);
-            assert_eq!(compact.apply(&rhs), &full_product * &rhs);
+            assert_eq!(compact.apply(rhs.as_ref()), &full_product * &rhs);
         }
         for derivative in lambda_derivatives(&structures) {
             for columns in [0, 1, 4, 17] {
                 let rhs = Mat::from_fn(q, columns, |i, j| ((2 * i + j) % 11) as f64 / 4.0);
-                let (trace, product) = compact.actions(&derivative, &rhs);
+                let (trace, product) = compact.actions::<true>(&derivative, &rhs);
                 let (expected_trace, expected_product) =
-                    derivative.crossproduct_actions(&full_product, &full_inverse, &rhs);
+                    derivative.crossproduct_actions::<true>(&full_product, &full_inverse, &rhs);
                 assert_eq!(trace, expected_trace);
                 assert_eq!(product, expected_product);
+                let (trace_only, empty) = compact.actions::<false>(&derivative, &rhs);
+                assert_eq!(trace_only, trace);
+                assert_eq!(empty.shape(), (q, 0));
             }
         }
     }
@@ -1625,9 +1688,14 @@ mod prepared_tests {
                 }
                 for ncols in [0, 1, 4] {
                     let rhs = Mat::from_fn(11, ncols, |i, j| (i + 3 * j) as f64 - 5.0);
-                    let (trace, actual) = derivative.crossproduct_actions(&product, &inverse, &rhs);
+                    let (trace, actual) =
+                        derivative.crossproduct_actions::<true>(&product, &inverse, &rhs);
                     assert_eq!(trace, expected_trace);
                     assert_eq!(actual, &derivative_matrix * &rhs);
+                    let (trace_only, empty) =
+                        derivative.crossproduct_actions::<false>(&product, &inverse, &rhs);
+                    assert_eq!(trace_only, trace);
+                    assert_eq!(empty.shape(), (11, 0));
                 }
             }
         }
