@@ -20,6 +20,9 @@ from scipy import sparse
     ("layout", "n_obs", "n_groups"),
     [
         ("intercept", 200, 10),
+        ("intercept", 512, 64),
+        ("intercept", 1016, 127),
+        ("scalar_slope", 1024, 128),
         ("intercept", 6000, 300),
         ("slopes", 6000, 150),
         ("crossed", 6000, 150),
@@ -45,11 +48,17 @@ def test_benchmark_native_glmm_crossproducts(benchmark, layout, n_obs, n_groups)
     )
     formula = {
         "intercept": "y ~ x + (1 | g)",
+        "scalar_slope": "y ~ x + (0 + x | g)",
         "slopes": "y ~ x + (x | g)",
         "crossed": "y ~ x + (1 | g) + (1 | h)",
     }[layout]
     theta = np.array(
-        {"intercept": [0.5], "slopes": [0.5, 0.1, 0.3], "crossed": [0.5, 0.35]}[layout]
+        {
+            "intercept": [0.5],
+            "scalar_slope": [0.5],
+            "slopes": [0.5, 0.1, 0.3],
+            "crossed": [0.5, 0.35],
+        }[layout]
     )
     matrices = build_model_matrices(
         parse_formula(formula), data, weights=np.linspace(0.4, 2.0, n_obs), offset=offset
