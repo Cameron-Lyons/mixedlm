@@ -29,6 +29,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Native GLMM fitting and joint likelihood profiles reuse owned input preparation and starting coefficients across parameter evaluations. Each solve remains independent, including when its fixed-effect offset changes.
+
 - Native GLMM likelihoods reuse final PIRLS means for Laplace and adaptive quadrature corrections. Laplace also reuses the covariance factor, and each iteration shares link derivatives between working weights and responses.
 
 - Nonlinear prediction uses stable group row indexing, and nonlinear bootstrap reuses simulation preparation across responses. Seeded draw order, custom simulation overrides, and per-replicate failure handling are preserved.

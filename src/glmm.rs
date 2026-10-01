@@ -215,7 +215,7 @@ struct GlmmInputs<'a> {
     z: CscMatrix,
     weights: &'a [f64],
     offset: DVector<f64>,
-    theta: &'a [f64],
+    n_theta: usize,
     structures: Vec<RandomEffectStructure>,
     family: FamilyType,
     link: LinkFunction,
@@ -227,9 +227,9 @@ fn validate_glmm_dimensions(
     z_shape: (usize, usize),
     weights_len: usize,
     offset_len: usize,
-    theta_len: usize,
+    theta_len: Option<usize>,
     structures: &[RandomEffectStructure],
-) -> Result<(), String> {
+) -> Result<usize, String> {
     if n == 0 {
         return Err("y must contain at least one observation".into());
     }
@@ -279,12 +279,10 @@ fn validate_glmm_dimensions(
             z_shape.1
         ));
     }
-    if theta_len != parameters {
-        return Err(format!(
-            "theta must have length {parameters}, got {theta_len}"
-        ));
+    if let Some(length) = theta_len {
+        validate_theta_length(length, parameters)?;
     }
-    Ok(())
+    Ok(parameters)
 }
 
 impl<'a> GlmmInputs<'a> {
@@ -298,7 +296,7 @@ impl<'a> GlmmInputs<'a> {
         z_shape: (usize, usize),
         weights: &'a [f64],
         offset: ArrayView1<'_, f64>,
-        theta: &'a [f64],
+        theta_len: Option<usize>,
         n_levels: Vec<usize>,
         n_terms: Vec<usize>,
         correlated: Vec<bool>,
@@ -324,21 +322,17 @@ impl<'a> GlmmInputs<'a> {
                 correlated,
             })
             .collect();
-        validate_glmm_dimensions(
+        let n_theta = validate_glmm_dimensions(
             y.len(),
             x.nrows(),
             z_shape,
             weights.len(),
             offset.len(),
-            theta.len(),
+            theta_len,
             &structures,
         )
         .map_err(PyValueError::new_err)?;
-        if n_agq > 1 && z_shape.1 > 0 && (structures.len() != 1 || structures[0].n_terms != 1) {
-            return Err(PyValueError::new_err(
-                "n_agq > 1 requires one random-effect term with one coefficient per group; use n_agq=1 for this model",
-            ));
-        }
+        validate_agq_structure(n_agq, z_shape.1, &structures)?;
         let (family, link) = parse_family_and_link(family, link)?;
         // Validate before indexing views or allocating the owned dense matrices.
         let z = csc_from_scipy(z_data, z_indices, z_indptr, z_shape)?;
@@ -348,11 +342,167 @@ impl<'a> GlmmInputs<'a> {
             z,
             weights,
             offset: offset.iter().copied().collect(),
-            theta,
+            n_theta,
             structures,
             family,
             link,
         })
+    }
+}
+
+fn validate_theta_length(length: usize, expected: usize) -> Result<(), String> {
+    if length != expected {
+        return Err(format!("theta must have length {expected}, got {length}"));
+    }
+    Ok(())
+}
+
+fn validate_agq_structure(
+    n_agq: usize,
+    q: usize,
+    structures: &[RandomEffectStructure],
+) -> PyResult<()> {
+    if n_agq == 0 {
+        return Err(PyValueError::new_err("n_agq must be a positive integer"));
+    }
+    if n_agq > 1 && q > 0 && (structures.len() != 1 || structures[0].n_terms != 1) {
+        return Err(PyValueError::new_err(
+            "n_agq > 1 requires one random-effect term with one coefficient per group; use n_agq=1 for this model",
+        ));
+    }
+    Ok(())
+}
+
+/// An owned, immutable problem reused across likelihood evaluations.
+/// Every solve starts from the same coefficients, independent of call order.
+#[pyclass(frozen)]
+pub struct GlmmProblem {
+    y: DVector<f64>,
+    x: DMatrix<f64>,
+    z: CscMatrix,
+    weights: Vec<f64>,
+    offset: DVector<f64>,
+    structures: Vec<RandomEffectStructure>,
+    n_theta: usize,
+    family: FamilyType,
+    link: LinkFunction,
+    beta_start: DVector<f64>,
+}
+
+#[pymethods]
+impl GlmmProblem {
+    #[new]
+    #[allow(clippy::too_many_arguments)]
+    fn new<'py>(
+        y: numpy::PyArrayLike1<'py, f64>,
+        x: numpy::PyArrayLike2<'py, f64>,
+        z_data: numpy::PyArrayLike1<'py, f64>,
+        z_indices: numpy::PyArrayLike1<'py, i64>,
+        z_indptr: numpy::PyArrayLike1<'py, i64>,
+        z_shape: (usize, usize),
+        weights: numpy::PyArrayLike1<'py, f64>,
+        offset: numpy::PyArrayLike1<'py, f64>,
+        n_levels: Vec<usize>,
+        n_terms: Vec<usize>,
+        correlated: Vec<bool>,
+        family: &str,
+        link: &str,
+    ) -> PyResult<Self> {
+        let inputs = GlmmInputs::new(
+            y.as_array(),
+            x.as_array(),
+            z_data.as_slice()?,
+            z_indices.as_slice()?,
+            z_indptr.as_slice()?,
+            z_shape,
+            weights.as_slice()?,
+            offset.as_array(),
+            None,
+            n_levels,
+            n_terms,
+            correlated,
+            family,
+            link,
+            1,
+        )?;
+        let beta_start = initial_beta(
+            &inputs.y,
+            &inputs.x,
+            inputs.weights,
+            &inputs.offset,
+            inputs.family,
+            inputs.link,
+        );
+        Ok(Self {
+            y: inputs.y,
+            x: inputs.x,
+            z: inputs.z,
+            weights: inputs.weights.to_vec(),
+            offset: inputs.offset,
+            structures: inputs.structures,
+            n_theta: inputs.n_theta,
+            family: inputs.family,
+            link: inputs.link,
+            beta_start,
+        })
+    }
+
+    #[pyo3(signature = (theta, n_agq=1, *, offset=None, maxiter=PIRLS_MAX_ITER, tol=PIRLS_TOLERANCE))]
+    fn evaluate<'py>(
+        &self,
+        theta: numpy::PyArrayLike1<'py, f64>,
+        n_agq: usize,
+        offset: Option<numpy::PyArrayLike1<'py, f64>>,
+        maxiter: usize,
+        tol: f64,
+    ) -> PyResult<(f64, Vec<f64>, Vec<f64>, bool)> {
+        validate_pirls_controls(maxiter, tol)?;
+        validate_agq_structure(n_agq, self.z.ncols(), &self.structures)?;
+        let theta = theta.as_slice()?;
+        validate_theta_length(theta.len(), self.n_theta).map_err(PyValueError::new_err)?;
+        let override_offset = if let Some(offset) = offset {
+            let offset = offset.as_array();
+            if offset.len() != self.y.nrows() {
+                return Err(PyValueError::new_err(format!(
+                    "offset must have length {}, got {}",
+                    self.y.nrows(),
+                    offset.len(),
+                )));
+            }
+            Some(offset.iter().copied().collect::<DVector<f64>>())
+        } else {
+            None
+        };
+        let offset = override_offset.as_ref().unwrap_or(&self.offset);
+        // A changed offset needs its own initial coefficients. Mode-only solves
+        // have no fixed coefficients and can always use the empty cached start.
+        let beta_start = if override_offset.is_none() || self.x.ncols() == 0 {
+            Some(&self.beta_start)
+        } else {
+            None
+        };
+        let (deviance, beta, u, converged) = adaptive_gh_deviance_impl(
+            &self.y,
+            &self.x,
+            &self.z,
+            &self.weights,
+            offset,
+            theta,
+            &self.structures,
+            self.family,
+            self.link,
+            n_agq,
+            beta_start,
+            None,
+            maxiter,
+            tol,
+        )?;
+        Ok((
+            deviance,
+            beta.iter().copied().collect(),
+            u.iter().copied().collect(),
+            converged,
+        ))
     }
 }
 
@@ -939,6 +1089,7 @@ pub fn pirls<'py>(
     tol: f64,
 ) -> PyResult<(Vec<f64>, Vec<f64>, f64, bool)> {
     validate_pirls_controls(maxiter, tol)?;
+    let theta = theta.as_slice()?;
     let inputs = GlmmInputs::new(
         y.as_array(),
         x.as_array(),
@@ -948,7 +1099,7 @@ pub fn pirls<'py>(
         z_shape,
         weights.as_slice()?,
         offset.as_array(),
-        theta.as_slice()?,
+        Some(theta.len()),
         n_levels,
         n_terms,
         correlated,
@@ -963,7 +1114,7 @@ pub fn pirls<'py>(
         &inputs.z,
         inputs.weights,
         &inputs.offset,
-        inputs.theta,
+        theta,
         &inputs.structures,
         inputs.family,
         inputs.link,
@@ -1117,6 +1268,7 @@ pub fn glmm_deviance<'py>(
     tol: f64,
 ) -> PyResult<(f64, Vec<f64>, Vec<f64>, bool)> {
     validate_pirls_controls(maxiter, tol)?;
+    let theta = theta.as_slice()?;
     let inputs = GlmmInputs::new(
         y.as_array(),
         x.as_array(),
@@ -1126,7 +1278,7 @@ pub fn glmm_deviance<'py>(
         z_shape,
         weights.as_slice()?,
         offset.as_array(),
-        theta.as_slice()?,
+        Some(theta.len()),
         n_levels,
         n_terms,
         correlated,
@@ -1141,7 +1293,7 @@ pub fn glmm_deviance<'py>(
         &inputs.z,
         inputs.weights,
         &inputs.offset,
-        inputs.theta,
+        theta,
         &inputs.structures,
         inputs.family,
         inputs.link,
@@ -1478,10 +1630,14 @@ mod input_dimension_tests {
                 correlated: false,
             },
         ];
-        assert!(validate_glmm_dimensions(8, 8, (8, 14), 8, 8, 5, &structures).is_ok());
-        assert!(validate_glmm_dimensions(8, 8, (8, 14), 8, 8, 4, &structures).is_err());
-        assert!(validate_glmm_dimensions(8, 8, (8, 14), 8, 8, 6, &structures).is_err());
-        assert!(validate_glmm_dimensions(8, 8, (8, 13), 8, 8, 5, &structures).is_err());
-        assert!(validate_glmm_dimensions(8, 8, (8, 0), 8, 8, 0, &[]).is_ok());
+        assert!(validate_glmm_dimensions(8, 8, (8, 14), 8, 8, Some(5), &structures).is_ok());
+        assert!(validate_glmm_dimensions(8, 8, (8, 14), 8, 8, Some(4), &structures).is_err());
+        assert!(validate_glmm_dimensions(8, 8, (8, 14), 8, 8, Some(6), &structures).is_err());
+        assert!(validate_glmm_dimensions(8, 8, (8, 13), 8, 8, Some(5), &structures).is_err());
+        assert!(validate_glmm_dimensions(8, 8, (8, 0), 8, 8, Some(0), &[]).is_ok());
+        assert_eq!(
+            validate_glmm_dimensions(8, 8, (8, 14), 8, 8, None, &structures),
+            Ok(5)
+        );
     }
 }

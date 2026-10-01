@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import replace
 from unittest.mock import patch
 
@@ -7,7 +8,7 @@ import numpy as np
 import pandas as pd
 import pytest
 from mixedlm import glmer, lmer, lmerControl
-from mixedlm.estimation import laplace, reml
+from mixedlm.estimation import joint_glmm, laplace, reml
 from mixedlm.estimation.optimizers import OptimizeResult
 from mixedlm.families import Gaussian, Poisson
 from mixedlm.formula.parser import parse_formula
@@ -37,10 +38,13 @@ def make_optimizer(data, mode):
     return laplace.GLMMOptimizer(matrices, Poisson(), nAGQ=5 if mode.startswith("agq") else 1)
 
 
+@contextmanager
 def backend_patch(optimizer, mode, evaluation=None, error=None):
     kwargs = {"side_effect": error} if error is not None else {"return_value": evaluation}
     if mode == "linear":
-        return patch.object(optimizer, "_evaluate_core", **kwargs)
+        with patch.object(optimizer, "_evaluate_core", **kwargs):
+            yield
+        return
     if evaluation is not None and len(evaluation) == 3:
         kwargs = {"return_value": (*evaluation, True)}
     name = (
@@ -52,7 +56,15 @@ def backend_patch(optimizer, mode, evaluation=None, error=None):
             else "_laplace_deviance_with_status"
         )
     )
-    return patch.object(laplace, name, **kwargs)
+    with patch.object(laplace, name, **kwargs):
+        if mode.endswith("native"):
+            with (
+                patch.object(laplace, "_evaluate_native_problem", **kwargs),
+                patch.object(joint_glmm, "_evaluate_native_problem", **kwargs),
+            ):
+                yield
+        else:
+            yield
 
 
 def good_evaluation(optimizer, mode):

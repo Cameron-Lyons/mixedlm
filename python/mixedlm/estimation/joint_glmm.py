@@ -7,7 +7,12 @@ from dataclasses import replace
 import numpy as np
 from numpy.typing import NDArray
 
-from mixedlm.estimation.laplace import _validate_quadrature, glmm_deviance_with_status
+from mixedlm.estimation.laplace import (
+    _evaluate_native_problem,
+    _prepare_native_glmm,
+    _validate_quadrature,
+    glmm_deviance_with_status,
+)
 from mixedlm.estimation.pirls_control import validate_pirls_controls
 from mixedlm.estimation.reml import _build_theta_bounds, _count_theta
 from mixedlm.estimation.validation import validate_finite_real
@@ -16,7 +21,11 @@ from mixedlm.matrices.design import ModelMatrices
 
 
 class JointGLMMObjective:
-    """Evaluate parameters ordered as covariance parameters followed by beta."""
+    """Evaluate covariance parameters followed by beta for a fixed model.
+
+    Treat the model arrays and family as immutable for this object's lifetime.
+    Each evaluation uses an independent mode solve with its own combined offset.
+    """
 
     def __init__(
         self,
@@ -42,6 +51,7 @@ class JointGLMMObjective:
             n_fixed=0,
             fixed_names=[],
         )
+        self._native_problem = _prepare_native_glmm(self.mode_matrices, family)
         self.bounds = _build_theta_bounds(matrices.random_structures, self.n_theta)
         self.bounds += [(None, None)] * matrices.n_fixed
 
@@ -51,15 +61,26 @@ class JointGLMMObjective:
         parameters = np.asarray(parameters)
         validate_finite_real("joint parameters", parameters, (self.n_parameters,))
         theta, beta = parameters[: self.n_theta], parameters[self.n_theta :]
-        matrices = replace(self.mode_matrices, offset=self.matrices.offset + self.matrices.X @ beta)
-        deviance, _, u, converged = glmm_deviance_with_status(
-            theta,
-            matrices,
-            self.family,
-            nAGQ=max(1, self.nAGQ),
-            pirls_maxiter=self.pirls_maxiter,
-            pirls_tol=self.pirls_tol,
-        )
+        offset = self.matrices.offset + self.matrices.X @ beta
+        if self._native_problem is not None and (self.nAGQ <= 1 or self.matrices.n_random):
+            deviance, _, u, converged = _evaluate_native_problem(
+                self._native_problem,
+                theta,
+                self.nAGQ,
+                offset=offset,
+                pirls_maxiter=self.pirls_maxiter,
+                pirls_tol=self.pirls_tol,
+            )
+        else:
+            matrices = replace(self.mode_matrices, offset=offset)
+            deviance, _, u, converged = glmm_deviance_with_status(
+                theta,
+                matrices,
+                self.family,
+                nAGQ=max(1, self.nAGQ),
+                pirls_maxiter=self.pirls_maxiter,
+                pirls_tol=self.pirls_tol,
+            )
         return deviance, beta.copy(), u, converged
 
     def __call__(self, parameters: NDArray[np.floating]) -> float:
