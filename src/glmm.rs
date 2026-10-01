@@ -58,14 +58,14 @@ impl LinkFunction {
         }
     }
 
-    fn deriv(&self, mu: &DVector<f64>) -> DVector<f64> {
+    fn deriv_at(&self, mu: f64) -> f64 {
         match self {
-            LinkFunction::Identity => DVector::full(mu.nrows(), 1.0),
-            LinkFunction::Log => DVector::from_fn(mu.nrows(), |i| 1.0 / mu[i].max(1e-10)),
-            LinkFunction::Logit => DVector::from_fn(mu.nrows(), |i| {
-                let m = mu[i].clamp(1e-10, 1.0 - 1e-10);
+            LinkFunction::Identity => 1.0,
+            LinkFunction::Log => 1.0 / mu.max(1e-10),
+            LinkFunction::Logit => {
+                let m = mu.clamp(1e-10, 1.0 - 1e-10);
                 1.0 / (m * (1.0 - m))
-            }),
+            }
         }
     }
 }
@@ -98,14 +98,14 @@ impl FamilyType {
         }
     }
 
-    fn variance(&self, mu: &DVector<f64>) -> DVector<f64> {
+    fn variance_at(&self, mu: f64) -> f64 {
         match self {
-            FamilyType::Gaussian => DVector::full(mu.nrows(), 1.0),
-            FamilyType::Binomial => DVector::from_fn(mu.nrows(), |i| {
-                let m = mu[i].clamp(1e-10, 1.0 - 1e-10);
+            FamilyType::Gaussian => 1.0,
+            FamilyType::Binomial => {
+                let m = mu.clamp(1e-10, 1.0 - 1e-10);
                 m * (1.0 - m)
-            }),
-            FamilyType::Poisson => DVector::from_fn(mu.nrows(), |i| mu[i].max(1e-10)),
+            }
+            FamilyType::Poisson => mu.max(1e-10),
         }
     }
 
@@ -157,20 +157,14 @@ impl FamilyType {
     }
 
     fn weights(&self, mu: &DVector<f64>, link: LinkFunction) -> DVector<f64> {
-        self.weights_from_derivative(mu, &link.deriv(mu))
+        DVector::from_fn(mu.nrows(), |i| {
+            self.weight_from_derivative(mu[i], link.deriv_at(mu[i]))
+        })
     }
 
-    fn weights_from_derivative(
-        &self,
-        mu: &DVector<f64>,
-        link_deriv: &DVector<f64>,
-    ) -> DVector<f64> {
-        let variance = self.variance(mu);
-        DVector::from_fn(mu.nrows(), |i| {
-            let d = link_deriv[i];
-            let v = variance[i].max(1e-10);
-            1.0 / (d * d * v).max(1e-10)
-        })
+    fn weight_from_derivative(&self, mu: f64, derivative: f64) -> f64 {
+        let variance = self.variance_at(mu).max(1e-10);
+        1.0 / (derivative * derivative * variance).max(1e-10)
     }
 }
 
@@ -652,6 +646,8 @@ pub fn pirls_impl(
     };
 
     let mut converged = false;
+    let mut w_vec = DVector::zeros(n);
+    let mut z_vec = DVector::zeros(n);
 
     for _iter in 0..maxiter {
         let random_effects = lambda.apply(&spherical);
@@ -668,41 +664,13 @@ pub fn pirls_impl(
         let mut mu = link.inverse(&eta);
         family.clamp_mu(&mut mu, 1e-10);
 
-        let link_deriv = link.deriv(&mu);
-        let mut w_vec = family.weights_from_derivative(&mu, &link_deriv);
         for i in 0..n {
-            w_vec[i] = (w_vec[i] * weights[i]).max(1e-10);
+            // Share each derivative without allocating full derivative and
+            // variance vectors. Keep the weight arithmetic and floors intact.
+            let derivative = link.deriv_at(mu[i]);
+            w_vec[i] = (family.weight_from_derivative(mu[i], derivative) * weights[i]).max(1e-10);
+            z_vec[i] = eta[i] - offset[i] + derivative * (y[i] - mu[i]);
         }
-
-        let z_vec: DVector<f64> =
-            DVector::from_fn(n, |i| eta[i] - offset[i] + link_deriv[i] * (y[i] - mu[i]));
-
-        let wx = DMatrix::from_fn(n, p, |i, j| w_vec[i].sqrt() * x[(i, j)]);
-        let xtwx = wx.transpose() * &wx;
-
-        let mut xtwz_mat = DMatrix::zeros(p, q);
-        for j in 0..q {
-            let col_start = z.col_offsets()[j];
-            let col_end = z.col_offsets()[j + 1];
-            for pj in 0..p {
-                let mut sum = 0.0;
-                for idx in col_start..col_end {
-                    let i = z.row_indices()[idx];
-                    sum += x[(i, pj)] * w_vec[i] * z.values()[idx];
-                }
-                xtwz_mat[(pj, j)] = sum;
-            }
-        }
-
-        let ztwx = xtwz_mat.transpose();
-
-        let xtwz_vec: DVector<f64> = DVector::from_fn(p, |i| {
-            let mut sum = 0.0;
-            for j in 0..n {
-                sum += x[(j, i)] * w_vec[j] * z_vec[j];
-            }
-            sum
-        });
 
         let mut ztwz_vec = DVector::zeros(q);
         for j in 0..q {
@@ -732,30 +700,62 @@ pub fn pirls_impl(
             }
         };
 
-        let spherical_ztwx = lambda.transpose_apply(ztwx);
         let spherical_ztwz = lambda.transpose_apply_vector(&ztwz_vec);
-        // Solve all fixed-effect and response columns together, borrowing the
-        // Cholesky factor instead of copying its q-by-q storage each iteration.
-        let mut rhs = DMatrix::from_fn(q, p + 1, |i, j| {
-            if j == p {
-                spherical_ztwz[i]
-            } else {
-                spherical_ztwx[(i, j)]
+        let (beta_new, mut spherical_new) = if p == 0 {
+            // Joint likelihoods put fixed coefficients into the offset. Their
+            // mode solve only needs C u = Lambda' Z' W z; avoid constructing
+            // and factoring an empty fixed-effect Schur complement.
+            let mut rhs = spherical_ztwz;
+            chol_c.solve_lower_in_place(rhs.as_mat_mut());
+            (DVector::zeros(0), rhs)
+        } else {
+            let wx = DMatrix::from_fn(n, p, |i, j| w_vec[i].sqrt() * x[(i, j)]);
+            let xtwx = wx.transpose() * &wx;
+
+            let mut xtwz_mat = DMatrix::zeros(p, q);
+            for j in 0..q {
+                let col_start = z.col_offsets()[j];
+                let col_end = z.col_offsets()[j + 1];
+                for pj in 0..p {
+                    let mut sum = 0.0;
+                    for idx in col_start..col_end {
+                        let i = z.row_indices()[idx];
+                        sum += x[(i, pj)] * w_vec[i] * z.values()[idx];
+                    }
+                    xtwz_mat[(pj, j)] = sum;
+                }
             }
-        });
-        chol_c.solve_lower_in_place(rhs.as_mut());
-        let rzx = rhs.subcols(0, p);
-        let cu = rhs.col(p);
 
-        let xtvinvx = &xtwx - &(rzx.transpose() * rzx);
-        let xtvinvz = &xtwz_vec - &(rzx.transpose() * cu);
+            let xtwz_vec: DVector<f64> = DVector::from_fn(p, |i| {
+                let mut sum = 0.0;
+                for j in 0..n {
+                    sum += x[(j, i)] * w_vec[j] * z_vec[j];
+                }
+                sum
+            });
+            let spherical_ztwx = lambda.transpose_apply(xtwz_mat.transpose());
+            // Solve fixed-effect and response columns together, borrowing the
+            // Cholesky factor instead of copying its storage each iteration.
+            let mut rhs = DMatrix::from_fn(q, p + 1, |i, j| {
+                if j == p {
+                    spherical_ztwz[i]
+                } else {
+                    spherical_ztwx[(i, j)]
+                }
+            });
+            chol_c.solve_lower_in_place(rhs.as_mut());
+            let rzx = rhs.subcols(0, p);
+            let cu = rhs.col(p);
 
-        let beta_new = match Llt::new(xtvinvx.as_ref(), Side::Lower) {
-            Ok(chol) => chol.solve(&xtvinvz),
-            Err(_) => xtvinvx.partial_piv_lu().solve(&xtvinvz),
+            let xtvinvx = &xtwx - &(rzx.transpose() * rzx);
+            let xtvinvz = &xtwz_vec - &(rzx.transpose() * cu);
+            let beta_new = match Llt::new(xtvinvx.as_ref(), Side::Lower) {
+                Ok(chol) => chol.solve(&xtvinvz),
+                Err(_) => xtvinvx.partial_piv_lu().solve(&xtvinvz),
+            };
+            let spherical_new = cu - rzx * &beta_new;
+            (beta_new, spherical_new)
         };
-
-        let mut spherical_new = cu - rzx * &beta_new;
         chol_c.solve_upper_in_place(spherical_new.as_mat_mut());
 
         let delta_beta = max_abs_diff(&beta_new, &beta);

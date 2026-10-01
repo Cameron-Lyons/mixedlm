@@ -284,6 +284,13 @@ these estimation objects; construct a new object when the inputs change. Public
 fits and refits prepare their current inputs automatically. Custom families,
 links, and covariance structures retain the Python implementation.
 
+Native PIRLS reuses its working-weight and working-response buffers across
+iterations and computes link derivatives and variances per observation without
+retaining separate vectors. Joint likelihoods pass fixed coefficients through
+the offset, so their mode solves skip the empty fixed-effect system and use the
+two triangular random-effect solves directly. Working-weight floors, convergence
+checks, and the final likelihood correction use the same formulas.
+
 Modular `GlmerDevfun` calls with full `[theta, beta]` vectors prepare the joint
 objective on first use and reuse it for later parameter values. Changing its
 optimizer, quadrature order, or inner solver controls refreshes this preparation.

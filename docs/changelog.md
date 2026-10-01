@@ -29,6 +29,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Native GLMM iterations reuse working buffers and avoid intermediate derivative and variance vectors. Mode-only solves, including joint likelihood evaluations, skip empty fixed-effect matrix construction and factorization.
+
 - Modular GLMM deviance callables reuse joint likelihood preparation across `[theta, beta]` evaluations, refreshing it when the optimizer or solver settings change. Covariance-only calls do not construct a joint objective.
 
 - Native adaptive quadrature runs on the calling thread when only one worker is available. Parallel evaluations collect group contributions in a fixed order for compensated summation, preserving small contributions and making the quadrature reduction reproducible across worker counts.
