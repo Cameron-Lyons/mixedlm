@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Nonlinear fits accept `pnls_maxiter` and `pnls_tol` for inner iteration control on both backends. Results expose `pnls_converged` and retain the controls for refits and updates.
+
 - `LmerControl` and `GlmerControl` accept `restart_edge` to control likelihood checks and optimizer restarts at zero variance; enabled by default.
 
 - `slice2D(..., profile_covariance=True)` computes a full joint ML likelihood profile, with nuisance covariance and scale optimization, adaptive grid ranges, and parallel row evaluation.
@@ -34,6 +36,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   behavior, including per-unit rates from models fitted with log-exposure offsets.
 
 ### Fixed
+
+- Nonlinear fits no longer report convergence when the inner PNLS iteration limit is reached. Summaries identify unfinished inner solves, and nonlinear bootstrap intervals exclude unconverged refits.
 
 - LMM and GLMM fitting, modular optimization, and profiles detect zero variance scales with a zero gradient but a better nearby likelihood. Restarts retain the selected optimizer, share its remaining budget, and report nonconvergence if an improvement cannot be resolved.
 

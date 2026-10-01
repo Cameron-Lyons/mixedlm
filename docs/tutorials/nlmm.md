@@ -299,10 +299,26 @@ optimizer can try other parameter values. If the final evaluation fails,
 They also reject nonfinite or incorrectly shaped estimates and a nonpositive
 residual scale. The failure penalty is never returned as a fitted deviance.
 
-A valid final evaluation can still have `converged=False` if the optimizer did
-not meet its stopping criteria; inspect that flag before using the result.
-`bootstrap_nlmer()` and `bootMer()` count refits that raise an error as failed
-replicates and exclude them from their confidence intervals.
+A valid final evaluation has `converged=True` only when both the outer optimizer
+and inner parameter updates converge. `pnls_converged` records the inner status;
+an iteration limit no longer counts as successful convergence. `nlmer()` warns
+when the final inner solve is unfinished, and the summary identifies that case.
+
+`pnls_maxiter` sets the inner iteration budget (default 50). `pnls_tol` sets the
+largest allowed absolute change in any fixed or random parameter (default
+`1e-6`). Both controls apply to Python and native fitting. The existing `maxiter`
+argument limits outer covariance optimization independently. Results retain the
+inner controls for `refit()` and `update()`, which accept overrides:
+
+```python
+refined = model.refit(pnls_maxiter=2000, pnls_tol=1e-6)
+print(refined.converged, refined.pnls_converged)
+```
+
+Inspect convergence before using the estimates. `bootstrap_nlmer()`, `bootMer()`,
+and bootstrap confidence intervals count refits that fail or do not converge as
+failed replicates and exclude them from their intervals. If every replicate
+fails, interval bounds are NaN.
 
 NLMMs are particularly sensitive to:
 

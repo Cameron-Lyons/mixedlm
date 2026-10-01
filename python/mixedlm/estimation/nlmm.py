@@ -12,6 +12,7 @@ from numpy.typing import NDArray
 from scipy import linalg
 from scipy.optimize import minimize
 
+from mixedlm.estimation.pnls_control import validate_pnls_controls
 from mixedlm.nlme.models import (
     NonlinearModel,
     SSasymp,
@@ -23,7 +24,7 @@ from mixedlm.nlme.models import (
 )
 
 try:
-    from mixedlm._rust import nlmm_deviance as _rust_nlmm_deviance
+    from mixedlm._rust import nlmm_deviance_with_status as _rust_nlmm_deviance_with_status
 
     _HAS_RUST = True
 except ImportError:
@@ -76,6 +77,7 @@ class NLMMOptimizationResult:
     deviance: float
     converged: bool
     n_iter: int
+    pnls_converged: bool = True
 
 
 def _as_prior_weights(
@@ -293,10 +295,23 @@ def pnls_step(
     random_params: list[int],
     n_jobs: int = 1,
     weights: NDArray[np.floating] | None = None,
+    *,
+    maxiter: int | None = None,
+    tol: float = _PNLS_TOL,
 ) -> tuple[NDArray[np.floating], NDArray[np.floating], float]:
     """Update parameters with random-effect rows in sorted group-label order."""
+    validate_pnls_controls(maxiter, tol)
     with _nlmm_workspace(y, x, groups, weights, n_jobs) as workspace:
-        phi_new, b_new, sigma_sq = _pnls_step(workspace, model, phi, b, Psi, random_params)
+        phi_new, b_new, sigma_sq, _ = _pnls_step(
+            workspace,
+            model,
+            phi,
+            b,
+            Psi,
+            random_params,
+            _PNLS_MAX_ITER if maxiter is None else maxiter,
+            tol,
+        )
     return phi_new, b_new, np.sqrt(sigma_sq)
 
 
@@ -307,7 +322,9 @@ def _pnls_step(
     b: NDArray[np.floating],
     Psi: NDArray[np.floating],
     random_params: list[int],
-) -> tuple[NDArray[np.floating], NDArray[np.floating], float]:
+    maxiter: int,
+    tol: float,
+) -> tuple[NDArray[np.floating], NDArray[np.floating], float, bool]:
     """Return updated parameters and the profiled residual variance."""
     y, x = workspace.y, workspace.x
     n = len(y)
@@ -338,7 +355,8 @@ def _pnls_step(
             g, rows, x, y, phi_new, b, random_params, model, Psi_inv, prior_weights
         )
 
-    for _iteration in range(_PNLS_MAX_ITER):
+    converged = False
+    for _iteration in range(maxiter):
         # After the first iteration b and b_new share storage.
         b_previous = b.copy()
         for _, rows, resid_g, grad_g in workspace.map_groups(residual_gradient):
@@ -365,7 +383,8 @@ def _pnls_step(
         )
         phi = phi_new
         b = b_new
-        if max_delta < _PNLS_TOL:
+        if max_delta < tol:
+            converged = True
             break
 
     def group_rss(g: int, rows: NDArray[np.intp]) -> float:
@@ -376,7 +395,7 @@ def _pnls_step(
     rss = sum(workspace.map_groups(group_rss))
     penalty = float(np.einsum("gi,ij,gj->", b_new, Psi_inv, b_new, optimize=True))
     sigma_sq = max((rss + penalty) / n, _MIN_VARIANCE)
-    return phi_new, b_new, sigma_sq
+    return phi_new, b_new, sigma_sq, converged
 
 
 def nlmm_deviance(
@@ -391,10 +410,57 @@ def nlmm_deviance(
     sigma: float,
     n_jobs: int = 1,
     weights: NDArray[np.floating] | None = None,
+    *,
+    pnls_maxiter: int | None = None,
+    pnls_tol: float = _PNLS_TOL,
 ) -> tuple[float, NDArray[np.floating], NDArray[np.floating], float]:
     """Evaluate deviance with random-effect rows in sorted group-label order."""
+    return nlmm_deviance_with_status(
+        theta,
+        y,
+        x,
+        groups,
+        model,
+        phi,
+        b,
+        random_params,
+        sigma,
+        n_jobs=n_jobs,
+        weights=weights,
+        pnls_maxiter=pnls_maxiter,
+        pnls_tol=pnls_tol,
+    )[:4]
+
+
+def nlmm_deviance_with_status(
+    theta: NDArray[np.floating],
+    y: NDArray[np.floating],
+    x: NDArray[np.floating],
+    groups: NDArray[np.integer],
+    model: NonlinearModel,
+    phi: NDArray[np.floating],
+    b: NDArray[np.floating],
+    random_params: list[int],
+    sigma: float,
+    n_jobs: int = 1,
+    weights: NDArray[np.floating] | None = None,
+    *,
+    pnls_maxiter: int | None = None,
+    pnls_tol: float = _PNLS_TOL,
+) -> tuple[float, NDArray[np.floating], NDArray[np.floating], float, bool]:
+    """Return the Python likelihood evaluation and its inner PNLS convergence flag."""
+    validate_pnls_controls(pnls_maxiter, pnls_tol)
     with _nlmm_workspace(y, x, groups, weights, n_jobs) as workspace:
-        return _nlmm_deviance(theta, workspace, model, phi, b, random_params)
+        return _nlmm_deviance(
+            theta,
+            workspace,
+            model,
+            phi,
+            b,
+            random_params,
+            _PNLS_MAX_ITER if pnls_maxiter is None else pnls_maxiter,
+            pnls_tol,
+        )
 
 
 def _nlmm_deviance(
@@ -404,12 +470,16 @@ def _nlmm_deviance(
     phi: NDArray[np.floating],
     b: NDArray[np.floating],
     random_params: list[int],
-) -> tuple[float, NDArray[np.floating], NDArray[np.floating], float]:
+    pnls_maxiter: int,
+    pnls_tol: float,
+) -> tuple[float, NDArray[np.floating], NDArray[np.floating], float, bool]:
     n = len(workspace.y)
     n_random = len(random_params)
     Psi_factor = _build_psi_factor(theta, n_random)
     Psi = Psi_factor @ Psi_factor.T
-    phi_new, b_new, sigma_sq = _pnls_step(workspace, model, phi, b, Psi, random_params)
+    phi_new, b_new, sigma_sq, converged = _pnls_step(
+        workspace, model, phi, b, Psi, random_params, pnls_maxiter, pnls_tol
+    )
 
     laplace_correction = 0.0
     identity = np.eye(n_random, dtype=np.float64)
@@ -424,12 +494,12 @@ def _nlmm_deviance(
         system = identity + Psi_factor.T @ ZtWZ @ Psi_factor
         sign, logdet = np.linalg.slogdet(system)
         if sign <= 0 or not np.isfinite(logdet):
-            return _INVALID_OBJECTIVE, phi_new, b_new, np.sqrt(sigma_sq)
+            return _INVALID_OBJECTIVE, phi_new, b_new, np.sqrt(sigma_sq), False
         laplace_correction += logdet
 
     deviance = n * (1.0 + np.log(2.0 * np.pi * sigma_sq)) + laplace_correction
 
-    return deviance, phi_new, b_new, np.sqrt(sigma_sq)
+    return deviance, phi_new, b_new, np.sqrt(sigma_sq), converged
 
 
 def _nlmm_deviance_rust(
@@ -443,11 +513,46 @@ def _nlmm_deviance_rust(
     random_params: list[int],
     sigma: float,
     weights: NDArray[np.floating],
+    *,
+    pnls_maxiter: int | None = None,
+    pnls_tol: float = _PNLS_TOL,
 ) -> tuple[float, NDArray[np.floating], NDArray[np.floating], float]:
+    return _nlmm_deviance_rust_with_status(
+        theta,
+        y,
+        x,
+        groups,
+        model,
+        phi,
+        b,
+        random_params,
+        sigma,
+        weights,
+        pnls_maxiter=pnls_maxiter,
+        pnls_tol=pnls_tol,
+    )[:4]
+
+
+def _nlmm_deviance_rust_with_status(
+    theta: NDArray[np.floating],
+    y: NDArray[np.floating],
+    x: NDArray[np.floating],
+    groups: NDArray[np.integer],
+    model: NonlinearModel,
+    phi: NDArray[np.floating],
+    b: NDArray[np.floating],
+    random_params: list[int],
+    sigma: float,
+    weights: NDArray[np.floating],
+    *,
+    pnls_maxiter: int | None = None,
+    pnls_tol: float = _PNLS_TOL,
+) -> tuple[float, NDArray[np.floating], NDArray[np.floating], float, bool]:
+    validate_pnls_controls(pnls_maxiter, pnls_tol)
     model_name = _get_rust_model_name(model)
     if model_name is None:
         raise ValueError("Native nonlinear evaluation requires an unmodified built-in model")
-    dev, phi_out, b_out, sigma_out = _rust_nlmm_deviance(
+    dev, phi_out, b_out, sigma_out, converged = _rust_nlmm_deviance_with_status(
         np.ascontiguousarray(theta, dtype=np.float64),
         np.ascontiguousarray(y, dtype=np.float64),
         np.ascontiguousarray(x, dtype=np.float64),
@@ -458,8 +563,10 @@ def _nlmm_deviance_rust(
         list(random_params),
         float(sigma),
         np.ascontiguousarray(weights, dtype=np.float64),
+        maxiter=_PNLS_MAX_ITER if pnls_maxiter is None else pnls_maxiter,
+        tol=pnls_tol,
     )
-    return dev, np.array(phi_out), np.array(b_out), sigma_out
+    return dev, np.array(phi_out), np.array(b_out), sigma_out, converged
 
 
 class NLMMOptimizer:
@@ -474,7 +581,13 @@ class NLMMOptimizer:
         use_rust: bool = True,
         n_jobs: int = 1,
         weights: NDArray[np.floating] | None = None,
+        *,
+        pnls_maxiter: int | None = None,
+        pnls_tol: float = _PNLS_TOL,
     ) -> None:
+        validate_pnls_controls(pnls_maxiter, pnls_tol)
+        self.pnls_maxiter = _PNLS_MAX_ITER if pnls_maxiter is None else int(pnls_maxiter)
+        self.pnls_tol = float(pnls_tol)
         self.y = y
         self.x = x
         self.groups = groups
@@ -501,6 +614,7 @@ class NLMMOptimizer:
                 NDArray[np.floating],
                 NDArray[np.floating],
                 float,
+                bool,
             ]
             | None
         ) = None
@@ -521,7 +635,7 @@ class NLMMOptimizer:
     def _evaluate(
         self,
         theta: NDArray[np.floating],
-    ) -> tuple[float, NDArray[np.floating], NDArray[np.floating], float]:
+    ) -> tuple[float, NDArray[np.floating], NDArray[np.floating], float, bool]:
         if (
             self._last_theta is not None
             and np.array_equal(theta, self._last_theta)
@@ -538,7 +652,7 @@ class NLMMOptimizer:
                 raise ValueError("variance parameters must be finite")
             with np.errstate(divide="raise", invalid="raise", over="raise"):
                 if self.use_rust:
-                    evaluation = _nlmm_deviance_rust(
+                    evaluation = _nlmm_deviance_rust_with_status(
                         theta,
                         self.y,
                         self.x,
@@ -549,6 +663,8 @@ class NLMMOptimizer:
                         self.random_params,
                         self._start_sigma,
                         self.weights,
+                        pnls_maxiter=self.pnls_maxiter,
+                        pnls_tol=self.pnls_tol,
                     )
                 elif self._workspace is not None:
                     evaluation = _nlmm_deviance(
@@ -558,9 +674,11 @@ class NLMMOptimizer:
                         self._start_phi,
                         self._start_b,
                         self.random_params,
+                        self.pnls_maxiter,
+                        self.pnls_tol,
                     )
                 else:
-                    evaluation = nlmm_deviance(
+                    evaluation = nlmm_deviance_with_status(
                         theta,
                         self.y,
                         self.x,
@@ -572,9 +690,13 @@ class NLMMOptimizer:
                         self._start_sigma,
                         n_jobs=self.n_jobs,
                         weights=self.weights,
+                        pnls_maxiter=self.pnls_maxiter,
+                        pnls_tol=self.pnls_tol,
                     )
 
-            deviance, phi, b, sigma = evaluation
+            deviance, phi, b, sigma, pnls_converged = evaluation
+            if not isinstance(pnls_converged, (bool, np.bool_)):
+                raise ValueError("PNLS convergence status must be a boolean")
             for name, values, shape in (
                 ("deviance", deviance, ()),
                 ("fixed parameters", phi, (self.model.n_params,)),
@@ -603,6 +725,7 @@ class NLMMOptimizer:
                 self._start_phi.copy(),
                 self._start_b.copy(),
                 self._start_sigma,
+                False,
             )
 
         self._last_theta = theta.copy()
@@ -676,7 +799,7 @@ class NLMMOptimizer:
                     options={"maxiter": maxiter},
                     callback=callback,
                 )
-                deviance, phi, b, sigma = self._evaluate(result.x)
+                deviance, phi, b, sigma, pnls_converged = self._evaluate(result.x)
             finally:
                 self._workspace = None
 
@@ -691,6 +814,7 @@ class NLMMOptimizer:
             sigma=sigma,
             b=b,
             deviance=deviance,
-            converged=bool(result.success and np.isfinite(deviance)),
+            converged=bool(result.success and pnls_converged and np.isfinite(deviance)),
+            pnls_converged=bool(pnls_converged),
             n_iter=result.nit,
         )
