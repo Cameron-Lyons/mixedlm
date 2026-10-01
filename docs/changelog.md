@@ -87,6 +87,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Variance-boundary restarts check small positive covariance scales as well as zero. This recovers better likelihoods when numerical derivatives stop just outside the old boundary threshold, while retaining genuine small estimates and the remaining optimization budget.
+
 - `trust-constr` reports the objective gradient for convergence summaries and accepts the same one-argument iteration callbacks as other SciPy optimizers.
 
 - Native LMM likelihoods, final estimates, and covariance gradients preserve weighted crossproducts between levels of the same random-effect structure. This corrects advanced designs with overlapping level columns; ordinary grouped designs retain their specialized block solves.

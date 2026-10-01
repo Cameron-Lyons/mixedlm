@@ -580,8 +580,8 @@ def optimizeLmer(
     verbose : int, default 0
         Verbosity level.
     restart_edge : bool, default True
-        Check zero covariance scales for likelihood improvement and restart
-        the requested optimizer within the remaining iteration budget.
+        Check zero and near-zero covariance scales for likelihood improvement.
+        Restart the requested optimizer within the remaining iteration budget.
     use_analytic_gradient : bool or None, default None
         Use native analytic gradients with supported optimizers. None uses the
         control supplied to mkLmerDevfun (False by default).
