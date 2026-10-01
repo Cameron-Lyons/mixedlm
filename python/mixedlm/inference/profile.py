@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import warnings
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -9,7 +8,6 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 from numpy.typing import NDArray
 from scipy import stats
-from scipy.optimize import brentq
 
 from mixedlm.inference.profile_types import Profile2DResult, ProfileResult
 from mixedlm.models.shared_utils import _RandomEffectFactor
@@ -22,14 +20,6 @@ if TYPE_CHECKING:
     from mixedlm.models.lmer import LmerResult
 
 _SLICE2D_PARALLEL_MIN_TASKS = 400
-
-
-def _profile_parameter_grid(mle: float, se: float, n_points: int) -> NDArray[np.float64]:
-    """Build a symmetric profile grid with an exact center for odd sizes."""
-    values = np.linspace(mle - 4 * se, mle + 4 * se, n_points)
-    if n_points % 2 == 1:
-        values[n_points // 2] = mle
-    return values
 
 
 def plot_profiles(
@@ -200,98 +190,6 @@ def splom_profiles(
     return fig
 
 
-def _profile_param_worker(
-    args: tuple[Any, ...],
-) -> tuple[str, ProfileResult | None]:
-    (
-        param,
-        idx,
-        mle,
-        se,
-        z_crit,
-        level,
-        n_points,
-        theta,
-        y,
-        weights,
-        X,
-        Zt_data,
-        Zt_indices,
-        Zt_indptr,
-        Zt_shape,
-        random_structures,
-        n,
-        p,
-        q,
-        REML,
-    ) = args
-
-    range_low = mle - 4 * se
-    range_high = mle + 4 * se
-
-    param_values = _profile_parameter_grid(mle, se, n_points)
-    zeta_values = np.zeros(n_points)
-
-    param_cache = _ProfileCache.from_components(
-        idx,
-        theta,
-        y,
-        weights,
-        X,
-        Zt_data,
-        Zt_indices,
-        Zt_indptr,
-        Zt_shape,
-        random_structures,
-        n,
-        p,
-        q,
-        REML,
-    )
-    dev_mle = _profile_deviance_cached(param_cache, mle)
-
-    for i, val in enumerate(param_values):
-        dev = _profile_deviance_cached(param_cache, val)
-        sign = 1 if val >= mle else -1
-        zeta_values[i] = sign * np.sqrt(max(0, dev - dev_mle))
-
-    def zeta_func(val: float) -> float:
-        dev = _profile_deviance_cached(param_cache, val)
-        sign = 1 if val >= mle else -1
-        return sign * np.sqrt(max(0, dev - dev_mle))
-
-    try:
-        ci_lower = brentq(
-            lambda x: zeta_func(x) + z_crit,
-            range_low,
-            mle,
-        )
-    except ValueError:
-        ci_lower = mle - z_crit * se
-
-    try:
-        ci_upper = brentq(
-            lambda x: zeta_func(x) - z_crit,
-            mle,
-            range_high,
-        )
-    except ValueError:
-        ci_upper = mle + z_crit * se
-
-    return (
-        param,
-        ProfileResult(
-            parameter=param,
-            values=param_values,
-            zeta=zeta_values,
-            mle=mle,
-            ci_lower=ci_lower,
-            ci_upper=ci_upper,
-            level=level,
-        ),
-    )
-
-
 def profile_lmer(
     result: LmerResult,
     which: str | list[str] | None = None,
@@ -299,164 +197,16 @@ def profile_lmer(
     level: float = 0.95,
     n_jobs: int = 1,
 ) -> dict[str, ProfileResult]:
-    level = _validate_confidence_level(level)
-    if which is None:
-        which = result.matrices.fixed_names
-    elif isinstance(which, str):
-        which = [which]
+    """Profile fixed coefficients by re-optimizing covariance and residual scale.
 
-    from mixedlm.utils.names import _check_unique_coefficient_names
+    Use an ML reference fit for both ML and REML inputs. Plotting resolution does
+    not control endpoint accuracy. Failed fits or unbracketed intervals raise.
+    """
+    from mixedlm.inference.lmm_profile import likelihood_profiles
 
-    _check_unique_coefficient_names(
-        result.matrices.fixed_names,
-        which,
-        alternative="Rename colliding formula variables before requesting named profiles.",
+    return likelihood_profiles(
+        result, which, n_points, level, n_jobs, executor_factory=ProcessPoolExecutor
     )
-
-    profiles: dict[str, ProfileResult] = {}
-    alpha = 1 - level
-    z_crit = stats.norm.isf(alpha / 2)
-
-    vcov = result.vcov()
-
-    matrices = result.matrices
-    n = matrices.n_obs
-    p = matrices.n_fixed
-    q = matrices.n_random
-
-    if q > 0:
-        Zt = matrices.Zt
-        Zt_data = np.array(Zt.data)
-        Zt_indices = np.array(Zt.indices)
-        Zt_indptr = np.array(Zt.indptr)
-        Zt_shape = Zt.shape
-    else:
-        Zt_data = np.array([])
-        Zt_indices = np.array([])
-        Zt_indptr = np.array([0])
-        Zt_shape = (0, n)
-
-    if n_jobs == 1:
-        for param in which:
-            if param not in result.matrices.fixed_names:
-                continue
-
-            idx = result.matrices.fixed_names.index(param)
-            mle = result.beta[idx]
-            se = np.sqrt(vcov[idx, idx])
-
-            range_low = mle - 4 * se
-            range_high = mle + 4 * se
-
-            cache = _ProfileCache.build(result, idx)
-            profile_dev_mle = _profile_deviance_cached(cache, mle)
-
-            param_values = _profile_parameter_grid(mle, se, n_points)
-            zeta_values = np.zeros(n_points)
-
-            for i, val in enumerate(param_values):
-                dev = _profile_deviance_cached(cache, val)
-                sign = 1 if val >= mle else -1
-                zeta_values[i] = sign * np.sqrt(max(0, dev - profile_dev_mle))
-
-            def zeta_func(
-                val: float,
-                c: _ProfileCache = cache,
-                m: float = mle,
-                d0: float = profile_dev_mle,
-            ) -> float:
-                dev = _profile_deviance_cached(c, val)
-                sign = 1 if val >= m else -1
-                return sign * np.sqrt(max(0, dev - d0))
-
-            try:
-                ci_lower = brentq(
-                    lambda x: zeta_func(x) + z_crit,
-                    range_low,
-                    mle,
-                )
-            except ValueError:
-                ci_lower = mle - z_crit * se
-
-            try:
-                ci_upper = brentq(
-                    lambda x: zeta_func(x) - z_crit,
-                    mle,
-                    range_high,
-                )
-            except ValueError:
-                ci_upper = mle + z_crit * se
-
-            profiles[param] = ProfileResult(
-                parameter=param,
-                values=param_values,
-                zeta=zeta_values,
-                mle=mle,
-                ci_lower=ci_lower,
-                ci_upper=ci_upper,
-                level=level,
-            )
-    else:
-        if n_jobs == -1:
-            n_jobs = os.cpu_count() or 1
-
-        tasks = []
-        for param in which:
-            if param not in result.matrices.fixed_names:
-                continue
-
-            idx = result.matrices.fixed_names.index(param)
-            mle = result.beta[idx]
-            se = np.sqrt(vcov[idx, idx])
-
-            tasks.append(
-                (
-                    param,
-                    idx,
-                    mle,
-                    se,
-                    z_crit,
-                    level,
-                    n_points,
-                    result.theta.copy(),
-                    (matrices.y - matrices.offset).copy(),
-                    matrices.weights.copy(),
-                    matrices.X.copy(),
-                    Zt_data,
-                    Zt_indices,
-                    Zt_indptr,
-                    Zt_shape,
-                    matrices.random_structures,
-                    n,
-                    p,
-                    q,
-                    result.REML,
-                )
-            )
-
-        try:
-            executor = ProcessPoolExecutor(max_workers=n_jobs)
-        except (NotImplementedError, OSError) as exc:
-            warnings.warn(
-                "Process-based parallel profiling is unavailable; falling back to serial "
-                f"execution ({exc}).",
-                RuntimeWarning,
-                stacklevel=2,
-            )
-            for task in tasks:
-                param, profile_result = _profile_param_worker(task)
-                if profile_result is not None:
-                    profiles[param] = profile_result
-        else:
-            with executor:
-                futures = {executor.submit(_profile_param_worker, task): task[0] for task in tasks}
-
-                for future in as_completed(futures):
-                    param, profile_result = future.result()
-                    if profile_result is not None:
-                        profiles[param] = profile_result
-
-    return profiles
 
 
 @dataclass
@@ -686,71 +436,11 @@ def _factor_profile_information(
     return factor, logdet
 
 
-@dataclass
-class _ProfileCache:
-    """Cache invariant terms for repeated one-parameter profile evaluations."""
-
-    projection: _ProfileProjection
-    X_col: NDArray[np.floating]
-
-    @classmethod
-    def build(cls, result: LmerResult, idx: int) -> _ProfileCache:
-        keep_idx = [column for column in range(result.matrices.n_fixed) if column != idx]
-        return cls(
-            projection=_ProfileProjection.from_result(result, keep_idx),
-            X_col=result.matrices.X[:, idx],
-        )
-
-    @classmethod
-    def from_components(
-        cls,
-        idx: int,
-        theta: NDArray[np.floating],
-        y: NDArray[np.floating],
-        weights: NDArray[np.floating],
-        X: NDArray[np.floating],
-        Zt_data: NDArray[np.floating],
-        Zt_indices: NDArray[np.int64],
-        Zt_indptr: NDArray[np.int64],
-        Zt_shape: tuple[int, int],
-        random_structures: list[Any],
-        n: int,
-        p: int,
-        q: int,
-        REML: bool,
-    ) -> _ProfileCache:
-        keep_idx = [column for column in range(p) if column != idx]
-        return cls(
-            projection=_ProfileProjection.from_components(
-                theta,
-                y,
-                weights,
-                X,
-                keep_idx,
-                Zt_data,
-                Zt_indices,
-                Zt_indptr,
-                Zt_shape,
-                random_structures,
-                n,
-                q,
-                REML,
-            ),
-            X_col=X[:, idx],
-        )
-
-
-def _profile_deviance_cached(cache: _ProfileCache, value: float) -> float:
-    return cache.projection.deviance(cache.projection.y - value * cache.X_col)
-
-
-def _profile_deviance_at_beta(
-    result: LmerResult,
-    idx: int,
-    value: float,
-) -> float:
-    cache = _ProfileCache.build(result, idx)
-    return _profile_deviance_cached(cache, value)
+def _profile_deviance_at_beta(result: LmerResult, idx: int, value: float) -> float:
+    """Evaluate a conditional slice at the fitted covariance parameters."""
+    keep = [column for column in range(result.matrices.n_fixed) if column != idx]
+    projection = _ProfileProjection.from_result(result, keep)
+    return projection.deviance(projection.y - value * result.matrices.X[:, idx])
 
 
 def profile_glmer(
@@ -1013,14 +703,16 @@ def slice2D(
     n_points: int = 15,
     level: float = 0.95,
     n_jobs: int = 1,
+    *,
+    profile_covariance: bool = False,
 ) -> Profile2DResult:
-    """Compute 2D profile likelihood slice for two parameters.
+    """Compute a conditional slice or full likelihood profile for two parameters.
 
     This function evaluates the profile deviance over a grid of values
     for two fixed effects, while recomputing the remaining fixed effects and
-    residual scale at the fitted covariance parameters.
-    The result can be used to visualize joint confidence regions and
-    parameter correlations.
+    residual scale at the fitted covariance parameters. Set profile_covariance
+    to True to also re-optimize covariance parameters using ML, including for
+    REML inputs. Use that full profile for likelihood-ratio confidence regions.
 
     Parameters
     ----------
@@ -1036,6 +728,10 @@ def slice2D(
         Confidence level for the joint region.
     n_jobs : int, default 1
         Number of parallel jobs. Use -1 for all available cores.
+    profile_covariance : bool, default False
+        Re-optimize covariance parameters at each pair of fixed coefficients.
+        True uses an ML reference and ranges covering the requested joint
+        likelihood-ratio region. False retains the faster conditional slice.
 
     Returns
     -------
@@ -1048,6 +744,23 @@ def slice2D(
     >>> slice2d = slice2D(result, "(Intercept)", "Days", n_points=10)
     >>> slice2d.plot()
     """
+    if not isinstance(profile_covariance, (bool, np.bool_)):
+        raise ValueError("profile_covariance must be a boolean")
+    if param1 == param2:
+        raise ValueError("The two profile parameters must be distinct")
+    if profile_covariance:
+        from mixedlm.inference.lmm_profile import likelihood_surface
+
+        return likelihood_surface(
+            result,
+            param1,
+            param2,
+            n_points,
+            level,
+            n_jobs,
+            executor_factory=ProcessPoolExecutor,
+        )
+
     if param1 not in result.matrices.fixed_names:
         raise ValueError(f"Parameter '{param1}' not found in fixed effects")
     if param2 not in result.matrices.fixed_names:
