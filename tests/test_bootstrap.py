@@ -272,7 +272,8 @@ class TestBootstrapLmer:
             payload["REML"],
         )
 
-        boot_idx, beta, theta, sigma = _lmer_bootstrap_worker(args)
+        sample = _lmer_bootstrap_worker(args)
+        boot_idx, beta, theta, sigma = sample.index, sample.fixed, sample.theta, sample.sigma
 
         assert boot_idx == 0
         assert beta is not None

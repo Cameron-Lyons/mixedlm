@@ -229,10 +229,10 @@ def test_each_parallel_replicate_receives_a_fresh_custom_family():
             bootstrap._parallel_bootstrap_samples(
                 bootstrap._glmer_bootstrap_worker, data, np.array([42, 42]), 1
             ),
-            key=lambda row: row[0],
+            key=lambda row: row.index,
         )
-    np.testing.assert_array_equal(actual[0][1], actual[1][1])
-    np.testing.assert_array_equal(actual[0][2], actual[1][2])
+    np.testing.assert_array_equal(actual[0].fixed, actual[1].fixed)
+    np.testing.assert_array_equal(actual[0].theta, actual[1].theta)
     assert family.count == 0
 
 

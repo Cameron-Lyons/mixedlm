@@ -29,8 +29,9 @@ def run(result, entry, count=3, seed=42, jobs=2):
     return bootstrap.bootstrap_nlmer(result, n_boot=count, seed=seed, n_jobs=jobs)
 
 
-def summarize_response(result, response):
-    return (
+def summarize_response(result, response, *, index=0):
+    return bootstrap._BootstrapOutcome(
+        index,
         np.array([np.mean(response), np.std(response), response[0]]),
         np.full_like(result.theta, np.var(response)),
         float(np.std(response)),
@@ -90,9 +91,9 @@ def test_seeded_bootstrap_preserves_the_legacy_draw_sequence(random_params, jobs
     expected = legacy_draws(result, 7, 22)
     observed = []
 
-    def record(result, response):
+    def record(result, response, *, index=0):
         observed.append(response.copy())
-        return summarize_response(result, response)
+        return summarize_response(result, response, index=index)
 
     before = pickle.dumps(np.random.get_state())
     with (
@@ -188,7 +189,7 @@ def test_parallel_queue_does_not_simulate_the_entire_bootstrap_ahead():
         stream = bootstrap._parallel_bootstrap_tasks(
             bootstrap._nlmer_bootstrap_worker, (result,), responses, 2
         )
-        assert next(stream)[0] == 0
+        assert next(stream).index == 0
         assert simulate.call_count == 4
         stream.close()
     pool = ImmediateExecutor.instances[-1]
@@ -295,6 +296,6 @@ def test_worker_custom_model_state_is_independent_between_refits():
     with patch.object(NlmerResult, "refit", refit):
         first = bootstrap._nlmer_bootstrap_worker((0, result.y, result))
         second = bootstrap._nlmer_bootstrap_worker((1, result.y, result))
-    assert_array_equal(first[1], np.ones(3))
-    assert_array_equal(second[1], first[1])
+    assert_array_equal(first.fixed, np.ones(3))
+    assert_array_equal(second.fixed, first.fixed)
     assert result.model.refit_count == 0

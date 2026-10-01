@@ -194,6 +194,9 @@ def test_real_unfinished_glmm_refits_are_excluded_in_serial_and_worker_processes
     serial = bootstrap.bootstrap_glmer(limited, n_boot=3, seed=14, n_jobs=1)
     parallel = bootstrap.bootstrap_glmer(limited, n_boot=3, seed=14, n_jobs=2)
     assert serial.n_failed == parallel.n_failed == 3
+    assert serial.failures == parallel.failures
+    assert all(f.stage == "convergence" for f in serial.failures)
+    assert all("pirls_converged" in f.message for f in serial.failures)
     for actual in (serial, parallel):
         assert np.isnan(actual.beta_samples).all()
         assert np.isnan(actual.theta_samples).all()
