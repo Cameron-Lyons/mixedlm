@@ -171,7 +171,7 @@ control = mlm.LmerControl(
 - `optimizer`: Optimization algorithm. Options include `"COBYQA"` (default), `"L-BFGS-B"`, `"BFGS"`, `"Nelder-Mead"`, and `"Powell"`
 - `maxiter`: Maximum number of iterations
 - `optCtrl`: Optimizer-specific options, such as COBYQA's `final_tr_radius`
-- `restart_edge`: Boolean, default `True`. Before accepting a zero variance
+- `restart_edge`: Boolean, default `True`. Before accepting a zero or near-zero variance
   scale, check nearby positive scales for a better likelihood. Restart the
   requested optimizer if a probe improves the objective. Iteration and explicit
   evaluation limits are shared across the original fit and its restarts; a fit
@@ -264,7 +264,10 @@ opt_result = mlm.optimizeLmer(devfun)
 ```
 
 The modular optimizer uses the same solver dispatch and variance-boundary checks
-as `lmer()`. Pass `restart_edge=False` to disable those checks.
+as `lmer()`. An omitted `restart_edge` argument, or `restart_edge=None`, inherits
+the control supplied to `mkLmerDevfun()`; checks are enabled when no control is
+available. Pass `restart_edge=False` or `restart_edge=True` to override that
+choice for one fit without changing the stored control.
 
 ### mkLmerMod
 

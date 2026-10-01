@@ -559,7 +559,7 @@ def optimizeLmer(
     maxiter: int = 1000,
     verbose: int = 0,
     *,
-    restart_edge: bool = True,
+    restart_edge: bool | None = None,
     use_analytic_gradient: bool | None = None,
 ) -> OptimizeResult:
     """Optimize the deviance function for a linear mixed model.
@@ -579,9 +579,11 @@ def optimizeLmer(
         Maximum number of iterations.
     verbose : int, default 0
         Verbosity level.
-    restart_edge : bool, default True
+    restart_edge : bool or None, default None
         Check zero and near-zero covariance scales for likelihood improvement.
-        Restart the requested optimizer within the remaining iteration budget.
+        None uses the control supplied to mkLmerDevfun (True by default).
+        An explicit boolean overrides the control for this optimization call.
+        Restarts use the requested optimizer and its remaining iteration budget.
     use_analytic_gradient : bool or None, default None
         Use native analytic gradients with supported optimizers. None uses the
         control supplied to mkLmerDevfun (False by default).
@@ -610,6 +612,8 @@ def optimizeLmer(
         start = devfun.get_start()
 
     bounds = devfun.get_bounds()
+    if restart_edge is None:
+        restart_edge = devfun.control.restart_edge if devfun.control is not None else True
     if use_analytic_gradient is None:
         use_analytic_gradient = (
             devfun.control.use_analytic_gradient if devfun.control is not None else False
