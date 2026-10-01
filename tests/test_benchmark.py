@@ -1840,6 +1840,23 @@ def test_benchmark_wide_fixed_effect_lmm_gradients(benchmark, widths, fixed, cou
     )
 
 
+@pytest.mark.benchmark(group="lmm-prepared-storage")
+@pytest.mark.parametrize("q", [512, 4096])
+@pytest.mark.parametrize("width", [2, 8])
+def test_benchmark_independent_lmm_design_storage(benchmark, q, width):
+    from mixedlm import _rust
+
+    from tests.test_lmm_compact_design import grouped_slope_oracle, large_slopes
+    from tests.test_lmm_prepared_design import native_arguments
+
+    matrices, terms, theta = large_slopes(q // width, width)
+    design = benchmark(_rust.LmmDesign, **native_arguments(matrices))
+    value, gradient = design.with_response(matrices.y).deviance_with_gradient(theta, True)
+    expected, expected_gradient, _, _ = grouped_slope_oracle(matrices, terms, theta, True)
+    np.testing.assert_allclose(value, expected, rtol=2e-12, atol=2e-8)
+    np.testing.assert_allclose(gradient, expected_gradient, rtol=2e-11, atol=2e-8)
+
+
 @pytest.mark.benchmark(group="lmm-blocked-solves")
 @pytest.mark.parametrize("layout", ["intercept", "slope", "crossed"])
 @pytest.mark.parametrize("groups", [64, 256])
