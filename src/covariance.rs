@@ -92,6 +92,25 @@ impl CovarianceFactor {
         self.apply_vector::<false>(vector)
     }
 
+    /// Return the repeated diagonal when the covariance factor has no coupling.
+    pub fn diagonal_values(&self) -> Option<Vec<f64>> {
+        let mut values = Vec::with_capacity(self.dimension);
+        for block in &self.blocks {
+            let width = block.lower.nrows();
+            for row in 0..width {
+                if !block.lower[(row, row)].is_finite()
+                    || (0..row).any(|column| block.lower[(row, column)] != 0.0)
+                {
+                    return None;
+                }
+            }
+            for _ in 0..block.n_levels {
+                values.extend((0..width).map(|row| block.lower[(row, row)]));
+            }
+        }
+        Some(values)
+    }
+
     /// Form Z * Lambda without allocating a dense covariance or design matrix.
     /// A row accumulator merges contributions from correlated slope columns.
     pub fn sparse_design(&self, design: &CscMatrix) -> Option<CscMatrix> {

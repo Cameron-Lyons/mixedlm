@@ -19,6 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Native GLMMs with diagonal random-effect precision use scalar solves and log determinants at every model size, reusing the prepared design across PIRLS iterations.
+
 - `ggpredict()` and `allEffects()` now default to the unweighted mean of fitted
   link-scale offsets after missing-value omission. Pass `offset=0` for the previous
   behavior, including per-unit rates from models fitted with log-exposure offsets.

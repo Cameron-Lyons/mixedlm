@@ -9,6 +9,103 @@ use crate::csc::CscMatrix;
 use crate::linalg::LinalgError;
 use crate::sparse_chol::{NumericFactorization, SymbolicCholeskyCache};
 
+/// Independent columns need only their diagonal precision, including small models.
+#[derive(Debug)]
+pub struct DiagonalWeightedDesign {
+    rows: Vec<usize>,
+    offsets: Vec<usize>,
+    values: Vec<f64>,
+}
+
+impl DiagonalWeightedDesign {
+    pub fn new(design: &CscMatrix, covariance: &CovarianceFactor) -> Option<Self> {
+        if design.ncols() == 0 {
+            return None;
+        }
+        let scales = covariance.diagonal_values()?;
+        assert_eq!(scales.len(), design.ncols());
+        let mut occupied = vec![false; design.nrows()];
+        let mut rows = Vec::with_capacity(design.values().len());
+        let mut values = Vec::with_capacity(design.values().len());
+        let mut offsets = vec![0];
+        for (column, &scale) in scales.iter().enumerate() {
+            for entry in design.col_offsets()[column]..design.col_offsets()[column + 1] {
+                let value = scale * design.values()[entry];
+                if !value.is_finite() {
+                    return None;
+                }
+                if value == 0.0 {
+                    continue;
+                }
+                let row = design.row_indices()[entry];
+                if occupied[row] {
+                    return None;
+                }
+                occupied[row] = true;
+                rows.push(row);
+                values.push(value);
+            }
+            offsets.push(rows.len());
+        }
+        Some(Self {
+            rows,
+            offsets,
+            values,
+        })
+    }
+
+    fn factor(&self, weights: &[f64], regularization: f64) -> Result<Vec<f64>, LinalgError> {
+        self.offsets
+            .windows(2)
+            .map(|column| {
+                let mut information = 0.0;
+                for entry in column[0]..column[1] {
+                    information +=
+                        self.values[entry] * weights[self.rows[entry]] * self.values[entry];
+                }
+                // Sum weak contributions before adding the unit prior precision.
+                let diagonal = 1.0 + (information + regularization);
+                if diagonal.is_finite() && diagonal > 0.0 {
+                    Ok(diagonal.sqrt())
+                } else {
+                    Err(LinalgError::NotPositiveDefinite)
+                }
+            })
+            .collect()
+    }
+}
+
+/// Prepare the structure once and reuse it as PIRLS changes the working weights.
+#[derive(Debug)]
+pub enum WeightedRandomDesign {
+    Diagonal(DiagonalWeightedDesign),
+    Sparse(SparseWeightedDesign),
+}
+
+impl WeightedRandomDesign {
+    pub fn new(design: &CscMatrix, covariance: &CovarianceFactor) -> Option<Self> {
+        if let Some(diagonal) = DiagonalWeightedDesign::new(design, covariance) {
+            return Some(Self::Diagonal(diagonal));
+        }
+        SparseWeightedDesign::new(design, covariance).map(Self::Sparse)
+    }
+
+    pub fn factor(
+        &self,
+        weights: &[f64],
+        regularization: f64,
+    ) -> Result<RandomFactor, LinalgError> {
+        match self {
+            Self::Diagonal(design) => design
+                .factor(weights, regularization)
+                .map(RandomFactor::Diagonal),
+            Self::Sparse(design) => design
+                .factor(weights, regularization)
+                .map(RandomFactor::Sparse),
+        }
+    }
+}
+
 /// The row layout of Z Lambda and the reusable pattern of its penalized crossproduct.
 pub struct SparseWeightedDesign {
     row_offsets: Vec<usize>,
@@ -132,13 +229,27 @@ impl SparseWeightedDesign {
 }
 
 pub enum RandomFactor {
+    Diagonal(Vec<f64>),
     Dense(Llt<f64>),
     Sparse(NumericFactorization),
 }
 
 impl RandomFactor {
+    pub fn logdet(&self) -> f64 {
+        match self {
+            Self::Diagonal(diagonal) => 2.0 * diagonal.iter().map(|value| value.ln()).sum::<f64>(),
+            Self::Dense(factor) => {
+                2.0 * (0..factor.L().nrows())
+                    .map(|i| factor.L()[(i, i)].ln())
+                    .sum::<f64>()
+            }
+            Self::Sparse(factor) => factor.logdet(),
+        }
+    }
+
     pub fn solve_lower_in_place(&self, rhs: MatMut<'_, f64>) {
         match self {
+            Self::Diagonal(diagonal) => Self::solve_diagonal(diagonal, rhs),
             Self::Dense(factor) => factor.L().solve_lower_triangular_in_place(rhs),
             Self::Sparse(factor) => factor.solve_lower_in_place(rhs),
         }
@@ -146,8 +257,18 @@ impl RandomFactor {
 
     pub fn solve_upper_in_place(&self, rhs: MatMut<'_, f64>) {
         match self {
+            Self::Diagonal(diagonal) => Self::solve_diagonal(diagonal, rhs),
             Self::Dense(factor) => factor.L().transpose().solve_upper_triangular_in_place(rhs),
             Self::Sparse(factor) => factor.solve_upper_in_place(rhs),
+        }
+    }
+
+    fn solve_diagonal(diagonal: &[f64], mut rhs: MatMut<'_, f64>) {
+        assert_eq!(diagonal.len(), rhs.nrows());
+        for column in 0..rhs.ncols() {
+            for (row, &scale) in diagonal.iter().enumerate() {
+                rhs[(row, column)] /= scale;
+            }
         }
     }
 }
@@ -167,6 +288,127 @@ mod tests {
                 correlated: true,
             }],
         )
+    }
+
+    #[test]
+    fn diagonal_system_matches_dense_solves_and_determinants_at_all_sizes() {
+        use faer::prelude::Solve;
+
+        for q in [1, 8, 127, 128, 4096] {
+            let rows: Vec<_> = (0..3 * q).collect();
+            let offsets: Vec<_> = (0..=q).map(|i| 3 * i).collect();
+            let values: Vec<_> = (0..3 * q).map(|i| [-0.5, 0.0, 1.5][i % 3]).collect();
+            let input =
+                CscMatrix::try_from_usize(&values, &rows, &offsets, (3 * q + 1, q)).unwrap();
+            for scale in [0.0, 0.6, -0.9] {
+                let system = WeightedRandomDesign::new(&input, &covariance(q, scale)).unwrap();
+                let WeightedRandomDesign::Diagonal(ref storage) = system else {
+                    panic!("independent columns require only diagonal storage");
+                };
+                assert!(storage.values.len() <= 2 * q);
+                assert_eq!(storage.offsets.len(), q + 1);
+                for shift in [0, 3] {
+                    let weights: Vec<_> = (0..3 * q + 1)
+                        .map(|i| 0.5 + ((i + shift) % 7) as f64 / 4.0)
+                        .collect();
+                    let diagonal: Vec<_> = (0..q)
+                        .map(|i| {
+                            1.0 + scale
+                                * scale
+                                * (0.25 * weights[3 * i] + 2.25 * weights[3 * i + 2])
+                        })
+                        .collect();
+                    let factor = system.factor(&weights, 0.0).unwrap();
+                    let logdet: f64 = diagonal.iter().map(|value| value.ln()).sum();
+                    assert!((factor.logdet() - logdet).abs() < 1e-9);
+                    for columns in [0, 1, 4] {
+                        let mut rhs = Mat::from_fn(q, columns, |i, j| ((i + j) % 11) as f64 / 5.0);
+                        let original = rhs.clone();
+                        factor.solve_lower_in_place(rhs.as_mut());
+                        for j in 0..columns {
+                            for i in 0..q {
+                                assert!(
+                                    (rhs[(i, j)] * diagonal[i].sqrt() - original[(i, j)]).abs()
+                                        < 1e-12
+                                );
+                            }
+                        }
+                        factor.solve_upper_in_place(rhs.as_mut());
+                        let expected = if q < 128 {
+                            let matrix =
+                                Mat::from_fn(q, q, |i, j| if i == j { diagonal[i] } else { 0.0 });
+                            Llt::new(matrix.as_ref(), faer::Side::Lower)
+                                .unwrap()
+                                .solve(&original)
+                        } else {
+                            Mat::from_fn(q, columns, |i, j| original[(i, j)] / diagonal[i])
+                        };
+                        assert!((&rhs - &expected).norm_l2() < 1e-11);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn diagonal_selection_accounts_for_covariance_and_shared_rows() {
+        let input = CscMatrix::try_from_usize(&[1.0, -0.5], &[0, 1], &[0, 1, 2], (3, 2)).unwrap();
+        let structure = [RandomEffectStructure {
+            n_levels: 1,
+            n_terms: 2,
+            correlated: true,
+        }];
+        for coupling in [0.0, 0.4] {
+            let covariance = CovarianceFactor::new(&[0.7, coupling, 0.8], &structure);
+            let selected = WeightedRandomDesign::new(&input, &covariance);
+            assert_eq!(
+                matches!(selected, Some(WeightedRandomDesign::Diagonal(_))),
+                coupling == 0.0
+            );
+        }
+        let crossed = CscMatrix::try_from_usize(&[1.0, -0.5], &[0, 0], &[0, 1, 2], (3, 2)).unwrap();
+        assert!(WeightedRandomDesign::new(&crossed, &covariance(2, 0.7)).is_none());
+        // A zero covariance column has no contribution to the precision.
+        let covariance = CovarianceFactor::new(
+            &[0.0, 0.8],
+            &[RandomEffectStructure {
+                n_levels: 1,
+                n_terms: 2,
+                correlated: false,
+            }],
+        );
+        assert!(matches!(
+            WeightedRandomDesign::new(&crossed, &covariance),
+            Some(WeightedRandomDesign::Diagonal(_))
+        ));
+    }
+
+    #[test]
+    fn diagonal_factor_rejects_nonfinite_precision_and_keeps_empty_levels() {
+        let input = CscMatrix::try_from_usize(&[1.0], &[0], &[0, 1, 1], (2, 2)).unwrap();
+        let system = WeightedRandomDesign::new(&input, &covariance(2, 0.7)).unwrap();
+        for invalid in [f64::NAN, f64::INFINITY, -100.0] {
+            assert!(system.factor(&[invalid, 1.0], 0.0).is_err());
+        }
+        let RandomFactor::Diagonal(diagonal) = system.factor(&[2.0, 1.0], 0.0).unwrap() else {
+            panic!("expected a diagonal factor");
+        };
+        assert_eq!(diagonal[1], 1.0);
+        assert!((diagonal[0] - 1.98_f64.sqrt()).abs() < 1e-15);
+    }
+
+    #[test]
+    fn diagonal_factor_retains_accumulated_weak_information() {
+        let n = 1024;
+        let input =
+            CscMatrix::try_from_usize(&vec![1.0; n], &(0..n).collect::<Vec<_>>(), &[0, n], (n, 1))
+                .unwrap();
+        let system = WeightedRandomDesign::new(&input, &covariance(1, 1e-8)).unwrap();
+        for regularization in [0.0, 1e-6] {
+            let factor = system.factor(&vec![1.0; n], regularization).unwrap();
+            let expected = (n as f64 * 1e-16 + regularization).ln_1p();
+            assert!((factor.logdet() - expected).abs() < 1e-15);
+        }
     }
 
     #[test]

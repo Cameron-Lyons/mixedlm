@@ -8,7 +8,7 @@ use rayon::prelude::*;
 use crate::covariance::CovarianceFactor;
 pub use crate::covariance::RandomEffectStructure;
 use crate::csc::CscMatrix;
-use crate::glmm_sparse::{RandomFactor, SparseWeightedDesign};
+use crate::glmm_sparse::{RandomFactor, WeightedRandomDesign};
 use crate::linalg::LinalgError;
 use crate::quadrature::gauss_hermite_nodes_weights;
 
@@ -218,17 +218,16 @@ fn dense_penalized_crossproduct(
 fn factor_random_system(
     z: &CscMatrix,
     lambda: &CovarianceFactor,
-    sparse: Option<&SparseWeightedDesign>,
+    prepared: Option<&WeightedRandomDesign>,
     weights: &DVector<f64>,
 ) -> Result<RandomFactor, LinalgError> {
-    if let Some(sparse) = sparse {
+    if let Some(prepared) = prepared {
         let weights = weights
             .try_as_col_major()
             .expect("owned weights are contiguous");
-        return sparse
+        return prepared
             .factor(weights.as_slice(), 0.0)
-            .or_else(|_| sparse.factor(weights.as_slice(), 1e-6))
-            .map(RandomFactor::Sparse);
+            .or_else(|_| prepared.factor(weights.as_slice(), 1e-6));
     }
     let mut matrix = dense_penalized_crossproduct(z, lambda, weights);
     match Llt::new(matrix.as_ref(), Side::Lower) {
@@ -306,7 +305,7 @@ pub struct PirlsResult {
     pub u: DVector<f64>,
     pub deviance: f64,
     pub converged: bool,
-    sparse_system: Option<SparseWeightedDesign>,
+    random_system: Option<WeightedRandomDesign>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -336,7 +335,7 @@ pub fn pirls_impl(
     };
 
     let lambda = CovarianceFactor::new(theta, structures);
-    let sparse_system = SparseWeightedDesign::new(z, &lambda);
+    let random_system = WeightedRandomDesign::new(z, &lambda);
     let mut spherical = if let Some(u_init) = u_start {
         lambda.to_dense().col_piv_qr().solve_lstsq(u_init)
     } else {
@@ -408,7 +407,7 @@ pub fn pirls_impl(
             ztwz_vec[j] = sum;
         }
 
-        let chol_c = match factor_random_system(z, &lambda, sparse_system.as_ref(), &w_vec) {
+        let chol_c = match factor_random_system(z, &lambda, random_system.as_ref(), &w_vec) {
             Ok(factor) => factor,
             Err(_) => {
                 return PirlsResult {
@@ -417,7 +416,7 @@ pub fn pirls_impl(
                     u: random_effects,
                     deviance: 1e10,
                     converged: false,
-                    sparse_system,
+                    random_system,
                 };
             }
         };
@@ -491,7 +490,7 @@ pub fn pirls_impl(
         u: random_effects,
         deviance,
         converged: converged && deviance.is_finite(),
-        sparse_system,
+        random_system,
     }
 }
 
@@ -557,11 +556,11 @@ pub fn laplace_deviance_impl(
         w_vec[i] = (w_vec[i] * weights[i]).max(1e-10);
     }
 
-    let logdet_h = if let Some(sparse) = result.sparse_system.as_ref() {
+    let logdet_h = if let Some(prepared) = result.random_system.as_ref() {
         let weights = w_vec
             .try_as_col_major()
             .expect("owned weights are contiguous");
-        match sparse.factor(weights.as_slice(), 0.0) {
+        match prepared.factor(weights.as_slice(), 0.0) {
             Ok(factor) => factor.logdet(),
             Err(_) => dense_logdet(z, &lambda, &w_vec),
         }

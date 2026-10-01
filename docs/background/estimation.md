@@ -273,6 +273,16 @@ using direct dot products for fully populated matrices. Linear and generalized
 linear models share this implementation for dense systems. Larger sparse GLMM
 systems use the sparse precision pattern described below.
 
+When the covariance factor is diagonal and its active design columns do not
+share observations, the penalized random-effect precision is diagonal. The
+native solver then accumulates one precision value per coefficient and solves
+by scalar division. The same diagonal supplies the Laplace log determinant.
+The prepared design is reused as working weights change. This covers random
+intercepts, scalar random slopes, and disjoint independent coefficients at any
+model size, including models below the sparse-factorization cutoff. Empty levels
+retain their unit prior precision. Coupled effects use the existing dense or
+sparse factorization.
+
 The native solver stores one small covariance factor per random-effect
 structure and applies it across the grouping levels. For sufficiently sparse
 models with at least 128 random-effect coefficients, it forms the scaled design
