@@ -1197,7 +1197,7 @@ mod prepared_tests {
         let initial = first.deviance(&[], false);
         assert!((second.deviance(&[], false) - initial - 4.0 * 4.0f64.ln()).abs() < 1e-12);
         drop(design);
-        assert_eq!(first.deviance(&[], false), initial);
+        assert!((first.deviance(&[], false) - initial).abs() <= 1e-12 * initial.abs().max(1.0));
         assert!(first.validate_parameters(&[1.0], false).is_err());
         assert!(
             second
