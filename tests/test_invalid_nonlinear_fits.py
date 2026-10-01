@@ -143,6 +143,9 @@ INVALID_EVALUATIONS = [
     (3, -1.0, "strictly positive"),
     (3, np.array([1.0]), "residual scale has shape"),
     (3, 1j, "residual scale"),
+    (4, 1, "PNLS convergence status"),
+    (4, None, "PNLS convergence status"),
+    (4, np.array([True]), "PNLS convergence status"),
 ]
 
 
@@ -154,9 +157,9 @@ def test_invalid_final_evaluations_raise_even_after_optimizer_success(
     optimizer = make_optimizer(data, native)
     # Exercise both dispatch paths independently of extension availability.
     optimizer.use_rust = native
-    evaluation = [-12.0, np.array([5.0, 1.0, -0.5]), np.zeros((2, 1)), 1.0]
+    evaluation = [-12.0, np.array([5.0, 1.0, -0.5]), np.zeros((2, 1)), 1.0, True]
     evaluation[component] = value
-    target = "_nlmm_deviance_rust" if native else "_nlmm_deviance"
+    target = "_nlmm_deviance_rust_with_status" if native else "_nlmm_deviance"
     with (
         patch.object(nlmm, target, return_value=tuple(evaluation)) as backend,
         patch.object(nlmm, "minimize", side_effect=stop_at_start),
@@ -186,8 +189,8 @@ def test_invalid_final_variance_parameters_raise(data, value):
 def test_failed_trial_can_be_followed_by_a_valid_fit(data, native):
     optimizer = make_optimizer(data, native)
     optimizer.use_rust = native
-    target = "_nlmm_deviance_rust" if native else "_nlmm_deviance"
-    good = (-12.0, np.array([5.0, 1.0, -0.5]), np.zeros((2, 1)), 1.0)
+    target = "_nlmm_deviance_rust_with_status" if native else "_nlmm_deviance"
+    good = (-12.0, np.array([5.0, 1.0, -0.5]), np.zeros((2, 1)), 1.0, True)
 
     def evaluate(theta, *args, **kwargs):
         if theta[0] < 0.9:
@@ -214,7 +217,7 @@ def test_failed_trial_can_be_followed_by_a_valid_fit(data, native):
 )
 def test_finite_valid_fits_keep_optimizer_status(data, success, deviance):
     optimizer = make_optimizer(data)
-    evaluation = (deviance, np.array([5.0, 1.0, -0.5]), np.zeros((2, 1)), 1.0)
+    evaluation = (deviance, np.array([5.0, 1.0, -0.5]), np.zeros((2, 1)), 1.0, True)
 
     def finished(fun, x0, **kwargs):
         theta = np.asarray(x0)

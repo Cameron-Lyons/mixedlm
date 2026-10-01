@@ -113,6 +113,8 @@ def test_simulation_failures_do_not_abort_later_replicates(result, entry):
 @pytest.mark.parametrize(
     ("field", "value"),
     [
+        ("converged", False),
+        ("pnls_converged", False),
         ("phi", np.array([1.0, np.nan, 3.0])),
         ("phi", np.array([1.0, np.inf, 3.0])),
         ("phi", np.array([1.0])),
@@ -202,6 +204,7 @@ def test_seeded_weighted_offset_intervals_match_bootstrap_result():
         weights=weights,
         offset=offsets,
         random_params=["Asym"],
+        pnls_maxiter=2000,
     )
     boot = bootstrap_nlmer(fit, n_boot=4, seed=2026)
     assert boot.n_failed == 0

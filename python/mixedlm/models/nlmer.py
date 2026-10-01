@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import warnings
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from numbers import Integral
@@ -66,6 +67,9 @@ class NlmerResult:
     _data: pd.DataFrame | None = field(default=None, repr=False)
     _x_var: str = field(default="x", repr=False)
     _y_var: str = field(default="y", repr=False)
+    pnls_converged: bool = True
+    pnls_maxiter: int = 50
+    pnls_tol: float = 1e-6
 
     def fixef(self) -> dict[str, float]:
         from mixedlm.utils.names import _check_unique_coefficient_names
@@ -477,7 +481,8 @@ class NlmerResult:
             New response vector. Must have the same length as the original.
             If None, refits with the original response.
         **kwargs
-            Additional arguments passed to the optimizer.
+            Additional optimizer arguments. ``pnls_maxiter`` and ``pnls_tol``
+            default to the fitted model's inner controls.
 
         Returns
         -------
@@ -500,6 +505,8 @@ class NlmerResult:
             self.random_params,
             verbose=0,
             weights=self._weights,
+            pnls_maxiter=kwargs.pop("pnls_maxiter", self.pnls_maxiter),
+            pnls_tol=kwargs.pop("pnls_tol", self.pnls_tol),
         )
 
         start_phi = kwargs.pop("start", self.phi)
@@ -531,6 +538,9 @@ class NlmerResult:
             deviance=opt_result.deviance,
             converged=opt_result.converged,
             n_iter=opt_result.n_iter,
+            pnls_converged=opt_result.pnls_converged,
+            pnls_maxiter=optimizer.pnls_maxiter,
+            pnls_tol=optimizer.pnls_tol,
             x=self.x,
             y=newresp,
             groups=self.groups,
@@ -580,6 +590,8 @@ class NlmerResult:
 
         random_param_names = [self.model.param_names[i] for i in self.random_params]
 
+        kwargs.setdefault("pnls_maxiter", self.pnls_maxiter)
+        kwargs.setdefault("pnls_tol", self.pnls_tol)
         return nlmer(
             model=self.model,
             data=data,
@@ -952,6 +964,9 @@ class NlmerResult:
         else:
             lines.append(f"convergence: no ({self.n_iter} iterations)")
 
+        if not self.pnls_converged:
+            lines.append("inner PNLS convergence: no (iteration limit reached)")
+
         return "\n".join(lines)
 
     def __str__(self) -> str:
@@ -1027,6 +1042,9 @@ class NlmerMod:
         self,
         method: str = "L-BFGS-B",
         maxiter: int = _DEFAULT_MAXITER,
+        *,
+        pnls_maxiter: int | None = None,
+        pnls_tol: float = 1e-6,
     ) -> NlmerResult:
         optimizer = NLMMOptimizer(
             self._adjusted_y,
@@ -1036,6 +1054,8 @@ class NlmerMod:
             self.random_params,
             verbose=self.verbose,
             weights=self.weights,
+            pnls_maxiter=pnls_maxiter,
+            pnls_tol=pnls_tol,
         )
 
         opt_result = optimizer.optimize(
@@ -1043,6 +1063,14 @@ class NlmerMod:
             method=method,
             maxiter=maxiter,
         )
+
+        if not opt_result.pnls_converged:
+            warnings.warn(
+                "The inner PNLS solver did not converge; increase pnls_maxiter "
+                "or review starting values and pnls_tol before using the fit.",
+                UserWarning,
+                stacklevel=2,
+            )
 
         return NlmerResult(
             model=self.model,
@@ -1055,6 +1083,9 @@ class NlmerMod:
             deviance=opt_result.deviance,
             converged=opt_result.converged,
             n_iter=opt_result.n_iter,
+            pnls_converged=opt_result.pnls_converged,
+            pnls_maxiter=optimizer.pnls_maxiter,
+            pnls_tol=optimizer.pnls_tol,
             x=self.x,
             y=self.y,
             groups=self.groups,
@@ -1108,7 +1139,10 @@ def nlmer(
     offset : array-like, optional
         Known offset added to the fitted nonlinear mean.
     **kwargs
-        Additional arguments passed to the optimizer (method, maxiter).
+        Additional optimizer arguments: ``method`` and ``maxiter`` for outer
+        covariance optimization, and ``pnls_maxiter`` (default 50) and
+        ``pnls_tol`` (default 1e-6) for the inner parameter updates. The inner
+        tolerance bounds the largest absolute fixed or random parameter update.
 
     Returns
     -------

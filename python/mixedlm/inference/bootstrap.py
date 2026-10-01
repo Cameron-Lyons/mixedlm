@@ -714,7 +714,7 @@ def bootstrap_nlmer(
 
     Notes
     -----
-    Simulation or refit exceptions, nonfinite estimates, and incompatible
+    Simulation or refit exceptions, nonconvergence, nonfinite estimates, and incompatible
     parameter shapes count as failed samples. All components of a failed
     sample remain NaN and are excluded from confidence intervals and
     standard errors. Inspect ``n_failed`` before interpreting the results.
@@ -750,6 +750,10 @@ def bootstrap_nlmer(
         try:
             y_sim = result.simulate(nsim=1, seed=rng, use_re=True)
             boot_result = result.refit(y_sim)
+
+            if not boot_result.converged or not boot_result.pnls_converged:
+                n_failed += 1
+                continue
 
             # Validate every component before writing any part of the sample.
             phi = np.asarray(boot_result.phi, dtype=np.float64)

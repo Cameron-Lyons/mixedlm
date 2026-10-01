@@ -168,7 +168,8 @@ class TestNlmerUpdate:
         result = nlmer(model, NLME_DATA, x_var="time", y_var="y", group_var="subject")
 
         updated = result.update()
-        assert updated.converged
+        assert not updated.converged and not updated.pnls_converged
+        assert not result.converged and not result.pnls_converged
         assert np.allclose(result.phi, updated.phi, atol=0.1)
 
     def test_update_with_start(self) -> None:
@@ -177,7 +178,10 @@ class TestNlmerUpdate:
 
         start = {"Asym": 200.0, "R0": 180.0, "lrc": -3.0}
         updated = result.update(start=start)
-        assert updated.converged
+        assert not updated.converged and not updated.pnls_converged
+        direct = nlmer(model, NLME_DATA, x_var="time", y_var="y", group_var="subject", start=start)
+        for field in ("phi", "theta", "b", "deviance", "converged", "pnls_converged"):
+            np.testing.assert_array_equal(getattr(updated, field), getattr(direct, field))
 
 
 class TestNlmerVcov:
@@ -426,6 +430,7 @@ class TestNlmerWeightsOffset:
             "y_var": "y",
             "group_var": "subject",
             "random_params": ["Asym"],
+            "pnls_maxiter": 2000,
         }
 
         with_offset = nlmer(nlme.SSasymp(), data, offset=offset, **fit_kwargs)
@@ -505,7 +510,16 @@ class TestNlmerWeightsOffset:
 class TestBootstrapNlmer:
     def test_bootstrap_nlmer_basic(self) -> None:
         model = nlme.SSasymp()
-        result = nlmer(model, NLME_DATA, x_var="time", y_var="y", group_var="subject")
+        result = nlmer(
+            model,
+            create_offset_nlme_data(),
+            x_var="time",
+            y_var="y",
+            group_var="subject",
+            random_params=["Asym"],
+            pnls_maxiter=2000,
+        )
+        assert result.converged and result.pnls_converged
 
         boot = bootstrap_nlmer(result, n_boot=10, seed=42)
         assert boot.n_boot == 10
@@ -514,7 +528,16 @@ class TestBootstrapNlmer:
 
     def test_bootstrap_nlmer_ci(self) -> None:
         model = nlme.SSasymp()
-        result = nlmer(model, NLME_DATA, x_var="time", y_var="y", group_var="subject")
+        result = nlmer(
+            model,
+            create_offset_nlme_data(),
+            x_var="time",
+            y_var="y",
+            group_var="subject",
+            random_params=["Asym"],
+            pnls_maxiter=2000,
+        )
+        assert result.converged and result.pnls_converged
 
         boot = bootstrap_nlmer(result, n_boot=20, seed=42)
         ci = boot.ci(level=0.95)
@@ -526,7 +549,16 @@ class TestBootstrapNlmer:
 
     def test_bootstrap_nlmer_se(self) -> None:
         model = nlme.SSasymp()
-        result = nlmer(model, NLME_DATA, x_var="time", y_var="y", group_var="subject")
+        result = nlmer(
+            model,
+            create_offset_nlme_data(),
+            x_var="time",
+            y_var="y",
+            group_var="subject",
+            random_params=["Asym"],
+            pnls_maxiter=2000,
+        )
+        assert result.converged and result.pnls_converged
 
         boot = bootstrap_nlmer(result, n_boot=20, seed=42)
         se = boot.se()
@@ -537,7 +569,16 @@ class TestBootstrapNlmer:
 
     def test_bootstrap_nlmer_summary(self) -> None:
         model = nlme.SSasymp()
-        result = nlmer(model, NLME_DATA, x_var="time", y_var="y", group_var="subject")
+        result = nlmer(
+            model,
+            create_offset_nlme_data(),
+            x_var="time",
+            y_var="y",
+            group_var="subject",
+            random_params=["Asym"],
+            pnls_maxiter=2000,
+        )
+        assert result.converged and result.pnls_converged
 
         boot = bootstrap_nlmer(result, n_boot=10, seed=42)
         summary = boot.summary()
