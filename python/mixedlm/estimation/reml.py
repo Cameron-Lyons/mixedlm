@@ -179,6 +179,35 @@ def _build_lambda(
     )
 
 
+def _diagonal_covariance_factor(
+    theta: NDArray[np.floating], structures: list[RandomEffectStructure]
+) -> NDArray[np.floating] | None:
+    """Return repeated diagonal factors only when every block is diagonal."""
+    diagonals = []
+    for structure, block in zip(structures, _build_lambda_blocks(theta, structures), strict=True):
+        diagonal = np.diag(block)
+        if np.count_nonzero(block) != np.count_nonzero(diagonal):
+            return None
+        diagonals.append(np.tile(diagonal, structure.n_levels))
+    return np.concatenate(diagonals) if diagonals else np.empty(0)
+
+
+def _diagonal_entries(
+    matrix: sparse.spmatrix | NDArray[np.floating],
+) -> NDArray[np.floating] | None:
+    """Identify an exactly diagonal product, including stored sparse zeros."""
+    if sparse.issparse(matrix):
+        entries = sparse.coo_matrix(matrix, copy=False)
+        if not entries.has_canonical_format:
+            entries = entries.copy()
+            entries.sum_duplicates()
+        if np.any((entries.row != entries.col) & (entries.data != 0)):
+            return None
+        return np.asarray(entries.diagonal())
+    diagonal = np.diag(matrix)
+    return diagonal if np.count_nonzero(matrix) == np.count_nonzero(diagonal) else None
+
+
 def _count_theta(structures: list[RandomEffectStructure]) -> int:
     count = 0
     for struct in structures:
@@ -264,6 +293,7 @@ class _LMMCrossproducts:
     ZtWZ: sparse.csc_matrix | NDArray[np.floating]
     ZtWX: NDArray[np.floating]
     ZtWy: NDArray[np.floating]
+    ZtWZ_diagonal: NDArray[np.floating] | None = None
 
     @classmethod
     def from_matrices(cls, matrices: ModelMatrices) -> _LMMCrossproducts:
@@ -276,15 +306,17 @@ class _LMMCrossproducts:
             if sparse.issparse(matrices.Z)
             else sqrt_w[:, None] * matrices.Z
         )
+        ZtWZ = WZ.T @ WZ
         return cls(
             weights=weights,
             y_adj=y_adj,
             logdet_w=float(np.sum(np.log(weights))),
             XtWX=WX.T @ WX,
             XtWy=WX.T @ (sqrt_w * y_adj),
-            ZtWZ=WZ.T @ WZ,
+            ZtWZ=ZtWZ,
             ZtWX=matrices.Zt @ (weights[:, None] * matrices.X),
             ZtWy=matrices.Zt @ (weights * y_adj),
+            ZtWZ_diagonal=_diagonal_entries(ZtWZ),
         )
 
 
@@ -300,6 +332,7 @@ def _profiled_deviance_core(
     This unified function computes the profiled deviance and all intermediate
     values needed for both the deviance itself and for extracting estimates.
     Large sparse random-effect systems retain their sparse representation.
+    Diagonal random-effect systems use scalar precision operations.
     Returns None if a factorization fails.
     """
     n = matrices.n_obs
@@ -347,43 +380,63 @@ def _profiled_deviance_core(
         crossproducts = _LMMCrossproducts.from_matrices(matrices)
     w = crossproducts.weights
     y_adj = crossproducts.y_adj
-    Lambda = _build_lambda(theta, matrices.random_structures)
-    LambdatZtWZLambda = Lambda.T @ crossproducts.ZtWZ @ Lambda
-
-    I_q = sparse.eye(q, format="csc")
-    V_factor = LambdatZtWZLambda + I_q
-
-    cu = Lambda.T @ crossproducts.ZtWy
-    Lambdat_ZtWX = Lambda.T @ crossproducts.ZtWX
+    diagonal_factor = (
+        _diagonal_covariance_factor(theta, matrices.random_structures)
+        if crossproducts.ZtWZ_diagonal is not None
+        else None
+    )
+    Lambda = None
     solve_random: Callable[[NDArray[np.floating]], NDArray[np.floating]]
-    if sparse.issparse(V_factor) and q >= _SPARSE_PROFILE_MIN_RANDOM:
-        try:
-            factor = sparse_linalg.splu(V_factor.tocsc())
-        except RuntimeError:
-            return None
-        solve_random = factor.solve
-        # The precision is positive definite. Permutation signs do not affect
-        # its log determinant, obtained from the absolute LU diagonal.
-        ldL2 = np.sum(np.log(np.abs(factor.U.diagonal())))
-        solved = solve_random(np.column_stack((cu, Lambdat_ZtWX)))
-        XtVinvX = crossproducts.XtWX - Lambdat_ZtWX.T @ solved[:, 1:]
-        XtVinvX = (XtVinvX + XtVinvX.T) * 0.5
-        Xty_adj = crossproducts.XtWy - Lambdat_ZtWX.T @ solved[:, 0]
-    else:
-        try:
-            V_factor_dense = V_factor.toarray() if sparse.issparse(V_factor) else V_factor
-            L_V = linalg.cholesky(V_factor_dense, lower=True)
-        except linalg.LinAlgError:
+    if diagonal_factor is not None:
+        assert crossproducts.ZtWZ_diagonal is not None
+        information = diagonal_factor * (crossproducts.ZtWZ_diagonal * diagonal_factor)
+        precision = 1.0 + information
+        if np.any(~np.isfinite(precision)) or np.any(precision <= 0):
             return None
 
         def solve_random(rhs: NDArray[np.floating]) -> NDArray[np.floating]:
-            return linalg.cho_solve((L_V, True), rhs)
+            return rhs / precision
 
-        ldL2 = 2.0 * np.sum(np.log(np.diag(L_V)))
-        cu_star = linalg.solve_triangular(L_V, cu, lower=True)
-        RZX = linalg.solve_triangular(L_V, Lambdat_ZtWX, lower=True)
+        ldL2 = np.sum(np.log1p(information))
+        scaled_factor = diagonal_factor / np.sqrt(precision)
+        cu_star = scaled_factor * crossproducts.ZtWy
+        RZX = scaled_factor[:, None] * crossproducts.ZtWX
         XtVinvX = crossproducts.XtWX - RZX.T @ RZX
         Xty_adj = crossproducts.XtWy - RZX.T @ cu_star
+    else:
+        Lambda = _build_lambda(theta, matrices.random_structures)
+        LambdatZtWZLambda = Lambda.T @ crossproducts.ZtWZ @ Lambda
+        V_factor = LambdatZtWZLambda + sparse.eye(q, format="csc")
+        cu = Lambda.T @ crossproducts.ZtWy
+        Lambdat_ZtWX = Lambda.T @ crossproducts.ZtWX
+        if sparse.issparse(V_factor) and q >= _SPARSE_PROFILE_MIN_RANDOM:
+            try:
+                factor = sparse_linalg.splu(V_factor.tocsc())
+            except RuntimeError:
+                return None
+            solve_random = factor.solve
+            # The precision is positive definite. Permutation signs do not affect
+            # its log determinant, obtained from the absolute LU diagonal.
+            ldL2 = np.sum(np.log(np.abs(factor.U.diagonal())))
+            solved = solve_random(np.column_stack((cu, Lambdat_ZtWX)))
+            XtVinvX = crossproducts.XtWX - Lambdat_ZtWX.T @ solved[:, 1:]
+            XtVinvX = (XtVinvX + XtVinvX.T) * 0.5
+            Xty_adj = crossproducts.XtWy - Lambdat_ZtWX.T @ solved[:, 0]
+        else:
+            try:
+                V_factor_dense = V_factor.toarray() if sparse.issparse(V_factor) else V_factor
+                L_V = linalg.cholesky(V_factor_dense, lower=True)
+            except linalg.LinAlgError:
+                return None
+
+            def solve_random(rhs: NDArray[np.floating]) -> NDArray[np.floating]:
+                return linalg.cho_solve((L_V, True), rhs)
+
+            ldL2 = 2.0 * np.sum(np.log(np.diag(L_V)))
+            cu_star = linalg.solve_triangular(L_V, cu, lower=True)
+            RZX = linalg.solve_triangular(L_V, Lambdat_ZtWX, lower=True)
+            XtVinvX = crossproducts.XtWX - RZX.T @ RZX
+            Xty_adj = crossproducts.XtWy - RZX.T @ cu_star
 
     try:
         L_XtVinvX = linalg.cholesky(XtVinvX, lower=True)
@@ -397,10 +450,13 @@ def _profiled_deviance_core(
     marginal_resid = y_adj - matrices.X @ beta
 
     Zt_resid = matrices.Zt @ (w * marginal_resid)
-    Lambda_t_Zt_resid = Lambda.T @ Zt_resid
-    u_star = solve_random(Lambda_t_Zt_resid)
-
-    u = np.asarray(Lambda @ u_star).reshape(-1)
+    if diagonal_factor is not None:
+        u_star = solve_random(diagonal_factor * Zt_resid)
+        u = diagonal_factor * u_star
+    else:
+        assert Lambda is not None
+        u_star = solve_random(Lambda.T @ Zt_resid)
+        u = np.asarray(Lambda @ u_star).reshape(-1)
     conditional_resid = marginal_resid - matrices.Z @ u
     wrss = np.dot(w * conditional_resid, conditional_resid)
     ussq = np.dot(u_star, u_star)

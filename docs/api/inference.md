@@ -643,8 +643,10 @@ is unchanged. `ProfileResult.mle` records the ML center, which can differ from
 the input coefficient; a warning reports shifts above 0.001 ML standard errors.
 
 Weighted design crossproducts are reused across constrained fits, and large
-random-effect systems remain sparse. `n_jobs` supports parallel profiling of
-coefficients, with serial fallback if process workers cannot be created.
+random-effect systems remain sparse. Diagonal systems, including models with a
+single random intercept term, use scalar solves without assembling a random-effect
+precision matrix. `n_jobs` supports parallel profiling of coefficients, with serial
+fallback if process workers cannot be created.
 Confidence limits use likelihood-ratio cutoffs and adaptive bracketing. A failed
 gradient optimization retries the same likelihood with COBYQA. Fits starting at
 zero variance use COBYQA directly so constrained optima can leave that boundary.
