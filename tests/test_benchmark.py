@@ -1562,6 +1562,34 @@ def test_benchmark_lmm_design_preparation_threads(benchmark, layout, workers):
         assert design.with_response(matrices.y).deviance(theta) == expected
 
 
+@pytest.mark.benchmark(group="lmm-final-estimates")
+@pytest.mark.parametrize("layout", ["intercept", "slope"])
+@pytest.mark.parametrize("size", [48, 65536])
+@pytest.mark.parametrize("use_rust", [False, True])
+@pytest.mark.parametrize("warm", [False, True])
+def test_benchmark_lmm_final_estimates(benchmark, layout, size, use_rust, warm):
+    from copy import copy
+
+    from tests.test_glmm_final_state import mode_problem
+
+    matrices, _, theta = mode_problem("gaussian", layout, n_obs=size, n_groups=16)
+    optimizer = LMMOptimizer(matrices, use_rust=use_rust)
+    expected = LMMOptimizer(matrices, use_rust=False)._final_evaluation(theta)
+    if warm:
+        optimizer._final_evaluation(theta)
+
+    def setup():
+        return (copy(optimizer),), {}
+
+    actual = benchmark.pedantic(
+        lambda prepared: prepared._final_evaluation(theta), setup=setup, rounds=10
+    )
+    for field in vars(expected):
+        np.testing.assert_allclose(
+            getattr(actual, field), getattr(expected, field), rtol=2e-10, atol=2e-9
+        )
+
+
 @pytest.mark.benchmark(group="prepared-lmm-threads")
 @pytest.mark.parametrize("reml", [False, True])
 @pytest.mark.parametrize("workers", [1, 2, 4])
