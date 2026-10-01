@@ -242,6 +242,29 @@ fn compute_ztwx_sparse(z: &CscMatrix, w: &[f64], x: &Mat<f64>, q: usize, p: usiz
     result
 }
 
+fn marginal_residual(x: &Mat<f64>, beta: &Mat<f64>, y: &[f64]) -> Vec<f64> {
+    let mut residual = y.to_vec();
+    if x.ncols() != 0 {
+        faer::linalg::matmul::matmul(
+            faer::ColMut::from_slice_mut(&mut residual).as_mat_mut(),
+            faer::Accum::Add,
+            x,
+            beta,
+            -1.0,
+            faer::get_global_parallelism(),
+        );
+    }
+    residual
+}
+
+fn subtract_random_prediction(residual: &mut [f64], z: &CscMatrix, random: &faer::Col<f64>) {
+    for j in 0..z.ncols() {
+        for index in z.col_offsets()[j]..z.col_offsets()[j + 1] {
+            residual[z.row_indices()[index]] -= z.values()[index] * random[j];
+        }
+    }
+}
+
 /// Products that depend only on the design, shared by independent responses.
 struct PreparedLmmDesign {
     x: Mat<f64>,
@@ -503,45 +526,21 @@ impl PreparedLmmResponse {
         let xty_adj = xtwy - &cu_star_rzx_beta_term;
         let beta = chol_xtvinvx.solve(&xty_adj);
 
-        let mut resid = Vec::with_capacity(n);
-        for i in 0..n {
-            let mut pred = 0.0;
-            for j in 0..p {
-                pred += x[(i, j)] * beta[(j, 0)];
-            }
-            resid.push(y_adj[i] - pred);
-        }
+        let mut resid = marginal_residual(x, &beta, y_adj);
 
         let zt_w_resid = compute_ztwy_sparse(z, w, &resid, q);
         let lambda_t_zt_resid =
             apply_lambda_transpose_vector(&zt_w_resid, &lambda_blocks, structures);
         let u_star = chol_v.solve(&lambda_t_zt_resid);
 
-        let (u, wrss, ussq, pwrss) = if ESTIMATES {
-            let random = CovarianceFactor::new(theta, structures).apply(&u_star.col(0).to_owned());
-            let mut prediction = vec![0.0; n];
-            for j in 0..q {
-                for index in z.col_offsets()[j]..z.col_offsets()[j + 1] {
-                    prediction[z.row_indices()[index]] += z.values()[index] * random[j];
-                }
-            }
-            // Final scale uses the conditional residual and spherical penalty,
-            // avoiding subtraction of nearly equal marginal quadratic forms.
-            let wrss = (0..n)
-                .map(|i| {
-                    let conditional = resid[i] - prediction[i];
-                    w[i] * conditional * conditional
-                })
-                .sum::<f64>();
-            let ussq = (0..q).map(|i| u_star[(i, 0)] * u_star[(i, 0)]).sum::<f64>();
-            ((0..q).map(|i| random[i]).collect(), wrss, ussq, wrss + ussq)
-        } else {
-            let w_resid_sq: f64 = (0..n).map(|i| w[i] * resid[i] * resid[i]).sum();
-            let random_reduction: f64 = (0..q)
-                .map(|i| lambda_t_zt_resid[(i, 0)] * u_star[(i, 0)])
-                .sum();
-            (Vec::new(), 0.0, 0.0, w_resid_sq - random_reduction)
-        };
+        let random = CovarianceFactor::new(theta, structures).apply(&u_star.col(0).to_owned());
+        subtract_random_prediction(&mut resid, z, &random);
+        // Use conditional residuals and the spherical penalty for both the
+        // objective and final scale. Subtracting marginal quadratic forms loses
+        // precision when the random effects explain nearly all of the response.
+        let wrss = (0..n).map(|i| w[i] * resid[i] * resid[i]).sum::<f64>();
+        let ussq = (0..q).map(|i| u_star[(i, 0)] * u_star[(i, 0)]).sum::<f64>();
+        let pwrss = wrss + ussq;
 
         let denom = if reml { n - p } else { n } as f64;
         let sigma2 = pwrss / denom;
@@ -560,7 +559,11 @@ impl PreparedLmmResponse {
                 Vec::new()
             },
             if ESTIMATES { sigma2.sqrt() } else { 0.0 },
-            u,
+            if ESTIMATES {
+                (0..q).map(|i| random[i]).collect()
+            } else {
+                Vec::new()
+            },
             logdet_v,
             if reml { logdet_xtvinvx } else { 0.0 },
             wrss,
@@ -858,24 +861,19 @@ pub fn profiled_deviance_with_gradient_impl(
     let xty_adj = &xtwy - &cu_star_rzx_beta_term;
     let beta = chol_xtvinvx.solve(&xty_adj);
 
-    let mut resid = Vec::with_capacity(n);
-    for i in 0..n {
-        let mut pred = 0.0;
-        for j in 0..p {
-            pred += x[(i, j)] * beta[(j, 0)];
-        }
-        resid.push(y_adj[i] - pred);
-    }
+    let mut resid = marginal_residual(&x, &beta, &y_adj);
 
     let zt_w_resid = compute_ztwy_sparse(&z, &w, &resid, q);
     let lambda_t_zt_resid = apply_lambda_transpose_vector(&zt_w_resid, &lambda_blocks, structures);
     let u_star = chol_v.solve(&lambda_t_zt_resid);
 
-    let w_resid_sq: f64 = (0..n).map(|i| w[i] * resid[i] * resid[i]).sum();
-    let random_reduction: f64 = (0..q)
-        .map(|i| lambda_t_zt_resid[(i, 0)] * u_star[(i, 0)])
-        .sum();
-    let pwrss = w_resid_sq - random_reduction;
+    let factor = CovarianceFactor::new(theta, structures);
+    let random = factor.apply(&u_star.col(0).to_owned());
+    subtract_random_prediction(&mut resid, &z, &random);
+    let wrss: f64 = (0..n).map(|i| w[i] * resid[i] * resid[i]).sum();
+    let ussq: f64 = (0..q).map(|i| u_star[(i, 0)] * u_star[(i, 0)]).sum();
+    let pwrss = wrss + ussq;
+    let zt_w_conditional = compute_ztwy_sparse(&z, &w, &resid, q);
 
     let denom = if reml { n - p } else { n } as f64;
     let sigma2 = pwrss / denom;
@@ -893,10 +891,7 @@ pub fn profiled_deviance_with_gradient_impl(
         None
     };
 
-    let ztwz_lambda = CovarianceFactor::new(theta, structures)
-        .transpose_apply(ztwz.as_ref())
-        .transpose()
-        .to_owned();
+    let ztwz_lambda = factor.transpose_apply(ztwz.as_ref()).transpose().to_owned();
     let mut gradient = Vec::with_capacity(n_theta);
 
     for (block_idx, (structure, block_derivs)) in
@@ -920,11 +915,25 @@ pub fn profiled_deviance_with_gradient_impl(
 
             let dc = apply_dlambda_transpose_vector(&zt_w_resid, dlambda, block_idx, structures);
             let dv_u = &dv * &u_star;
-            let mut d_pwrss = 0.0;
-            for i in 0..q {
-                d_pwrss += u_star[(i, 0)] * dv_u[(i, 0)];
-                d_pwrss -= 2.0 * dc[(i, 0)] * u_star[(i, 0)];
-            }
+            let d_u = chol_v.solve(&(&dc - &dv_u));
+            let lambda_d_u = factor.apply(&d_u.col(0).to_owned());
+            let d_lambda_u = apply_dlambda_transpose_vector(
+                &u_star,
+                &dlambda.transpose().to_owned(),
+                block_idx,
+                structures,
+            );
+            // Differentiate the conditional residual norm and spherical penalty
+            // through the mode solve. Holding beta fixed is valid at its optimum.
+            // This avoids cancellation between large marginal quadratic forms,
+            // and remains valid when a covariance factor is singular.
+            let d_pwrss = 2.0
+                * (0..q)
+                    .map(|i| {
+                        u_star[(i, 0)] * d_u[(i, 0)]
+                            - zt_w_conditional[(i, 0)] * (d_lambda_u[(i, 0)] + lambda_d_u[i])
+                    })
+                    .sum::<f64>();
 
             let mut grad_k = d_logdet_v + denom / pwrss * d_pwrss;
 

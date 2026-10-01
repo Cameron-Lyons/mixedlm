@@ -1620,6 +1620,32 @@ def test_benchmark_lmm_level_covariance(benchmark, layout, overlap, operation):
     np.testing.assert_allclose(actual, expected, rtol=1e-12, atol=1e-11)
 
 
+@pytest.mark.benchmark(group="lmm-large-variance")
+@pytest.mark.parametrize("theta_value", [1e2, 1e6, 1e8])
+@pytest.mark.parametrize("operation", ["objective", "gradient"])
+def test_benchmark_lmm_large_variance(benchmark, theta_value, operation):
+    from mixedlm import _rust
+
+    from tests.test_lmm_prepared_design import native_arguments
+    from tests.test_lmm_stability import dominant_random_effects, groupwise_likelihood
+
+    matrices, groups = dominant_random_effects(fixed=True)
+    theta = np.array([theta_value])
+    expected, _ = groupwise_likelihood(matrices, groups, theta_value, True)
+    if operation == "objective":
+        prepared = LMMOptimizer(matrices, use_rust=True)
+        actual = benchmark(prepared.objective, theta)
+    else:
+        actual, gradient = benchmark(
+            _rust.profiled_deviance_with_gradient,
+            theta=theta,
+            y=matrices.y,
+            **native_arguments(matrices),
+        )
+        assert np.all(np.isfinite(gradient))
+    np.testing.assert_allclose(actual, expected, rtol=0, atol=2e-5)
+
+
 @pytest.mark.benchmark(group="prepared-lmm-threads")
 @pytest.mark.parametrize("reml", [False, True])
 @pytest.mark.parametrize("workers", [1, 2, 4])

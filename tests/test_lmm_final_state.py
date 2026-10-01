@@ -38,6 +38,7 @@ def test_native_final_state_matches_independent_marginal_likelihood(kind, reml, 
         assert serial.pwrss == serial.wrss + serial.ussq
         if matrices.n_random:
             assert "_crossproducts" not in response.__dict__
+            assert response.objective(theta) == serial.deviance
         native = response._rust_cache.response.evaluate(theta, reml)
         for value, field in zip(native, vars(serial), strict=True):
             actual = np.asarray(value)
