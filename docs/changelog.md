@@ -29,6 +29,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Native adaptive quadrature runs on the calling thread when only one worker is available. Parallel evaluations collect group contributions in a fixed order for compensated summation, preserving small contributions and making the quadrature reduction reproducible across worker counts.
+
 - Native GLMM fitting and joint likelihood profiles reuse owned input preparation and starting coefficients across parameter evaluations. Each solve remains independent, including when its fixed-effect offset changes.
 
 - Native GLMM likelihoods reuse final PIRLS means for Laplace and adaptive quadrature corrections. Laplace also reuses the covariance factor, and each iteration shares link derivatives between working weights and responses.

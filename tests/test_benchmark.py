@@ -1594,3 +1594,21 @@ def test_benchmark_prepared_glmm(benchmark, joint, order, size):
         expected = optimizer.objective(theta)
         assert benchmark(optimizer.objective, theta) == expected
     assert np.isfinite(expected[0] if joint else expected)
+
+
+@pytest.mark.benchmark(group="native-quadrature-dispatch")
+@pytest.mark.parametrize("kind", ["gaussian", "binomial", "poisson"])
+@pytest.mark.parametrize("groups", [64, 1024])
+@pytest.mark.parametrize("order", [7, 31])
+def test_benchmark_native_quadrature_dispatch(benchmark, kind, groups, order):
+    from mixedlm.estimation.laplace import _prepare_native_glmm
+
+    from tests.test_glmm_final_state import mode_problem
+
+    matrices, family, theta = mode_problem(kind, "mode_only", n_obs=8192, n_groups=groups)
+    problem = _prepare_native_glmm(matrices, family)
+    expected = problem.evaluate(theta, order)
+    actual = benchmark(problem.evaluate, theta, order)
+    for value, reference in zip(actual, expected, strict=True):
+        np.testing.assert_array_equal(value, reference)
+    assert actual[3]
