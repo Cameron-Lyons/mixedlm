@@ -1550,3 +1550,20 @@ def test_benchmark_nonlinear_simulation_preparation(benchmark, groups, operation
 
     expected = evaluate()
     np.testing.assert_array_equal(benchmark(evaluate), expected)
+
+
+@pytest.mark.benchmark(group="native-glmm-final-state")
+@pytest.mark.parametrize("kind", ["binomial", "poisson"])
+@pytest.mark.parametrize("layout", ["intercept", "mode_only"])
+@pytest.mark.parametrize("order", [1, 7])
+def test_benchmark_native_glmm_final_state(benchmark, kind, layout, order):
+    from mixedlm.estimation.laplace import _native_deviance_with_status
+
+    from tests.test_glmm_final_state import mode_problem
+
+    matrices, family, theta = mode_problem(kind, layout, n_obs=8192, n_groups=64)
+    actual = benchmark(_native_deviance_with_status, theta, matrices, family, order)
+    assert np.isfinite(actual[0])
+    assert np.isfinite(actual[1]).all()
+    assert np.isfinite(actual[2]).all()
+    assert actual[3]
