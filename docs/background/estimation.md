@@ -103,6 +103,14 @@ preparing a separate workspace in each parallel worker. Response-dependent
 products are recomputed for each replicate, and each refit starts from the
 original fitted covariance parameters.
 
+Native mixed-model fits also use these products to extract final fixed and
+random effects, scale, likelihood components, and fixed-effect information.
+They avoid building a second Python crossproduct cache during final extraction
+or response refits. The final scale is computed from weighted conditional
+residuals plus the squared spherical random effects, avoiding cancellation
+between marginal quadratic forms. Fixed-only fits retain the existing Python
+solve and least-squares fallback.
+
 At the estimation API level, `LMMOptimizer.with_response(y)` creates an
 independent optimizer sharing the prepared design on either backend. It copies
 the new response and retains the optimizer's ML/REML setting. Design matrices,
@@ -116,7 +124,8 @@ Prepared native ML and REML evaluations release the interpreter lock after
 copying the covariance parameters. Each solve reads an immutable design and
 response and uses its own scratch storage, so Python threads can evaluate a
 shared response or separate responses concurrently. This applies to the native
-backend; automatic backend selection remains unchanged. Complete-fit throughput
+backend, including final mixed-model estimate extraction; automatic backend
+selection remains unchanged. Complete-fit throughput
 also depends on the optimizer: SciPy's default COBYQA implementation serializes
 optimizer calls with its own lock.
 
