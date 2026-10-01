@@ -89,6 +89,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- COBYLA fits return results when SciPy supplies an evaluation count without an iteration count. The normalized iteration count uses evaluations, matching COBYLA's `maxiter` budget units. Boundary probes and restarts share that evaluation budget, retaining the best probe when too few evaluations remain to initialize a restart.
+
+- `optimizeLmer()` applies the stored control's convergence tolerances and `optCtrl` options to the requested solver, including evaluation limits and normalized option aliases. Explicit `optCtrl` entries override generated options without changing the stored control.
+
 - `optimizeLmer()` honors the `restart_edge` control supplied to `mkLmerDevfun()` when no override is given. Explicit booleans override the control for one fit; `None` inherits it, and manually constructed deviance callables without a control retain enabled checks.
 
 - Variance-boundary restarts check small positive covariance scales as well as zero. This recovers better likelihoods when numerical derivatives stop just outside the old boundary threshold, while retaining genuine small estimates and the remaining optimization budget.

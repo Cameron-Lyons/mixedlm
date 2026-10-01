@@ -566,6 +566,8 @@ def optimizeLmer(
 
     This is the third step in the modular interface. It minimizes
     the deviance function to find optimal variance components.
+    Tolerances and optCtrl from the deviance callable's control are applied
+    to the requested method; optCtrl overrides generated solver options.
 
     Parameters
     ----------
@@ -576,7 +578,8 @@ def optimizeLmer(
     method : str, default "L-BFGS-B"
         Optimization method (passed to scipy.optimize.minimize).
     maxiter : int, default 1000
-        Maximum number of iterations.
+        Base iteration limit, unless overridden by the control's optCtrl.
+        TNC and COBYLA use this as their function evaluation limit.
     verbose : int, default 0
         Verbosity level.
     restart_edge : bool or None, default None
@@ -612,6 +615,11 @@ def optimizeLmer(
         start = devfun.get_start()
 
     bounds = devfun.get_bounds()
+    options = (
+        devfun.control.get_scipy_options(optimizer=method, maxiter=maxiter)
+        if devfun.control is not None
+        else {"maxiter": maxiter}
+    )
     if restart_edge is None:
         restart_edge = devfun.control.restart_edge if devfun.control is not None else True
     if use_analytic_gradient is None:
@@ -635,7 +643,7 @@ def optimizeLmer(
         start,
         method=method,
         bounds=bounds,
-        options={"maxiter": maxiter},
+        options=options,
         callback=callback,
         jac=gradient,
         restart_edge=restart_edge,
