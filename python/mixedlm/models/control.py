@@ -41,6 +41,7 @@ def _validate_common_control(
     optimizer: str,
     maxiter: int,
     boundary_tol: float,
+    restart_edge: bool,
     check_nobs_vs_rankZ: str,
     check_nobs_vs_nlev: str,
     check_nlev_gtreq_5: str,
@@ -59,6 +60,8 @@ def _validate_common_control(
 
     if boundary_tol < 0:
         raise ValueError("boundary_tol must be non-negative")
+    if not isinstance(restart_edge, (bool, np.bool_)):
+        raise ValueError("restart_edge must be a boolean")
 
     for name, value in [
         ("check_nobs_vs_rankZ", check_nobs_vs_rankZ),
@@ -165,6 +168,9 @@ class LmerControl:
         Tolerance for detecting boundary (singular) fits.
         If any variance component is smaller than this value,
         the fit is considered singular.
+    restart_edge : bool, default True
+        Check zero variance scales for likelihood improvement and restart the
+        requested optimizer when needed, within its remaining budget.
     check_conv : bool, default True
         Whether to check convergence and warn if not converged.
     check_singular : bool, default True
@@ -217,12 +223,14 @@ class LmerControl:
     check_rankX: str = "message+drop.cols"
     check_scaleX: str = "warning"
     optCtrl: dict[str, Any] = field(default_factory=dict)
+    restart_edge: bool = True
 
     def __post_init__(self) -> None:
         _validate_common_control(
             optimizer=self.optimizer,
             maxiter=self.maxiter,
             boundary_tol=self.boundary_tol,
+            restart_edge=self.restart_edge,
             check_nobs_vs_rankZ=self.check_nobs_vs_rankZ,
             check_nobs_vs_nlev=self.check_nobs_vs_nlev,
             check_nlev_gtreq_5=self.check_nlev_gtreq_5,
@@ -282,6 +290,9 @@ class GlmerControl:
         Parameter tolerance for convergence.
     boundary_tol : float, default 1e-4
         Tolerance for detecting boundary (singular) fits.
+    restart_edge : bool, default True
+        Check zero variance scales and restart within each outer stage's
+        remaining budget when positive variance improves the likelihood.
     check_conv : bool, default True
         Whether to check convergence and warn if not converged.
     check_singular : bool, default True
@@ -347,6 +358,7 @@ class GlmerControl:
     check_scaleX: str = "warning"
     optCtrl: dict[str, Any] = field(default_factory=dict)
     pirls_maxiter: int | None = None
+    restart_edge: bool = True
 
     def __post_init__(self) -> None:
         from mixedlm.estimation.pirls_control import validate_pirls_controls
@@ -358,6 +370,7 @@ class GlmerControl:
             optimizer=self.optimizer,
             maxiter=self.maxiter,
             boundary_tol=self.boundary_tol,
+            restart_edge=self.restart_edge,
             check_nobs_vs_rankZ=self.check_nobs_vs_rankZ,
             check_nobs_vs_nlev=self.check_nobs_vs_nlev,
             check_nlev_gtreq_5=self.check_nlev_gtreq_5,
@@ -409,6 +422,7 @@ def lmerControl(
     check_rankX: str = "message+drop.cols",
     check_scaleX: str = "warning",
     optCtrl: dict[str, Any] | None = None,
+    restart_edge: bool = True,
 ) -> LmerControl:
     """Create a control object for lmer().
 
@@ -426,6 +440,7 @@ def lmerControl(
     >>> result = lmer("y ~ x + (1|group)", data, control=ctrl)
     """
     return LmerControl(
+        restart_edge=restart_edge,
         optimizer=optimizer,
         maxiter=maxiter,
         ftol=ftol,
@@ -470,6 +485,7 @@ def glmerControl(
     check_scaleX: str = "warning",
     optCtrl: dict[str, Any] | None = None,
     pirls_maxiter: int | None = None,
+    restart_edge: bool = True,
 ) -> GlmerControl:
     """Create a control object for glmer().
 
@@ -487,6 +503,7 @@ def glmerControl(
     >>> result = glmer("y ~ x + (1|group)", data, family=Binomial(), control=ctrl)
     """
     return GlmerControl(
+        restart_edge=restart_edge,
         optimizer=optimizer,
         maxiter=maxiter,
         ftol=ftol,

@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `LmerControl` and `GlmerControl` accept `restart_edge` to control likelihood checks and optimizer restarts at zero variance; enabled by default.
+
 - `slice2D(..., profile_covariance=True)` computes a full joint ML likelihood profile, with nuisance covariance and scale optimization, adaptive grid ranges, and parallel row evaluation.
 
 - `nAGQ=0` exposes the previous fast joint-PIRLS GLMM approximation; `nAGQ0initStep` now controls preliminary covariance optimization for joint fits.
@@ -28,6 +30,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   behavior, including per-unit rates from models fitted with log-exposure offsets.
 
 ### Fixed
+
+- LMM and GLMM fitting, modular optimization, and profiles detect zero variance scales with a zero gradient but a better nearby likelihood. Restarts retain the selected optimizer, share its remaining budget, and report nonconvergence if an improvement cannot be resolved.
 
 - LMM fixed-effect profile intervals now re-optimize nuisance covariance and residual scale using ML, including for REML inputs. Failed fits and unbracketed intervals raise instead of substituting Wald limits; interval extraction skips unnecessary plotting points.
 

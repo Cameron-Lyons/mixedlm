@@ -227,8 +227,8 @@ def test_solver_failures_do_not_return_wald_intervals():
     fitted = poisson_fit()
     with (
         patch.object(
-            glmm_profile.optimize,
-            "minimize",
+            glmm_profile,
+            "run_optimizer",
             return_value=SimpleNamespace(success=False, message="limit"),
         ),
         pytest.raises(RuntimeError, match="nuisance optimization failed: limit"),
