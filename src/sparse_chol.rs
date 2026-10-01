@@ -4,12 +4,13 @@ use std::sync::Arc;
 use faer::Mat;
 use faer::dyn_stack::{MemBuffer, MemStack};
 use faer::linalg::cholesky::ldlt::factor::LdltRegularization;
-use faer::sparse::linalg::SupernodalThreshold;
+use faer::perm::PermRef;
 use faer::sparse::linalg::cholesky::simplicial::SimplicialLdltRef;
 use faer::sparse::linalg::cholesky::{
     CholeskySymbolicParams, SymbolicCholesky, SymbolicCholeskyRaw, SymmetricOrdering,
     factorize_symbolic_cholesky,
 };
+use faer::sparse::linalg::{SupernodalThreshold, amd};
 use faer::sparse::{SparseColMatRef, SymbolicSparseColMatRef};
 use faer::{Conj, MatMut, Par, Side};
 use numpy::ndarray::ArrayView2;
@@ -51,6 +52,33 @@ impl SymbolicCholeskyCache {
         let params = CholeskySymbolicParams {
             supernodal_flop_ratio_threshold: SupernodalThreshold::FORCE_SIMPLICIAL,
             ..Default::default()
+        };
+        // faer's AMD preprocessing reads the previous Cell value when filling
+        // column pointers. Initialize its scratch before invoking it, then pass
+        // the computed ordering to symbolic factorization.
+        let mut permutation = Vec::new();
+        let mut inverse = Vec::new();
+        let ordering = if matches!(ordering, SymmetricOrdering::Amd) {
+            permutation.resize(n, 0);
+            inverse.resize(n, 0);
+            let mut memory = MemBuffer::new(amd::order_maybe_unsorted_scratch::<usize>(
+                n,
+                upper.values().len(),
+            ));
+            for byte in memory.iter_mut() {
+                byte.write(0);
+            }
+            amd::order_maybe_unsorted(
+                &mut permutation,
+                &mut inverse,
+                matrix_ref(&upper).symbolic(),
+                params.amd_params,
+                MemStack::new(&mut memory),
+            )
+            .map_err(|error| LinalgError::InvalidSparseFormat(format!("{error:?}")))?;
+            SymmetricOrdering::Custom(PermRef::new_checked(&permutation, &inverse, n))
+        } else {
+            ordering
         };
         let symbolic = factorize_symbolic_cholesky(
             matrix_ref(&upper).symbolic(),
