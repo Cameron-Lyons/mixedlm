@@ -168,9 +168,8 @@ class TestNlmerUpdate:
         result = nlmer(model, NLME_DATA, x_var="time", y_var="y", group_var="subject")
 
         updated = result.update()
-        assert not updated.converged and not updated.pnls_converged
-        assert not result.converged and not result.pnls_converged
-        assert np.allclose(result.phi, updated.phi, atol=0.1)
+        for field in ("phi", "theta", "b", "deviance", "converged", "pnls_converged"):
+            np.testing.assert_array_equal(getattr(updated, field), getattr(result, field))
 
     def test_update_with_start(self) -> None:
         model = nlme.SSasymp()
@@ -178,7 +177,7 @@ class TestNlmerUpdate:
 
         start = {"Asym": 200.0, "R0": 180.0, "lrc": -3.0}
         updated = result.update(start=start)
-        assert not updated.converged and not updated.pnls_converged
+        assert updated.converged and updated.pnls_converged
         direct = nlmer(model, NLME_DATA, x_var="time", y_var="y", group_var="subject", start=start)
         for field in ("phi", "theta", "b", "deviance", "converged", "pnls_converged"):
             np.testing.assert_array_equal(getattr(updated, field), getattr(direct, field))
@@ -226,13 +225,20 @@ class TestNlmerConfint:
 
     def test_confint_bootstrap(self) -> None:
         model = nlme.SSasymp()
-        result = nlmer(model, NLME_DATA, x_var="time", y_var="y", group_var="subject")
+        result = nlmer(
+            model,
+            NLME_DATA,
+            x_var="time",
+            y_var="y",
+            group_var="subject",
+            random_params=["Asym"],
+        )
 
         ci = result.confint(method="boot", n_boot=20, seed=42)
         assert "Asym" in ci
         for _name, (lower, upper) in ci.items():
-            if not np.isnan(lower) and not np.isnan(upper):
-                assert lower < upper
+            assert np.isfinite(lower) and np.isfinite(upper)
+            assert lower < upper
 
     def test_confint_specific_params(self) -> None:
         model = nlme.SSasymp()

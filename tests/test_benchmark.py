@@ -15,6 +15,27 @@ from mixedlm.utils.variance import cov2sdcor, sdcor2cov
 from scipy import sparse
 
 
+@pytest.mark.benchmark(group="nonlinear-joint-fit")
+@pytest.mark.parametrize("native", [False, True])
+def test_benchmark_joint_nonlinear_fit(benchmark, native):
+    from mixedlm.estimation.nlmm import NLMMOptimizer
+    from mixedlm.nlme.models import SSasymp
+
+    rng = np.random.default_rng(12)
+    model = SSasymp()
+    phi = np.array([10.0, 0.5, -0.5])
+    x = np.tile(np.linspace(0, 5, 10), 5)
+    groups = np.repeat(np.arange(5), 10)
+    y = np.concatenate([model.predict(phi + [b, 0, 0], x[:10]) for b in rng.normal(0, 1, 5)])
+    y += rng.normal(0, 0.3, len(x))
+
+    def fit():
+        return NLMMOptimizer(y, x, groups, model, [0], use_rust=native).optimize(start_phi=phi)
+
+    result = benchmark(fit)
+    assert result.converged and result.pnls_converged
+
+
 @pytest.mark.benchmark(group="python-nonlinear-likelihood")
 @pytest.mark.parametrize("n_groups,n_jobs", [(4, 1), (4, 2), (40, 1), (40, 2)])
 def test_benchmark_python_nonlinear_likelihood(benchmark, n_groups, n_jobs):
