@@ -173,9 +173,10 @@ class ProfileResult:
 class Profile2DResult:
     """Result of 2D profile likelihood slice.
 
-    Represents the profile likelihood surface over a 2D grid of
-    parameter values, useful for visualizing parameter correlations
-    and joint confidence regions.
+    Represents a surface over a 2D grid of coefficient values. When
+    profile_covariance is True, covariance parameters and residual scale were
+    re-optimized using ML at each grid point. False identifies a conditional
+    slice at the original fitted covariance parameters.
     """
 
     param1: str
@@ -186,6 +187,7 @@ class Profile2DResult:
     mle1: float
     mle2: float
     level: float
+    profile_covariance: bool = False
 
     def plot(
         self,

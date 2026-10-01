@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `slice2D(..., profile_covariance=True)` computes a full joint ML likelihood profile, with nuisance covariance and scale optimization, adaptive grid ranges, and parallel row evaluation.
+
 - `nAGQ=0` exposes the previous fast joint-PIRLS GLMM approximation; `nAGQ0initStep` now controls preliminary covariance optimization for joint fits.
 
 - GLMM fitting accepts `pirls_maxiter` to limit inner iterations independently of outer optimization; fitted results and refits retain the inner controls
@@ -26,6 +28,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   behavior, including per-unit rates from models fitted with log-exposure offsets.
 
 ### Fixed
+
+- LMM fixed-effect profile intervals now re-optimize nuisance covariance and residual scale using ML, including for REML inputs. Failed fits and unbracketed intervals raise instead of substituting Wald limits; interval extraction skips unnecessary plotting points.
 
 - GLMM fits with `nAGQ>=1` now jointly optimize fixed coefficients and covariance parameters against the integrated likelihood; modular fits, refits, reconstructed objectives, and profiles use the same objective. Default estimates can change and fitting may take longer; `nAGQ=0` preserves the previous algorithm.
 
