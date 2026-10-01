@@ -81,3 +81,32 @@ def test_gaussian_mode_and_likelihood_match_closed_form(layout, zero_covariance)
         assert beta == []
         assert_allclose(random, covariance @ spherical, rtol=1e-11, atol=1e-12)
         assert_allclose(deviance, expected, rtol=1e-12, atol=1e-11)
+
+
+@pytest.mark.parametrize("n", [1, 3, 7, 15, 17, 31, 33, 129])
+@pytest.mark.parametrize("kind", ["gaussian", "binomial", "poisson"])
+def test_mode_update_with_short_and_odd_lengths_and_extreme_offsets(n, kind):
+    matrices, family, theta = mode_problem(kind, "intercept", n_obs=n, n_groups=1)
+    weights = np.geomspace(1e-14, 1e4, n)
+    weights[::5] = 0
+    matrices = replace(
+        matrices,
+        X=np.empty((n, 0)),
+        n_fixed=0,
+        fixed_names=[],
+        offset=np.linspace(-30, 30, n),
+        weights=weights,
+    )
+    mean = family.clamp_mu(family.link.inverse(matrices.offset), eps=1e-10)
+    derivative = family.link.deriv(mean)
+    variance = np.maximum(family.variance(mean), 1e-10)
+    working_weights = np.maximum(weights / np.maximum(derivative**2 * variance, 1e-10), 1e-10)
+    working_response = derivative * (matrices.y - mean)
+    # One random intercept makes the penalized normal equation scalar.
+    precision = 1 + theta[0] ** 2 * np.sum(working_weights)
+    expected_random = theta[0] ** 2 * np.dot(working_weights, working_response) / precision
+    beta, random, _, _ = native.pirls(
+        *_native_glmm_args(theta, matrices, family), maxiter=1, tol=1e-12
+    )
+    assert beta == []
+    assert_allclose(random, [expected_random], rtol=1e-11, atol=1e-12)

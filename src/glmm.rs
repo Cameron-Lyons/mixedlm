@@ -598,6 +598,34 @@ fn initial_beta(
     }
 }
 
+// Keep the separate mutable slices visible at the function boundary so the
+// compiler can vectorize stores without assuming they alias the model inputs.
+#[inline(never)]
+fn update_binomial_logit_working_values(
+    working_weights: &mut [f64],
+    working_response: &mut [f64],
+    mean: &[f64],
+    eta: &[f64],
+    y: &[f64],
+    offset: &[f64],
+    prior_weights: &[f64],
+) {
+    let n = mean.len();
+    assert_eq!(working_weights.len(), n);
+    assert_eq!(working_response.len(), n);
+    assert_eq!(eta.len(), n);
+    assert_eq!(y.len(), n);
+    assert_eq!(offset.len(), n);
+    assert_eq!(prior_weights.len(), n);
+    for i in 0..n {
+        let derivative = LinkFunction::Logit.deriv_at(mean[i]);
+        working_weights[i] = (FamilyType::Binomial.weight_from_derivative(mean[i], derivative)
+            * prior_weights[i])
+            .max(1e-10);
+        working_response[i] = eta[i] - offset[i] + derivative * (y[i] - mean[i]);
+    }
+}
+
 #[derive(Debug)]
 pub struct PirlsResult {
     pub beta: DVector<f64>,
@@ -664,12 +692,25 @@ pub fn pirls_impl(
         let mut mu = link.inverse(&eta);
         family.clamp_mu(&mut mu, 1e-10);
 
-        for i in 0..n {
-            // Share each derivative without allocating full derivative and
-            // variance vectors. Keep the weight arithmetic and floors intact.
-            let derivative = link.deriv_at(mu[i]);
-            w_vec[i] = (family.weight_from_derivative(mu[i], derivative) * weights[i]).max(1e-10);
-            z_vec[i] = eta[i] - offset[i] + derivative * (y[i] - mu[i]);
+        if family == FamilyType::Binomial && link == LinkFunction::Logit {
+            update_binomial_logit_working_values(
+                w_vec.try_as_col_major_mut().unwrap().as_slice_mut(),
+                z_vec.try_as_col_major_mut().unwrap().as_slice_mut(),
+                mu.try_as_col_major().unwrap().as_slice(),
+                eta.try_as_col_major().unwrap().as_slice(),
+                y.try_as_col_major().unwrap().as_slice(),
+                offset.try_as_col_major().unwrap().as_slice(),
+                weights,
+            );
+        } else {
+            for i in 0..n {
+                // Share each derivative without allocating full derivative and
+                // variance vectors. Keep the weight arithmetic and floors intact.
+                let derivative = link.deriv_at(mu[i]);
+                w_vec[i] =
+                    (family.weight_from_derivative(mu[i], derivative) * weights[i]).max(1e-10);
+                z_vec[i] = eta[i] - offset[i] + derivative * (y[i] - mu[i]);
+            }
         }
 
         let mut ztwz_vec = DVector::zeros(q);
