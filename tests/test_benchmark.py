@@ -1612,3 +1612,21 @@ def test_benchmark_native_quadrature_dispatch(benchmark, kind, groups, order):
     for value, reference in zip(actual, expected, strict=True):
         np.testing.assert_array_equal(value, reference)
     assert actual[3]
+
+
+@pytest.mark.benchmark(group="modular-glmm-joint")
+@pytest.mark.parametrize("order", [1, 7])
+@pytest.mark.parametrize("size", ["small", "large"])
+def test_benchmark_modular_glmm_joint(benchmark, order, size):
+    from mixedlm.models.modular import GlmerParsedFormula, mkGlmerDevfun
+
+    from tests.test_glmm_final_state import mode_problem
+
+    n, groups = (48, 4) if size == "small" else (8192, 64)
+    matrices, family, theta = mode_problem("poisson", "intercept", n_obs=n, n_groups=groups)
+    parsed = GlmerParsedFormula(parse_formula("y ~ x + (1 | g)"), matrices, family)
+    devfun = mkGlmerDevfun(parsed, nAGQ=order)
+    parameters = np.r_[theta, np.full(matrices.n_fixed, 0.2)]
+    expected = devfun(parameters)
+    assert np.isfinite(expected)
+    assert benchmark(devfun, parameters) == expected
