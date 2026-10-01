@@ -600,12 +600,20 @@ print(ci)
 ```
 
 For nonlinear fits, `bootMer()` returns `NlmerBootstrapResult`, with
-`phi_samples` in place of `beta_samples`. Each failed simulation or refit leaves
-an entire sample row as `NaN`; nonfinite or incorrectly shaped estimates also
-count as failures. Check `n_failed` before interpreting intervals. Confidence
-intervals and standard errors exclude failed samples, and all-failed intervals
-have `NaN` bounds. `NlmerResult.confint(method="boot")` uses this same bootstrap
-path. Nonlinear bootstrap counts (`nsim` or `n_boot`) must be positive integers.
+`phi_samples` in place of `beta_samples`.
+
+For all model types, each failed simulation or refit leaves an entire sample row
+as `NaN` and increments `n_failed`. Refits must converge, including the inner
+PIRLS or PNLS solve where applicable, and return finite real estimates with the
+expected shapes. Residual scales must be positive. These checks apply to both
+serial and parallel bootstrap execution. Converged fits with zero variance
+components are retained.
+
+Confidence intervals and standard errors exclude failed samples and are `NaN`
+when fewer than two valid samples remain for a parameter. Check `n_failed`
+before interpreting intervals. `NlmerResult.confint(method="boot")` uses this
+same bootstrap path. Nonlinear bootstrap counts (`nsim` or `n_boot`) must be
+positive integers.
 
 Nonlinear bootstrap (`bootstrap_nlmer()`, `bootMer()` on an `NlmerResult`, and
 `NlmerResult.confint(method="boot")`) uses a local random stream shared across
@@ -629,6 +637,10 @@ The returned data frame includes each parameter's original estimate, bootstrap
 mean, bias, sample standard error, confidence bounds, and successful replicate
 count. `component="sigma"` is available for linear and nonlinear models; GLMM
 results do not have a separately estimated residual scale.
+
+With fewer than two finite samples for a parameter, every interval method
+returns `NaN` confidence bounds and standard errors. A single valid sample
+still has a reported mean, bias, and `n.success` count.
 
 Repeated coefficient labels remain separate rows in `bootCI`, in sample-column
 order. Bootstrap dictionary methods (`ci()` and `se()`) reject repeated labels
