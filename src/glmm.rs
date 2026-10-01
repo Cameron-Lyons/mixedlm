@@ -155,9 +155,15 @@ impl FamilyType {
     }
 
     fn weights(&self, mu: &DVector<f64>, link: LinkFunction) -> DVector<f64> {
-        let link_deriv = link.deriv(mu);
-        let variance = self.variance(mu);
+        self.weights_from_derivative(mu, &link.deriv(mu))
+    }
 
+    fn weights_from_derivative(
+        &self,
+        mu: &DVector<f64>,
+        link_deriv: &DVector<f64>,
+    ) -> DVector<f64> {
+        let variance = self.variance(mu);
         DVector::from_fn(mu.nrows(), |i| {
             let d = link_deriv[i];
             let v = variance[i].max(1e-10);
@@ -305,6 +311,9 @@ pub struct PirlsResult {
     pub u: DVector<f64>,
     pub deviance: f64,
     pub converged: bool,
+    // Preserve the final mode state for Laplace and adaptive quadrature.
+    mean: DVector<f64>,
+    covariance: CovarianceFactor,
     random_system: Option<WeightedRandomDesign>,
 }
 
@@ -359,12 +368,12 @@ pub fn pirls_impl(
         let mut mu = link.inverse(&eta);
         family.clamp_mu(&mut mu, 1e-10);
 
-        let mut w_vec = family.weights(&mu, link);
+        let link_deriv = link.deriv(&mu);
+        let mut w_vec = family.weights_from_derivative(&mu, &link_deriv);
         for i in 0..n {
             w_vec[i] = (w_vec[i] * weights[i]).max(1e-10);
         }
 
-        let link_deriv = link.deriv(&mu);
         let z_vec: DVector<f64> =
             DVector::from_fn(n, |i| eta[i] - offset[i] + link_deriv[i] * (y[i] - mu[i]));
 
@@ -416,6 +425,8 @@ pub fn pirls_impl(
                     u: random_effects,
                     deviance: 1e10,
                     converged: false,
+                    mean: mu,
+                    covariance: lambda,
                     random_system,
                 };
             }
@@ -490,6 +501,8 @@ pub fn pirls_impl(
         u: random_effects,
         deviance,
         converged: converged && deviance.is_finite(),
+        mean: mu_final,
+        covariance: lambda,
         random_system,
     }
 }
@@ -532,24 +545,15 @@ pub fn laplace_deviance_impl(
     let u = result.u;
     let spherical = result.spherical;
 
-    let lambda = CovarianceFactor::new(theta, structures);
-
-    let mut eta = x * &beta + offset;
-    for j in 0..q {
-        let col_start = z.col_offsets()[j];
-        let col_end = z.col_offsets()[j + 1];
-        for idx in col_start..col_end {
-            let i = z.row_indices()[idx];
-            eta[i] += z.values()[idx] * u[j];
-        }
-    }
-
-    let mut mu = link.inverse(&eta);
-    family.clamp_mu(&mut mu, 1e-10);
-
-    let dev_resids = family.deviance_resids(y, &mu, weights);
-
-    let mut deviance = dev_resids + spherical.squared_norm_l2();
+    let lambda = result.covariance;
+    let mu = result.mean;
+    let mut deviance = if converged {
+        result.deviance
+    } else {
+        // A failed factorization retains PIRLS's sentinel deviance. Recompute
+        // the likelihood component as before, while preserving the failure flag.
+        family.deviance_resids(y, &mu, weights) + spherical.squared_norm_l2()
+    };
 
     let mut w_vec = family.weights(&mu, link);
     for i in 0..n {
@@ -703,18 +707,7 @@ pub fn adaptive_gh_deviance_impl(
     let relative_scale = theta[0];
 
     let eta_fixed = x * &beta + offset;
-    let mut eta = eta_fixed.clone();
-    for j in 0..q {
-        let col_start = z.col_offsets()[j];
-        let col_end = z.col_offsets()[j + 1];
-        for idx in col_start..col_end {
-            let i = z.row_indices()[idx];
-            eta[i] += z.values()[idx] * u[j];
-        }
-    }
-
-    let mut mu = link.inverse(&eta);
-    family.clamp_mu(&mut mu, 1e-10);
+    let mu = result.mean;
 
     let mut w_vec = family.weights(&mu, link);
     for i in 0..n {
@@ -1211,5 +1204,138 @@ mod initialization_tests {
             assert_eq!(max_abs_diff(&finite, &invalid), f64::INFINITY);
             assert_eq!(max_abs_diff(&invalid, &invalid), f64::INFINITY);
         }
+    }
+}
+
+#[cfg(test)]
+mod final_mode_tests {
+    use super::*;
+
+    #[test]
+    fn retained_state_matches_returned_parameters_after_every_exit_iteration() {
+        let n = 12;
+        for (family, link) in [
+            (FamilyType::Gaussian, LinkFunction::Identity),
+            (FamilyType::Binomial, LinkFunction::Logit),
+            (FamilyType::Poisson, LinkFunction::Log),
+        ] {
+            for terms in 0..=2 {
+                for fixed in [0, 2] {
+                    let y = DVector::from_fn(n, |i| {
+                        if family == FamilyType::Binomial {
+                            [0.0, 0.25, 0.75, 1.0][i % 4]
+                        } else {
+                            [0.0, 2.0, 1.0, 3.0][i % 4]
+                        }
+                    });
+                    let x = DMatrix::from_fn(
+                        n,
+                        fixed,
+                        |i, j| {
+                            if j == 0 { 1.0 } else { i as f64 / 12.0 }
+                        },
+                    );
+                    let weights: Vec<_> = (0..n).map(|i| 0.5 + i as f64 / 10.0).collect();
+                    let offset = DVector::from_fn(n, |i| -0.2 + i as f64 / 30.0);
+                    let mut values = vec![];
+                    let mut rows = vec![];
+                    let mut offsets = vec![0];
+                    for group in 0..3 {
+                        for term in 0..terms {
+                            for row in (4 * group)..(4 * group + 4) {
+                                rows.push(row);
+                                values.push(if term == 0 { 1.0 } else { row as f64 / 12.0 });
+                            }
+                            offsets.push(rows.len());
+                        }
+                    }
+                    let z = CscMatrix::try_from_usize(&values, &rows, &offsets, (n, 3 * terms))
+                        .unwrap();
+                    let structures = if terms == 0 {
+                        vec![]
+                    } else {
+                        vec![RandomEffectStructure {
+                            n_levels: 3,
+                            n_terms: terms,
+                            correlated: true,
+                        }]
+                    };
+                    let theta: &[f64] = match terms {
+                        0 => &[],
+                        1 => &[0.4],
+                        _ => &[0.4, 0.15, 0.25],
+                    };
+                    for maxiter in [0, 1, 100] {
+                        let state = pirls_impl(
+                            &y,
+                            &x,
+                            &z,
+                            &weights,
+                            &offset,
+                            theta,
+                            &structures,
+                            family,
+                            link,
+                            None,
+                            None,
+                            maxiter,
+                            1e-10,
+                        );
+                        let mut eta = &x * &state.beta + &offset;
+                        for column in 0..z.ncols() {
+                            for entry in z.col_offsets()[column]..z.col_offsets()[column + 1] {
+                                eta[z.row_indices()[entry]] += z.values()[entry] * state.u[column];
+                            }
+                        }
+                        let mut mean = link.inverse(&eta);
+                        family.clamp_mu(&mut mean, 1e-10);
+                        for row in 0..n {
+                            assert_eq!(state.mean[row].to_bits(), mean[row].to_bits());
+                        }
+                        assert_eq!(state.covariance.apply(&state.spherical), state.u);
+                        assert_eq!(
+                            state.deviance,
+                            family.deviance_resids(&y, &mean, &weights)
+                                + state.spherical.squared_norm_l2(),
+                        );
+                        if maxiter == 0 {
+                            assert!(!state.converged);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn failed_factorization_keeps_its_matching_mean_and_sentinel() {
+        let y = DVector::from_fn(4, |i| [1.0, 2.0, 1.0, 2.0][i]);
+        let x = DMatrix::full(4, 1, 1.0);
+        let z = csc_from_scipy(&[1.0; 4], &[0, 1, 2, 3], &[0, 4], (4, 1)).unwrap();
+        let structures = [RandomEffectStructure {
+            n_levels: 1,
+            n_terms: 1,
+            correlated: true,
+        }];
+        let state = pirls_impl(
+            &y,
+            &x,
+            &z,
+            &[1.0; 4],
+            &DVector::zeros(4),
+            &[1e308],
+            &structures,
+            FamilyType::Poisson,
+            LinkFunction::Log,
+            None,
+            None,
+            100,
+            1e-6,
+        );
+        assert!(!state.converged);
+        assert_eq!(state.deviance, 1e10);
+        assert_eq!(state.covariance.apply(&state.spherical), state.u);
+        let expected_mean = LinkFunction::Log.inverse(&(&x * &state.beta));
+        assert_eq!(state.mean, expected_mean);
     }
 }
