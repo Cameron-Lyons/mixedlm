@@ -89,6 +89,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `optimizeLmer()` honors the `restart_edge` control supplied to `mkLmerDevfun()` when no override is given. Explicit booleans override the control for one fit; `None` inherits it, and manually constructed deviance callables without a control retain enabled checks.
+
 - Variance-boundary restarts check small positive covariance scales as well as zero. This recovers better likelihoods when numerical derivatives stop just outside the old boundary threshold, while retaining genuine small estimates and the remaining optimization budget.
 
 - `trust-constr` reports the objective gradient for convergence summaries and accepts the same one-argument iteration callbacks as other SciPy optimizers.
