@@ -15,6 +15,19 @@ from mixedlm.utils.variance import cov2sdcor, sdcor2cov
 from scipy import sparse
 
 
+@pytest.mark.benchmark(group="bootstrap-worker-reuse")
+@pytest.mark.parametrize("n_jobs", [1, 2])
+def test_benchmark_bootstrap_workers(benchmark, large_data, n_jobs):
+    from mixedlm.inference.bootstrap import bootstrap_lmer
+
+    fitted = lmer("y ~ x + (1 | group)", large_data, REML=False)
+    expected = bootstrap_lmer(fitted, n_boot=8, seed=42)
+    actual = benchmark(bootstrap_lmer, fitted, n_boot=8, seed=42, n_jobs=n_jobs)
+    assert actual.n_failed == expected.n_failed
+    for field in ("beta_samples", "theta_samples", "sigma_samples"):
+        np.testing.assert_array_equal(getattr(actual, field), getattr(expected, field))
+
+
 @pytest.mark.benchmark(group="nonlinear-joint-fit")
 @pytest.mark.parametrize("native", [False, True])
 def test_benchmark_joint_nonlinear_fit(benchmark, native):
