@@ -642,6 +642,12 @@ vectors per worker are queued. The original data frame is excluded from worker
 payloads. Worker counts are validated before drawing responses and capped at
 the number of replicates.
 
+Nonlinear bootstrap prepares group rows, the covariance transform, offsets,
+and residual scales once per call and reuses them across simulated responses.
+Preparation is refreshed on the next call. Custom overrides of `simulate()`
+are still invoked for every replicate, and a failed draw does not prevent
+later draws from being attempted.
+
 Custom nonlinear model classes must be importable and picklable, with
 deterministic prediction and gradient methods. Each worker refit receives a
 separate copy of the model. In scripts that use process spawning, start parallel

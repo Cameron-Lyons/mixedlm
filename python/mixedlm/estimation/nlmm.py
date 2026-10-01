@@ -139,12 +139,19 @@ def _build_psi_matrix(
     return factor @ factor.T
 
 
-def _grouped_observation_indices(groups: NDArray[np.integer]) -> list[NDArray[np.intp]]:
-    """Return rows in observation order for each sorted group label."""
+def _grouped_observation_indices(
+    groups: NDArray[np.integer], *, n_groups: int | None = None
+) -> list[NDArray[np.intp]]:
+    """Return ordered rows for observed labels or each code in range(n_groups)."""
     order = np.argsort(groups, kind="stable")
+    sorted_groups = groups[order]
+    if n_groups is not None:
+        codes = np.arange(n_groups)
+        starts = np.searchsorted(sorted_groups, codes, side="left")
+        ends = np.searchsorted(sorted_groups, codes, side="right")
+        return [order[start:end] for start, end in zip(starts, ends, strict=True)]
     if len(order) == 0:
         return []
-    sorted_groups = groups[order]
     boundaries = np.flatnonzero(sorted_groups[1:] != sorted_groups[:-1]) + 1
     return list(np.split(order, boundaries))
 

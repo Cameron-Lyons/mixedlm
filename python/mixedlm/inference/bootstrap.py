@@ -845,13 +845,22 @@ def _nlmer_bootstrap_responses(
     n_boot: int,
     rng: Any,
 ) -> Generator[tuple[int, NDArray | None], None, None]:
+    from mixedlm.models.nlmer import _DEFAULT_NLMER_SIMULATE, _NlmerSimulation
+
     # Draw in the caller to preserve the established sequential random stream.
-    # The bounded task consumer keeps at most two responses per worker queued.
+    # Preparation is local to this bootstrap; result changes are seen next call.
+    use_prepared = getattr(result.simulate, "__func__", None) is _DEFAULT_NLMER_SIMULATE
+    prepared = None
     for index in range(n_boot):
         try:
-            response = result.simulate(nsim=1, seed=rng, use_re=True)
-            # Process serialization is asynchronous; own each response's storage.
-            response = np.array(response, copy=True)
+            if use_prepared:
+                if prepared is None:
+                    prepared = _NlmerSimulation.prepare(result, include_re=True)
+                response = prepared.draw(rng)
+            else:
+                response = result.simulate(nsim=1, seed=rng, use_re=True)
+                # Process serialization is asynchronous; own custom response storage.
+                response = np.array(response, copy=True)
         except Exception:
             response = None
         yield index, response
@@ -923,15 +932,15 @@ def bootstrap_nlmer(
     sigma_samples = np.full(n_boot, np.nan)
 
     rng = random_stream(seed)
+    responses = _nlmer_bootstrap_responses(result, n_boot, rng)
     n_failed = 0
 
     if n_jobs == 1:
         for b in range(n_boot):
             if verbose and (b + 1) % 100 == 0:
                 print(f"Bootstrap iteration {b + 1}/{n_boot}")
-            try:
-                y_sim = result.simulate(nsim=1, seed=rng, use_re=True)
-            except Exception:
+            _, y_sim = next(responses)
+            if y_sim is None:
                 n_failed += 1
                 continue
             phi, theta, sigma = _nlmer_bootstrap_refit(result, y_sim)
@@ -944,9 +953,8 @@ def bootstrap_nlmer(
     else:
         # Refits only need the numerical model data, not the original frame.
         worker_result = replace(result, _data=None)
-        tasks = _nlmer_bootstrap_responses(result, n_boot, rng)
         with closing(
-            _parallel_bootstrap_tasks(_nlmer_bootstrap_worker, (worker_result,), tasks, workers)
+            _parallel_bootstrap_tasks(_nlmer_bootstrap_worker, (worker_result,), responses, workers)
         ) as samples:
             for completed, (index, phi, theta, sigma) in enumerate(samples, start=1):
                 if verbose and completed % 100 == 0:
