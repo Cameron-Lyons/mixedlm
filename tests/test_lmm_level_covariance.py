@@ -1,0 +1,99 @@
+"""Overlapping level columns retain their covariance in native LMM profiles."""
+
+from dataclasses import replace
+
+import numpy as np
+import pytest
+from mixedlm import _rust
+from mixedlm.estimation.reml import LMMOptimizer, _profiled_deviance_core
+from numpy.testing import assert_allclose
+
+from tests.test_glmm_final_state import mode_problem
+from tests.test_lmm_prepared_design import native_arguments, parameters
+from tests.test_native_covariance_transforms import _problem
+from tests.test_reml_profiled_deviance import _direct_profiled_likelihood
+
+
+@pytest.mark.parametrize(
+    "layout", ["intercept", "correlated", "diagonal", "mixed", "crossed_slopes", "no_fixed"]
+)
+@pytest.mark.parametrize("variance", ["regular", "singular", "zero"])
+@pytest.mark.parametrize("weighted", [False, True])
+@pytest.mark.parametrize("reml", [False, True])
+def test_overlapping_levels_match_observation_covariance(layout, variance, weighted, reml):
+    matrices, theta, _ = _problem(layout, variance, weighted, overlap=True)
+    prepared = LMMOptimizer(matrices, REML=reml, use_rust=True)
+    for y in [matrices.y, matrices.y[::-1] + 0.3 * matrices.weights]:
+        response = prepared.with_response(y)
+        expected = _direct_profiled_likelihood(theta, replace(matrices, y=y), reml)
+        assert_allclose(response.objective(theta), expected["deviance"], rtol=1e-12, atol=1e-11)
+        actual = response._final_evaluation(theta)
+        for field, value in expected.items():
+            assert_allclose(getattr(actual, field), value, rtol=2e-12, atol=2e-11)
+        assert response._rust_cache.design is prepared._rust_cache.design
+
+
+@pytest.mark.parametrize(
+    "layout", ["intercept", "correlated", "diagonal", "mixed", "crossed_slopes", "no_fixed"]
+)
+@pytest.mark.parametrize("variance", ["regular", "singular", "zero"])
+@pytest.mark.parametrize("reml", [False, True])
+def test_overlapping_level_gradients_match_independent_likelihood(layout, variance, reml):
+    matrices, theta, _ = _problem(layout, variance, True, overlap=True)
+    value, gradient = _rust.profiled_deviance_with_gradient(
+        theta=theta, y=matrices.y, reml=reml, **native_arguments(matrices)
+    )
+    expected = _direct_profiled_likelihood(theta, matrices, reml)["deviance"]
+    assert_allclose(value, expected, rtol=1e-12, atol=1e-11)
+    step = 2e-5
+    difference = []
+    for index in range(len(theta)):
+        upper, lower = theta.copy(), theta.copy()
+        upper[index] += step
+        lower[index] -= step
+        difference.append(
+            (
+                _direct_profiled_likelihood(upper, matrices, reml)["deviance"]
+                - _direct_profiled_likelihood(lower, matrices, reml)["deviance"]
+            )
+            / (2 * step)
+        )
+    assert_allclose(gradient, difference, rtol=3e-6, atol=3e-7)
+
+
+@pytest.mark.parametrize("reml", [False, True])
+def test_cached_crossproducts_preserve_overlapping_level_terms(reml):
+    matrices, theta, _ = _problem("correlated", "regular", True, overlap=True)
+    arguments = native_arguments(matrices)
+    products = _rust.compute_ztwz(
+        arguments["z_data"],
+        arguments["z_indices"],
+        arguments["z_indptr"],
+        arguments["z_shape"],
+        arguments["weights"],
+    )
+    expected = _direct_profiled_likelihood(theta, matrices, reml)["deviance"]
+    for cache in [None, products]:
+        actual = _rust.profiled_deviance_cached(
+            theta=theta, y=matrices.y, reml=reml, ztwz_cache=cache, **arguments
+        )
+        assert_allclose(actual, expected, rtol=1e-12, atol=1e-11)
+
+
+@pytest.mark.parametrize("reml", [False, True])
+def test_overlapping_levels_do_not_create_spurious_factorization_failure(reml):
+    matrices, _, _ = mode_problem("gaussian", "slope", n_obs=8192, n_groups=64)
+    columns = np.roll(np.arange(matrices.n_random), 2)
+    matrices = replace(matrices, Z=(matrices.Z + 0.15 * matrices.Z[:, columns]).tocsc())
+    theta = parameters(matrices)
+    expected = _profiled_deviance_core(theta, matrices, reml)
+    optimizer = LMMOptimizer(matrices, REML=reml, use_rust=True)
+    actual = optimizer._final_evaluation(theta)
+    for field in vars(expected):
+        assert_allclose(getattr(actual, field), getattr(expected, field), rtol=2e-11, atol=2e-10)
+    assert_allclose(optimizer.objective(theta), expected.deviance, rtol=2e-12)
+    value, gradient = _rust.profiled_deviance_with_gradient(
+        theta=theta, y=matrices.y, reml=reml, **native_arguments(matrices)
+    )
+    assert_allclose(value, expected.deviance, rtol=2e-12)
+    assert np.all(np.isfinite(gradient))
