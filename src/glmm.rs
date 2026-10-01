@@ -598,6 +598,27 @@ fn initial_beta(
     }
 }
 
+fn update_fixed_linear_predictor(
+    eta: &mut DVector<f64>,
+    x: &DMatrix<f64>,
+    beta: &DVector<f64>,
+    offset: &DVector<f64>,
+) {
+    if x.ncols() == 0 {
+        eta.copy_from(offset);
+    } else {
+        faer::linalg::matmul::matmul(
+            eta.as_mut(),
+            faer::Accum::Replace,
+            x,
+            beta,
+            1.0,
+            faer::get_global_parallelism(),
+        );
+        *eta += offset;
+    }
+}
+
 // Keep the separate mutable slices visible at the function boundary so the
 // compiler can vectorize stores without assuming they alias the model inputs.
 #[inline(never)]
@@ -676,10 +697,11 @@ pub fn pirls_impl(
     let mut converged = false;
     let mut w_vec = DVector::zeros(n);
     let mut z_vec = DVector::zeros(n);
+    let mut eta = DVector::zeros(n);
 
     for _iter in 0..maxiter {
         let random_effects = lambda.apply(&spherical);
-        let mut eta = x * &beta + offset;
+        update_fixed_linear_predictor(&mut eta, x, &beta, offset);
         for j in 0..q {
             let col_start = z.col_offsets()[j];
             let col_end = z.col_offsets()[j + 1];
@@ -819,17 +841,17 @@ pub fn pirls_impl(
     }
 
     let random_effects = lambda.apply(&spherical);
-    let mut eta_final = x * &beta + offset;
+    update_fixed_linear_predictor(&mut eta, x, &beta, offset);
     for j in 0..q {
         let col_start = z.col_offsets()[j];
         let col_end = z.col_offsets()[j + 1];
         for idx in col_start..col_end {
             let i = z.row_indices()[idx];
-            eta_final[i] += z.values()[idx] * random_effects[j];
+            eta[i] += z.values()[idx] * random_effects[j];
         }
     }
 
-    let mut mu_final = link.inverse(&eta_final);
+    let mut mu_final = link.inverse(&eta);
     family.clamp_mu(&mut mu_final, 1e-10);
 
     let dev_resids = family.deviance_resids(y, &mu_final, weights);
@@ -1087,7 +1109,8 @@ pub fn adaptive_gh_deviance_impl(
     let n = y.nrows();
     let relative_scale = theta[0];
 
-    let eta_fixed = x * &beta + offset;
+    let mut eta_fixed = DVector::zeros(n);
+    update_fixed_linear_predictor(&mut eta_fixed, x, &beta, offset);
     let mu = result.mean;
 
     let mut w_vec = family.weights(&mu, link);
