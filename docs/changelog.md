@@ -33,6 +33,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Native LMM gradients share projected mode and adjoint vectors for random-effect structures wider than an intercept and slope. Each mode derivative then contracts only the selected factor entries, avoiding per-parameter derivative vectors and scans over all random-effect coefficients. Narrow structures retain direct contractions and their optimizer stopping behavior.
+
 - Native LMM gradients use one shared adjoint solve for the conditional-mode contribution across covariance parameters, retaining the correction for numerical error at large variances. This removes per-parameter mode solves and covariance-factor transforms for both ML and REML.
 
 - Native REML gradients share a fixed-effect solve and projected crossproduct across covariance parameters, then contract only the selected factor entries. This avoids an explicit fixed-effect information inverse and per-parameter random-by-fixed matrix products. Independent levels retain compact block products.
