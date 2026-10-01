@@ -29,6 +29,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Native sparse input parsing reuses converted row-index and column-offset buffers for canonical CSC matrices and reserves conversion storage once, reducing temporary allocation during model preparation and sparse solves.
+
 - Native LMM design preparation releases Python's interpreter lock after snapshotting its inputs, allowing weighted crossproduct preparation to overlap across independent fits.
 
 - Prepared native LMM likelihoods release Python's interpreter lock during ML and REML evaluation. Calls snapshot covariance parameters and keep solve state local, allowing concurrent evaluations of shared designs and responses.
