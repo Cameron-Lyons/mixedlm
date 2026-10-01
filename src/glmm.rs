@@ -4,6 +4,7 @@ use numpy::ndarray::{ArrayView1, ArrayView2};
 use pyo3::PyResult;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
+#[cfg(not(miri))]
 use rayon::prelude::*;
 
 use crate::covariance::CovarianceFactor;
@@ -936,6 +937,46 @@ fn compute_group_log_integral(
     scale.ln() - 0.5 * std::f64::consts::PI.ln() + log_sum
 }
 
+/// Preserve small group contributions beside much larger log likelihoods.
+fn sum_log_integrals(values: impl IntoIterator<Item = f64>) -> f64 {
+    let mut sum = 0.0;
+    let mut correction = 0.0;
+    for value in values {
+        let next = sum + value;
+        if next.is_finite() {
+            correction += if sum.abs() >= value.abs() {
+                (sum - next) + value
+            } else {
+                (value - next) + sum
+            };
+        } else {
+            // Keep ordinary infinity/NaN propagation, including overflow.
+            correction = 0.0;
+        }
+        sum = next;
+    }
+    sum + correction
+}
+
+/// Keep group addition order independent of worker count and avoid dispatch
+/// when the pool has only one worker. Each group still has its own scratch data.
+fn sum_group_log_integrals<F>(n_groups: usize, integrate: F) -> f64
+where
+    F: Fn(usize) -> f64 + Send + Sync,
+{
+    #[cfg(not(miri))]
+    if n_groups > 1 && rayon::current_num_threads() > 1 {
+        // Indexed collection preserves group order while allowing uneven groups
+        // to be scheduled independently. Only one scalar per group is retained.
+        let values = (0..n_groups)
+            .into_par_iter()
+            .map(integrate)
+            .collect::<Vec<_>>();
+        return sum_log_integrals(values);
+    }
+    sum_log_integrals((0..n_groups).map(integrate))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn adaptive_gh_deviance_impl(
     y: &DVector<f64>,
@@ -1015,28 +1056,22 @@ pub fn adaptive_gh_deviance_impl(
 
     let rule = gauss_hermite_nodes_weights(n_agq);
 
-    #[cfg(miri)]
-    let iter = (0..n_levels_first).into_iter();
-    #[cfg(not(miri))]
-    let iter = (0..n_levels_first).into_par_iter();
-    let log_integral: f64 = iter
-        .map(|g| {
-            compute_group_log_integral(
-                g,
-                &spherical,
-                relative_scale,
-                &rule.nodes,
-                &rule.weights,
-                y,
-                z,
-                &eta_fixed,
-                &w_vec,
-                weights,
-                family,
-                link,
-            )
-        })
-        .sum();
+    let log_integral = sum_group_log_integrals(n_levels_first, |g| {
+        compute_group_log_integral(
+            g,
+            &spherical,
+            relative_scale,
+            &rule.nodes,
+            &rule.weights,
+            y,
+            z,
+            &eta_fixed,
+            &w_vec,
+            weights,
+            family,
+            link,
+        )
+    });
 
     let fixed_rows: Vec<usize> = active_rows
         .iter()
@@ -1315,6 +1350,36 @@ pub fn glmm_deviance<'py>(
 #[cfg(test)]
 mod quadrature_tests {
     use super::*;
+
+    #[test]
+    #[cfg(not(miri))]
+    fn group_sums_preserve_small_contributions_for_every_pool_size() {
+        for workers in [1, 2, 4] {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(workers)
+                .build()
+                .unwrap();
+            for n_groups in [4, 65, 2048] {
+                let actual = pool.install(|| {
+                    sum_group_log_integrals(n_groups, |group| if group == 0 { -1e16 } else { -1.0 })
+                });
+                let expected = -1e16 - (n_groups - 1) as f64;
+                assert_eq!(actual, expected, "{workers} workers, {n_groups} groups");
+            }
+        }
+    }
+
+    #[test]
+    fn group_sum_preserves_nonfinite_results() {
+        assert_eq!(sum_log_integrals([]), 0.0);
+        assert_eq!(
+            sum_log_integrals([f64::NEG_INFINITY, -1.0]),
+            f64::NEG_INFINITY
+        );
+        assert_eq!(sum_log_integrals([f64::MAX, f64::MAX]), f64::INFINITY);
+        assert!(sum_log_integrals([f64::INFINITY, f64::NEG_INFINITY]).is_nan());
+        assert!(sum_log_integrals([1.0, f64::NAN, 2.0]).is_nan());
+    }
 
     #[test]
     fn local_gaussian_integral_and_empty_group() {
