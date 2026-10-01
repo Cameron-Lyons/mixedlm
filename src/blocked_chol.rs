@@ -73,19 +73,28 @@ fn independent_level_block(
             .collect();
         BlockType::Diagonal(diagonal)
     } else {
-        let blocks = (0..levels)
-            .map(|level| {
-                let block =
-                    crossproducts.submatrix(level * width, level * column_stride, width, width);
-                let mut result = lambda.transpose() * block * lambda;
-                if add_identity {
-                    for i in 0..width {
-                        result[(i, i)] += 1.0;
-                    }
+        let mut blocks = Vec::with_capacity(levels);
+        // Reuse the intermediate factor product across levels. Each output
+        // remains owned, and Replace prevents a preceding level leaking in.
+        let mut transformed = Mat::zeros(width, if levels == 0 { 0 } else { width });
+        for level in 0..levels {
+            let block = crossproducts.submatrix(level * width, level * column_stride, width, width);
+            faer::linalg::matmul::matmul(
+                transformed.as_mut(),
+                faer::Accum::Replace,
+                lambda.transpose(),
+                block,
+                1.0,
+                faer::get_global_parallelism(),
+            );
+            let mut result = &transformed * lambda;
+            if add_identity {
+                for i in 0..width {
+                    result[(i, i)] += 1.0;
                 }
-                result
-            })
-            .collect();
+            }
+            blocks.push(result);
+        }
         BlockType::BlockDiagonal {
             block_size: width,
             blocks,
@@ -827,7 +836,9 @@ mod tests {
             for structure in &structures {
                 let w = structure.n_terms;
                 let block = Mat::from_fn(structure.n_levels * w, w, |row, column| {
-                    if row % w == column {
+                    if row / w == 1 {
+                        0.0
+                    } else if row % w == column {
                         2.0 + row as f64 / 8.0
                     } else {
                         0.125
@@ -866,6 +877,21 @@ mod tests {
                     );
                     assert_eq!(actual.to_dense(), expected.to_dense());
                     assert!(matches!(actual.blocks[1][0], BlockType::Zero { .. }));
+                    for (i, structure) in structures.iter().enumerate() {
+                        if let BlockType::BlockDiagonal { blocks, .. } = &actual.blocks[i][i] {
+                            for (level, block) in blocks.iter().enumerate() {
+                                let products = stacked[i]
+                                    .subrows(level * structure.n_terms, structure.n_terms);
+                                let mut expected = lambda[i].transpose() * products * &lambda[i];
+                                if identity {
+                                    for diagonal in 0..structure.n_terms {
+                                        expected[(diagonal, diagonal)] += 1.0;
+                                    }
+                                }
+                                assert_eq!(block, &expected);
+                            }
+                        }
+                    }
                 }
                 let factor = crate::covariance::CovarianceFactor::from_blocks(lambda, &structures);
                 assert_eq!(
