@@ -334,7 +334,9 @@ mod tests {
                             }
                         }
                         factor.solve_upper_in_place(rhs.as_mut());
-                        let expected = if q < 128 {
+                        // Small systems also use an independent dense reference.
+                        // Larger diagonal systems have an exact elementwise oracle.
+                        let expected = if q <= 8 {
                             let matrix =
                                 Mat::from_fn(q, q, |i, j| if i == j { diagonal[i] } else { 0.0 });
                             Llt::new(matrix.as_ref(), faer::Side::Lower)
