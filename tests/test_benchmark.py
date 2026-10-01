@@ -1768,7 +1768,7 @@ def test_benchmark_wide_lmm_gradient_contractions(benchmark, width, independent,
 
 
 @pytest.mark.benchmark(group="lmm-gradient-contractions")
-@pytest.mark.parametrize("groups", [8, 64])
+@pytest.mark.parametrize("groups", [8, 64, 256])
 @pytest.mark.parametrize("overlap", [False, True])
 @pytest.mark.parametrize("reml", [False, True])
 def test_benchmark_multilevel_lmm_gradient_contractions(benchmark, groups, overlap, reml):
@@ -1792,6 +1792,30 @@ def test_benchmark_multilevel_lmm_gradient_contractions(benchmark, groups, overl
     )
     np.testing.assert_allclose(
         gradient, observation_gradient(matrices, theta, reml), rtol=2e-10, atol=2e-9
+    )
+
+
+@pytest.mark.benchmark(group="lmm-blocked-solves")
+@pytest.mark.parametrize("groups", [64, 256])
+@pytest.mark.parametrize("overlap", [False, True])
+@pytest.mark.parametrize("reml", [False, True])
+def test_benchmark_lmm_blocked_scalar_solves(benchmark, groups, overlap, reml):
+    from dataclasses import replace
+
+    from mixedlm import _rust
+
+    from tests.test_glmm_final_state import mode_problem
+    from tests.test_lmm_prepared_design import native_arguments, observation_likelihood, parameters
+
+    matrices, _, _ = mode_problem("gaussian", "slope", n_obs=256, n_groups=groups)
+    if overlap:
+        columns = np.roll(np.arange(matrices.n_random), 2)
+        matrices = replace(matrices, Z=(matrices.Z + 0.15 * matrices.Z[:, columns]).tocsc())
+    theta = parameters(matrices)
+    response = _rust.LmmDesign(**native_arguments(matrices)).with_response(matrices.y)
+    actual = benchmark(response.deviance, theta, reml)
+    np.testing.assert_allclose(
+        actual, observation_likelihood(matrices, theta, reml), rtol=2e-12, atol=2e-10
     )
 
 

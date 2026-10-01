@@ -472,7 +472,7 @@ impl PreparedLmmResponse {
             dev += logdet_xtvinvx;
         }
 
-        let v_inv = chol_v.solve(&Mat::<f64>::identity(q, q));
+        let v_inv = chol_v.inverse();
         let v_inv_b = if reml {
             chol_v.solve(&lambdat_ztwx)
         } else {

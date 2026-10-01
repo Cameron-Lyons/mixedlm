@@ -1,5 +1,5 @@
 use faer::linalg::solvers::Llt;
-use faer::{Mat, Side};
+use faer::{Mat, MatMut, MatRef, Side};
 use rayon::prelude::*;
 
 use crate::linalg::LinalgError;
@@ -308,19 +308,31 @@ impl BlockedCholesky {
     }
 
     pub fn solve(&self, b: &Mat<f64>) -> Mat<f64> {
-        let y = self.forward_solve(b);
-        self.backward_solve(&y)
+        self.solve_owned(b.clone())
+    }
+
+    /// Build the inverse in its final buffer, avoiding a second identity copy.
+    pub fn inverse(&self) -> Mat<f64> {
+        let dimension = self.block_dims.iter().sum();
+        self.solve_owned(Mat::identity(dimension, dimension))
+    }
+
+    fn solve_owned(&self, mut rhs: Mat<f64>) -> Mat<f64> {
+        self.forward_solve_in_place(&mut rhs);
+        self.backward_solve_in_place(&mut rhs);
+        rhs
     }
 
     pub fn solve_lower(&self, b: &Mat<f64>) -> Mat<f64> {
-        self.forward_solve(b)
+        let mut rhs = b.clone();
+        self.forward_solve_in_place(&mut rhs);
+        rhs
     }
 
-    fn forward_solve(&self, b: &Mat<f64>) -> Mat<f64> {
+    fn forward_solve_in_place(&self, rhs: &mut Mat<f64>) {
         let total_dim: usize = self.block_dims.iter().sum();
-        let ncols = b.ncols();
-        let mut y = Mat::zeros(total_dim, ncols);
-
+        assert_eq!(rhs.nrows(), total_dim);
+        let ncols = rhs.ncols();
         let mut block_offsets = vec![0usize];
         for dim in &self.block_dims {
             block_offsets.push(block_offsets.last().unwrap() + dim);
@@ -329,103 +341,46 @@ impl BlockedCholesky {
         for (i, row_blocks) in self.l_blocks.iter().enumerate() {
             let offset_i = block_offsets[i];
             let dim_i = self.block_dims[i];
-
-            let mut rhs = Mat::zeros(dim_i, ncols);
-            for ii in 0..dim_i {
-                for c in 0..ncols {
-                    rhs[(ii, c)] = b[(offset_i + ii, c)];
-                }
-            }
-
             for (j, lij) in row_blocks.iter().enumerate().take(i) {
                 let offset_j = block_offsets[j];
                 let dim_j = self.block_dims[j];
-
-                let mut yj = Mat::zeros(dim_j, ncols);
-                for jj in 0..dim_j {
-                    for c in 0..ncols {
-                        yj[(jj, c)] = y[(offset_j + jj, c)];
-                    }
-                }
-
-                let contrib = block_matvec(lij, &yj);
-                for ii in 0..dim_i {
-                    for c in 0..ncols {
-                        rhs[(ii, c)] -= contrib[(ii, c)];
-                    }
-                }
-            }
-
-            let lii = &row_blocks[i];
-            let yi = solve_lower_block(lii, &rhs);
-
-            for ii in 0..dim_i {
+                let contrib = block_matvec(lij, rhs.subrows(offset_j, dim_j));
                 for c in 0..ncols {
-                    y[(offset_i + ii, c)] = yi[(ii, c)];
+                    for ii in 0..dim_i {
+                        rhs[(offset_i + ii, c)] -= contrib[(ii, c)];
+                    }
                 }
             }
+            solve_lower_block_in_place(&row_blocks[i], rhs.subrows_mut(offset_i, dim_i));
         }
-
-        y
     }
 
-    fn backward_solve(&self, y: &Mat<f64>) -> Mat<f64> {
-        let total_dim: usize = self.block_dims.iter().sum();
-        let ncols = y.ncols();
-        let mut x = Mat::zeros(total_dim, ncols);
-
+    fn backward_solve_in_place(&self, rhs: &mut Mat<f64>) {
+        let ncols = rhs.ncols();
         let mut block_offsets = vec![0usize];
         for dim in &self.block_dims {
             block_offsets.push(block_offsets.last().unwrap() + dim);
         }
 
-        let n_blocks = self.l_blocks.len();
-        let block_layout: Vec<(usize, usize)> = block_offsets
-            .iter()
-            .take(n_blocks)
-            .copied()
-            .zip(self.block_dims.iter().copied())
-            .collect();
         for (i, row_blocks_i) in self.l_blocks.iter().enumerate().rev() {
-            let (offset_i, dim_i) = block_layout[i];
-
-            let mut rhs = Mat::zeros(dim_i, ncols);
-            for ii in 0..dim_i {
-                for c in 0..ncols {
-                    rhs[(ii, c)] = y[(offset_i + ii, c)];
-                }
-            }
-
+            let offset_i = block_offsets[i];
+            let dim_i = self.block_dims[i];
             for (j, row_blocks_j) in self.l_blocks.iter().enumerate().skip(i + 1) {
-                let (offset_j, dim_j) = block_layout[j];
-                let lji = &row_blocks_j[i];
-
-                let mut xj = Mat::zeros(dim_j, ncols);
-                for jj in 0..dim_j {
-                    for c in 0..ncols {
-                        xj[(jj, c)] = x[(offset_j + jj, c)];
-                    }
-                }
-
-                let contrib = block_matvec_transpose(lji, &xj);
-                for ii in 0..dim_i {
-                    for c in 0..ncols {
-                        rhs[(ii, c)] -= contrib[(ii, c)];
-                    }
-                }
-            }
-
-            let lii = &row_blocks_i[i];
-            let xi = solve_lower_transpose_block(lii, &rhs);
-
-            for ii in 0..dim_i {
+                let offset_j = block_offsets[j];
+                let dim_j = self.block_dims[j];
+                let contrib =
+                    block_matvec_transpose(&row_blocks_j[i], rhs.subrows(offset_j, dim_j));
                 for c in 0..ncols {
-                    x[(offset_i + ii, c)] = xi[(ii, c)];
+                    for ii in 0..dim_i {
+                        rhs[(offset_i + ii, c)] -= contrib[(ii, c)];
+                    }
                 }
             }
+            solve_lower_transpose_block_in_place(
+                &row_blocks_i[i],
+                rhs.subrows_mut(offset_i, dim_i),
+            );
         }
-
-        x
     }
 
     pub fn logdet(&self) -> f64 {
@@ -670,7 +625,7 @@ fn forward_solve_block_transpose(l: &BlockType, b: &BlockType) -> Result<BlockTy
     }
 }
 
-fn block_matvec(block: &BlockType, v: &Mat<f64>) -> Mat<f64> {
+fn block_matvec(block: &BlockType, v: MatRef<'_, f64>) -> Mat<f64> {
     match block {
         BlockType::Dense(m) => m * v,
         BlockType::Diagonal(d) => Mat::from_fn(v.nrows(), v.ncols(), |i, j| d[i] * v[(i, j)]),
@@ -694,7 +649,7 @@ fn block_matvec(block: &BlockType, v: &Mat<f64>) -> Mat<f64> {
     }
 }
 
-fn block_matvec_transpose(block: &BlockType, v: &Mat<f64>) -> Mat<f64> {
+fn block_matvec_transpose(block: &BlockType, v: MatRef<'_, f64>) -> Mat<f64> {
     match block {
         BlockType::Dense(m) => m.transpose() * v,
         BlockType::Diagonal(d) => Mat::from_fn(v.nrows(), v.ncols(), |i, j| d[i] * v[(i, j)]),
@@ -718,76 +673,60 @@ fn block_matvec_transpose(block: &BlockType, v: &Mat<f64>) -> Mat<f64> {
     }
 }
 
-fn solve_lower_block(l: &BlockType, b: &Mat<f64>) -> Mat<f64> {
+fn solve_lower_block_in_place(l: &BlockType, mut rhs: MatMut<'_, f64>) {
     match l {
-        BlockType::Dense(m) => {
-            let mut y = b.clone();
-            for i in 0..m.nrows() {
-                for c in 0..b.ncols() {
-                    for k in 0..i {
-                        y[(i, c)] -= m[(i, k)] * y[(k, c)];
-                    }
-                    y[(i, c)] /= m[(i, i)];
+        BlockType::Dense(m) => m.as_ref().solve_lower_triangular_in_place(rhs),
+        BlockType::Diagonal(d) => {
+            for c in 0..rhs.ncols() {
+                for (i, diagonal) in d.iter().enumerate() {
+                    rhs[(i, c)] /= diagonal;
                 }
             }
-            y
         }
-        BlockType::Diagonal(d) => Mat::from_fn(b.nrows(), b.ncols(), |i, j| b[(i, j)] / d[i]),
         BlockType::BlockDiagonal { block_size, blocks } => {
-            let mut result = Mat::zeros(b.nrows(), b.ncols());
-            for (k, block) in blocks.iter().enumerate() {
-                let offset = k * block_size;
-
-                for c in 0..b.ncols() {
+            // Complete each right-hand side in column-major storage order.
+            for c in 0..rhs.ncols() {
+                for (k, block) in blocks.iter().enumerate() {
+                    let offset = k * block_size;
                     for i in 0..*block_size {
-                        let mut val = b[(offset + i, c)];
+                        let mut value = rhs[(offset + i, c)];
                         for j in 0..i {
-                            val -= block[(i, j)] * result[(offset + j, c)];
+                            value -= block[(i, j)] * rhs[(offset + j, c)];
                         }
-                        result[(offset + i, c)] = val / block[(i, i)];
+                        rhs[(offset + i, c)] = value / block[(i, i)];
                     }
                 }
             }
-            result
         }
-        BlockType::Zero { rows, .. } => Mat::zeros(*rows, b.ncols()),
+        BlockType::Zero { .. } => rhs.fill(0.0),
     }
 }
 
-fn solve_lower_transpose_block(l: &BlockType, b: &Mat<f64>) -> Mat<f64> {
+fn solve_lower_transpose_block_in_place(l: &BlockType, mut rhs: MatMut<'_, f64>) {
     match l {
-        BlockType::Dense(m) => {
-            let mut x = b.clone();
-            let n = m.nrows();
-            for i in (0..n).rev() {
-                for c in 0..b.ncols() {
-                    for k in (i + 1)..n {
-                        x[(i, c)] -= m[(k, i)] * x[(k, c)];
-                    }
-                    x[(i, c)] /= m[(i, i)];
+        BlockType::Dense(m) => m.as_ref().transpose().solve_upper_triangular_in_place(rhs),
+        BlockType::Diagonal(d) => {
+            for c in 0..rhs.ncols() {
+                for (i, diagonal) in d.iter().enumerate() {
+                    rhs[(i, c)] /= diagonal;
                 }
             }
-            x
         }
-        BlockType::Diagonal(d) => Mat::from_fn(b.nrows(), b.ncols(), |i, j| b[(i, j)] / d[i]),
         BlockType::BlockDiagonal { block_size, blocks } => {
-            let mut result = Mat::zeros(b.nrows(), b.ncols());
-            for (k, block) in blocks.iter().enumerate() {
-                let offset = k * block_size;
-
-                for c in 0..b.ncols() {
+            for c in 0..rhs.ncols() {
+                for (k, block) in blocks.iter().enumerate() {
+                    let offset = k * block_size;
                     for i in (0..*block_size).rev() {
-                        let mut val = b[(offset + i, c)];
+                        let mut value = rhs[(offset + i, c)];
                         for j in (i + 1)..*block_size {
-                            val -= block[(j, i)] * result[(offset + j, c)];
+                            value -= block[(j, i)] * rhs[(offset + j, c)];
                         }
-                        result[(offset + i, c)] = val / block[(i, i)];
+                        rhs[(offset + i, c)] = value / block[(i, i)];
                     }
                 }
             }
-            result
         }
-        BlockType::Zero { rows, .. } => Mat::zeros(*rows, b.ncols()),
+        BlockType::Zero { .. } => rhs.fill(0.0),
     }
 }
 
@@ -1020,23 +959,118 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let q = 4 * 2 + 3 * 2;
-        let ztwz = make_test_ztwz(q);
+        let widths: &[usize] = if cfg!(miri) {
+            &[0, 1, 4]
+        } else {
+            &[0, 1, 4, 17, 129]
+        };
+        for independent in [false, true] {
+            let mut ztwz = make_test_ztwz(q);
+            if independent {
+                for i in 0..q {
+                    for j in 0..q {
+                        if (i < 8) == (j < 8) && i / 2 != j / 2 {
+                            ztwz[(i, j)] = 0.0;
+                        }
+                    }
+                }
+            }
+            let blocked = BlockedMatrix::from_lambda_ztwz(&ztwz, &lambda_blocks, &structures, true);
+            let dense_v = blocked.to_dense();
+            let blocked_chol = BlockedCholesky::factor(&blocked).unwrap();
+            let dense_chol = Llt::new(dense_v.as_ref(), Side::Lower).unwrap();
+            let inverse = blocked_chol.inverse();
+            let expected_inverse = dense_chol.solve(&Mat::<f64>::identity(q, q));
+            for row in 0..q {
+                for column in 0..q {
+                    assert!(
+                        (inverse[(row, column)] - expected_inverse[(row, column)]).abs() < 1e-12
+                    );
+                }
+            }
+            for &width in widths {
+                let b = Mat::from_fn(q, width, |row, column| (row + 2 * column + 1) as f64);
+                let original = b.clone();
+                let blocked_x = blocked_chol.solve(&b);
+                let dense_x = dense_chol.solve(&b);
+                let blocked_lower = blocked_chol.solve_lower(&b);
+                let mut dense_lower = b.clone();
+                dense_chol
+                    .L()
+                    .solve_lower_triangular_in_place(dense_lower.as_mut());
+                assert_eq!(b, original);
+                assert_eq!(blocked_x.ncols(), width);
+                assert_eq!(blocked_lower.ncols(), width);
+                for row in 0..q {
+                    for column in 0..width {
+                        assert!((blocked_x[(row, column)] - dense_x[(row, column)]).abs() < 1e-10);
+                        assert!(
+                            (blocked_lower[(row, column)] - dense_lower[(row, column)]).abs()
+                                < 1e-10
+                        );
+                    }
+                }
+            }
+        }
+    }
 
-        let blocked = BlockedMatrix::from_lambda_ztwz(&ztwz, &lambda_blocks, &structures, true);
-        let dense_v = blocked.to_dense();
-        let blocked_chol = BlockedCholesky::factor(&blocked).expect("Blocked Cholesky failed");
-        let dense_chol = Llt::new(dense_v.as_ref(), Side::Lower).expect("Dense Cholesky failed");
-        let b = Mat::from_fn(q, 4, |row, column| (row + 2 * column + 1) as f64);
-
-        let blocked_x = blocked_chol.solve(&b);
-        let dense_x = dense_chol.solve(&b);
-
-        for row in 0..q {
-            for column in 0..b.ncols() {
-                assert!(
-                    (blocked_x[(row, column)] - dense_x[(row, column)]).abs() < 1e-10,
-                    "solve mismatch at ({row}, {column})"
-                );
+    #[test]
+    fn triangular_blocks_solve_strided_views_without_touching_adjacent_rows() {
+        let q = 9;
+        let lower = |n| {
+            Mat::from_fn(n, n, |i, j| {
+                if i == j {
+                    3.0 + i as f64 / 8.0
+                } else if j < i {
+                    (i + j + 1) as f64 / 16.0
+                } else {
+                    0.0
+                }
+            })
+        };
+        let factors = [
+            BlockType::Dense(lower(q)),
+            BlockType::Diagonal(vec![3.0; q]),
+            BlockType::BlockDiagonal {
+                block_size: 3,
+                blocks: vec![lower(3); 3],
+            },
+            BlockType::Zero { rows: q, cols: q },
+        ];
+        let widths: &[usize] = if cfg!(miri) {
+            &[0, 1, 4]
+        } else {
+            &[0, 1, 4, 17, 129]
+        };
+        for factor in &factors {
+            for &width in widths {
+                let b = Mat::from_fn(q, width, |i, j| ((3 * i + 7 * j) % 17) as f64 / 9.0 - 1.0);
+                for transpose in [false, true] {
+                    let mut buffer = Mat::from_fn(q + 2, width, |_, _| 42.0);
+                    buffer.subrows_mut(1, q).copy_from(b.as_ref());
+                    if transpose {
+                        solve_lower_transpose_block_in_place(factor, buffer.subrows_mut(1, q));
+                    } else {
+                        solve_lower_block_in_place(factor, buffer.subrows_mut(1, q));
+                    }
+                    let dense = factor.to_dense();
+                    let actual = if transpose {
+                        dense.transpose() * buffer.subrows(1, q)
+                    } else {
+                        &dense * buffer.subrows(1, q)
+                    };
+                    for column in 0..width {
+                        assert_eq!(buffer[(0, column)], 42.0);
+                        assert_eq!(buffer[(q + 1, column)], 42.0);
+                        for row in 0..q {
+                            if matches!(factor, BlockType::Zero { .. }) {
+                                assert_eq!(buffer[(row + 1, column)], 0.0);
+                            } else {
+                                assert!((actual[(row, column)] - b[(row, column)]).abs() < 1e-12);
+                            }
+                        }
+                    }
+                }
             }
         }
     }
