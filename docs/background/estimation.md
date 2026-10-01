@@ -284,6 +284,14 @@ these estimation objects; construct a new object when the inputs change. Public
 fits and refits prepare their current inputs automatically. Custom families,
 links, and covariance structures retain the Python implementation.
 
+Prepared native GLMM likelihood evaluations release Python's interpreter lock
+during the solve. Covariance parameters and offset overrides are copied before
+release, and each evaluation has its own scratch storage, allowing Python threads
+to evaluate one immutable prepared problem concurrently. Complete-fit throughput
+also depends on the optimizer: the tested SciPy 1.17.0 COBYQA wrapper serializes
+optimizer calls with its own lock. Releasing the interpreter lock does not remove
+that synchronization.
+
 Native PIRLS reuses its linear-predictor, working-weight, and working-response
 buffers across iterations and computes link derivatives and variances per
 observation without retaining separate vectors. Predictor updates overwrite the

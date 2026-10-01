@@ -29,6 +29,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Prepared native GLMM likelihoods release Python's interpreter lock during evaluation, allowing independent solves from Python threads. Per-call covariance parameters and offset overrides are copied before release, and scratch state remains local to each solve.
+
 - Native GLMM iterations and final mode calculations reuse a linear-predictor buffer. Mode-only updates start directly from the fixed-effect offset, avoiding empty matrix multiplication, and adaptive quadrature uses the same predictor update.
 
 - Native binomial/logit iterations use a specialized working-value loop that enables compiler vectorization, preserving the existing arithmetic and weight floors.

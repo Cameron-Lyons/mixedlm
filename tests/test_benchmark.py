@@ -1653,3 +1653,28 @@ def test_benchmark_glmm_working_buffers(benchmark, kind, layout, mode_only, n):
     for value, reference in zip(actual, expected, strict=True):
         np.testing.assert_array_equal(value, reference)
     assert actual[3]
+
+
+@pytest.mark.benchmark(group="prepared-glmm-threads")
+@pytest.mark.parametrize("kind", ["gaussian", "binomial", "poisson"])
+@pytest.mark.parametrize("workers", [1, 2, 4])
+def test_benchmark_prepared_glmm_threads(benchmark, kind, workers):
+    from concurrent.futures import ThreadPoolExecutor
+
+    from mixedlm.estimation.laplace import _prepare_native_glmm
+
+    from tests.test_glmm_final_state import mode_problem
+
+    matrices, family, theta = mode_problem(kind, "mode_only", n_obs=8192, n_groups=64)
+    problem = _prepare_native_glmm(matrices, family)
+    expected = problem.evaluate(theta)
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+
+        def run():
+            return list(pool.map(problem.evaluate, [theta] * 16))
+
+        actual = benchmark(run)
+    for result in actual:
+        for value, reference in zip(result, expected, strict=True):
+            np.testing.assert_array_equal(value, reference)
+        assert result[3]
