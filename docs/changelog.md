@@ -33,6 +33,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Native LMM covariance assembly transforms complete grouping blocks in place, avoiding temporary matrices for each pair of levels. Independent-level blocks retain their compact representation and skip redundant copies.
+
 - Native LMM gradients multiply crossproducts by covariance factors directly, avoiding an extra full-matrix transpose and allocation. The same column-oriented transform is shared with penalized covariance construction.
 
 - Native LMM blocked solves reuse one owned workspace and optimized dense triangular solves. Covariance gradients build the inverse in its final buffer, reducing temporary matrix allocation for models with many random-effect coefficients.

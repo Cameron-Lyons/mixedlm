@@ -2,6 +2,7 @@ use faer::linalg::solvers::Llt;
 use faer::{Mat, MatMut, MatRef, Side};
 use rayon::prelude::*;
 
+use crate::covariance::{right_apply_repeated_in_place, transpose_apply_repeated_in_place};
 use crate::linalg::LinalgError;
 use crate::lmm::RandomEffectStructure;
 
@@ -126,12 +127,9 @@ impl BlockedMatrix {
                         let mut diagonal: Vec<f64> = Vec::with_capacity(ni);
 
                         for level in 0..ni {
-                            let li = level * qi;
-                            let mut block = Mat::zeros(qi, qi);
-                            block[(0, 0)] = ztwz[(offset_i + li, offset_i + li)];
-
-                            let transformed = lambda_i_t.as_ref() * &block * lambda_i;
-                            let mut value = transformed[(0, 0)];
+                            let position = offset_i + level;
+                            let scale = lambda_i[(0, 0)];
+                            let mut value = (scale * ztwz[(position, position)]) * scale;
                             if add_identity {
                                 value += 1.0;
                             }
@@ -144,23 +142,8 @@ impl BlockedMatrix {
 
                         for level in 0..ni {
                             let li = level * qi;
-                            let mut block = Mat::zeros(qi, qi);
-
-                            for ii in 0..qi {
-                                for jj in 0..qi {
-                                    block[(ii, jj)] =
-                                        ztwz[(offset_i + li + ii, offset_i + li + jj)];
-                                }
-                            }
-
-                            let transformed = lambda_i_t.as_ref() * &block * lambda_i;
-
-                            let mut result_block = Mat::zeros(qi, qi);
-                            for ii in 0..qi {
-                                for jj in 0..qi {
-                                    result_block[(ii, jj)] = transformed[(ii, jj)];
-                                }
-                            }
+                            let block = ztwz.submatrix(offset_i + li, offset_i + li, qi, qi);
+                            let mut result_block = lambda_i_t.as_ref() * block * lambda_i;
 
                             if add_identity {
                                 for ii in 0..qi {
@@ -177,30 +160,21 @@ impl BlockedMatrix {
                         });
                     }
                 } else {
-                    let mut dense_block = Mat::zeros(block_dims[i], block_dims[j]);
-
-                    for level_i in 0..ni {
-                        let li = level_i * qi;
-                        for level_j in 0..nj {
-                            let lj = level_j * qj;
-
-                            let mut block = Mat::zeros(qi, qj);
-                            for ii in 0..qi {
-                                for jj in 0..qj {
-                                    block[(ii, jj)] =
-                                        ztwz[(offset_i + li + ii, offset_j + lj + jj)];
-                                }
-                            }
-
-                            let transformed = lambda_i_t.as_ref() * &block * lambda_j;
-
-                            for ii in 0..qi {
-                                for jj in 0..qj {
-                                    dense_block[(li + ii, lj + jj)] = transformed[(ii, jj)];
-                                }
-                            }
-                        }
-                    }
+                    let mut dense_block = ztwz
+                        .submatrix(offset_i, offset_j, block_dims[i], block_dims[j])
+                        .to_owned();
+                    transpose_apply_repeated_in_place(
+                        lambda_i,
+                        ni,
+                        !structures[i].correlated || qi == 1,
+                        dense_block.as_mut(),
+                    );
+                    right_apply_repeated_in_place(
+                        lambda_j,
+                        nj,
+                        !structures[j].correlated || qj == 1,
+                        dense_block.as_mut(),
+                    );
 
                     if i == j && add_identity {
                         for diagonal in 0..block_dims[i] {
@@ -785,6 +759,105 @@ mod tests {
             }
         }
         m
+    }
+
+    #[test]
+    fn mixed_width_assembly_matches_dense_products_for_all_block_patterns() {
+        let widths: &[(usize, usize)] = if cfg!(miri) {
+            &[(1, 2), (3, 1)]
+        } else {
+            &[(1, 3), (3, 1), (15, 3), (16, 3), (17, 16), (32, 17)]
+        };
+        for &(left_width, right_width) in widths {
+            let structures = [
+                RandomEffectStructure {
+                    n_levels: 2,
+                    n_terms: left_width,
+                    correlated: true,
+                },
+                RandomEffectStructure {
+                    n_levels: 3,
+                    n_terms: right_width,
+                    correlated: false,
+                },
+            ];
+            let split = 2 * left_width;
+            let q = split + 3 * right_width;
+            for independent in [false, true] {
+                let ztwz = Mat::from_fn(q, q, |i, j| {
+                    let cross_level = if i < split && j < split {
+                        i / left_width != j / left_width
+                    } else if i >= split && j >= split {
+                        (i - split) / right_width != (j - split) / right_width
+                    } else {
+                        false
+                    };
+                    if i == j {
+                        3.0 + (i % 5) as f64 / 4.0
+                    } else if independent && cross_level {
+                        0.0
+                    } else {
+                        0.01 / (1 + i.abs_diff(j)) as f64
+                    }
+                });
+                for variance in 0..3 {
+                    let blocks = structures
+                        .iter()
+                        .map(|structure| {
+                            let width = structure.n_terms;
+                            Mat::from_fn(width, width, |i, j| {
+                                if variance == 2
+                                    || i < j
+                                    || (variance == 1 && j == width - 1)
+                                    || (!structure.correlated && i != j)
+                                {
+                                    0.0
+                                } else if i == j {
+                                    0.4 + i as f64 / 32.0
+                                } else {
+                                    (i + j + 1) as f64 / 64.0
+                                }
+                            })
+                        })
+                        .collect::<Vec<_>>();
+                    let mut lambda = Mat::zeros(q, q);
+                    let mut offset = 0;
+                    for (structure, block) in structures.iter().zip(&blocks) {
+                        for _ in 0..structure.n_levels {
+                            lambda
+                                .submatrix_mut(offset, offset, structure.n_terms, structure.n_terms)
+                                .copy_from(block.as_ref());
+                            offset += structure.n_terms;
+                        }
+                    }
+                    for identity in [false, true] {
+                        let actual =
+                            BlockedMatrix::from_lambda_ztwz(&ztwz, &blocks, &structures, identity);
+                        if independent {
+                            assert!(matches!(
+                                actual.blocks[0][0],
+                                BlockType::Diagonal(_) | BlockType::BlockDiagonal { .. }
+                            ));
+                        }
+                        if variance == 2 {
+                            assert!(matches!(actual.blocks[1][0], BlockType::Zero { .. }));
+                        }
+                        let mut expected = lambda.transpose() * &ztwz * &lambda;
+                        if identity {
+                            expected += Mat::<f64>::identity(q, q);
+                        }
+                        let dense = actual.to_dense();
+                        for column in 0..q {
+                            for row in 0..q {
+                                assert!(
+                                    (dense[(row, column)] - expected[(row, column)]).abs() < 2e-12
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]

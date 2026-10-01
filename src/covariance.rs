@@ -1,4 +1,4 @@
-use faer::{Col, Mat, MatRef};
+use faer::{Col, Mat, MatMut, MatRef};
 
 use crate::csc::CscMatrix;
 
@@ -45,6 +45,78 @@ pub fn build_lambda_blocks(theta: &[f64], structures: &[RandomEffectStructure]) 
     }
 
     blocks
+}
+
+/// Apply a repeated transposed factor to a view's rows without replacing its buffer.
+pub(crate) fn transpose_apply_repeated_in_place(
+    lower: &Mat<f64>,
+    n_levels: usize,
+    diagonal: bool,
+    mut matrix: MatMut<'_, f64>,
+) {
+    let width = lower.nrows();
+    assert_eq!(lower.ncols(), width);
+    assert_eq!(matrix.nrows(), n_levels * width);
+    if !diagonal && width >= 16 {
+        // Temporary storage is limited to one level's rows.
+        for level in 0..n_levels {
+            let offset = level * width;
+            let transformed = lower.transpose() * matrix.as_ref().subrows(offset, width);
+            matrix
+                .as_mut()
+                .subrows_mut(offset, width)
+                .copy_from(transformed.as_ref());
+        }
+        return;
+    }
+    for column in 0..matrix.ncols() {
+        for level in 0..n_levels {
+            let offset = level * width;
+            // Ascending rows only read entries not yet overwritten.
+            for i in 0..width {
+                let end = if diagonal { i + 1 } else { width };
+                let mut value = 0.0;
+                for k in i..end {
+                    value += lower[(k, i)] * matrix[(offset + k, column)];
+                }
+                matrix[(offset + i, column)] = value;
+            }
+        }
+    }
+}
+
+/// Apply a repeated factor to a view's columns without replacing its buffer.
+pub(crate) fn right_apply_repeated_in_place(
+    lower: &Mat<f64>,
+    n_levels: usize,
+    diagonal: bool,
+    mut matrix: MatMut<'_, f64>,
+) {
+    let width = lower.nrows();
+    assert_eq!(lower.ncols(), width);
+    assert_eq!(matrix.ncols(), n_levels * width);
+    for level in 0..n_levels {
+        let offset = level * width;
+        if !diagonal && width >= 16 {
+            let transformed = matrix.as_ref().subcols(offset, width) * lower;
+            matrix
+                .as_mut()
+                .subcols_mut(offset, width)
+                .copy_from(transformed.as_ref());
+            continue;
+        }
+        // Ascending columns only read entries not yet overwritten.
+        for j in 0..width {
+            let end = if diagonal { j + 1 } else { width };
+            for row in 0..matrix.nrows() {
+                let mut value = 0.0;
+                for k in j..end {
+                    value += matrix[(row, offset + k)] * lower[(k, j)];
+                }
+                matrix[(row, offset + j)] = value;
+            }
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -233,34 +305,12 @@ impl CovarianceFactor {
 
     fn transpose_apply_in_place(&self, matrix: &mut Mat<f64>) {
         for block in &self.blocks {
-            let width = block.lower.nrows();
-            if !block.diagonal && width >= 16 {
-                // Wide correlated blocks benefit from the optimized matrix
-                // kernel. Temporary storage is limited to one block's rows.
-                for level in 0..block.n_levels {
-                    let offset = block.offset + level * width;
-                    let transformed = block.lower.transpose() * matrix.subrows(offset, width);
-                    matrix
-                        .subrows_mut(offset, width)
-                        .copy_from(transformed.as_ref());
-                }
-                continue;
-            }
-            for column in 0..matrix.ncols() {
-                for level in 0..block.n_levels {
-                    let offset = block.offset + level * width;
-                    // Lambda' is upper triangular: ascending rows only read
-                    // entries that have not yet been overwritten.
-                    for i in 0..width {
-                        let end = if block.diagonal { i + 1 } else { width };
-                        let mut value = 0.0;
-                        for k in i..end {
-                            value += block.lower[(k, i)] * matrix[(offset + k, column)];
-                        }
-                        matrix[(offset + i, column)] = value;
-                    }
-                }
-            }
+            transpose_apply_repeated_in_place(
+                &block.lower,
+                block.n_levels,
+                block.diagonal,
+                matrix.subrows_mut(block.offset, block.n_levels * block.lower.nrows()),
+            );
         }
     }
 
@@ -274,29 +324,12 @@ impl CovarianceFactor {
 
     fn right_apply_in_place(&self, matrix: &mut Mat<f64>) {
         for block in &self.blocks {
-            let width = block.lower.nrows();
-            for level in 0..block.n_levels {
-                let offset = block.offset + level * width;
-                if !block.diagonal && width >= 16 {
-                    let transformed = matrix.subcols(offset, width) * &block.lower;
-                    matrix
-                        .subcols_mut(offset, width)
-                        .copy_from(transformed.as_ref());
-                    continue;
-                }
-                // Right multiplication by a lower triangular block allows
-                // ascending columns for the same reason as the left transform.
-                for j in 0..width {
-                    let end = if block.diagonal { j + 1 } else { width };
-                    for row in 0..matrix.nrows() {
-                        let mut value = 0.0;
-                        for k in j..end {
-                            value += matrix[(row, offset + k)] * block.lower[(k, j)];
-                        }
-                        matrix[(row, offset + j)] = value;
-                    }
-                }
-            }
+            right_apply_repeated_in_place(
+                &block.lower,
+                block.n_levels,
+                block.diagonal,
+                matrix.subcols_mut(block.offset, block.n_levels * block.lower.nrows()),
+            );
         }
     }
 
@@ -377,6 +410,51 @@ mod tests {
         for j in 0..actual.ncols() {
             for i in 0..actual.nrows() {
                 assert!((actual[(i, j)] - expected[(i, j)]).abs() < 1e-12);
+            }
+        }
+    }
+
+    #[test]
+    fn repeated_transforms_only_modify_the_requested_view() {
+        let width = if cfg!(miri) { 3 } else { 17 };
+        let q = 2 * width;
+        let lower = Mat::from_fn(width, width, |i, j| {
+            if i >= j {
+                (i + j + 1) as f64 / 32.0
+            } else {
+                0.0
+            }
+        });
+        let dense = Mat::from_fn(q, q, |i, j| {
+            if i / width == j / width {
+                lower[(i % width, j % width)]
+            } else {
+                0.0
+            }
+        });
+        for left in [false, true] {
+            let (rows, columns) = if left { (q, 5) } else { (5, q) };
+            let mut buffer = Mat::from_fn(rows + 2, columns + 2, |i, j| ((i + 3 * j) as f64).cos());
+            let original = buffer.clone();
+            let view = original.submatrix(1, 1, rows, columns);
+            let expected = if left {
+                dense.transpose() * view
+            } else {
+                view * &dense
+            };
+            let view = buffer.submatrix_mut(1, 1, rows, columns);
+            if left {
+                transpose_apply_repeated_in_place(&lower, 2, false, view);
+            } else {
+                right_apply_repeated_in_place(&lower, 2, false, view);
+            }
+            assert_close(buffer.submatrix(1, 1, rows, columns), expected.as_ref());
+            for j in 0..columns + 2 {
+                for i in 0..rows + 2 {
+                    if i == 0 || i == rows + 1 || j == 0 || j == columns + 1 {
+                        assert_eq!(buffer[(i, j)], original[(i, j)]);
+                    }
+                }
             }
         }
     }
