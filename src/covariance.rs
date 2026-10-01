@@ -322,6 +322,27 @@ impl CovarianceFactor {
         result
     }
 
+    /// Transform only independent level crossproducts, stacked per structure.
+    /// The caller must establish that all cross-level and cross-structure entries vanish.
+    pub fn right_apply_level_crossproducts(&self, matrix: MatRef<'_, f64>) -> Vec<Mat<f64>> {
+        assert_eq!(matrix.nrows(), self.dimension);
+        assert_eq!(matrix.ncols(), self.dimension);
+        self.blocks
+            .iter()
+            .map(|block| {
+                let width = block.lower.nrows();
+                let mut product = Mat::from_fn(block.n_levels * width, width, |row, column| {
+                    matrix[(
+                        block.offset + row,
+                        block.offset + row / width * width + column,
+                    )]
+                });
+                right_apply_repeated_in_place(&block.lower, 1, block.diagonal, product.as_mut());
+                product
+            })
+            .collect()
+    }
+
     fn right_apply_in_place(&self, matrix: &mut Mat<f64>) {
         for block in &self.blocks {
             right_apply_repeated_in_place(

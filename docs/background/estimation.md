@@ -149,11 +149,19 @@ fit = lmer(
 
 This option supports native LMM fitting with L-BFGS-B, BFGS, TNC, SLSQP, and
 trust-constr. Value and gradient requests at the same parameters share an
-evaluation within each fit. It is disabled by default: fewer objective calls
-can accelerate fitting, but the full random-effect inverse required by the
-gradient can make large random-effect systems considerably slower. Python
-backends and structured covariance types retain the solver's numerical
-derivatives; derivative-free solvers continue to use the scalar objective.
+evaluation within each fit. It is disabled by default because the benefit
+depends on the model and optimizer. Python backends and structured covariance
+types retain the solver's numerical derivatives; derivative-free solvers
+continue to use the scalar objective.
+
+When weighted design crossproducts separate across all grouping structures
+and their levels, gradients use compact per-level inverses and transformed
+crossproducts. Their storage grows with the sum of the squared level widths,
+which reduces gradient costs for models with many independent levels. The
+prepared design still stores the full random-effect crossproduct. Coupled
+designs require a full inverse and can make analytic gradients more expensive
+than numerical derivatives. Eligibility depends on exact zeros in the design
+crossproducts, so zero variance parameters do not hide coupled levels.
 
 `LMMOptimizer.optimize(use_analytic_gradient=True)` enables the same path for
 prepared fits and response refits. `optimizeLmer()` inherits this setting from

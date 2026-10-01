@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- LMM fitting accepts `use_analytic_gradient=True` through `lmerControl()`, `LMMOptimizer.optimize()`, and `optimizeLmer()`. Supported native gradient-based solvers share value/gradient evaluations within each fit. The option is disabled by default because large random-effect systems can make analytic gradients more expensive than numerical derivatives.
+- LMM fitting accepts `use_analytic_gradient=True` through `lmerControl()`, `LMMOptimizer.optimize()`, and `optimizeLmer()`. Supported native gradient-based solvers share value/gradient evaluations within each fit. The option is disabled by default because its benefit depends on the model and optimizer, and large coupled random-effect systems can make analytic gradients more expensive than numerical derivatives.
 
 - Prepared native LMM responses expose `deviance_with_gradient(theta, reml=True)`, reusing validated design and response products for analytic covariance gradients. Calls snapshot parameters and release the interpreter lock, allowing concurrent evaluations and direct use with SciPy's `jac=True` interface.
 
@@ -32,6 +32,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Nonlinear new-data predictions accept scalar, array, or column-based response offsets.
 
 ### Changed
+
+- Native LMM gradients use compact per-level inverses and crossproducts when the weighted design separates across all levels and grouping structures. Eligibility is cached from the design, including exact checks for tiny couplings. These gradient temporaries use per-level block sizes; the prepared design still stores the full crossproduct.
 
 - Native LMM covariance assembly transforms complete grouping blocks in place, avoiding temporary matrices for each pair of levels. Independent-level blocks retain their compact representation and skip redundant copies.
 

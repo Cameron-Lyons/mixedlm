@@ -72,6 +72,7 @@ fn csc_from_scipy(
 
 /// A covariance parameter selects one entry of a repeated factor block.
 struct LambdaDerivative {
+    structure: usize,
     offset: usize,
     n_levels: usize,
     n_terms: usize,
@@ -126,6 +127,35 @@ impl LambdaDerivative {
         (trace, product)
     }
 
+    fn level_crossproduct_actions(
+        &self,
+        ztwz_lambda: &Mat<f64>,
+        inverse: &Mat<f64>,
+        rhs: &Mat<f64>,
+    ) -> (f64, Mat<f64>) {
+        let mut trace = 0.0;
+        let mut product = Mat::zeros(rhs.nrows(), rhs.ncols());
+        // Visit nonzero contributions in the same column order as the full contraction.
+        for level in 0..self.n_levels {
+            let local_offset = level * self.n_terms;
+            let target = self.offset + local_offset + self.column;
+            for column in 0..self.n_terms {
+                let value = ztwz_lambda[(local_offset + self.row, column)];
+                if value != 0.0 {
+                    trace += value
+                        * (inverse[(local_offset + column, self.column)]
+                            + inverse[(local_offset + self.column, column)]);
+                    let global_column = self.offset + local_offset + column;
+                    for right in 0..rhs.ncols() {
+                        product[(target, right)] += value * rhs[(global_column, right)];
+                        product[(global_column, right)] += value * rhs[(target, right)];
+                    }
+                }
+            }
+        }
+        (trace, product)
+    }
+
     #[cfg(test)]
     fn crossproduct_derivative(&self, ztwz_lambda: &Mat<f64>) -> Mat<f64> {
         // d(Lambda' Z'WZ Lambda) = dLambda' (Z'WZ Lambda) + its transpose.
@@ -149,7 +179,7 @@ impl LambdaDerivative {
 fn lambda_derivatives(structures: &[RandomEffectStructure]) -> Vec<LambdaDerivative> {
     let mut derivatives = Vec::new();
     let mut offset = 0;
-    for structure in structures {
+    for (structure_index, structure) in structures.iter().enumerate() {
         for row in 0..structure.n_terms {
             let columns = if structure.correlated {
                 0..row + 1
@@ -158,6 +188,7 @@ fn lambda_derivatives(structures: &[RandomEffectStructure]) -> Vec<LambdaDerivat
             };
             for column in columns {
                 derivatives.push(LambdaDerivative {
+                    structure: structure_index,
                     offset,
                     n_levels: structure.n_levels,
                     n_terms: structure.n_terms,
@@ -169,6 +200,69 @@ fn lambda_derivatives(structures: &[RandomEffectStructure]) -> Vec<LambdaDerivat
         offset += structure.n_levels * structure.n_terms;
     }
     derivatives
+}
+
+enum GradientCrossproducts {
+    Dense {
+        product: Mat<f64>,
+        inverse: Mat<f64>,
+    },
+    Levels {
+        products: Vec<Mat<f64>>,
+        inverses: Vec<Mat<f64>>,
+    },
+}
+
+impl GradientCrossproducts {
+    fn new(design: &PreparedLmmDesign, factor: &CovarianceFactor, chol: &BlockedCholesky) -> Self {
+        if design.independent_level_blocks
+            && let Some(inverses) = chol.independent_level_inverses()
+        {
+            return Self::Levels {
+                products: factor.right_apply_level_crossproducts(design.ztwz.as_ref()),
+                inverses,
+            };
+        }
+        let inverse = chol.inverse();
+        Self::Dense {
+            product: factor.right_apply(design.ztwz.as_ref()),
+            inverse,
+        }
+    }
+
+    fn actions(&self, derivative: &LambdaDerivative, rhs: &Mat<f64>) -> (f64, Mat<f64>) {
+        match self {
+            Self::Dense { product, inverse } => {
+                derivative.crossproduct_actions(product, inverse, rhs)
+            }
+            Self::Levels { products, inverses } => derivative.level_crossproduct_actions(
+                &products[derivative.structure],
+                &inverses[derivative.structure],
+                rhs,
+            ),
+        }
+    }
+}
+
+fn independent_level_blocks(
+    ztwz: &Mat<f64>,
+    structures: &[RandomEffectStructure],
+    independent_levels: &[bool],
+) -> bool {
+    if independent_levels.iter().any(|independent| !independent) {
+        return false;
+    }
+    let mut offset = 0;
+    for structure in structures {
+        let end = offset + structure.n_levels * structure.n_terms;
+        if (offset..end).any(|column| {
+            (0..offset).any(|row| ztwz[(row, column)] != 0.0 || ztwz[(column, row)] != 0.0)
+        }) {
+            return false;
+        }
+        offset = end;
+    }
+    true
 }
 
 fn compute_ztwz_sparse(z: &CscMatrix, weights: &[f64]) -> Mat<f64> {
@@ -244,6 +338,7 @@ struct PreparedLmmDesign {
     ztwx: Mat<f64>,
     ztwz: Mat<f64>,
     independent_levels: Vec<bool>,
+    independent_level_blocks: bool,
     structures: Vec<RandomEffectStructure>,
     n_theta: usize,
 }
@@ -315,6 +410,8 @@ impl PreparedLmmDesign {
             compute_ztwz_sparse(&z, &weights)
         };
         let independent_levels = BlockedMatrix::independent_levels(&ztwz, &structures);
+        let independent_level_blocks =
+            independent_level_blocks(&ztwz, &structures, &independent_levels);
         Ok(Self {
             x,
             wx,
@@ -327,6 +424,7 @@ impl PreparedLmmDesign {
             ztwx,
             ztwz,
             independent_levels,
+            independent_level_blocks,
             structures,
             n_theta,
         })
@@ -472,7 +570,6 @@ impl PreparedLmmResponse {
             dev += logdet_xtvinvx;
         }
 
-        let v_inv = chol_v.inverse();
         let v_inv_b = if reml {
             chol_v.solve(&lambdat_ztwx)
         } else {
@@ -484,7 +581,7 @@ impl PreparedLmmResponse {
             None
         };
 
-        let ztwz_lambda = factor.right_apply(ztwz.as_ref());
+        let gradient_products = GradientCrossproducts::new(design, &factor, &chol_v);
         let derivative_rhs = Mat::from_fn(q, 1 + v_inv_b.ncols(), |row, column| {
             if column == 0 {
                 u_star[(row, 0)]
@@ -495,8 +592,7 @@ impl PreparedLmmResponse {
         let mut gradient = Vec::with_capacity(n_theta);
 
         for derivative in lambda_derivatives(structures) {
-            let (d_logdet_v, products) =
-                derivative.crossproduct_actions(&ztwz_lambda, &v_inv, &derivative_rhs);
+            let (d_logdet_v, products) = gradient_products.actions(&derivative, &derivative_rhs);
 
             let mut dc = derivative.apply::<true>(&zt_w_resid);
             for row in 0..q {
@@ -1067,6 +1163,140 @@ pub fn profiled_deviance_with_gradient<'py>(
 mod prepared_tests {
     use super::*;
     use numpy::ndarray::ArrayView1;
+
+    #[test]
+    fn independent_level_contractions_match_full_products() {
+        let structures = [
+            RandomEffectStructure {
+                n_levels: 0,
+                n_terms: 1,
+                correlated: true,
+            },
+            RandomEffectStructure {
+                n_levels: 3,
+                n_terms: 2,
+                correlated: true,
+            },
+            RandomEffectStructure {
+                n_levels: 2,
+                n_terms: 3,
+                correlated: false,
+            },
+            RandomEffectStructure {
+                n_levels: 4,
+                n_terms: 1,
+                correlated: true,
+            },
+        ];
+        let q = 16;
+        let mut full_product = Mat::zeros(q, q);
+        let mut full_inverse = Mat::zeros(q, q);
+        let mut products = Vec::new();
+        let mut inverses = Vec::new();
+        let mut offset = 0;
+        for structure in &structures {
+            let width = structure.n_terms;
+            let dimension = structure.n_levels * width;
+            let product = Mat::from_fn(dimension, width, |i, j| (i + 3 * j) as f64 / 8.0 - 0.5);
+            // Deliberately nonsymmetric to verify both inverse orientations.
+            let inverse = Mat::from_fn(dimension, width, |i, j| (3 * i + j + 1) as f64 / 16.0);
+            for level in 0..structure.n_levels {
+                let local = level * width;
+                full_product
+                    .submatrix_mut(offset + local, offset + local, width, width)
+                    .copy_from(product.subrows(local, width));
+                full_inverse
+                    .submatrix_mut(offset + local, offset + local, width, width)
+                    .copy_from(inverse.subrows(local, width));
+            }
+            products.push(product);
+            inverses.push(inverse);
+            offset += dimension;
+        }
+        let compact = GradientCrossproducts::Levels { products, inverses };
+        for derivative in lambda_derivatives(&structures) {
+            for columns in [0, 1, 4, 17] {
+                let rhs = Mat::from_fn(q, columns, |i, j| ((2 * i + j) % 11) as f64 / 4.0);
+                let (trace, product) = compact.actions(&derivative, &rhs);
+                let (expected_trace, expected_product) =
+                    derivative.crossproduct_actions(&full_product, &full_inverse, &rhs);
+                assert_eq!(trace, expected_trace);
+                assert_eq!(product, expected_product);
+            }
+        }
+    }
+
+    #[test]
+    fn compact_gradient_selection_depends_on_design_and_retains_tiny_couplings() {
+        let structures = vec![
+            RandomEffectStructure {
+                n_levels: 2,
+                n_terms: 2,
+                correlated: true,
+            },
+            RandomEffectStructure {
+                n_levels: 3,
+                n_terms: 1,
+                correlated: false,
+            },
+        ];
+        let q = 7;
+        let design = |crossproduct: &Mat<f64>| {
+            let rows = (0..q).collect::<Vec<_>>();
+            let offsets = (0..=q).collect::<Vec<_>>();
+            let z = CscMatrix::try_from_usize(&vec![1.0; q], &rows, &offsets, (q, q)).unwrap();
+            let cache = (0..q * q)
+                .map(|i| crossproduct[(i / q, i % q)])
+                .collect::<Vec<_>>();
+            PreparedLmmDesign::new(
+                Mat::full(q, 1, 1.0),
+                z,
+                vec![1.0; q],
+                vec![0.0; q],
+                structures.clone(),
+                Some(&cache),
+            )
+            .unwrap()
+        };
+        let mut crossproduct = Mat::<f64>::identity(q, q);
+        crossproduct[(0, 1)] = 0.2;
+        crossproduct[(1, 0)] = 0.2;
+        let independent = design(&crossproduct);
+        assert!(independent.independent_level_blocks);
+        let blocks = build_lambda_blocks(&[0.8, 0.1, 0.6, 0.5], &structures);
+        let blocked = BlockedMatrix::from_lambda_ztwz(&crossproduct, &blocks, &structures, true);
+        let chol = BlockedCholesky::factor(&blocked).unwrap();
+        let factor = CovarianceFactor::from_blocks(blocks, &structures);
+        let GradientCrossproducts::Levels { products, inverses } =
+            GradientCrossproducts::new(&independent, &factor, &chol)
+        else {
+            panic!("independent levels should use compact products")
+        };
+        for values in [products, inverses] {
+            assert_eq!(values[0].shape(), (4, 2));
+            assert_eq!(values[1].shape(), (3, 1));
+            assert_eq!(
+                values.iter().map(|m| m.nrows() * m.ncols()).sum::<usize>(),
+                11
+            );
+        }
+        for (row, column) in [(0, 2), (2, 0), (0, 4), (4, 0)] {
+            let mut coupled = crossproduct.clone();
+            coupled[(row, column)] = 1e-300;
+            let coupled_design = design(&coupled);
+            assert!(!coupled_design.independent_level_blocks);
+            // Zero covariance parameters can hide design coupling in the factor.
+            let zero_blocks = build_lambda_blocks(&[0.0; 4], &structures);
+            let blocked =
+                BlockedMatrix::from_lambda_ztwz(&coupled, &zero_blocks, &structures, true);
+            let chol = BlockedCholesky::factor(&blocked).unwrap();
+            let factor = CovarianceFactor::from_blocks(zero_blocks, &structures);
+            assert!(matches!(
+                GradientCrossproducts::new(&coupled_design, &factor, &chol),
+                GradientCrossproducts::Dense { .. }
+            ));
+        }
+    }
 
     #[test]
     fn coordinate_derivatives_match_full_matrix_products() {

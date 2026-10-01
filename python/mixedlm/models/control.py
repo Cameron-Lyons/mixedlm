@@ -183,7 +183,8 @@ class LmerControl:
         Use prepared analytic gradients with the native backend and L-BFGS-B,
         BFGS, TNC, SLSQP, or trust-constr. False retains numerical derivatives.
         Python and structured-covariance fits retain numerical derivatives when
-        required. Analytic gradients can be slower for large random-effect systems.
+        required. Benefits depend on the model and optimizer; large coupled
+        random-effect systems can make analytic gradients more expensive.
     em_init : bool, default False
         Whether to use EM-REML algorithm for initialization before
         switching to direct optimization. Can improve convergence for
