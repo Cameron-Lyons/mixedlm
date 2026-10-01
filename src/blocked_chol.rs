@@ -52,11 +52,49 @@ pub struct BlockedMatrix {
 }
 
 impl BlockedMatrix {
+    /// Identify structures whose weighted design products separate by level.
+    /// Cache this alongside immutable crossproducts, rather than scanning each solve.
+    pub fn independent_levels(ztwz: &Mat<f64>, structures: &[RandomEffectStructure]) -> Vec<bool> {
+        let mut offset = 0;
+        structures
+            .iter()
+            .map(|structure| {
+                let width = structure.n_terms;
+                let dimension = width * structure.n_levels;
+                let independent = (0..dimension).all(|column| {
+                    (0..column / width * width).all(|row| {
+                        ztwz[(offset + row, offset + column)] == 0.0
+                            && ztwz[(offset + column, offset + row)] == 0.0
+                    })
+                });
+                offset += dimension;
+                independent
+            })
+            .collect()
+    }
+
     pub fn from_lambda_ztwz(
         ztwz: &Mat<f64>,
         lambda_blocks: &[Mat<f64>],
         structures: &[RandomEffectStructure],
         add_identity: bool,
+    ) -> Self {
+        let independent_levels = Self::independent_levels(ztwz, structures);
+        Self::from_lambda_ztwz_with_pattern(
+            ztwz,
+            lambda_blocks,
+            structures,
+            add_identity,
+            &independent_levels,
+        )
+    }
+
+    pub fn from_lambda_ztwz_with_pattern(
+        ztwz: &Mat<f64>,
+        lambda_blocks: &[Mat<f64>],
+        structures: &[RandomEffectStructure],
+        add_identity: bool,
+        independent_levels: &[bool],
     ) -> Self {
         let n_blocks = structures.len();
         let block_dims: Vec<usize> = structures.iter().map(|s| s.n_levels * s.n_terms).collect();
@@ -82,7 +120,7 @@ impl BlockedMatrix {
                 let offset_i = block_offsets[i];
                 let offset_j = block_offsets[j];
 
-                if i == j {
+                if i == j && independent_levels[i] {
                     if qi == 1 {
                         let mut diagonal: Vec<f64> = Vec::with_capacity(ni);
 
@@ -163,9 +201,15 @@ impl BlockedMatrix {
                         }
                     }
 
+                    if i == j && add_identity {
+                        for diagonal in 0..block_dims[i] {
+                            dense_block[(diagonal, diagonal)] += 1.0;
+                        }
+                    }
+
                     let is_zero = dense_block
                         .col_iter()
-                        .all(|col| col.iter().all(|&v| v.abs() < 1e-15));
+                        .all(|col| col.iter().all(|&v| v == 0.0));
 
                     if is_zero {
                         row_blocks.push(BlockType::Zero {
@@ -801,6 +845,84 @@ mod tests {
             }
         }
         m
+    }
+
+    #[test]
+    fn overlapping_levels_preserve_the_full_covariance_transform() {
+        let structures = make_test_structures();
+        let lambda_blocks = make_test_lambda_blocks();
+        let ztwz = make_test_ztwz(8);
+        let mut lambda = Mat::zeros(8, 8);
+        let mut offset = 0;
+        for (structure, block) in structures.iter().zip(&lambda_blocks) {
+            for _ in 0..structure.n_levels {
+                for i in 0..structure.n_terms {
+                    for j in 0..structure.n_terms {
+                        lambda[(offset + i, offset + j)] = block[(i, j)];
+                    }
+                }
+                offset += structure.n_terms;
+            }
+        }
+        assert_eq!(
+            BlockedMatrix::independent_levels(&ztwz, &structures),
+            [false, false]
+        );
+        for add_identity in [false, true] {
+            let blocked =
+                BlockedMatrix::from_lambda_ztwz(&ztwz, &lambda_blocks, &structures, add_identity);
+            assert!(matches!(blocked.blocks[0][0], BlockType::Dense(_)));
+            assert!(matches!(blocked.blocks[1][1], BlockType::Dense(_)));
+            let mut expected = lambda.transpose() * &ztwz * &lambda;
+            if add_identity {
+                expected += Mat::<f64>::identity(8, 8);
+            }
+            let actual = blocked.to_dense();
+            for i in 0..8 {
+                for j in 0..8 {
+                    assert!((actual[(i, j)] - expected[(i, j)]).abs() < 1e-14);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn independent_levels_keep_specialized_blocks_and_detect_small_couplings() {
+        let structures = make_test_structures();
+        let lambda_blocks = make_test_lambda_blocks();
+        let mut ztwz = Mat::<f64>::identity(8, 8);
+        ztwz[(0, 1)] = 0.2;
+        ztwz[(1, 0)] = 0.2;
+        ztwz[(0, 6)] = 0.3;
+        ztwz[(6, 0)] = 0.3;
+        assert_eq!(
+            BlockedMatrix::independent_levels(&ztwz, &structures),
+            [true, true]
+        );
+        let blocked = BlockedMatrix::from_lambda_ztwz(&ztwz, &lambda_blocks, &structures, true);
+        assert!(matches!(
+            blocked.blocks[0][0],
+            BlockType::BlockDiagonal { .. }
+        ));
+        assert!(matches!(blocked.blocks[1][1], BlockType::Diagonal(_)));
+        ztwz[(0, 3)] = 1e-300;
+        ztwz[(3, 0)] = 1e-300;
+        assert_eq!(
+            BlockedMatrix::independent_levels(&ztwz, &structures),
+            [false, true]
+        );
+    }
+
+    #[test]
+    fn small_cross_structure_products_are_not_treated_as_zero() {
+        let structures = make_test_structures();
+        let lambda_blocks = make_test_lambda_blocks();
+        let mut ztwz = Mat::<f64>::identity(8, 8);
+        ztwz[(0, 6)] = 1e-300;
+        ztwz[(6, 0)] = 1e-300;
+        let blocked = BlockedMatrix::from_lambda_ztwz(&ztwz, &lambda_blocks, &structures, true);
+        assert!(matches!(blocked.blocks[1][0], BlockType::Dense(_)));
+        assert!(blocked.to_dense()[(6, 0)] > 0.0);
     }
 
     #[test]

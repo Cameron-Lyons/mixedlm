@@ -103,6 +103,12 @@ preparing a separate workspace in each parallel worker. Response-dependent
 products are recomputed for each replicate, and each refit starts from the
 original fitted covariance parameters.
 
+The native solver checks whether the weighted design products separate by
+grouping level and caches that pattern with the design. Standard grouped
+designs use diagonal or small block solves. If an advanced design includes
+overlapping level columns, the solver retains the full covariance within each
+affected structure; covariance gradients retain those cross-level terms too.
+
 Native mixed-model fits also use these products to extract final fixed and
 random effects, scale, likelihood components, and fixed-effect information.
 They avoid building a second Python crossproduct cache during final extraction

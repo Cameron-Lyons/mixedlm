@@ -1590,6 +1590,36 @@ def test_benchmark_lmm_final_estimates(benchmark, layout, size, use_rust, warm):
         )
 
 
+@pytest.mark.benchmark(group="lmm-level-covariance")
+@pytest.mark.parametrize("layout", ["intercept", "correlated", "mixed"])
+@pytest.mark.parametrize("overlap", [False, True])
+@pytest.mark.parametrize("operation", ["prepare", "objective", "gradient"])
+def test_benchmark_lmm_level_covariance(benchmark, layout, overlap, operation):
+    from mixedlm import _rust
+
+    from tests.test_lmm_prepared_design import native_arguments
+    from tests.test_native_covariance_transforms import _problem
+    from tests.test_reml_profiled_deviance import _direct_profiled_likelihood
+
+    matrices, theta, _ = _problem(layout, "regular", True, overlap=overlap)
+    expected = _direct_profiled_likelihood(theta, matrices, True)["deviance"]
+    if operation == "prepare":
+        prepared = benchmark(LMMOptimizer, matrices, use_rust=True)
+        actual = prepared.objective(theta)
+    elif operation == "objective":
+        prepared = LMMOptimizer(matrices, use_rust=True)
+        actual = benchmark(prepared.objective, theta)
+    else:
+        actual, gradient = benchmark(
+            _rust.profiled_deviance_with_gradient,
+            theta=theta,
+            y=matrices.y,
+            **native_arguments(matrices),
+        )
+        assert np.all(np.isfinite(gradient))
+    np.testing.assert_allclose(actual, expected, rtol=1e-12, atol=1e-11)
+
+
 @pytest.mark.benchmark(group="prepared-lmm-threads")
 @pytest.mark.parametrize("reml", [False, True])
 @pytest.mark.parametrize("workers", [1, 2, 4])

@@ -73,6 +73,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Native LMM likelihoods, final estimates, and covariance gradients preserve weighted crossproducts between levels of the same random-effect structure. This corrects advanced designs with overlapping level columns; ordinary grouped designs retain their specialized block solves.
+
 - GLMM optimizers, joint likelihood objectives, and modular deviance callables can be deep-copied and pickled with native preparation enabled. Restored objects rebuild the cache using the available backend and preserve model inputs and solver controls.
 
 - Native GLMM entry points reject inconsistent array dimensions, covariance parameter counts, and random-effect metadata with `ValueError`, preventing Rust panics and silently ignored input. Dimension arithmetic and sparse column-pointer lengths are checked for overflow.
