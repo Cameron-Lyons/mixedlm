@@ -25,6 +25,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Native Gaussian GLMMs with the identity link reuse a constant working factor across PIRLS iterations and the final likelihood correction.
+
 - Native LMM factorization reuses its working covariance buffers, removing extra matrix copies for both independent levels and coupled random effects.
 
 - Parallel LMM and GLMM bootstrap reuse model data within each worker and bound queued tasks, reducing serialization and scheduling memory. Worker counts are validated before drawing seeds and capped at the number of replicates.
