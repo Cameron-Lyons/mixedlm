@@ -18,8 +18,14 @@ use numpy::ndarray::ArrayView2;
 use crate::csc::CscMatrix;
 use crate::linalg::LinalgError;
 
+struct Ordering {
+    forward: Vec<usize>,
+    inverse: Vec<usize>,
+}
+
 pub struct SymbolicCholeskyCache {
     symbolic: Arc<SymbolicCholesky<usize>>,
+    ordering: Option<Arc<Ordering>>,
     input_indices: Vec<usize>,
     input_indptr: Vec<usize>,
     upper_indices: Vec<usize>,
@@ -54,8 +60,8 @@ impl SymbolicCholeskyCache {
             ..Default::default()
         };
         // faer's AMD preprocessing reads the previous Cell value when filling
-        // column pointers. Initialize its scratch before invoking it, then pass
-        // the computed ordering to symbolic factorization.
+        // column pointers. Initialize its scratch before invoking it and retain
+        // the computed ordering with the cache.
         let mut permutation = Vec::new();
         let mut inverse = Vec::new();
         let ordering = if matches!(ordering, SymmetricOrdering::Amd) {
@@ -76,14 +82,41 @@ impl SymbolicCholeskyCache {
                 MemStack::new(&mut memory),
             )
             .map_err(|error| LinalgError::InvalidSparseFormat(format!("{error:?}")))?;
-            SymmetricOrdering::Custom(PermRef::new_checked(&permutation, &inverse, n))
+            Some(Arc::new(Ordering {
+                forward: permutation,
+                inverse,
+            }))
         } else {
-            ordering
+            None
+        };
+        // Permute initialized owned storage ourselves: faer's internal custom
+        // ordering path also fills uninitialized column pointers via Cell::set.
+        let upper = if let Some(ordering) = &ordering {
+            let mut columns = vec![Vec::new(); n];
+            for column in 0..n {
+                for &row in &upper.row_indices()
+                    [upper.col_offsets()[column]..upper.col_offsets()[column + 1]]
+                {
+                    let i = ordering.inverse[row];
+                    let j = ordering.inverse[column];
+                    columns[i.max(j)].push(i.min(j));
+                }
+            }
+            let mut pointers = vec![0];
+            let mut rows = Vec::with_capacity(upper.values().len());
+            for column in &mut columns {
+                column.sort_unstable();
+                rows.extend_from_slice(column);
+                pointers.push(rows.len());
+            }
+            build_csc_matrix(&vec![1.0; rows.len()], &rows, &pointers, n)?
+        } else {
+            upper
         };
         let symbolic = factorize_symbolic_cholesky(
             matrix_ref(&upper).symbolic(),
             Side::Upper,
-            ordering,
+            SymmetricOrdering::Identity,
             params,
         )
         .map_err(|error| LinalgError::InvalidSparseFormat(format!("{error:?}")))?;
@@ -98,16 +131,22 @@ impl SymbolicCholeskyCache {
                 if row < column {
                     continue;
                 }
-                let upper_start = upper.col_offsets()[row];
-                let upper_end = upper.col_offsets()[row + 1];
+                let (i, j) = match &ordering {
+                    Some(ordering) => (ordering.inverse[row], ordering.inverse[column]),
+                    None => (row, column),
+                };
+                let upper_column = i.max(j);
+                let upper_start = upper.col_offsets()[upper_column];
+                let upper_end = upper.col_offsets()[upper_column + 1];
                 let offset = upper.row_indices()[upper_start..upper_end]
-                    .binary_search(&column)
+                    .binary_search(&i.min(j))
                     .expect("canonical upper pattern contains every lower entry");
                 upper_value_sources.push((position, upper_start + offset));
             }
         }
         Ok(Self {
             symbolic: Arc::new(symbolic),
+            ordering,
             input_indices: indices.to_vec(),
             input_indptr: indptr.to_vec(),
             upper_indices: upper.row_indices().to_vec(),
@@ -179,6 +218,7 @@ impl SymbolicCholeskyCache {
         }
         Ok(NumericFactorization {
             symbolic: Arc::clone(&self.symbolic),
+            ordering: self.ordering.clone(),
             values,
             n: self.n,
         })
@@ -195,6 +235,7 @@ impl SymbolicCholeskyCache {
 
 pub struct NumericFactorization {
     symbolic: Arc<SymbolicCholesky<usize>>,
+    ordering: Option<Arc<Ordering>>,
     values: Vec<f64>,
     n: usize,
 }
@@ -205,7 +246,8 @@ impl NumericFactorization {
         let SymbolicCholeskyRaw::Simplicial(symbolic) = self.symbolic.raw() else {
             unreachable!("symbolic factorization is forced to be simplicial")
         };
-        if let Some(permutation) = self.symbolic.perm() {
+        if let Some(ordering) = &self.ordering {
+            let permutation = PermRef::new_checked(&ordering.forward, &ordering.inverse, self.n);
             let input = rhs.as_ref().to_owned();
             faer::perm::permute_rows(rhs.as_mut(), input.as_ref(), permutation);
         }
@@ -242,7 +284,8 @@ impl NumericFactorization {
             rhs.as_mut(),
             Par::Seq,
         );
-        if let Some(permutation) = self.symbolic.perm() {
+        if let Some(ordering) = &self.ordering {
+            let permutation = PermRef::new_checked(&ordering.forward, &ordering.inverse, self.n);
             let input = rhs.as_ref().to_owned();
             faer::perm::permute_rows(rhs, input.as_ref(), permutation.inverse());
         }
@@ -259,7 +302,12 @@ impl NumericFactorization {
         // ndarray iteration follows logical row-major order even for strided inputs.
         // Solve all columns directly in the owned Python result buffer.
         let mut result: Vec<f64> = b.iter().copied().collect();
-        let rhs = MatMut::from_row_major_slice_mut(&mut result, self.n, b.ncols());
+        let mut rhs = MatMut::from_row_major_slice_mut(&mut result, self.n, b.ncols());
+        if self.ordering.is_some() {
+            self.solve_lower_in_place(rhs.as_mut());
+            self.solve_upper_in_place(rhs);
+            return Ok(result);
+        }
         let SymbolicCholeskyRaw::Simplicial(symbolic) = self.symbolic.raw() else {
             unreachable!("symbolic factorization is forced to be simplicial")
         };
@@ -349,6 +397,32 @@ mod tests {
             for j in 0..columns {
                 for i in 0..3 {
                     assert!((reconstructed[(i, j)] - rhs[(i, j)]).abs() < 1e-12);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn amd_factorization_preserves_rhs_order() {
+        let indices = [0, 1, 2, 3, 1, 2, 3];
+        let offsets = [0, 4, 5, 6, 7];
+        let symbolic = SymbolicCholeskyCache::new_amd(&indices, &offsets, 4).unwrap();
+        let rhs = array![[1.0, 2.0], [-3.0, 4.0], [5.0, -6.0], [7.0, 8.0]];
+        for diagonal in [5.0, 7.0] {
+            let data = [diagonal, 1.0, 1.0, 1.0, diagonal, diagonal, diagonal];
+            let factor = symbolic.factor(&data, &indices, &offsets).unwrap();
+            let solution = factor.solve(rhs.view()).unwrap();
+            for column in 0..2 {
+                for row in 0..4 {
+                    let cross = if row == 0 {
+                        (1..4).map(|i| solution[i * 2 + column]).sum::<f64>()
+                    } else {
+                        solution[column]
+                    };
+                    assert!(
+                        (diagonal * solution[row * 2 + column] + cross - rhs[(row, column)]).abs()
+                            < 1e-12
+                    );
                 }
             }
         }
