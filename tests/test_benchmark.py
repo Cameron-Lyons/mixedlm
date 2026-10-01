@@ -1818,7 +1818,7 @@ def test_benchmark_separate_lmm_level_gradients(benchmark, widths, independent, 
 
 
 @pytest.mark.benchmark(group="lmm-reml-contractions")
-@pytest.mark.parametrize("widths", [(3, 2), (8, 5)])
+@pytest.mark.parametrize("widths", [(3, 2), (8, 5), (17, 16)])
 @pytest.mark.parametrize("fixed", [8, 64])
 @pytest.mark.parametrize("coupled", [False, True])
 @pytest.mark.parametrize("reml", [False, True])

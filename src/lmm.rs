@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use faer::linalg::solvers::{Llt, Solve};
-use faer::{Mat, MatRef, Side};
+use faer::{Mat, Side};
 use numpy::PyArray1;
 use numpy::ndarray::{ArrayView1, ArrayView2};
 use pyo3::PyResult;
@@ -202,21 +202,38 @@ fn lambda_derivatives(structures: &[RandomEffectStructure]) -> Vec<LambdaDerivat
     derivatives
 }
 
-fn fixed_effect_logdet_derivative(
-    weighted: MatRef<'_, f64>,
-    derivative_b: MatRef<'_, f64>,
-    derivative_v_p: MatRef<'_, f64>,
-) -> f64 {
-    debug_assert_eq!(weighted.shape(), derivative_b.shape());
-    debug_assert_eq!(weighted.shape(), derivative_v_p.shape());
-    let mut trace = 0.0;
-    for column in 0..weighted.ncols() {
-        for row in 0..weighted.nrows() {
-            trace += weighted[(row, column)]
-                * (derivative_v_p[(row, column)] - 2.0 * derivative_b[(row, column)]);
-        }
+/// Shared products for the REML fixed-information log determinant.
+struct FixedEffectGradient {
+    weighted: Mat<f64>,
+    residual: Mat<f64>,
+}
+
+impl FixedEffectGradient {
+    fn new(
+        products: &GradientCrossproducts,
+        projection: &Mat<f64>,
+        weighted: Mat<f64>,
+        ztwx: &Mat<f64>,
+    ) -> Self {
+        let mut residual = products.apply(projection);
+        residual -= ztwx;
+        Self { weighted, residual }
     }
-    trace
+
+    fn derivative(&self, derivative: &LambdaDerivative) -> f64 {
+        // P = V^-1 B, W = P C^-1, A = Z'W_obs Z Lambda, T = Z'W_obs X.
+        // Symmetry of C^-1 combines the two dV terms:
+        // tr(C^-1 dC) = 2 <dLambda W, A P - T>.
+        let mut trace = 0.0;
+        for column in 0..self.weighted.ncols() {
+            for level in 0..derivative.n_levels {
+                let offset = derivative.offset + level * derivative.n_terms;
+                trace += self.weighted[(offset + derivative.column, column)]
+                    * self.residual[(offset + derivative.row, column)];
+            }
+        }
+        2.0 * trace
+    }
 }
 
 enum GradientCrossproducts {
@@ -244,6 +261,56 @@ impl GradientCrossproducts {
         Self::Dense {
             product: factor.right_apply(design.ztwz.as_ref()),
             inverse,
+        }
+    }
+
+    fn apply(&self, rhs: &Mat<f64>) -> Mat<f64> {
+        match self {
+            Self::Dense { product, .. } => product * rhs,
+            Self::Levels { products, .. } => {
+                let mut result = Mat::zeros(rhs.nrows(), rhs.ncols());
+                let mut offset = 0;
+                for product in products {
+                    let width = product.ncols();
+                    if width == 1 {
+                        // A random-intercept block is diagonal across levels.
+                        for column in 0..rhs.ncols() {
+                            for row in 0..product.nrows() {
+                                result[(offset + row, column)] =
+                                    product[(row, 0)] * rhs[(offset + row, column)];
+                            }
+                        }
+                    } else if width > 1 && width < 16 {
+                        // Avoid dense-kernel dispatch for the small blocks used
+                        // by grouped intercepts and slopes.
+                        for column in 0..rhs.ncols() {
+                            for local in (0..product.nrows()).step_by(width) {
+                                for row in 0..width {
+                                    let mut value = 0.0;
+                                    for source in 0..width {
+                                        value += product[(local + row, source)]
+                                            * rhs[(offset + local + source, column)];
+                                    }
+                                    result[(offset + local + row, column)] = value;
+                                }
+                            }
+                        }
+                    } else if width >= 16 {
+                        for local in (0..product.nrows()).step_by(width) {
+                            faer::linalg::matmul::matmul(
+                                result.subrows_mut(offset + local, width),
+                                faer::Accum::Replace,
+                                product.subrows(local, width),
+                                rhs.subrows(offset + local, width),
+                                1.0,
+                                faer::get_global_parallelism(),
+                            );
+                        }
+                    }
+                    offset += product.nrows();
+                }
+                result
+            }
         }
     }
 
@@ -587,36 +654,26 @@ impl PreparedLmmResponse {
             dev += logdet_xtvinvx;
         }
 
-        let v_inv_b = if reml {
-            chol_v.solve(&lambdat_ztwx)
-        } else {
-            Mat::zeros(q, 0)
-        };
-        // With P = V^-1 B and C = X'V_obs^-1 X, solve for P C^-1 once.
-        // Each covariance derivative then contracts (dV P - 2 dB) against it.
-        let fixed_weights = if reml && p > 0 {
-            Some(
-                chol_xtvinvx
-                    .solve(&v_inv_b.transpose())
-                    .transpose()
-                    .to_owned(),
-            )
+        let gradient_products = GradientCrossproducts::new(design, &factor, &chol_v);
+        let fixed_gradient = if reml && p > 0 {
+            let projection = chol_v.solve(&lambdat_ztwx);
+            let weighted = chol_xtvinvx
+                .solve(&projection.transpose())
+                .transpose()
+                .to_owned();
+            Some(FixedEffectGradient::new(
+                &gradient_products,
+                &projection,
+                weighted,
+                ztwx,
+            ))
         } else {
             None
         };
-
-        let gradient_products = GradientCrossproducts::new(design, &factor, &chol_v);
-        let derivative_rhs = Mat::from_fn(q, 1 + v_inv_b.ncols(), |row, column| {
-            if column == 0 {
-                u_star[(row, 0)]
-            } else {
-                v_inv_b[(row, column - 1)]
-            }
-        });
         let mut gradient = Vec::with_capacity(n_theta);
 
         for derivative in lambda_derivatives(structures) {
-            let (d_logdet_v, products) = gradient_products.actions(&derivative, &derivative_rhs);
+            let (d_logdet_v, products) = gradient_products.actions(&derivative, &u_star);
 
             let mut dc = derivative.apply::<true>(&zt_w_resid);
             for row in 0..q {
@@ -639,13 +696,8 @@ impl PreparedLmmResponse {
 
             let mut grad_k = d_logdet_v + denom / pwrss * d_pwrss;
 
-            if let Some(fixed_weights) = &fixed_weights {
-                let db = derivative.apply::<true>(ztwx);
-                grad_k += fixed_effect_logdet_derivative(
-                    fixed_weights.as_ref(),
-                    db.as_ref(),
-                    products.as_ref().subcols(1, p),
-                );
+            if let Some(fixed_gradient) = &fixed_gradient {
+                grad_k += fixed_gradient.derivative(&derivative);
             }
 
             gradient.push(grad_k);
@@ -1179,40 +1231,47 @@ mod prepared_tests {
     use numpy::ndarray::ArrayView1;
 
     #[test]
-    fn fixed_effect_contraction_matches_full_information_derivative() {
+    fn shared_fixed_effect_products_match_full_information_derivatives() {
         let fixed: &[usize] = if cfg!(miri) {
             &[0, 1, 3]
         } else {
             &[0, 1, 3, 8, 17]
         };
-        let random: &[usize] = if cfg!(miri) {
-            &[0, 1, 4]
-        } else {
-            &[0, 1, 4, 19]
-        };
+        let structures = [
+            RandomEffectStructure {
+                n_levels: 2,
+                n_terms: 3,
+                correlated: true,
+            },
+            RandomEffectStructure {
+                n_levels: 3,
+                n_terms: 2,
+                correlated: false,
+            },
+        ];
+        let q = 12;
         for &p in fixed {
             let design = Mat::from_fn(p + 2, p, |i, j| ((i + 2 * j) % 5) as f64 / 8.0);
             let information = Mat::<f64>::identity(p, p) + design.transpose() * &design;
             let chol = Llt::new(information.as_ref(), Side::Lower).unwrap();
-            for &q in random {
-                let projection =
-                    Mat::from_fn(q, p, |i, j| ((3 * i + 5 * j) % 11) as f64 / 8.0 - 0.5);
-                let derivative_b =
-                    Mat::from_fn(q, p, |i, j| ((i + 2 * j + 1) % 13) as f64 / 16.0 - 0.25);
-                let derivative_v =
-                    Mat::from_fn(q, q, |i, j| ((i + j + 1) % 7) as f64 / 16.0 - 0.125);
-                let product = &derivative_v * &projection;
-                let derivative_information = projection.transpose() * &product
+            let projection = Mat::from_fn(q, p, |i, j| ((3 * i + 5 * j) % 11) as f64 / 8.0 - 0.5);
+            let ztwx = Mat::from_fn(q, p, |i, j| ((i + 2 * j + 1) % 13) as f64 / 16.0 - 0.25);
+            let product = Mat::from_fn(q, q, |i, j| ((i + 3 * j + 1) % 7) as f64 / 16.0 - 0.125);
+            let products = GradientCrossproducts::Dense {
+                product: product.clone(),
+                inverse: Mat::zeros(q, q),
+            };
+            let weighted = chol.solve(&projection.transpose()).transpose().to_owned();
+            let shared = FixedEffectGradient::new(&products, &projection, weighted, &ztwx);
+            for derivative in lambda_derivatives(&structures) {
+                let derivative_b = derivative.apply::<true>(&ztwx);
+                let derivative_v = derivative.crossproduct_derivative(&product);
+                let derivative_information = projection.transpose() * derivative_v * &projection
                     - derivative_b.transpose() * &projection
                     - projection.transpose() * &derivative_b;
                 let solved = chol.solve(&derivative_information);
                 let expected: f64 = (0..p).map(|i| solved[(i, i)]).sum();
-                let weighted = chol.solve(&projection.transpose()).transpose().to_owned();
-                let actual = fixed_effect_logdet_derivative(
-                    weighted.as_ref(),
-                    derivative_b.as_ref(),
-                    product.as_ref(),
-                );
+                let actual = shared.derivative(&derivative);
                 assert!((actual - expected).abs() < 1e-11 * expected.abs().max(1.0));
             }
         }
@@ -1221,6 +1280,11 @@ mod prepared_tests {
     #[test]
     fn independent_level_contractions_match_full_products() {
         let structures = [
+            RandomEffectStructure {
+                n_levels: 2,
+                n_terms: 0,
+                correlated: true,
+            },
             RandomEffectStructure {
                 n_levels: 0,
                 n_terms: 1,
@@ -1268,6 +1332,10 @@ mod prepared_tests {
             offset += dimension;
         }
         let compact = GradientCrossproducts::Levels { products, inverses };
+        for columns in [0, 1, 4, 17] {
+            let rhs = Mat::from_fn(q, columns, |i, j| ((2 * i + j) % 11) as f64 / 4.0);
+            assert_eq!(compact.apply(&rhs), &full_product * &rhs);
+        }
         for derivative in lambda_derivatives(&structures) {
             for columns in [0, 1, 4, 17] {
                 let rhs = Mat::from_fn(q, columns, |i, j| ((2 * i + j) % 11) as f64 / 4.0);
