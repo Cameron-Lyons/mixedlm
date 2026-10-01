@@ -327,13 +327,23 @@ impl GradientCrossproducts {
             && let Some(inverses) = chol.independent_level_inverses()
         {
             return Self::Levels {
-                products: factor.right_apply_level_crossproducts(design.ztwz.as_ref()),
+                products: match &design.ztwz {
+                    DesignCrossproducts::Levels(blocks) => {
+                        factor.right_apply_stacked_level_crossproducts(blocks)
+                    }
+                    DesignCrossproducts::Dense(matrix) => {
+                        factor.right_apply_level_crossproducts(matrix.as_ref())
+                    }
+                },
                 inverses,
             };
         }
+        let DesignCrossproducts::Dense(matrix) = &design.ztwz else {
+            unreachable!("independent crossproducts retain independent Cholesky blocks");
+        };
         let inverse = chol.inverse();
         Self::Dense {
-            product: factor.right_apply(design.ztwz.as_ref()),
+            product: factor.right_apply(matrix.as_ref()),
             inverse,
         }
     }
@@ -488,6 +498,50 @@ fn marginal_residual(x: &Mat<f64>, beta: &Mat<f64>, y: &[f64]) -> Vec<f64> {
     residual
 }
 
+enum DesignCrossproducts {
+    Dense(Mat<f64>),
+    Levels(Vec<Mat<f64>>),
+}
+
+impl DesignCrossproducts {
+    fn from_cache(values: &[f64], q: usize, structures: &[RandomEffectStructure]) -> Self {
+        if q == 0 {
+            return Self::Levels(Vec::new());
+        }
+        let mut levels = Vec::with_capacity(q);
+        let mut block = 0;
+        for structure in structures {
+            for _ in 0..structure.n_levels {
+                levels.extend(std::iter::repeat_n(block, structure.n_terms));
+                block += 1;
+            }
+        }
+        for (row, entries) in values.chunks_exact(q).enumerate() {
+            if entries
+                .iter()
+                .enumerate()
+                .any(|(column, &value)| levels[row] != levels[column] && value != 0.0)
+            {
+                return Self::Dense(mat_from_flat_array(values, q));
+            }
+        }
+        let mut offset = 0;
+        let blocks = structures
+            .iter()
+            .map(|structure| {
+                let width = structure.n_terms;
+                let dimension = structure.n_levels * width;
+                let block = Mat::from_fn(dimension, width, |row, column| {
+                    values[(offset + row) * q + offset + row / width * width + column]
+                });
+                offset += dimension;
+                block
+            })
+            .collect();
+        Self::Levels(blocks)
+    }
+}
+
 /// Products that depend only on the design, shared by independent responses.
 struct PreparedLmmDesign {
     x: Mat<f64>,
@@ -499,7 +553,7 @@ struct PreparedLmmDesign {
     logdet_weights: f64,
     xtwx: Mat<f64>,
     ztwx: Mat<f64>,
-    ztwz: Mat<f64>,
+    ztwz: DesignCrossproducts,
     independent_levels: Vec<bool>,
     independent_level_blocks: bool,
     structures: Vec<RandomEffectStructure>,
@@ -568,13 +622,23 @@ impl PreparedLmmDesign {
             if q.checked_mul(q) != Some(values.len()) || values.iter().any(|v| !v.is_finite()) {
                 return Err("cached Z'WZ must contain q * q finite values");
             }
-            mat_from_flat_array(values, q)
+            DesignCrossproducts::from_cache(values, q, &structures)
         } else {
-            compute_ztwz_sparse(&z, &weights)
+            let blocks: Vec<_> = structures.iter().map(|s| (s.n_levels, s.n_terms)).collect();
+            if let Some(blocks) = z.weighted_repeated_block_crossproducts(&weights, &blocks) {
+                DesignCrossproducts::Levels(blocks)
+            } else {
+                DesignCrossproducts::Dense(compute_ztwz_sparse(&z, &weights))
+            }
         };
-        let independent_levels = BlockedMatrix::independent_levels(&ztwz, &structures);
-        let independent_level_blocks =
-            independent_level_blocks(&ztwz, &structures, &independent_levels);
+        let (independent_levels, independent_level_blocks) = match &ztwz {
+            DesignCrossproducts::Levels(_) => (vec![true; structures.len()], true),
+            DesignCrossproducts::Dense(matrix) => {
+                let levels = BlockedMatrix::independent_levels(matrix, &structures);
+                let all = independent_level_blocks(matrix, &structures, &levels);
+                (levels, all)
+            }
+        };
         Ok(Self {
             x,
             wx,
@@ -591,6 +655,26 @@ impl PreparedLmmDesign {
             structures,
             n_theta,
         })
+    }
+
+    fn blocked_v(&self, lambda: &[Mat<f64>]) -> BlockedMatrix {
+        match &self.ztwz {
+            DesignCrossproducts::Levels(blocks) => {
+                BlockedMatrix::from_independent_level_crossproducts(
+                    blocks,
+                    lambda,
+                    &self.structures,
+                    true,
+                )
+            }
+            DesignCrossproducts::Dense(matrix) => BlockedMatrix::from_lambda_ztwz_with_pattern(
+                matrix,
+                lambda,
+                &self.structures,
+                true,
+                &self.independent_levels,
+            ),
+        }
     }
 
     fn with_response(
@@ -664,7 +748,7 @@ impl PreparedLmmResponse {
         let design = &self.design;
         let (x, z, w) = (&design.x, &design.z, &design.weights);
         let (n, p, q) = (x.nrows(), x.ncols(), z.ncols());
-        let (xtwx, ztwx, ztwz) = (&design.xtwx, &design.ztwx, &design.ztwz);
+        let (xtwx, ztwx) = (&design.xtwx, &design.ztwx);
         let (y_adj, xtwy, ztwy) = (&self.y_adj, &self.xtwy, &self.ztwy);
         let structures = &design.structures;
         let logdet_w = design.logdet_weights;
@@ -675,13 +759,7 @@ impl PreparedLmmResponse {
 
         let lambda_blocks = build_lambda_blocks(theta, structures);
 
-        let blocked_v = BlockedMatrix::from_lambda_ztwz_with_pattern(
-            ztwz,
-            &lambda_blocks,
-            structures,
-            true,
-            &design.independent_levels,
-        );
+        let blocked_v = design.blocked_v(&lambda_blocks);
         let chol_v = match BlockedCholesky::factor(&blocked_v) {
             Ok(c) => c,
             Err(_) => return (1e10, vec![0.0; n_theta]),
@@ -789,7 +867,7 @@ impl PreparedLmmResponse {
         let design = &self.design;
         let (x, z, w) = (&design.x, &design.z, &design.weights);
         let (n, p, q) = (x.nrows(), x.ncols(), z.ncols());
-        let (xtwx, ztwx, ztwz) = (&design.xtwx, &design.ztwx, &design.ztwz);
+        let (xtwx, ztwx) = (&design.xtwx, &design.ztwx);
         let (y_adj, xtwy, ztwy) = (&self.y_adj, &self.xtwy, &self.ztwy);
         let structures = &design.structures;
         let logdet_w = design.logdet_weights;
@@ -849,13 +927,7 @@ impl PreparedLmmResponse {
 
         let lambda_blocks = build_lambda_blocks(theta, structures);
 
-        let blocked_v = BlockedMatrix::from_lambda_ztwz_with_pattern(
-            ztwz,
-            &lambda_blocks,
-            structures,
-            true,
-            &design.independent_levels,
-        );
+        let blocked_v = design.blocked_v(&lambda_blocks);
         let chol_v = BlockedCholesky::factor(&blocked_v).ok()?;
 
         let logdet_v = chol_v.logdet();
@@ -1308,6 +1380,76 @@ pub fn profiled_deviance_with_gradient<'py>(
 mod prepared_tests {
     use super::*;
     use numpy::ndarray::ArrayView1;
+
+    #[test]
+    fn independent_design_storage_scales_with_level_width_and_preserves_cached_blocks() {
+        let levels = if cfg!(miri) { 8 } else { 2048 };
+        let z = CscMatrix::try_from_usize(&[], &[], &vec![0; levels + 1], (4, levels)).unwrap();
+        let design = PreparedLmmDesign::new(
+            Mat::full(4, 1, 1.0),
+            z,
+            vec![1.0; 4],
+            vec![0.0; 4],
+            vec![RandomEffectStructure {
+                n_levels: levels,
+                n_terms: 1,
+                correlated: true,
+            }],
+            None,
+        )
+        .unwrap();
+        let DesignCrossproducts::Levels(blocks) = &design.ztwz else {
+            panic!("independent design should use compact storage")
+        };
+        assert_eq!(blocks[0].shape(), (levels, 1));
+        assert_eq!(
+            blocks
+                .iter()
+                .map(|block| block.nrows() * block.ncols())
+                .sum::<usize>(),
+            levels
+        );
+
+        let structures = [
+            RandomEffectStructure {
+                n_levels: 2,
+                n_terms: 2,
+                correlated: true,
+            },
+            RandomEffectStructure {
+                n_levels: 2,
+                n_terms: 1,
+                correlated: false,
+            },
+        ];
+        let q = 6;
+        let mut values = vec![0.0; q * q];
+        for i in 0..q {
+            values[i * q + i] = 2.0 + i as f64;
+        }
+        // Cached matrices need not be symmetric: preserve both orientations.
+        values[1] = 0.2;
+        values[q] = 0.4;
+        let DesignCrossproducts::Levels(blocks) =
+            DesignCrossproducts::from_cache(&values, q, &structures)
+        else {
+            panic!("cached independent blocks should remain compact")
+        };
+        assert_eq!(blocks[0].shape(), (4, 2));
+        assert_eq!(blocks[1].shape(), (2, 1));
+        assert_eq!(blocks[0][(0, 1)], 0.2);
+        assert_eq!(blocks[0][(1, 0)], 0.4);
+        for (row, column) in [(0, 2), (2, 0), (0, 4), (4, 0)] {
+            let mut coupled = values.clone();
+            coupled[row * q + column] = 1e-300;
+            let DesignCrossproducts::Dense(matrix) =
+                DesignCrossproducts::from_cache(&coupled, q, &structures)
+            else {
+                panic!("tiny cached couplings must remain dense")
+            };
+            assert_eq!(matrix[(row, column)], 1e-300);
+        }
+    }
 
     #[test]
     fn shared_mode_adjoint_retains_nonstationary_corrections() {

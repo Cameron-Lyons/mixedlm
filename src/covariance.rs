@@ -343,6 +343,24 @@ impl CovarianceFactor {
             .collect()
     }
 
+    /// Transform crossproducts already stored as stacked independent blocks.
+    pub fn right_apply_stacked_level_crossproducts(&self, matrices: &[Mat<f64>]) -> Vec<Mat<f64>> {
+        assert_eq!(matrices.len(), self.blocks.len());
+        self.blocks
+            .iter()
+            .zip(matrices)
+            .map(|(block, matrix)| {
+                assert_eq!(
+                    matrix.shape(),
+                    (block.n_levels * block.lower.nrows(), block.lower.nrows())
+                );
+                let mut product = matrix.clone();
+                right_apply_repeated_in_place(&block.lower, 1, block.diagonal, product.as_mut());
+                product
+            })
+            .collect()
+    }
+
     fn right_apply_in_place(&self, matrix: &mut Mat<f64>) {
         for block in &self.blocks {
             right_apply_repeated_in_place(

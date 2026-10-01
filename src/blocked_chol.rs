@@ -52,6 +52,47 @@ pub struct BlockedMatrix {
     pub blocks: Vec<Vec<BlockType>>,
 }
 
+fn independent_level_block(
+    crossproducts: MatRef<'_, f64>,
+    lambda: &Mat<f64>,
+    levels: usize,
+    add_identity: bool,
+    column_stride: usize,
+) -> BlockType {
+    let width = lambda.nrows();
+    if width == 1 {
+        let scale = lambda[(0, 0)];
+        let diagonal = (0..levels)
+            .map(|level| {
+                let mut value = (scale * crossproducts[(level, level * column_stride)]) * scale;
+                if add_identity {
+                    value += 1.0;
+                }
+                value
+            })
+            .collect();
+        BlockType::Diagonal(diagonal)
+    } else {
+        let blocks = (0..levels)
+            .map(|level| {
+                let block =
+                    crossproducts.submatrix(level * width, level * column_stride, width, width);
+                let mut result = lambda.transpose() * block * lambda;
+                if add_identity {
+                    for i in 0..width {
+                        result[(i, i)] += 1.0;
+                    }
+                }
+                result
+            })
+            .collect();
+        BlockType::BlockDiagonal {
+            block_size: width,
+            blocks,
+        }
+    }
+}
+
 impl BlockedMatrix {
     /// Identify structures whose weighted design products separate by level.
     /// Cache this alongside immutable crossproducts, rather than scanning each solve.
@@ -113,7 +154,6 @@ impl BlockedMatrix {
             let qi = structures[i].n_terms;
             let ni = structures[i].n_levels;
             let lambda_i = &lambda_blocks[i];
-            let lambda_i_t = lambda_i.transpose();
 
             for j in 0..=i {
                 let qj = structures[j].n_terms;
@@ -123,42 +163,13 @@ impl BlockedMatrix {
                 let offset_j = block_offsets[j];
 
                 if i == j && independent_levels[i] {
-                    if qi == 1 {
-                        let mut diagonal: Vec<f64> = Vec::with_capacity(ni);
-
-                        for level in 0..ni {
-                            let position = offset_i + level;
-                            let scale = lambda_i[(0, 0)];
-                            let mut value = (scale * ztwz[(position, position)]) * scale;
-                            if add_identity {
-                                value += 1.0;
-                            }
-                            diagonal.push(value);
-                        }
-
-                        row_blocks.push(BlockType::Diagonal(diagonal));
-                    } else {
-                        let mut sub_blocks: Vec<Mat<f64>> = Vec::with_capacity(ni);
-
-                        for level in 0..ni {
-                            let li = level * qi;
-                            let block = ztwz.submatrix(offset_i + li, offset_i + li, qi, qi);
-                            let mut result_block = lambda_i_t.as_ref() * block * lambda_i;
-
-                            if add_identity {
-                                for ii in 0..qi {
-                                    result_block[(ii, ii)] += 1.0;
-                                }
-                            }
-
-                            sub_blocks.push(result_block);
-                        }
-
-                        row_blocks.push(BlockType::BlockDiagonal {
-                            block_size: qi,
-                            blocks: sub_blocks,
-                        });
-                    }
+                    row_blocks.push(independent_level_block(
+                        ztwz.submatrix(offset_i, offset_i, block_dims[i], block_dims[i]),
+                        lambda_i,
+                        ni,
+                        add_identity,
+                        qi,
+                    ));
                 } else {
                     let mut dense_block = ztwz
                         .submatrix(offset_i, offset_j, block_dims[i], block_dims[j])
@@ -201,6 +212,37 @@ impl BlockedMatrix {
         }
 
         BlockedMatrix { block_dims, blocks }
+    }
+
+    /// Assemble independent level blocks directly from stacked crossproducts.
+    pub fn from_independent_level_crossproducts(
+        crossproducts: &[Mat<f64>],
+        lambda_blocks: &[Mat<f64>],
+        structures: &[RandomEffectStructure],
+        add_identity: bool,
+    ) -> Self {
+        let block_dims: Vec<_> = structures.iter().map(|s| s.n_levels * s.n_terms).collect();
+        let blocks = structures
+            .iter()
+            .enumerate()
+            .map(|(i, structure)| {
+                let mut row: Vec<_> = (0..i)
+                    .map(|j| BlockType::Zero {
+                        rows: block_dims[i],
+                        cols: block_dims[j],
+                    })
+                    .collect();
+                row.push(independent_level_block(
+                    crossproducts[i].as_ref(),
+                    &lambda_blocks[i],
+                    structure.n_levels,
+                    add_identity,
+                    0,
+                ));
+                row
+            })
+            .collect();
+        Self { block_dims, blocks }
     }
 
     #[cfg(test)]
@@ -757,6 +799,82 @@ fn block_logdet(block: &BlockType) -> f64 {
 mod tests {
     use super::*;
     use faer::linalg::solvers::Solve;
+
+    #[test]
+    fn stacked_level_assembly_matches_full_crossproducts() {
+        let widths: &[usize] = if cfg!(miri) {
+            &[1, 2]
+        } else {
+            &[1, 2, 3, 16, 17]
+        };
+        for &width in widths {
+            let structures = [
+                RandomEffectStructure {
+                    n_levels: 3,
+                    n_terms: width,
+                    correlated: true,
+                },
+                RandomEffectStructure {
+                    n_levels: 2,
+                    n_terms: 2,
+                    correlated: false,
+                },
+            ];
+            let q = 3 * width + 4;
+            let mut full = Mat::zeros(q, q);
+            let mut stacked = Vec::new();
+            let mut offset = 0;
+            for structure in &structures {
+                let w = structure.n_terms;
+                let block = Mat::from_fn(structure.n_levels * w, w, |row, column| {
+                    if row % w == column {
+                        2.0 + row as f64 / 8.0
+                    } else {
+                        0.125
+                    }
+                });
+                for level in 0..structure.n_levels {
+                    full.submatrix_mut(offset + level * w, offset + level * w, w, w)
+                        .copy_from(block.subrows(level * w, w));
+                }
+                offset += block.nrows();
+                stacked.push(block);
+            }
+            for zero in [false, true] {
+                let lambda: Vec<_> = structures
+                    .iter()
+                    .map(|structure| {
+                        Mat::from_fn(structure.n_terms, structure.n_terms, |row, column| {
+                            if zero || column > row || (!structure.correlated && row != column) {
+                                0.0
+                            } else if row == column {
+                                0.5 + row as f64 / 16.0
+                            } else {
+                                -0.125
+                            }
+                        })
+                    })
+                    .collect();
+                for identity in [false, true] {
+                    let expected =
+                        BlockedMatrix::from_lambda_ztwz(&full, &lambda, &structures, identity);
+                    let actual = BlockedMatrix::from_independent_level_crossproducts(
+                        &stacked,
+                        &lambda,
+                        &structures,
+                        identity,
+                    );
+                    assert_eq!(actual.to_dense(), expected.to_dense());
+                    assert!(matches!(actual.blocks[1][0], BlockType::Zero { .. }));
+                }
+                let factor = crate::covariance::CovarianceFactor::from_blocks(lambda, &structures);
+                assert_eq!(
+                    factor.right_apply_stacked_level_crossproducts(&stacked),
+                    factor.right_apply_level_crossproducts(full.as_ref())
+                );
+            }
+        }
+    }
 
     fn make_test_structures() -> Vec<RandomEffectStructure> {
         vec![

@@ -214,36 +214,8 @@ impl CscMatrix {
         if self.values.len() / self.nrows > self.ncols / 4 {
             let fully_dense = self.values.len() / self.nrows == self.ncols;
             for left in 0..self.ncols {
-                let left_end = self.col_offsets[left + 1];
                 for right in 0..=left {
-                    let mut i = self.col_offsets[left];
-                    let mut j = self.col_offsets[right];
-                    let right_end = self.col_offsets[right + 1];
-                    let mut sum = 0.0;
-                    if fully_dense {
-                        // Canonical CSC with n*q entries has every row in every
-                        // column, so no row-index intersections are needed.
-                        sum = self.values[i..left_end]
-                            .iter()
-                            .zip(weights)
-                            .zip(&self.values[j..right_end])
-                            .map(|((&a, &w), &b)| a * w * b)
-                            .sum();
-                    } else {
-                        while i < left_end && j < right_end {
-                            let left_row = self.row_indices[i];
-                            let right_row = self.row_indices[j];
-                            if left_row == right_row {
-                                sum += self.values[i] * weights[left_row] * self.values[j];
-                                i += 1;
-                                j += 1;
-                            } else if left_row < right_row {
-                                i += 1;
-                            } else {
-                                j += 1;
-                            }
-                        }
-                    }
+                    let sum = self.weighted_column_product(weights, left, right, fully_dense);
                     result[(left, right)] = sum;
                     result[(right, left)] = sum;
                 }
@@ -268,6 +240,141 @@ impl CscMatrix {
             }
         }
         result
+    }
+
+    fn weighted_column_product(
+        &self,
+        weights: &[f64],
+        left: usize,
+        right: usize,
+        fully_dense: bool,
+    ) -> f64 {
+        let mut i = self.col_offsets[left];
+        let mut j = self.col_offsets[right];
+        let left_end = self.col_offsets[left + 1];
+        let right_end = self.col_offsets[right + 1];
+        if fully_dense {
+            // Canonical CSC with n*q entries contains every row in each column.
+            return self.values[i..left_end]
+                .iter()
+                .zip(weights)
+                .zip(&self.values[j..right_end])
+                .map(|((&a, &w), &b)| a * w * b)
+                .sum();
+        }
+        let mut sum = 0.0;
+        while i < left_end && j < right_end {
+            let left_row = self.row_indices[i];
+            let right_row = self.row_indices[j];
+            if left_row == right_row {
+                sum += self.values[i] * weights[left_row] * self.values[j];
+                i += 1;
+                j += 1;
+            } else if left_row < right_row {
+                i += 1;
+            } else {
+                j += 1;
+            }
+        }
+        sum
+    }
+
+    /// Compute independent repeated blocks without allocating a square matrix.
+    /// Each pair gives (number of blocks, block width); results stack each set.
+    /// A row spanning blocks, even through stored zeros, uses the dense fallback.
+    pub fn weighted_repeated_block_crossproducts(
+        &self,
+        weights: &[f64],
+        blocks: &[(usize, usize)],
+    ) -> Option<Vec<Mat<f64>>> {
+        assert_eq!(weights.len(), self.nrows);
+        let mut column_sets = Vec::with_capacity(self.ncols);
+        let mut column_levels = Vec::with_capacity(self.ncols);
+        let mut offsets = Vec::with_capacity(blocks.len());
+        for (set, &(count, width)) in blocks.iter().enumerate() {
+            offsets.push(column_sets.len());
+            for _ in 0..count {
+                let start = column_sets.len();
+                column_sets.extend(std::iter::repeat_n(set, width));
+                column_levels.extend(std::iter::repeat_n(start, width));
+            }
+        }
+        assert_eq!(column_sets.len(), self.ncols);
+        let mut result: Vec<Mat<f64>> = blocks
+            .iter()
+            .map(|&(count, width)| Mat::zeros(count * width, width))
+            .collect();
+        if self.values.is_empty() {
+            return Some(result);
+        }
+        // Match both arithmetic paths of weighted_crossproduct exactly.
+        if self.values.len() / self.nrows > self.ncols / 4 {
+            // Dense column accumulation needs no permanent row workspace.
+            if column_levels.first() != column_levels.last() {
+                let mut owners = vec![usize::MAX; self.nrows];
+                for (column, &level) in column_levels.iter().enumerate() {
+                    for &row in
+                        &self.row_indices[self.col_offsets[column]..self.col_offsets[column + 1]]
+                    {
+                        if owners[row] == usize::MAX {
+                            owners[row] = level;
+                        } else if owners[row] != level {
+                            return None;
+                        }
+                    }
+                }
+            }
+            let fully_dense = self.values.len() / self.nrows == self.ncols;
+            for (set, &(count, width)) in blocks.iter().enumerate() {
+                for level in 0..count {
+                    let local = level * width;
+                    let start = offsets[set] + local;
+                    for left in 0..width {
+                        for right in 0..=left {
+                            let value = self.weighted_column_product(
+                                weights,
+                                start + left,
+                                start + right,
+                                fully_dense,
+                            );
+                            result[set][(local + left, right)] = value;
+                            result[set][(local + right, left)] = value;
+                        }
+                    }
+                }
+            }
+        } else {
+            let rows = self.rows.get_or_init(|| RowStorage::new(self));
+            for (row, &weight) in weights.iter().enumerate() {
+                let start = rows.offsets[row];
+                let end = rows.offsets[row + 1];
+                if start == end {
+                    continue;
+                }
+                let level = column_levels[rows.columns[start]];
+                if rows.columns[start..end]
+                    .iter()
+                    .any(|&column| column_levels[column] != level)
+                {
+                    return None;
+                }
+                let set = column_sets[rows.columns[start]];
+                let output = &mut result[set];
+                for left in start..end {
+                    let left_column = rows.columns[left];
+                    let weighted_left = weight * rows.values[left];
+                    for right in left..end {
+                        let right_column = rows.columns[right];
+                        let value = weighted_left * rows.values[right];
+                        output[(left_column - offsets[set], right_column - level)] += value;
+                        if left_column != right_column {
+                            output[(right_column - offsets[set], left_column - level)] += value;
+                        }
+                    }
+                }
+            }
+        }
+        Some(result)
     }
 
     /// Materialize the upper triangle of a self-adjoint matrix from its lower
@@ -367,6 +474,95 @@ fn checked_indices(values: &[i64], field_name: &str) -> Result<Vec<usize>, Linal
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn repeated_block_crossproducts_match_both_dense_accumulation_paths() {
+        for blocks in [
+            vec![(1, 3)],
+            vec![(2, 3)],
+            vec![(4, 2)],
+            vec![(3, 2), (2, 1)],
+        ] {
+            let levels: usize = blocks.iter().map(|&(count, _)| count).sum();
+            let q: usize = blocks.iter().map(|&(count, width)| count * width).sum();
+            let n = 7 * levels + 1;
+            let mut column_levels = Vec::new();
+            let mut level = 0;
+            for &(count, width) in &blocks {
+                for _ in 0..count {
+                    column_levels.extend(std::iter::repeat_n(level, width));
+                    level += 1;
+                }
+            }
+            for empty in [false, true] {
+                let (mut values, mut indices, mut offsets) = (Vec::new(), Vec::new(), vec![0]);
+                for (column, &level) in column_levels.iter().enumerate() {
+                    for row in 0..n {
+                        if !empty && row % levels == level {
+                            values.push(((3 * row + column + 1) % 7) as f64 / 9.0 - 0.25);
+                            indices.push(row);
+                        }
+                    }
+                    offsets.push(values.len());
+                }
+                let matrix =
+                    super::CscMatrix::try_from_usize(&values, &indices, &offsets, (n, q)).unwrap();
+                let weights: Vec<_> = (0..n).map(|row| 0.25 + row as f64 / 11.0).collect();
+                let compact = matrix
+                    .weighted_repeated_block_crossproducts(&weights, &blocks)
+                    .unwrap();
+                let mut expanded = faer::Mat::zeros(q, q);
+                let mut offset = 0;
+                for (&(count, width), block) in blocks.iter().zip(&compact) {
+                    assert_eq!(block.shape(), (count * width, width));
+                    for level in 0..count {
+                        expanded
+                            .submatrix_mut(
+                                offset + level * width,
+                                offset + level * width,
+                                width,
+                                width,
+                            )
+                            .copy_from(block.subrows(level * width, width));
+                    }
+                    offset += count * width;
+                }
+                assert_eq!(expanded, matrix.weighted_crossproduct(&weights));
+            }
+        }
+    }
+
+    #[test]
+    fn repeated_blocks_reject_cross_level_entries_including_tiny_values_and_stored_zeros() {
+        for value in [1.0, 1e-300, 0.0] {
+            let matrix =
+                super::CscMatrix::try_from_usize(&[1.0, value], &[0, 0], &[0, 1, 2], (2, 2))
+                    .unwrap();
+            assert!(
+                matrix
+                    .weighted_repeated_block_crossproducts(&[1.0; 2], &[(2, 1)])
+                    .is_none()
+            );
+            assert!(
+                matrix
+                    .weighted_repeated_block_crossproducts(&[1.0; 2], &[(1, 1), (1, 1)])
+                    .is_none()
+            );
+        }
+        let cancelling = super::CscMatrix::try_from_usize(
+            &[1.0, 1.0, 1.0, -1.0],
+            &[0, 1, 0, 1],
+            &[0, 2, 4],
+            (2, 2),
+        )
+        .unwrap();
+        assert_eq!(cancelling.weighted_crossproduct(&[1.0; 2])[(0, 1)], 0.0);
+        assert!(
+            cancelling
+                .weighted_repeated_block_crossproducts(&[1.0; 2], &[(2, 1)])
+                .is_none()
+        );
+    }
+
     use super::*;
 
     #[test]
