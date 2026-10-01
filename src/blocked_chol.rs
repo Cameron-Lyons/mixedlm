@@ -293,17 +293,18 @@ pub struct BlockedCholesky {
 }
 
 impl BlockedCholesky {
-    pub fn factor(a: &BlockedMatrix) -> Result<Self, LinalgError> {
+    /// Consume assembled blocks so their storage can become the factor in place.
+    pub fn factor(a: BlockedMatrix) -> Result<Self, LinalgError> {
         let n_blocks = a.blocks.len();
-        let block_dims = a.block_dims.clone();
+        let block_dims = a.block_dims;
         let mut l_blocks: Vec<Vec<BlockType>> = Vec::with_capacity(n_blocks);
 
-        for (i, a_row) in a.blocks.iter().enumerate() {
+        for (i, a_row) in a.blocks.into_iter().enumerate() {
             let mut row_blocks: Vec<BlockType> = Vec::with_capacity(i + 1);
 
-            for (j, a_block) in a_row.iter().enumerate() {
+            for (j, a_block) in a_row.into_iter().enumerate() {
                 if i == j {
-                    let mut aii = a_block.clone();
+                    let mut aii = a_block;
 
                     for lik in row_blocks.iter().take(i) {
                         rank_update_subtract(&mut aii, lik, lik)?;
@@ -312,7 +313,7 @@ impl BlockedCholesky {
                     let lii = chol_block(aii)?;
                     row_blocks.push(lii);
                 } else {
-                    let mut aij = a_block.clone();
+                    let mut aij = a_block;
 
                     for (lik, ljk) in row_blocks.iter().take(j).zip(l_blocks[j].iter().take(j)) {
                         rank_update_subtract(&mut aij, lik, ljk)?;
@@ -877,7 +878,71 @@ mod tests {
     }
 
     #[test]
-    fn factor_preserves_input_on_success_and_nonpositive_pivots() {
+    fn factor_reuses_assembled_diagonal_storage() {
+        fn buffers(block: &BlockType) -> Vec<*const f64> {
+            match block {
+                BlockType::Dense(matrix) => vec![matrix.as_ptr()],
+                BlockType::Diagonal(values) => vec![values.as_ptr()],
+                BlockType::BlockDiagonal { blocks, .. } => blocks.iter().map(Mat::as_ptr).collect(),
+                BlockType::Zero { .. } => Vec::new(),
+            }
+        }
+
+        let independent = BlockedMatrix {
+            block_dims: vec![4, 3, 2],
+            blocks: vec![
+                vec![BlockType::BlockDiagonal {
+                    block_size: 2,
+                    blocks: vec![Mat::identity(2, 2), Mat::identity(2, 2)],
+                }],
+                vec![
+                    BlockType::Zero { rows: 3, cols: 4 },
+                    BlockType::Diagonal(vec![1.0, 4.0, 9.0]),
+                ],
+                vec![
+                    BlockType::Zero { rows: 2, cols: 4 },
+                    BlockType::Zero { rows: 2, cols: 3 },
+                    BlockType::Dense(Mat::from_fn(2, 2, |i, j| if i == j { 2.0 } else { 0.1 })),
+                ],
+            ],
+        };
+        let coupled = BlockedMatrix {
+            block_dims: vec![3, 2],
+            blocks: vec![
+                vec![BlockType::Dense(Mat::from_fn(3, 3, |i, j| {
+                    if i == j { 4.0 } else { 0.0 }
+                }))],
+                vec![
+                    BlockType::Dense(Mat::from_fn(2, 3, |i, j| (i + j + 1) as f64 / 10.0)),
+                    BlockType::Dense(Mat::from_fn(2, 2, |i, j| if i == j { 5.0 } else { 0.0 })),
+                ],
+            ],
+        };
+        for matrix in [independent, coupled] {
+            let dense = matrix.to_dense();
+            let pointers: Vec<_> = matrix
+                .blocks
+                .iter()
+                .enumerate()
+                .map(|(i, row)| buffers(&row[i]))
+                .collect();
+            let factor = BlockedCholesky::factor(matrix).unwrap();
+            for (i, expected) in pointers.iter().enumerate() {
+                assert_eq!(&buffers(&factor.l_blocks[i][i]), expected);
+            }
+            let rhs = Mat::from_fn(dense.nrows(), 2, |i, j| (i + j + 1) as f64);
+            let expected = Llt::new(dense.as_ref(), Side::Lower).unwrap().solve(&rhs);
+            let actual = factor.solve(&rhs);
+            for j in 0..rhs.ncols() {
+                for i in 0..rhs.nrows() {
+                    assert!((actual[(i, j)] - expected[(i, j)]).abs() < 1e-12);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn factor_handles_success_and_nonpositive_pivots() {
         for pivot in [2.0, 0.0, -1.0] {
             let dense = Mat::from_fn(2, 2, |row, column| {
                 if row == column {
@@ -902,8 +967,7 @@ mod tests {
                     blocks: vec![vec![block]],
                 };
                 let before = input.to_dense();
-                let result = BlockedCholesky::factor(&input);
-                assert_eq!(input.to_dense(), before);
+                let result = BlockedCholesky::factor(input);
                 if pivot > 0.0 {
                     let factor = result.unwrap();
                     let rhs = Mat::from_fn(dimension, 2, |row, column| (row + column + 1) as f64);
@@ -1098,10 +1162,11 @@ mod tests {
             ];
             let blocked =
                 BlockedMatrix::from_lambda_ztwz(&crossproduct, &blocks, &structures, true);
-            let chol = BlockedCholesky::factor(&blocked).unwrap();
+            let dense_matrix = blocked.to_dense();
+            let chol = BlockedCholesky::factor(blocked).unwrap();
             let compact = chol.independent_level_inverses().unwrap();
             let full = chol.inverse();
-            let dense = Llt::new(blocked.to_dense().as_ref(), Side::Lower)
+            let dense = Llt::new(dense_matrix.as_ref(), Side::Lower)
                 .unwrap()
                 .solve(&Mat::<f64>::identity(q, q));
             let mut offset = 0;
@@ -1126,7 +1191,7 @@ mod tests {
                 coupled[(column, 0)] = 0.1;
                 let blocked = BlockedMatrix::from_lambda_ztwz(&coupled, &blocks, &structures, true);
                 assert!(
-                    BlockedCholesky::factor(&blocked)
+                    BlockedCholesky::factor(blocked)
                         .unwrap()
                         .independent_level_inverses()
                         .is_none()
@@ -1336,8 +1401,7 @@ mod tests {
         let blocked = BlockedMatrix::from_lambda_ztwz(&ztwz, &lambda_blocks, &structures, true);
         let dense_v = blocked.to_dense();
 
-        let blocked_chol = BlockedCholesky::factor(&blocked).expect("Blocked Cholesky failed");
-        assert_eq!(blocked.to_dense(), dense_v);
+        let blocked_chol = BlockedCholesky::factor(blocked).expect("Blocked Cholesky failed");
 
         let dense_chol = Llt::new(dense_v.as_ref(), Side::Lower).expect("Dense Cholesky failed");
 
@@ -1363,7 +1427,7 @@ mod tests {
         let blocked = BlockedMatrix::from_lambda_ztwz(&ztwz, &lambda_blocks, &structures, true);
         let dense_v = blocked.to_dense();
 
-        let blocked_chol = BlockedCholesky::factor(&blocked).expect("Blocked Cholesky failed");
+        let blocked_chol = BlockedCholesky::factor(blocked).expect("Blocked Cholesky failed");
         let dense_chol = Llt::new(dense_v.as_ref(), Side::Lower).expect("Dense Cholesky failed");
 
         let b = Mat::from_fn(q, 1, |i, _| (i + 1) as f64);
@@ -1425,7 +1489,7 @@ mod tests {
             }
             let blocked = BlockedMatrix::from_lambda_ztwz(&ztwz, &lambda_blocks, &structures, true);
             let dense_v = blocked.to_dense();
-            let blocked_chol = BlockedCholesky::factor(&blocked).unwrap();
+            let blocked_chol = BlockedCholesky::factor(blocked).unwrap();
             let dense_chol = Llt::new(dense_v.as_ref(), Side::Lower).unwrap();
             let inverse = blocked_chol.inverse();
             let expected_inverse = dense_chol.solve(&Mat::<f64>::identity(q, q));
@@ -1576,7 +1640,7 @@ mod tests {
         let blocked = BlockedMatrix::from_lambda_ztwz(&ztwz, &lambda_blocks, &structures, true);
         let dense_v = blocked.to_dense();
 
-        let blocked_chol = BlockedCholesky::factor(&blocked).expect("Blocked Cholesky failed");
+        let blocked_chol = BlockedCholesky::factor(blocked).expect("Blocked Cholesky failed");
         let dense_chol = Llt::new(dense_v.as_ref(), Side::Lower).expect("Dense Cholesky failed");
 
         let b = Mat::from_fn(q, 2, |i, j| (i + j + 1) as f64);

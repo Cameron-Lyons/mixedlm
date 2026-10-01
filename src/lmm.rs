@@ -760,7 +760,7 @@ impl PreparedLmmResponse {
         let lambda_blocks = build_lambda_blocks(theta, structures);
 
         let blocked_v = design.blocked_v(&lambda_blocks);
-        let chol_v = match BlockedCholesky::factor(&blocked_v) {
+        let chol_v = match BlockedCholesky::factor(blocked_v) {
             Ok(c) => c,
             Err(_) => return (1e10, vec![0.0; n_theta]),
         };
@@ -928,7 +928,7 @@ impl PreparedLmmResponse {
         let lambda_blocks = build_lambda_blocks(theta, structures);
 
         let blocked_v = design.blocked_v(&lambda_blocks);
-        let chol_v = BlockedCholesky::factor(&blocked_v).ok()?;
+        let chol_v = BlockedCholesky::factor(blocked_v).ok()?;
 
         let logdet_v = chol_v.logdet();
 
@@ -1494,7 +1494,7 @@ mod prepared_tests {
                 let blocks = build_lambda_blocks(&theta, &structures);
                 let blocked =
                     BlockedMatrix::from_lambda_ztwz(&crossproduct, &blocks, &structures, true);
-                let chol = BlockedCholesky::factor(&blocked).unwrap();
+                let chol = BlockedCholesky::factor(blocked).unwrap();
                 let factor = CovarianceFactor::from_blocks(blocks, &structures);
                 let lambda = factor.to_dense();
                 let information =
@@ -1700,7 +1700,7 @@ mod prepared_tests {
         assert!(independent.independent_level_blocks);
         let blocks = build_lambda_blocks(&[0.8, 0.1, 0.6, 0.5], &structures);
         let blocked = BlockedMatrix::from_lambda_ztwz(&crossproduct, &blocks, &structures, true);
-        let chol = BlockedCholesky::factor(&blocked).unwrap();
+        let chol = BlockedCholesky::factor(blocked).unwrap();
         let factor = CovarianceFactor::from_blocks(blocks, &structures);
         let GradientCrossproducts::Levels { products, inverses } =
             GradientCrossproducts::new(&independent, &factor, &chol)
@@ -1724,7 +1724,7 @@ mod prepared_tests {
             let zero_blocks = build_lambda_blocks(&[0.0; 4], &structures);
             let blocked =
                 BlockedMatrix::from_lambda_ztwz(&coupled, &zero_blocks, &structures, true);
-            let chol = BlockedCholesky::factor(&blocked).unwrap();
+            let chol = BlockedCholesky::factor(blocked).unwrap();
             let factor = CovarianceFactor::from_blocks(zero_blocks, &structures);
             assert!(matches!(
                 GradientCrossproducts::new(&coupled_design, &factor, &chol),

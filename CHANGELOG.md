@@ -25,6 +25,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Native LMM factorization consumes its assembled random-effect blocks directly, avoiding duplicate working matrices during likelihood and gradient evaluations.
+
 - Native weighted crossproducts reuse row layouts for wide, partially dense random-effect designs, reducing repeated GLMM weight-update work while preserving accumulation order.
 
 - Native Gaussian GLMMs with the identity link reuse a constant working factor across PIRLS iterations and the final likelihood correction.
