@@ -965,6 +965,16 @@ class GLMMOptimizer:
         self.n_theta = _count_theta(matrices.random_structures)
         self._native_problem = _prepare_native_glmm(matrices, family)
 
+    def __getstate__(self) -> dict[str, Any]:
+        # Native preparation is derived from the serializable model inputs.
+        state = self.__dict__.copy()
+        state.pop("_native_problem", None)
+        return state
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        self.__dict__.update(state)
+        self._native_problem = _prepare_native_glmm(self.matrices, self.family)
+
     def get_start_theta(self) -> NDArray[np.floating]:
         theta_list: list[float] = []
         for struct in self.matrices.random_structures:

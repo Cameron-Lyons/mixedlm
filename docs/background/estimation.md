@@ -284,6 +284,12 @@ these estimation objects; construct a new object when the inputs change. Public
 fits and refits prepare their current inputs automatically. Custom families,
 links, and covariance structures retain the Python implementation.
 
+These objectives and modular `GlmerDevfun` callables support copying and Python
+pickling when their model inputs and custom family are serializable. Deep copies and
+unpickled objects rebuild native preparation from the retained Python inputs,
+including when passed to a spawned worker process. Restoration uses the backend
+available in the receiving process; native buffers are not included in the pickle.
+
 A fitted GLMM reports `converged=True` only when both the outer optimizer and the
 inner PIRLS solver converge. `result.pirls_converged` exposes the inner status,
 including on refitted and modular results. For example, all-zero Poisson responses
