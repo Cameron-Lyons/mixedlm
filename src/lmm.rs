@@ -724,6 +724,27 @@ pub struct LmmResponse {
 
 #[pymethods]
 impl LmmResponse {
+    /// Return the profiled deviance and its covariance-parameter gradient.
+    /// Reuse validated design products and keep detached solve state local.
+    #[pyo3(signature = (theta, reml = true))]
+    fn deviance_with_gradient(
+        &self,
+        py: Python<'_>,
+        theta: numpy::PyArrayLike1<'_, f64>,
+        reml: bool,
+    ) -> PyResult<(f64, Py<PyArray1<f64>>)> {
+        let values = theta.as_slice()?;
+        self.inner
+            .validate_parameters(values, reml)
+            .map_err(PyValueError::new_err)?;
+        let values = values.to_vec();
+        // Drop the NumPy guard before detaching: the caller can then change
+        // the parameter array's values or layout without affecting this solve.
+        drop(theta);
+        let (deviance, gradient) = py.detach(|| self.inner.deviance_with_gradient(&values, reml));
+        Ok((deviance, PyArray1::from_vec(py, gradient).into()))
+    }
+
     /// Return estimates and likelihood components, or None on factorization failure.
     /// Final residual scale uses conditional residuals plus the spherical penalty.
     #[pyo3(signature = (theta, reml = true))]

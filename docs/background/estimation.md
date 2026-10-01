@@ -135,6 +135,36 @@ selection remains unchanged. Complete-fit throughput
 also depends on the optimizer: SciPy's default COBYQA implementation serializes
 optimizer calls with its own lock.
 
+Callers using `mixedlm._rust.LmmDesign` can reuse the same preparation for
+analytic covariance gradients. After `response = design.with_response(y)`,
+`response.deviance_with_gradient(theta, reml=True)` returns the profiled
+deviance and a NumPy gradient in the same parameter order as the scalar
+likelihood. It reuses design and response products across calls, checks the
+parameter count and finite values, and supports both ML and REML. Responses
+share the immutable design and own their response data; each returned gradient
+owns its array. Gradient solves release the interpreter lock after copying
+`theta`, allowing concurrent calls on shared or independent responses.
+
+The value-and-gradient pair can be passed directly to SciPy with `jac=True`.
+Given starting covariance parameters `theta0` and their corresponding `bounds`:
+
+```python
+from scipy.optimize import minimize
+
+result = minimize(
+    response.deviance_with_gradient,
+    theta0,
+    method="L-BFGS-B",
+    jac=True,
+    bounds=bounds,
+)
+```
+
+Use `lambda theta: response.deviance_with_gradient(theta, reml=False)` for ML.
+Fixed-effects-only responses return an empty gradient. Invalid parameters or
+nonpositive REML residual degrees of freedom raise `ValueError`; numerical
+factorization failures return the existing `1e10` penalty and a zero gradient.
+
 ## Generalized Linear Mixed Models
 
 ### The Model
