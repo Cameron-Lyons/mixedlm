@@ -1506,6 +1506,27 @@ def test_benchmark_native_prepared_lmm(benchmark, large_data, new_response):
     assert benchmark(evaluate) == expected
 
 
+@pytest.mark.benchmark(group="prepared-lmm-threads")
+@pytest.mark.parametrize("reml", [False, True])
+@pytest.mark.parametrize("workers", [1, 2, 4])
+def test_benchmark_prepared_lmm_threads(benchmark, reml, workers):
+    from concurrent.futures import ThreadPoolExecutor
+
+    from tests.test_glmm_final_state import mode_problem
+
+    matrices, _, theta = mode_problem("gaussian", "slope", n_obs=65536, n_groups=16)
+    optimizer = LMMOptimizer(matrices, REML=reml, use_rust=True)
+    expected = optimizer.objective(theta)
+    assert np.isfinite(expected) and expected != 1e10
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+
+        def run():
+            return list(pool.map(optimizer.objective, [theta] * 16))
+
+        actual = benchmark(run)
+    np.testing.assert_array_equal(actual, [expected] * 16)
+
+
 @pytest.mark.benchmark(group="nonlinear-bootstrap-workers")
 @pytest.mark.parametrize("n_jobs", [1, 2])
 def test_benchmark_nonlinear_bootstrap_workers(benchmark, n_jobs):

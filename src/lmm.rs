@@ -627,12 +627,21 @@ pub struct LmmResponse {
 #[pymethods]
 impl LmmResponse {
     #[pyo3(signature = (theta, reml = true))]
-    fn deviance(&self, theta: numpy::PyArrayLike1<'_, f64>, reml: bool) -> PyResult<f64> {
-        let theta = theta.as_slice()?;
+    fn deviance(
+        &self,
+        py: Python<'_>,
+        theta: numpy::PyArrayLike1<'_, f64>,
+        reml: bool,
+    ) -> PyResult<f64> {
+        let theta_values = theta.as_slice()?;
         self.inner
-            .validate_parameters(theta, reml)
+            .validate_parameters(theta_values, reml)
             .map_err(PyValueError::new_err)?;
-        Ok(self.inner.deviance(theta, reml))
+        // Release the NumPy borrow before the caller can change its array's
+        // values or layout. The detached solve only reads owned native data.
+        let theta_values = theta_values.to_vec();
+        drop(theta);
+        Ok(py.detach(|| self.inner.deviance(&theta_values, reml)))
     }
 }
 

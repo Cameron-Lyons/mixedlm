@@ -110,6 +110,14 @@ weights, and offsets must remain unchanged while the optimizers are in use;
 construct a new optimizer when those inputs change. Large Python random-effect
 systems retain sparse crossproducts.
 
+Prepared native ML and REML evaluations release Python's interpreter lock after
+copying the covariance parameters. Each solve reads an immutable design and
+response and uses its own scratch storage, so Python threads can evaluate a
+shared response or separate responses concurrently. This applies to the native
+backend; automatic backend selection remains unchanged. Complete-fit throughput
+also depends on the optimizer: SciPy's default COBYQA implementation serializes
+optimizer calls with its own lock.
+
 ## Generalized Linear Mixed Models
 
 ### The Model
