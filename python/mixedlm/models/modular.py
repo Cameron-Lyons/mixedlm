@@ -135,6 +135,7 @@ class LmerDevfun:
 
     parsed: LmerParsedFormula
     optimizer: LMMOptimizer
+    control: LmerControl | None = None
 
     def __call__(self, theta: NDArray[np.floating]) -> float:
         """Evaluate the deviance function at theta.
@@ -487,7 +488,7 @@ def mkLmerDevfun(
         use_rust=control.use_rust,
     )
 
-    return LmerDevfun(parsed=parsed, optimizer=optimizer)
+    return LmerDevfun(parsed=parsed, optimizer=optimizer, control=control)
 
 
 def mkGlmerDevfun(
@@ -559,6 +560,7 @@ def optimizeLmer(
     verbose: int = 0,
     *,
     restart_edge: bool = True,
+    use_analytic_gradient: bool | None = None,
 ) -> OptimizeResult:
     """Optimize the deviance function for a linear mixed model.
 
@@ -580,6 +582,9 @@ def optimizeLmer(
     restart_edge : bool, default True
         Check zero covariance scales for likelihood improvement and restart
         the requested optimizer within the remaining iteration budget.
+    use_analytic_gradient : bool or None, default None
+        Use native analytic gradients with supported optimizers. None uses the
+        control supplied to mkLmerDevfun (False by default).
 
     Returns
     -------
@@ -605,21 +610,30 @@ def optimizeLmer(
         start = devfun.get_start()
 
     bounds = devfun.get_bounds()
+    if use_analytic_gradient is None:
+        use_analytic_gradient = (
+            devfun.control.use_analytic_gradient if devfun.control is not None else False
+        )
+    objective, gradient = devfun.optimizer._optimization_functions(method, use_analytic_gradient)
+    if gradient is None or type(devfun).__call__ is not LmerDevfun.__call__:
+        # Custom callables may add terms absent from the native derivative.
+        objective, gradient = devfun, None
 
     callback: Callable[[NDArray[np.floating]], None] | None = None
     if verbose > 0:
 
         def callback(x: NDArray[np.floating]) -> None:
-            dev = devfun(x)
+            dev = objective(x)
             print(f"theta = {x}, deviance = {dev:.6f}")
 
     result = run_optimizer(
-        devfun,
+        objective,
         start,
         method=method,
         bounds=bounds,
         options={"maxiter": maxiter},
         callback=callback,
+        jac=gradient,
         restart_edge=restart_edge,
     )
 

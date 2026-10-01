@@ -135,6 +135,33 @@ selection remains unchanged. Complete-fit throughput
 also depends on the optimizer: SciPy's default COBYQA implementation serializes
 optimizer calls with its own lock.
 
+To fit with prepared analytic covariance gradients, enable them in the control:
+
+```python
+from mixedlm import lmer, lmerControl
+
+fit = lmer(
+    "y ~ x + (x | group)",
+    data,
+    control=lmerControl(optimizer="L-BFGS-B", use_analytic_gradient=True),
+)
+```
+
+This option supports native LMM fitting with L-BFGS-B, BFGS, TNC, SLSQP, and
+trust-constr. Value and gradient requests at the same parameters share an
+evaluation within each fit. It is disabled by default: fewer objective calls
+can accelerate fitting, but the full random-effect inverse required by the
+gradient can make large random-effect systems considerably slower. Python
+backends and structured covariance types retain the solver's numerical
+derivatives; derivative-free solvers continue to use the scalar objective.
+
+`LMMOptimizer.optimize(use_analytic_gradient=True)` enables the same path for
+prepared fits and response refits. `optimizeLmer()` inherits this setting from
+the control passed to `mkLmerDevfun()` and accepts an explicit override.
+Custom modular deviance callables retain numerical derivatives for their full objective.
+Analytic derivatives can change the optimization path; convergence checks and
+variance-boundary restarts still apply.
+
 Callers using `mixedlm._rust.LmmDesign` can reuse the same preparation for
 analytic covariance gradients. After `response = design.with_response(y)`,
 `response.deviance_with_gradient(theta, reml=True)` returns the profiled

@@ -103,6 +103,7 @@ class LmerMod:
             maxiter=opt_maxiter,
             options=opt_options,
             restart_edge=ctrl.restart_edge,
+            use_analytic_gradient=ctrl.use_analytic_gradient,
         )
 
         result = LmerResult(

@@ -1721,6 +1721,30 @@ def test_benchmark_lmm_validated_gradient(benchmark, layout, size):
     assert np.all(np.isfinite(gradient))
 
 
+@pytest.mark.benchmark(group="lmm-analytic-fitting")
+@pytest.mark.parametrize("groups", [16, 64, 256])
+@pytest.mark.parametrize("reml", [False, True])
+@pytest.mark.parametrize("analytic", [False, True])
+def test_benchmark_lmm_analytic_fitting(benchmark, groups, reml, analytic):
+    from mixedlm.estimation.reml import _profiled_deviance_core
+
+    from tests.test_glmm_final_state import mode_problem
+    from tests.test_lmm_prepared_design import parameters
+
+    matrices, _, _ = mode_problem("gaussian", "slope", n_obs=8192, n_groups=groups)
+    optimizer = LMMOptimizer(matrices, REML=reml, use_rust=True)
+    result = benchmark(
+        optimizer.optimize,
+        start=parameters(matrices),
+        use_analytic_gradient=analytic,
+        options={"ftol": 1e-12, "gtol": 1e-8, "maxls": 40},
+    )
+    assert result.converged
+    expected = _profiled_deviance_core(result.theta, matrices, reml)
+    np.testing.assert_allclose(result.deviance, expected.deviance, rtol=2e-11, atol=2e-9)
+    np.testing.assert_allclose(result.beta, expected.beta, rtol=2e-10, atol=2e-9)
+
+
 @pytest.mark.benchmark(group="lmm-gradient-contractions")
 @pytest.mark.parametrize("width", [16, 32])
 @pytest.mark.parametrize("independent", [False, True])
