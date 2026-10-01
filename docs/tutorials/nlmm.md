@@ -225,11 +225,18 @@ model.predict(newdata=new_data, group_var="subject")
 For confidence intervals on nonlinear parameters:
 
 ```python
-boot_result = mlm.bootstrap_nlmer(model, n_boot=500, seed=42)
+boot_result = mlm.bootstrap_nlmer(model, n_boot=500, seed=42, n_jobs=2)
 
 # Bootstrap CIs
 mlm.bootCI(boot_result, component="all")
 ```
+
+`bootMer(model, nsim=500, seed=42, n_jobs=2)` and
+`model.confint(n_boot=500, seed=42, n_jobs=2)` use the same parallel refits.
+Simulation preserves the serial draw sequence, and failed refits are excluded
+in both modes. Use `n_jobs=1` for small jobs where process startup would dominate.
+In scripts using process spawning, run parallel bootstrap inside an
+`if __name__ == "__main__":` guard; custom model classes must be importable.
 
 ## Custom Nonlinear Functions
 

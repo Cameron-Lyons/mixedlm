@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Nonlinear bootstrap and bootstrap confidence intervals accept `n_jobs` for parallel refits. `bootMer()` honors the worker count for nonlinear models, preserving seeded samples and failure handling. Nonlinear bootstrap also accepts reusable NumPy random streams.
+
 - Nonlinear fits accept `pnls_maxiter` and `pnls_tol` for inner iteration control on both backends. Results expose `pnls_converged` and retain the controls for refits and updates.
 
 - `LmerControl` and `GlmerControl` accept `restart_edge` to control likelihood checks and optimizer restarts at zero variance; enabled by default.

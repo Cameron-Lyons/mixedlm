@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import sys
-from collections.abc import Callable, Generator
+from collections.abc import Callable, Generator, Iterable
 from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wait
 from contextlib import closing
 from copy import deepcopy
@@ -232,7 +232,7 @@ def _initialize_bootstrap_worker(
     _bootstrap_worker_state.data = data
 
 
-def _run_bootstrap_task(task: tuple[int, int]) -> Any:
+def _run_bootstrap_task(task: tuple[int, Any]) -> Any:
     return _bootstrap_worker_state.worker((*task, *_bootstrap_worker_state.data))
 
 
@@ -242,7 +242,18 @@ def _parallel_bootstrap_samples(
     seeds: NDArray[np.integer],
     workers: int,
 ) -> Generator[_BootstrapSample, None, None]:
-    tasks = iter(enumerate(seeds))
+    tasks = ((index, int(seed)) for index, seed in enumerate(seeds))
+    yield from _parallel_bootstrap_tasks(worker, data, tasks, workers)
+
+
+def _parallel_bootstrap_tasks(
+    worker: Callable[[tuple[Any, ...]], _BootstrapSample],
+    data: tuple[Any, ...],
+    tasks: Iterable[tuple[int, Any]],
+    workers: int,
+) -> Generator[_BootstrapSample, None, None]:
+    """Consume a bounded stream of seed or response tasks using shared worker data."""
+    tasks = iter(tasks)
     with ProcessPoolExecutor(
         max_workers=workers,
         initializer=_initialize_bootstrap_worker,
@@ -250,9 +261,11 @@ def _parallel_bootstrap_samples(
     ) as executor:
         pending: set[Future[_BootstrapSample]] = set()
         try:
-            for _ in range(min(2 * workers, len(seeds))):
-                index, seed = next(tasks)
-                pending.add(executor.submit(_run_bootstrap_task, (index, int(seed))))
+            for _ in range(2 * workers):
+                task = next(tasks, None)
+                if task is None:
+                    break
+                pending.add(executor.submit(_run_bootstrap_task, task))
             while pending:
                 completed, pending = wait(pending, return_when=FIRST_COMPLETED)
                 while completed:
@@ -260,8 +273,7 @@ def _parallel_bootstrap_samples(
                     yield future.result()
                     following = next(tasks, None)
                     if following is not None:
-                        index, seed = following
-                        pending.add(executor.submit(_run_bootstrap_task, (index, int(seed))))
+                        pending.add(executor.submit(_run_bootstrap_task, following))
         except BaseException:
             # Interruptions and pool failures must not run the remaining bootstrap.
             for future in pending:
@@ -639,7 +651,7 @@ def _simulate_glmer_components(
 def bootMer(
     model: LmerResult | GlmerResult | NlmerResult,
     nsim: int = 1000,
-    seed: int | None = None,
+    seed: RandomSeed = None,
     n_jobs: int = 1,
     verbose: bool = False,
     bootstrap_type: str = "parametric",
@@ -647,21 +659,20 @@ def bootMer(
     """Model-based (semi-)parametric bootstrap for mixed models.
 
     This function provides an lme4-compatible interface for bootstrapping
-    mixed models. It is a convenience wrapper around bootstrap_lmer and
-    bootstrap_glmer that automatically selects the appropriate bootstrap
+    mixed models. It selects the linear, generalized, or nonlinear bootstrap
     function based on the model type.
 
     Parameters
     ----------
-    model : LmerResult or GlmerResult
+    model : LmerResult, GlmerResult, or NlmerResult
         A fitted mixed model.
     nsim : int, default 1000
         Number of bootstrap samples.
-    seed : int, optional
-        Random seed for reproducibility.
+    seed : int, RandomState, or Generator, optional
+        Local random seed or reusable stream for reproducibility.
     n_jobs : int, default 1
-        Positive worker count for linear and generalized bootstrap, or -1 for
-        available CPUs. The worker count never exceeds the number of replicates.
+        Positive worker count or -1 for available CPUs, for all model types.
+        The worker count never exceeds the number of replicates.
     verbose : bool, default False
         Print progress information.
     bootstrap_type : str, default "parametric"
@@ -671,13 +682,15 @@ def bootMer(
 
     Returns
     -------
-    BootstrapResult
+    BootstrapResult or NlmerBootstrapResult
         Bootstrap results containing:
         - n_boot: Number of bootstrap samples
         - beta_samples: Fixed effects estimates from each sample
         - theta_samples: Variance parameter estimates from each sample
-        - sigma_samples: Residual SD estimates (LMM only)
+        - sigma_samples: Residual SD estimates (linear and nonlinear models)
         - Methods: ci(), se(), summary()
+
+        Nonlinear models provide ``phi_samples`` in place of ``beta_samples``.
 
     Raises
     ------
@@ -717,6 +730,7 @@ def bootMer(
     --------
     bootstrap_lmer : Bootstrap for linear mixed models.
     bootstrap_glmer : Bootstrap for generalized linear mixed models.
+    bootstrap_nlmer : Bootstrap for nonlinear mixed models.
     confint : Confidence intervals (supports bootstrap method).
     """
     if bootstrap_type != "parametric":
@@ -750,6 +764,7 @@ def bootMer(
             n_boot=nsim,
             seed=seed,
             verbose=verbose,
+            n_jobs=n_jobs,
         )
     raise TypeError(
         f"Model type {type(model).__name__} not supported. "
@@ -795,11 +810,60 @@ class NlmerBootstrapResult:
         )
 
 
+def _nlmer_bootstrap_refit(
+    result: NlmerResult,
+    response: NDArray[np.floating],
+) -> tuple[NDArray | None, NDArray | None, float | None]:
+    try:
+        fitted = result.refit(response)
+        _require_bootstrap_convergence(fitted.converged, fitted.pnls_converged)
+        # Validate every component before publishing any part of the sample.
+        phi = _bootstrap_sample_vector(fitted.phi, len(result.phi))
+        theta = _bootstrap_sample_vector(fitted.theta, len(result.theta))
+        sigma = _bootstrap_sample_scale(fitted.sigma)
+        return phi, theta, sigma
+    except Exception:
+        return None, None, None
+
+
+def _nlmer_bootstrap_worker(
+    args: tuple[Any, ...],
+) -> tuple[int, NDArray | None, NDArray | None, float | None]:
+    index, response, result = args
+    if response is None:
+        return index, None, None, None
+    try:
+        # A custom model's per-fit caches must not leak into later worker tasks.
+        result = replace(result, model=deepcopy(result.model))
+    except Exception:
+        return index, None, None, None
+    return index, *_nlmer_bootstrap_refit(result, response)
+
+
+def _nlmer_bootstrap_responses(
+    result: NlmerResult,
+    n_boot: int,
+    rng: Any,
+) -> Generator[tuple[int, NDArray | None], None, None]:
+    # Draw in the caller to preserve the established sequential random stream.
+    # The bounded task consumer keeps at most two responses per worker queued.
+    for index in range(n_boot):
+        try:
+            response = result.simulate(nsim=1, seed=rng, use_re=True)
+            # Process serialization is asynchronous; own each response's storage.
+            response = np.array(response, copy=True)
+        except Exception:
+            response = None
+        yield index, response
+
+
 def bootstrap_nlmer(
     result: NlmerResult,
     n_boot: int = 1000,
-    seed: int | None = None,
+    seed: RandomSeed = None,
     verbose: bool = False,
+    *,
+    n_jobs: int = 1,
 ) -> NlmerBootstrapResult:
     """Parametric bootstrap for nonlinear mixed models.
 
@@ -809,10 +873,13 @@ def bootstrap_nlmer(
         A fitted nonlinear mixed model.
     n_boot : int, default 1000
         Positive integer number of bootstrap samples.
-    seed : int, optional
-        Random seed for reproducibility.
+    seed : int, RandomState, or Generator, optional
+        Local random seed or reusable stream for reproducibility.
     verbose : bool, default False
         Print progress information.
+    n_jobs : int, default 1
+        Positive refit worker count or -1 for available CPUs, capped at n_boot.
+        Parallel workers require a picklable nonlinear model.
 
     Returns
     -------
@@ -829,6 +896,12 @@ def bootstrap_nlmer(
     Confidence bounds and standard errors are NaN when fewer than two samples
     succeed. Residual scales must be positive, and estimates must be real.
 
+    Simulations use the caller's local stream in replicate order, preserving
+    integer-seeded results across worker counts. Parallel refits share the
+    fitted data once per worker and queue at most two responses per worker.
+    Custom model prediction and gradient methods should be deterministic;
+    each worker refit receives its own copy of the nonlinear model.
+
     Examples
     --------
     >>> from mixedlm.nlme.models import SSasymp
@@ -840,6 +913,7 @@ def bootstrap_nlmer(
         raise TypeError("n_boot must be a positive integer")
     if n_boot < 1:
         raise ValueError("n_boot must be a positive integer")
+    workers = _bootstrap_worker_count(n_jobs, n_boot)
 
     n_params = len(result.phi)
     n_theta = len(result.theta)
@@ -848,31 +922,41 @@ def bootstrap_nlmer(
     theta_samples = np.full((n_boot, n_theta), np.nan)
     sigma_samples = np.full(n_boot, np.nan)
 
-    rng = np.random.RandomState(seed)
-
+    rng = random_stream(seed)
     n_failed = 0
 
-    for b in range(n_boot):
-        if verbose and (b + 1) % 100 == 0:
-            print(f"Bootstrap iteration {b + 1}/{n_boot}")
-
-        try:
-            y_sim = result.simulate(nsim=1, seed=rng, use_re=True)
-            boot_result = result.refit(y_sim)
-
-            _require_bootstrap_convergence(boot_result.converged, boot_result.pnls_converged)
-            # Validate every component before writing any part of the sample.
-            phi = _bootstrap_sample_vector(boot_result.phi, n_params)
-            theta = _bootstrap_sample_vector(boot_result.theta, n_theta)
-            sigma = _bootstrap_sample_scale(boot_result.sigma)
-
-            phi_samples[b, :] = phi
-            theta_samples[b, :] = theta
-            sigma_samples[b] = sigma
-
-        except Exception:
-            n_failed += 1
-            continue
+    if n_jobs == 1:
+        for b in range(n_boot):
+            if verbose and (b + 1) % 100 == 0:
+                print(f"Bootstrap iteration {b + 1}/{n_boot}")
+            try:
+                y_sim = result.simulate(nsim=1, seed=rng, use_re=True)
+            except Exception:
+                n_failed += 1
+                continue
+            phi, theta, sigma = _nlmer_bootstrap_refit(result, y_sim)
+            if phi is None:
+                n_failed += 1
+            else:
+                phi_samples[b, :] = phi
+                theta_samples[b, :] = theta
+                sigma_samples[b] = sigma
+    else:
+        # Refits only need the numerical model data, not the original frame.
+        worker_result = replace(result, _data=None)
+        tasks = _nlmer_bootstrap_responses(result, n_boot, rng)
+        with closing(
+            _parallel_bootstrap_tasks(_nlmer_bootstrap_worker, (worker_result,), tasks, workers)
+        ) as samples:
+            for completed, (index, phi, theta, sigma) in enumerate(samples, start=1):
+                if verbose and completed % 100 == 0:
+                    print(f"Bootstrap iteration {completed}/{n_boot}")
+                if phi is None:
+                    n_failed += 1
+                else:
+                    phi_samples[index, :] = phi
+                    theta_samples[index, :] = theta
+                    sigma_samples[index] = sigma
 
     return NlmerBootstrapResult(
         n_boot=n_boot,
