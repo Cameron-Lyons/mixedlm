@@ -264,11 +264,15 @@ impl CovarianceFactor {
         }
     }
 
-    /// Transform the owned crossproduct in place to Lambda' * S * Lambda + I.
-    pub fn penalized_crossproduct(&self, mut matrix: Mat<f64>) -> Mat<f64> {
-        assert_eq!(matrix.nrows(), self.dimension);
+    /// Multiply by Lambda directly, without transposing a full intermediate.
+    pub fn right_apply(&self, matrix: MatRef<'_, f64>) -> Mat<f64> {
         assert_eq!(matrix.ncols(), self.dimension);
-        self.transpose_apply_in_place(&mut matrix);
+        let mut result = matrix.to_owned();
+        self.right_apply_in_place(&mut result);
+        result
+    }
+
+    fn right_apply_in_place(&self, matrix: &mut Mat<f64>) {
         for block in &self.blocks {
             let width = block.lower.nrows();
             for level in 0..block.n_levels {
@@ -284,7 +288,7 @@ impl CovarianceFactor {
                 // ascending columns for the same reason as the left transform.
                 for j in 0..width {
                     let end = if block.diagonal { j + 1 } else { width };
-                    for row in 0..self.dimension {
+                    for row in 0..matrix.nrows() {
                         let mut value = 0.0;
                         for k in j..end {
                             value += matrix[(row, offset + k)] * block.lower[(k, j)];
@@ -294,6 +298,14 @@ impl CovarianceFactor {
                 }
             }
         }
+    }
+
+    /// Transform the owned crossproduct in place to Lambda' * S * Lambda + I.
+    pub fn penalized_crossproduct(&self, mut matrix: Mat<f64>) -> Mat<f64> {
+        assert_eq!(matrix.nrows(), self.dimension);
+        assert_eq!(matrix.ncols(), self.dimension);
+        self.transpose_apply_in_place(&mut matrix);
+        self.right_apply_in_place(&mut matrix);
         for i in 0..self.dimension {
             matrix[(i, i)] += 1.0;
         }
@@ -386,6 +398,68 @@ mod tests {
                 factor.transpose_apply(matrix.as_ref()).as_ref(),
                 (dense.transpose() * &matrix).as_ref(),
             );
+            assert_close(
+                factor.right_apply(matrix.transpose()).as_ref(),
+                (matrix.transpose() * &dense).as_ref(),
+            );
+        }
+    }
+
+    #[test]
+    fn right_transforms_preserve_rectangular_views_at_kernel_boundary() {
+        let widths: &[usize] = if cfg!(miri) { &[3] } else { &[15, 16, 17, 32] };
+        let rows: &[usize] = if cfg!(miri) {
+            &[0, 1, 4]
+        } else {
+            &[0, 1, 7, 65]
+        };
+        for &width in widths {
+            for correlated in [false, true] {
+                let structures = [RandomEffectStructure {
+                    n_levels: 2,
+                    n_terms: width,
+                    correlated,
+                }];
+                for zero in [false, true] {
+                    let coefficient = |i, j| {
+                        if zero || i < j || j == width - 1 || (!correlated && i != j) {
+                            0.0
+                        } else if i == j {
+                            0.3 + i as f64 / 32.0
+                        } else {
+                            (i + j + 1) as f64 / 64.0
+                        }
+                    };
+                    let mut theta = Vec::new();
+                    for i in 0..width {
+                        for j in if correlated { 0..i + 1 } else { i..i + 1 } {
+                            theta.push(coefficient(i, j));
+                        }
+                    }
+                    let q = 2 * width;
+                    let dense = Mat::from_fn(q, q, |i, j| {
+                        if i / width == j / width {
+                            coefficient(i % width, j % width)
+                        } else {
+                            0.0
+                        }
+                    });
+                    let factor = CovarianceFactor::new(&theta, &structures);
+                    for &nrows in rows {
+                        // Padding and transposed views exercise both storage strides.
+                        let buffer =
+                            Mat::from_fn(nrows + 2, q + 2, |i, j| ((3 * i + 7 * j) as f64).sin());
+                        let original = buffer.clone();
+                        let matrix = buffer.submatrix(1, 1, nrows, q);
+                        let transposed = matrix.transpose().to_owned();
+                        let expected = matrix * &dense;
+                        for view in [matrix, transposed.transpose()] {
+                            assert_close(factor.right_apply(view).as_ref(), expected.as_ref());
+                        }
+                        assert_eq!(buffer, original);
+                    }
+                }
+            }
         }
     }
 
@@ -523,6 +597,10 @@ mod tests {
             assert_eq!(
                 factor.transpose_apply(Mat::zeros(0, 4).as_ref()),
                 Mat::<f64>::zeros(0, 4)
+            );
+            assert_eq!(
+                factor.right_apply(Mat::zeros(4, 0).as_ref()),
+                Mat::<f64>::zeros(4, 0)
             );
             assert_eq!(
                 factor.penalized_crossproduct(Mat::zeros(0, 0)),

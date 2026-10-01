@@ -1746,7 +1746,7 @@ def test_benchmark_lmm_analytic_fitting(benchmark, groups, reml, analytic):
 
 
 @pytest.mark.benchmark(group="lmm-gradient-contractions")
-@pytest.mark.parametrize("width", [16, 32])
+@pytest.mark.parametrize("width", [15, 16, 17, 32])
 @pytest.mark.parametrize("independent", [False, True])
 @pytest.mark.parametrize("reml", [False, True])
 def test_benchmark_wide_lmm_gradient_contractions(benchmark, width, independent, reml):
@@ -1768,7 +1768,7 @@ def test_benchmark_wide_lmm_gradient_contractions(benchmark, width, independent,
 
 
 @pytest.mark.benchmark(group="lmm-gradient-contractions")
-@pytest.mark.parametrize("groups", [8, 64, 256])
+@pytest.mark.parametrize("groups", [8, 64, 128, 256])
 @pytest.mark.parametrize("overlap", [False, True])
 @pytest.mark.parametrize("reml", [False, True])
 def test_benchmark_multilevel_lmm_gradient_contractions(benchmark, groups, overlap, reml):
