@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use faer::linalg::solvers::{Llt, Solve};
-use faer::{Mat, Side};
+use faer::{ColRef, Mat, Side};
 use numpy::PyArray1;
 use numpy::ndarray::{ArrayView1, ArrayView2};
 use pyo3::PyResult;
@@ -81,6 +81,15 @@ struct LambdaDerivative {
 }
 
 impl LambdaDerivative {
+    fn bilinear(&self, left: ColRef<'_, f64>, right: ColRef<'_, f64>) -> f64 {
+        (0..self.n_levels)
+            .map(|level| {
+                let offset = self.offset + level * self.n_terms;
+                left[offset + self.row] * right[offset + self.column]
+            })
+            .sum()
+    }
+
     fn apply<const TRANSPOSE: bool>(&self, matrix: &Mat<f64>) -> Mat<f64> {
         let mut result = Mat::zeros(matrix.nrows(), matrix.ncols());
         let (source, target) = if TRANSPOSE {
@@ -200,6 +209,40 @@ fn lambda_derivatives(structures: &[RandomEffectStructure]) -> Vec<LambdaDerivat
         offset += structure.n_levels * structure.n_terms;
     }
     derivatives
+}
+
+/// Shared adjoint for derivatives of the conditional norm and spherical penalty.
+struct ModeGradient<'a> {
+    mode: ColRef<'a, f64>,
+    conditional: ColRef<'a, f64>,
+    adjoint: Mat<f64>,
+}
+
+impl<'a> ModeGradient<'a> {
+    fn new(
+        mode: &'a Mat<f64>,
+        conditional: &'a Mat<f64>,
+        factor: &CovarianceFactor,
+        chol: &BlockedCholesky,
+    ) -> Self {
+        // The coefficient of du is u - Lambda' Z'W residual. Solve its adjoint
+        // once so every parameter can contract with the mode equation's RHS.
+        // Keep this residual even though it vanishes in exact arithmetic:
+        // large covariance factors can amplify the mode solve's rounding error.
+        let residual = mode - factor.transpose_apply(conditional.as_ref());
+        Self {
+            mode: mode.col(0),
+            conditional: conditional.col(0),
+            adjoint: chol.solve(&residual),
+        }
+    }
+
+    fn derivative(&self, derivative: &LambdaDerivative, rhs: &Mat<f64>) -> f64 {
+        2.0 * ((0..self.mode.nrows())
+            .map(|i| self.adjoint[(i, 0)] * rhs[(i, 0)])
+            .sum::<f64>()
+            - derivative.bilinear(self.conditional, self.mode))
+    }
 }
 
 /// Shared products for the REML fixed-information log determinant.
@@ -670,6 +713,7 @@ impl PreparedLmmResponse {
         } else {
             None
         };
+        let mode_gradient = ModeGradient::new(&u_star, &zt_w_conditional, &factor, &chol_v);
         let mut gradient = Vec::with_capacity(n_theta);
 
         for derivative in lambda_derivatives(structures) {
@@ -679,20 +723,9 @@ impl PreparedLmmResponse {
             for row in 0..q {
                 dc[(row, 0)] -= products[(row, 0)];
             }
-            let d_u = chol_v.solve(&dc);
-            let lambda_d_u = factor.apply(&d_u.col(0).to_owned());
-            let d_lambda_u = derivative.apply::<false>(&u_star);
-            // Differentiate the conditional residual norm and spherical penalty
-            // through the mode solve. Holding beta fixed is valid at its optimum.
-            // This avoids cancellation between large marginal quadratic forms,
-            // and remains valid when a covariance factor is singular.
-            let d_pwrss = 2.0
-                * (0..q)
-                    .map(|i| {
-                        u_star[(i, 0)] * d_u[(i, 0)]
-                            - zt_w_conditional[(i, 0)] * (d_lambda_u[(i, 0)] + lambda_d_u[i])
-                    })
-                    .sum::<f64>();
+            // Holding beta fixed is valid at its optimum. This form remains
+            // valid for singular factors and avoids marginal quadratic forms.
+            let d_pwrss = mode_gradient.derivative(&derivative, &dc);
 
             let mut grad_k = d_logdet_v + denom / pwrss * d_pwrss;
 
@@ -1231,6 +1264,81 @@ mod prepared_tests {
     use numpy::ndarray::ArrayView1;
 
     #[test]
+    fn shared_mode_adjoint_retains_nonstationary_corrections() {
+        let structures = [
+            RandomEffectStructure {
+                n_levels: 0,
+                n_terms: 1,
+                correlated: true,
+            },
+            RandomEffectStructure {
+                n_levels: 2,
+                n_terms: 3,
+                correlated: true,
+            },
+            RandomEffectStructure {
+                n_levels: 3,
+                n_terms: 2,
+                correlated: false,
+            },
+        ];
+        let q = 12;
+        let design = Mat::from_fn(17, q, |i, j| ((i + 3 * j) % 11) as f64 / 8.0 - 0.5);
+        let coupled = design.transpose() * &design;
+        let level = |i| if i < 6 { i / 3 } else { 2 + (i - 6) / 2 };
+        // Deliberately avoid stationarity: omitting the mode correction must fail.
+        let mode = Mat::from_fn(q, 1, |i, _| (i % 5) as f64 / 4.0 - 0.5);
+        let conditional = Mat::from_fn(q, 1, |i, _| (i % 7) as f64 / 8.0 + 0.25);
+        let marginal = Mat::from_fn(q, 1, |i, _| (i % 3) as f64 / 2.0 - 0.25);
+        for independent in [false, true] {
+            let crossproduct = Mat::from_fn(q, q, |i, j| {
+                if independent && level(i) != level(j) {
+                    0.0
+                } else {
+                    coupled[(i, j)]
+                }
+            });
+            for theta in [
+                [0.4, 0.8, -0.1, 0.7, 0.05, -0.2, 0.6, 0.3, 0.9],
+                [0.4, 0.0, -0.1, 0.7, 0.05, -0.2, 0.0, 0.3, 0.0],
+                [0.0; 9],
+            ] {
+                let blocks = build_lambda_blocks(&theta, &structures);
+                let blocked =
+                    BlockedMatrix::from_lambda_ztwz(&crossproduct, &blocks, &structures, true);
+                let chol = BlockedCholesky::factor(&blocked).unwrap();
+                let factor = CovarianceFactor::from_blocks(blocks, &structures);
+                let lambda = factor.to_dense();
+                let information =
+                    Mat::<f64>::identity(q, q) + lambda.transpose() * &crossproduct * &lambda;
+                let dense_chol = Llt::new(information.as_ref(), Side::Lower).unwrap();
+                let shared = ModeGradient::new(&mode, &conditional, &factor, &chol);
+                let mut max_correction: f64 = 0.0;
+                for derivative in lambda_derivatives(&structures) {
+                    let entry = derivative.apply::<false>(&Mat::identity(q, q));
+                    let dv = entry.transpose() * &crossproduct * &lambda
+                        + lambda.transpose() * &crossproduct * &entry;
+                    let rhs = entry.transpose() * &marginal - dv * &mode;
+                    let du = dense_chol.solve(&rhs);
+                    let random_derivative = &entry * &mode + &lambda * &du;
+                    let expected = 2.0
+                        * (0..q)
+                            .map(|i| {
+                                mode[(i, 0)] * du[(i, 0)]
+                                    - conditional[(i, 0)] * random_derivative[(i, 0)]
+                            })
+                            .sum::<f64>();
+                    let actual = shared.derivative(&derivative, &rhs);
+                    assert!((actual - expected).abs() < 1e-11 * expected.abs().max(1.0));
+                    let stationary = -2.0 * derivative.bilinear(conditional.col(0), mode.col(0));
+                    max_correction = max_correction.max((actual - stationary).abs());
+                }
+                assert!(max_correction > 0.1);
+            }
+        }
+    }
+
+    #[test]
     fn shared_fixed_effect_products_match_full_information_derivatives() {
         let fixed: &[usize] = if cfg!(miri) {
             &[0, 1, 3]
@@ -1486,6 +1594,13 @@ mod prepared_tests {
                     dense.transpose() * &matrix
                 );
             }
+            let left = Mat::from_fn(11, 1, |i, _| (i % 3) as f64 - 1.0);
+            let right = Mat::from_fn(11, 1, |i, _| (i % 5) as f64 - 2.0);
+            let expected = left.transpose() * &dense * &right;
+            assert_eq!(
+                derivative.bilinear(left.col(0), right.col(0)),
+                expected[(0, 0)]
+            );
             for sparse in [false, true] {
                 let product = Mat::from_fn(11, 11, |i, j| {
                     if sparse && i / 3 != j / 3 {
