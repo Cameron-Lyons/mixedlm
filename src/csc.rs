@@ -45,11 +45,13 @@ impl CscMatrix {
         shape: (usize, usize),
     ) -> Result<Self, LinalgError> {
         let (nrows, ncols) = shape;
-        if indptr.len() != ncols + 1 {
+        let expected_offsets = ncols.checked_add(1).ok_or_else(|| {
+            LinalgError::InvalidSparseFormat("matrix column count overflows indptr length".into())
+        })?;
+        if indptr.len() != expected_offsets {
             return Err(LinalgError::InvalidSparseFormat(format!(
-                "indptr has length {}, expected {}",
+                "indptr has length {}, expected {expected_offsets}",
                 indptr.len(),
-                ncols + 1
             )));
         }
         if indptr.first().copied() != Some(0) {
@@ -384,6 +386,13 @@ mod tests {
             assert_eq!(first.join().unwrap()[(0, 0)], 9.0);
             assert_eq!(second.join().unwrap()[(0, 0)], 19.0);
         });
+    }
+
+    #[test]
+    fn sparse_column_count_overflow_is_an_error_in_all_build_modes() {
+        let error = CscMatrix::try_from_usize(&[], &[], &[], (1, usize::MAX)).unwrap_err();
+        assert!(matches!(error, LinalgError::InvalidSparseFormat(_)));
+        assert!(error.to_string().contains("overflow"));
     }
 
     #[test]
