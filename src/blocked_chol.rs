@@ -291,6 +291,43 @@ impl BlockedCholesky {
         self.solve_owned(Mat::identity(dimension, dimension))
     }
 
+    /// Invert independent levels using stacked identities with one level's width.
+    /// Coupled factors require the full inverse instead.
+    pub fn independent_level_inverses(&self) -> Option<Vec<Mat<f64>>> {
+        let widths = self
+            .l_blocks
+            .iter()
+            .enumerate()
+            .map(|(i, row)| {
+                if row[..i]
+                    .iter()
+                    .any(|block| !matches!(block, BlockType::Zero { .. }))
+                {
+                    return None;
+                }
+                match &row[i] {
+                    BlockType::Diagonal(_) => Some(1),
+                    BlockType::BlockDiagonal { block_size, .. } => Some(*block_size),
+                    _ => None,
+                }
+            })
+            .collect::<Option<Vec<_>>>()?;
+        Some(
+            widths
+                .into_iter()
+                .enumerate()
+                .map(|(i, width)| {
+                    let mut inverse = Mat::from_fn(self.block_dims[i], width, |row, column| {
+                        if row % width == column { 1.0 } else { 0.0 }
+                    });
+                    solve_lower_block_in_place(&self.l_blocks[i][i], inverse.as_mut());
+                    solve_lower_transpose_block_in_place(&self.l_blocks[i][i], inverse.as_mut());
+                    inverse
+                })
+                .collect(),
+        )
+    }
+
     fn solve_owned(&self, mut rhs: Mat<f64>) -> Mat<f64> {
         self.forward_solve_in_place(&mut rhs);
         self.backward_solve_in_place(&mut rhs);
@@ -759,6 +796,85 @@ mod tests {
             }
         }
         m
+    }
+
+    #[test]
+    fn compact_level_inverses_match_full_solves_and_reject_coupling() {
+        let widths: &[usize] = if cfg!(miri) {
+            &[1, 2]
+        } else {
+            &[1, 2, 3, 16, 17]
+        };
+        for &width in widths {
+            let structures = [
+                RandomEffectStructure {
+                    n_levels: 3,
+                    n_terms: width,
+                    correlated: true,
+                },
+                RandomEffectStructure {
+                    n_levels: 2,
+                    n_terms: 2,
+                    correlated: false,
+                },
+            ];
+            let q = 3 * width + 4;
+            let mut crossproduct = Mat::<f64>::identity(q, q);
+            for level in 0..3 {
+                if width > 1 {
+                    crossproduct[(level * width, level * width + 1)] = 0.1;
+                    crossproduct[(level * width + 1, level * width)] = 0.1;
+                }
+            }
+            let blocks = vec![
+                Mat::from_fn(width, width, |i, j| {
+                    if i == j {
+                        0.8
+                    } else if i > j {
+                        0.1 / width as f64
+                    } else {
+                        0.0
+                    }
+                }),
+                Mat::from_fn(2, 2, |i, j| if i == j { 0.5 } else { 0.0 }),
+            ];
+            let blocked =
+                BlockedMatrix::from_lambda_ztwz(&crossproduct, &blocks, &structures, true);
+            let chol = BlockedCholesky::factor(&blocked).unwrap();
+            let compact = chol.independent_level_inverses().unwrap();
+            let full = chol.inverse();
+            let dense = Llt::new(blocked.to_dense().as_ref(), Side::Lower)
+                .unwrap()
+                .solve(&Mat::<f64>::identity(q, q));
+            let mut offset = 0;
+            for (inverse, structure) in compact.iter().zip(&structures) {
+                let width = structure.n_terms;
+                assert_eq!(inverse.shape(), (structure.n_levels * width, width));
+                for row in 0..inverse.nrows() {
+                    for column in 0..width {
+                        let global_column = offset + row / width * width + column;
+                        assert_eq!(inverse[(row, column)], full[(offset + row, global_column)]);
+                        assert!(
+                            (inverse[(row, column)] - dense[(offset + row, global_column)]).abs()
+                                < 1e-12
+                        );
+                    }
+                }
+                offset += inverse.nrows();
+            }
+            for column in [width, q - 1] {
+                let mut coupled = crossproduct.clone();
+                coupled[(0, column)] = 0.1;
+                coupled[(column, 0)] = 0.1;
+                let blocked = BlockedMatrix::from_lambda_ztwz(&coupled, &blocks, &structures, true);
+                assert!(
+                    BlockedCholesky::factor(&blocked)
+                        .unwrap()
+                        .independent_level_inverses()
+                        .is_none()
+                );
+            }
+        }
     }
 
     #[test]
