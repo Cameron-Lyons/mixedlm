@@ -1817,6 +1817,29 @@ def test_benchmark_separate_lmm_level_gradients(benchmark, widths, independent, 
     )
 
 
+@pytest.mark.benchmark(group="lmm-reml-contractions")
+@pytest.mark.parametrize("widths", [(3, 2), (8, 5)])
+@pytest.mark.parametrize("fixed", [8, 64])
+@pytest.mark.parametrize("coupled", [False, True])
+@pytest.mark.parametrize("reml", [False, True])
+def test_benchmark_wide_fixed_effect_lmm_gradients(benchmark, widths, fixed, coupled, reml):
+    from mixedlm import _rust
+
+    from tests.test_lmm_gradient_contractions import observation_gradient
+    from tests.test_lmm_prepared_design import native_arguments, observation_likelihood
+    from tests.test_lmm_reml_contractions import fixed_effect_problem
+
+    matrices, theta = fixed_effect_problem(widths, fixed, coupled, False, "regular")
+    response = _rust.LmmDesign(**native_arguments(matrices)).with_response(matrices.y)
+    value, gradient = benchmark(response.deviance_with_gradient, theta, reml)
+    np.testing.assert_allclose(
+        value, observation_likelihood(matrices, theta, reml), rtol=2e-12, atol=2e-10
+    )
+    np.testing.assert_allclose(
+        gradient, observation_gradient(matrices, theta, reml), rtol=2e-10, atol=2e-9
+    )
+
+
 @pytest.mark.benchmark(group="lmm-blocked-solves")
 @pytest.mark.parametrize("layout", ["intercept", "slope", "crossed"])
 @pytest.mark.parametrize("groups", [64, 256])

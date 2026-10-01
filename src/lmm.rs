@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use faer::linalg::solvers::{Llt, Solve};
-use faer::{Mat, Side};
+use faer::{Mat, MatRef, Side};
 use numpy::PyArray1;
 use numpy::ndarray::{ArrayView1, ArrayView2};
 use pyo3::PyResult;
@@ -200,6 +200,23 @@ fn lambda_derivatives(structures: &[RandomEffectStructure]) -> Vec<LambdaDerivat
         offset += structure.n_levels * structure.n_terms;
     }
     derivatives
+}
+
+fn fixed_effect_logdet_derivative(
+    weighted: MatRef<'_, f64>,
+    derivative_b: MatRef<'_, f64>,
+    derivative_v_p: MatRef<'_, f64>,
+) -> f64 {
+    debug_assert_eq!(weighted.shape(), derivative_b.shape());
+    debug_assert_eq!(weighted.shape(), derivative_v_p.shape());
+    let mut trace = 0.0;
+    for column in 0..weighted.ncols() {
+        for row in 0..weighted.nrows() {
+            trace += weighted[(row, column)]
+                * (derivative_v_p[(row, column)] - 2.0 * derivative_b[(row, column)]);
+        }
+    }
+    trace
 }
 
 enum GradientCrossproducts {
@@ -575,8 +592,15 @@ impl PreparedLmmResponse {
         } else {
             Mat::zeros(q, 0)
         };
-        let xtvinvx_inv = if reml {
-            Some(chol_xtvinvx.solve(&Mat::<f64>::identity(p, p)))
+        // With P = V^-1 B and C = X'V_obs^-1 X, solve for P C^-1 once.
+        // Each covariance derivative then contracts (dV P - 2 dB) against it.
+        let fixed_weights = if reml && p > 0 {
+            Some(
+                chol_xtvinvx
+                    .solve(&v_inv_b.transpose())
+                    .transpose()
+                    .to_owned(),
+            )
         } else {
             None
         };
@@ -615,23 +639,13 @@ impl PreparedLmmResponse {
 
             let mut grad_k = d_logdet_v + denom / pwrss * d_pwrss;
 
-            if let Some(xtvinvx_inv) = &xtvinvx_inv {
+            if let Some(fixed_weights) = &fixed_weights {
                 let db = derivative.apply::<true>(ztwx);
-                let mut d_logdet_xtvinvx = 0.0;
-
-                for i in 0..p {
-                    for j in 0..p {
-                        let mut dm_ji = 0.0;
-                        for r in 0..q {
-                            dm_ji -= db[(r, j)] * v_inv_b[(r, i)];
-                            dm_ji -= v_inv_b[(r, j)] * db[(r, i)];
-                            dm_ji += v_inv_b[(r, j)] * products[(r, i + 1)];
-                        }
-                        d_logdet_xtvinvx += xtvinvx_inv[(i, j)] * dm_ji;
-                    }
-                }
-
-                grad_k += d_logdet_xtvinvx;
+                grad_k += fixed_effect_logdet_derivative(
+                    fixed_weights.as_ref(),
+                    db.as_ref(),
+                    products.as_ref().subcols(1, p),
+                );
             }
 
             gradient.push(grad_k);
@@ -1163,6 +1177,46 @@ pub fn profiled_deviance_with_gradient<'py>(
 mod prepared_tests {
     use super::*;
     use numpy::ndarray::ArrayView1;
+
+    #[test]
+    fn fixed_effect_contraction_matches_full_information_derivative() {
+        let fixed: &[usize] = if cfg!(miri) {
+            &[0, 1, 3]
+        } else {
+            &[0, 1, 3, 8, 17]
+        };
+        let random: &[usize] = if cfg!(miri) {
+            &[0, 1, 4]
+        } else {
+            &[0, 1, 4, 19]
+        };
+        for &p in fixed {
+            let design = Mat::from_fn(p + 2, p, |i, j| ((i + 2 * j) % 5) as f64 / 8.0);
+            let information = Mat::<f64>::identity(p, p) + design.transpose() * &design;
+            let chol = Llt::new(information.as_ref(), Side::Lower).unwrap();
+            for &q in random {
+                let projection =
+                    Mat::from_fn(q, p, |i, j| ((3 * i + 5 * j) % 11) as f64 / 8.0 - 0.5);
+                let derivative_b =
+                    Mat::from_fn(q, p, |i, j| ((i + 2 * j + 1) % 13) as f64 / 16.0 - 0.25);
+                let derivative_v =
+                    Mat::from_fn(q, q, |i, j| ((i + j + 1) % 7) as f64 / 16.0 - 0.125);
+                let product = &derivative_v * &projection;
+                let derivative_information = projection.transpose() * &product
+                    - derivative_b.transpose() * &projection
+                    - projection.transpose() * &derivative_b;
+                let solved = chol.solve(&derivative_information);
+                let expected: f64 = (0..p).map(|i| solved[(i, i)]).sum();
+                let weighted = chol.solve(&projection.transpose()).transpose().to_owned();
+                let actual = fixed_effect_logdet_derivative(
+                    weighted.as_ref(),
+                    derivative_b.as_ref(),
+                    product.as_ref(),
+                );
+                assert!((actual - expected).abs() < 1e-11 * expected.abs().max(1.0));
+            }
+        }
+    }
 
     #[test]
     fn independent_level_contractions_match_full_products() {
