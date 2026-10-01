@@ -100,6 +100,33 @@ def test_benchmark_diagonal_lmm_likelihood(benchmark, n_groups):
     assert np.isfinite(actual)
 
 
+@pytest.mark.benchmark(group="native-sparse-inputs")
+@pytest.mark.parametrize("n", [37, 8193, 65539])
+@pytest.mark.parametrize("noncanonical", [False, True])
+def test_benchmark_native_sparse_input_crossproducts(benchmark, n, noncanonical):
+    from mixedlm import _rust
+
+    from tests.test_native_weighted_crossproducts import _noncanonical
+
+    rows = np.arange(n)
+    groups = rows % 16
+    values = 1.0 + np.sin(rows) / 5
+    weights = np.linspace(0.5, 2, n)
+    z = sparse.coo_matrix((values, (rows, groups)), shape=(n, 16)).tocsc()
+    if noncanonical:
+        z = _noncanonical(z)
+    expected = np.diag(np.bincount(groups, weights=weights * values**2, minlength=16))
+    actual = benchmark(
+        _rust.compute_ztwz,
+        z.data,
+        z.indices.astype(np.int64),
+        z.indptr.astype(np.int64),
+        z.shape,
+        weights,
+    ).reshape(16, 16)
+    np.testing.assert_allclose(actual, expected, rtol=2e-13, atol=1e-12)
+
+
 @pytest.mark.benchmark(group="native-glmm-crossproducts")
 @pytest.mark.parametrize(
     ("layout", "n_obs", "n_groups"),

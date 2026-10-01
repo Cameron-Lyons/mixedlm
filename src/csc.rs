@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::sync::OnceLock;
 
 use faer::Mat;
@@ -25,23 +26,24 @@ impl CscMatrix {
         indptr: &[i64],
         shape: (usize, usize),
     ) -> Result<Self, LinalgError> {
-        let row_indices = indices
-            .iter()
-            .enumerate()
-            .map(|(index, &value)| checked_i64_to_usize(value, "indices", index))
-            .collect::<Result<Vec<_>, _>>()?;
-        let col_offsets = indptr
-            .iter()
-            .enumerate()
-            .map(|(index, &value)| checked_i64_to_usize(value, "indptr", index))
-            .collect::<Result<Vec<_>, _>>()?;
-        Self::try_from_usize(data, &row_indices, &col_offsets, shape)
+        let row_indices = checked_indices(indices, "indices")?;
+        let col_offsets = checked_indices(indptr, "indptr")?;
+        Self::try_from_parts(data, row_indices.into(), col_offsets.into(), shape)
     }
 
     pub fn try_from_usize(
         data: &[f64],
         indices: &[usize],
         indptr: &[usize],
+        shape: (usize, usize),
+    ) -> Result<Self, LinalgError> {
+        Self::try_from_parts(data, indices.into(), indptr.into(), shape)
+    }
+
+    fn try_from_parts(
+        data: &[f64],
+        indices: Cow<'_, [usize]>,
+        indptr: Cow<'_, [usize]>,
         shape: (usize, usize),
     ) -> Result<Self, LinalgError> {
         let (nrows, ncols) = shape;
@@ -101,8 +103,9 @@ impl CscMatrix {
             return Ok(Self {
                 nrows,
                 ncols,
-                col_offsets: indptr.to_vec(),
-                row_indices: indices.to_vec(),
+                // Signed inputs already own their converted index buffers.
+                col_offsets: indptr.into_owned(),
+                row_indices: indices.into_owned(),
                 values: data.to_vec(),
                 rows: OnceLock::new(),
             });
@@ -321,17 +324,113 @@ impl RowStorage {
     }
 }
 
-fn checked_i64_to_usize(value: i64, field_name: &str, index: usize) -> Result<usize, LinalgError> {
-    usize::try_from(value).map_err(|_| {
-        LinalgError::InvalidSparseFormat(format!(
-            "{field_name}[{index}] must be non-negative, got {value}"
-        ))
-    })
+fn checked_indices(values: &[i64], field_name: &str) -> Result<Vec<usize>, LinalgError> {
+    let mut converted = Vec::with_capacity(values.len());
+    for (index, &value) in values.iter().enumerate() {
+        converted.push(usize::try_from(value).map_err(|_| {
+            LinalgError::InvalidSparseFormat(format!(
+                "{field_name}[{index}] must be non-negative, got {value}"
+            ))
+        })?);
+    }
+    Ok(converted)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn canonical_owned_indices_are_reused_and_values_are_snapshotted() {
+        let mut data = vec![2.0, 0.0, -1.0];
+        let indices = vec![0, 2, 1];
+        let indptr = vec![0, 2, 2, 3];
+        let indices_ptr = indices.as_ptr();
+        let indptr_ptr = indptr.as_ptr();
+        let matrix =
+            CscMatrix::try_from_parts(&data, Cow::Owned(indices), Cow::Owned(indptr), (3, 3))
+                .unwrap();
+        assert_eq!(matrix.row_indices().as_ptr(), indices_ptr);
+        assert_eq!(matrix.col_offsets().as_ptr(), indptr_ptr);
+        data.fill(100.0);
+        assert_eq!(matrix.values(), &[2.0, 0.0, -1.0]);
+    }
+
+    #[test]
+    fn signed_and_unsigned_constructors_preserve_irregular_columns() {
+        for (data, indices, indptr, shape) in [
+            (vec![], vec![], vec![0], (0, 0)),
+            (vec![], vec![], vec![0, 0, 0, 0], (0, 3)),
+            (vec![], vec![], vec![0, 0, 0], (5, 2)),
+            (
+                vec![2.0, 1.0, 3.0, 0.0, -2.0, 4.0],
+                vec![2, 0, 2, 1, 0, 2],
+                vec![0, 3, 3, 6],
+                (4, 3),
+            ),
+        ] {
+            let signed_indices: Vec<i64> = indices.iter().map(|&value| value as i64).collect();
+            let signed_indptr: Vec<i64> = indptr.iter().map(|&value| value as i64).collect();
+            let signed =
+                CscMatrix::try_from_i64(&data, &signed_indices, &signed_indptr, shape).unwrap();
+            let unsigned = CscMatrix::try_from_usize(&data, &indices, &indptr, shape).unwrap();
+            assert_eq!(signed.col_offsets(), unsigned.col_offsets());
+            assert_eq!(signed.row_indices(), unsigned.row_indices());
+            assert_eq!(signed.values(), unsigned.values());
+            if !data.is_empty() {
+                assert_eq!(signed.col_offsets(), &[0, 2, 2, 5]);
+                assert_eq!(signed.row_indices(), &[0, 2, 0, 1, 2]);
+                assert_eq!(signed.values(), &[1.0, 5.0, -2.0, 0.0, 4.0]);
+            }
+        }
+    }
+
+    #[test]
+    fn index_ownership_preserves_validation_errors() {
+        for (data, indices, indptr, shape, expected) in [
+            (vec![], vec![], vec![], (1, usize::MAX), "overflow"),
+            (vec![1.0], vec![0], vec![0], (2, 1), "indptr has length"),
+            (vec![1.0], vec![0], vec![1, 1], (2, 1), "start at zero"),
+            (vec![], vec![0], vec![0, 1], (2, 1), "data has length"),
+            (vec![1.0], vec![0], vec![0, 0], (2, 1), "indptr ends at"),
+            (vec![1.0], vec![0], vec![0, 2, 1], (2, 2), "invalid range"),
+            (
+                vec![1.0],
+                vec![2],
+                vec![0, 1],
+                (2, 1),
+                "exceeds matrix row count",
+            ),
+        ] {
+            let signed_indices: Vec<i64> = indices.iter().map(|&value| value as i64).collect();
+            let signed_indptr: Vec<i64> = indptr.iter().map(|&value| value as i64).collect();
+            let signed = CscMatrix::try_from_i64(&data, &signed_indices, &signed_indptr, shape)
+                .unwrap_err()
+                .to_string();
+            let unsigned = CscMatrix::try_from_usize(&data, &indices, &indptr, shape)
+                .unwrap_err()
+                .to_string();
+            assert_eq!(signed, unsigned);
+            assert!(signed.contains(expected), "{signed}");
+        }
+        for (indices, indptr, expected) in [
+            (
+                vec![0, -1],
+                vec![0, 2],
+                "indices[1] must be non-negative, got -1",
+            ),
+            (
+                vec![0, 1],
+                vec![0, -2],
+                "indptr[1] must be non-negative, got -2",
+            ),
+        ] {
+            let error = CscMatrix::try_from_i64(&[1.0, 2.0], &indices, &indptr, (2, 1))
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(expected), "{error}");
+        }
+    }
 
     #[test]
     fn crossproduct_reweights_sparse_and_dense_designs() {
