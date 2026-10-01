@@ -294,7 +294,10 @@ mod tests {
     fn diagonal_system_matches_dense_solves_and_determinants_at_all_sizes() {
         use faer::prelude::Solve;
 
-        for q in [1, 8, 127, 128, 4096] {
+        // Native tests retain the large stress case; Miri covers the same paths
+        // above the sparse-selection threshold without interpreting thousands of rows.
+        let stress_size = if cfg!(miri) { 256 } else { 4096 };
+        for q in [1, 8, 127, 128, stress_size] {
             let rows: Vec<_> = (0..3 * q).collect();
             let offsets: Vec<_> = (0..=q).map(|i| 3 * i).collect();
             let values: Vec<_> = (0..3 * q).map(|i| [-0.5, 0.0, 1.5][i % 3]).collect();
@@ -415,7 +418,7 @@ mod tests {
 
     #[test]
     fn independent_groups_use_linear_storage_and_reuse_weighted_pattern() {
-        let q = 4096;
+        let q = if cfg!(miri) { 128 } else { 4096 };
         let offsets: Vec<_> = (0..=q).map(|i| 2 * i).collect();
         let rows: Vec<_> = (0..2 * q).collect();
         let input =
