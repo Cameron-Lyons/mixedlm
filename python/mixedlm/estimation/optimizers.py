@@ -279,12 +279,15 @@ def _optimize_scipy(
     # trust-constr's jac contains constraint Jacobians; grad is the objective gradient.
     jac_val = result.grad if method == "trust-constr" else getattr(result, "jac", None)
     nfev_val = result.nfev if hasattr(result, "nfev") else 0
+    # COBYLA reports evaluations instead of iterations, and its maxiter option
+    # is an evaluation limit. Retain that budget count in the normalized result.
+    nit_val = getattr(result, "nit", nfev_val)
 
     return OptimizeResult(
         x=result.x,
         fun=result.fun,
         success=result.success,
-        nit=result.nit,
+        nit=nit_val,
         message=result.message if hasattr(result, "message") else "",
         jac=jac_val,
         nfev=nfev_val,
@@ -710,6 +713,8 @@ def run_optimizer(
     original_options = dict(options or {})
     maxiter = original_options.get("maxiter", 1000)
     limits = [original_options[key] for key in ("maxfun", "maxfev") if key in original_options]
+    if method == "COBYLA":
+        limits.append(maxiter)
     maxeval = min(limits) if limits else np.inf
     nfev = 0
     iterations = 0
@@ -759,7 +764,15 @@ def run_optimizer(
                     point, value = candidate, float(trial)
         if value >= result.fun - tolerance:
             return finish()
-        if iterations >= maxiter or nfev >= maxeval or restarts >= len(variance_indices) + 1:
+        # Recent COBYLA implementations raise smaller restart limits to n + 2.
+        # Retain the improved probe instead of letting that exceed the budget.
+        insufficient_restart = method == "COBYLA" and maxeval - nfev < len(x0) + 2
+        if (
+            iterations >= maxiter
+            or nfev >= maxeval
+            or insufficient_restart
+            or restarts >= len(variance_indices) + 1
+        ):
             result = replace(
                 result,
                 x=point,
@@ -770,7 +783,7 @@ def run_optimizer(
             )
             return finish()
         remaining = dict(original_options)
-        remaining["maxiter"] = maxiter - iterations
+        remaining["maxiter"] = maxeval - nfev if method == "COBYLA" else maxiter - iterations
         for key in ("maxfun", "maxfev"):
             if key in remaining:
                 remaining[key] = max(1, remaining[key] - nfev)

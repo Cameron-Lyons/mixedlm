@@ -169,7 +169,7 @@ control = mlm.LmerControl(
 **Parameters:**
 
 - `optimizer`: Optimization algorithm. Options include `"COBYQA"` (default), `"L-BFGS-B"`, `"BFGS"`, `"Nelder-Mead"`, and `"Powell"`
-- `maxiter`: Maximum number of iterations
+- `maxiter`: Maximum number of iterations (function evaluations for TNC and COBYLA)
 - `optCtrl`: Optimizer-specific options, such as COBYQA's `final_tr_radius`
 - `restart_edge`: Boolean, default `True`. Before accepting a zero or near-zero variance
   scale, check nearby positive scales for a better likelihood. Restart the
@@ -268,6 +268,17 @@ as `lmer()`. An omitted `restart_edge` argument, or `restart_edge=None`, inherit
 the control supplied to `mkLmerDevfun()`; checks are enabled when no control is
 available. Pass `restart_edge=False` or `restart_edge=True` to override that
 choice for one fit without changing the stored control.
+
+The `method` and `maxiter` arguments select the solver and its base limit.
+The stored control supplies the appropriate `ftol`, `gtol`, and `xtol`
+tolerances and any `optCtrl` options, whose entries override generated options.
+For example, `lmerControl(optCtrl={"maxfev": 10})` passed to `mkLmerDevfun()`
+limits a subsequent `optimizeLmer(devfun, method="COBYQA")` call to ten objective
+evaluations. Each solver retains its own stopping and budget semantics.
+For COBYLA, `n_iter` uses the solver's evaluation count because SciPy does not
+return a separate iteration count. Boundary checks share its evaluation budget;
+when too few evaluations remain to initialize a restart, the best probe is
+returned with non-converged status.
 
 ### mkLmerMod
 
