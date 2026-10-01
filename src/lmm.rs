@@ -85,88 +85,37 @@ fn build_lambda_derivative_blocks(structures: &[RandomEffectStructure]) -> Vec<V
 }
 
 fn compute_dv_dtheta(
-    ztwz: &Mat<f64>,
-    lambda_blocks: &[Mat<f64>],
+    ztwz_lambda: &Mat<f64>,
     dlambda: &Mat<f64>,
     block_idx: usize,
     structures: &[RandomEffectStructure],
 ) -> Mat<f64> {
-    let q = ztwz.nrows();
-    let mut dv = Mat::zeros(q, q);
-
-    let affected_structure = &structures[block_idx];
-    let qi = affected_structure.n_terms;
-    let ni = affected_structure.n_levels;
-    let lambda_i = &lambda_blocks[block_idx];
-
-    let mut affected_block_offset = 0;
-    for (idx, s) in structures.iter().enumerate() {
-        if idx == block_idx {
-            break;
-        }
-        affected_block_offset += s.n_levels * s.n_terms;
-    }
-
-    for level in 0..ni {
-        let offset_i = affected_block_offset + level * qi;
-
-        let mut block_ii = Mat::zeros(qi, qi);
-        for ii in 0..qi {
-            for jj in 0..qi {
-                block_ii[(ii, jj)] = ztwz[(offset_i + ii, offset_i + jj)];
-            }
-        }
-
-        let dlambda_t = dlambda.transpose();
-        let lambda_i_t = lambda_i.transpose();
-
-        let term1 = dlambda_t * &block_ii * lambda_i;
-        let term2 = lambda_i_t * &block_ii * dlambda;
-
-        for ii in 0..qi {
-            for jj in 0..qi {
-                dv[(offset_i + ii, offset_i + jj)] += term1[(ii, jj)] + term2[(ii, jj)];
-            }
-        }
-    }
-
-    let mut block_offset_j = 0;
-    for (struct_j, (structure_j, lambda_j)) in
-        structures.iter().zip(lambda_blocks.iter()).enumerate()
-    {
-        let qj = structure_j.n_terms;
-        let nj = structure_j.n_levels;
-
-        if struct_j != block_idx {
-            for level_i in 0..ni {
-                let offset_i = affected_block_offset + level_i * qi;
-                for level_j in 0..nj {
-                    let offset_j = block_offset_j + level_j * qj;
-
-                    let mut block_ij = Mat::zeros(qi, qj);
-                    for ii in 0..qi {
-                        for jj in 0..qj {
-                            block_ij[(ii, jj)] = ztwz[(offset_i + ii, offset_j + jj)];
-                        }
-                    }
-
-                    let dlambda_t = dlambda.transpose();
-                    let term = dlambda_t * &block_ij * lambda_j;
-
-                    for ii in 0..qi {
-                        for jj in 0..qj {
-                            dv[(offset_i + ii, offset_j + jj)] += term[(ii, jj)];
-                            dv[(offset_j + jj, offset_i + ii)] += term[(ii, jj)];
-                        }
+    // Differentiate Lambda' Z'WZ Lambda without dropping products between
+    // levels of the same structure. The second term is the first's transpose.
+    let dimension = ztwz_lambda.nrows();
+    let structure = &structures[block_idx];
+    let start: usize = structures[..block_idx]
+        .iter()
+        .map(|s| s.n_levels * s.n_terms)
+        .sum();
+    let width = structure.n_terms;
+    let mut derivative = Mat::zeros(dimension, dimension);
+    for level in 0..structure.n_levels {
+        let offset = start + level * width;
+        for i in 0..width {
+            for j in 0..width {
+                let scale = dlambda[(j, i)];
+                if scale != 0.0 {
+                    for column in 0..dimension {
+                        let value = scale * ztwz_lambda[(offset + j, column)];
+                        derivative[(offset + i, column)] += value;
+                        derivative[(column, offset + i)] += value;
                     }
                 }
             }
         }
-
-        block_offset_j += nj * qj;
     }
-
-    dv
+    derivative
 }
 
 fn apply_dlambda_transpose_vector(
@@ -305,6 +254,7 @@ struct PreparedLmmDesign {
     xtwx: Mat<f64>,
     ztwx: Mat<f64>,
     ztwz: Mat<f64>,
+    independent_levels: Vec<bool>,
     structures: Vec<RandomEffectStructure>,
     n_theta: usize,
 }
@@ -375,6 +325,7 @@ impl PreparedLmmDesign {
         } else {
             compute_ztwz_sparse(&z, &weights)
         };
+        let independent_levels = BlockedMatrix::independent_levels(&ztwz, &structures);
         Ok(Self {
             x,
             wx,
@@ -386,6 +337,7 @@ impl PreparedLmmDesign {
             xtwx,
             ztwx,
             ztwz,
+            independent_levels,
             structures,
             n_theta,
         })
@@ -522,7 +474,13 @@ impl PreparedLmmResponse {
 
         let lambda_blocks = build_lambda_blocks(theta, structures);
 
-        let blocked_v = BlockedMatrix::from_lambda_ztwz(ztwz, &lambda_blocks, structures, true);
+        let blocked_v = BlockedMatrix::from_lambda_ztwz_with_pattern(
+            ztwz,
+            &lambda_blocks,
+            structures,
+            true,
+            &design.independent_levels,
+        );
         let chol_v = BlockedCholesky::factor(&blocked_v).ok()?;
 
         let logdet_v = chol_v.logdet();
@@ -935,6 +893,10 @@ pub fn profiled_deviance_with_gradient_impl(
         None
     };
 
+    let ztwz_lambda = CovarianceFactor::new(theta, structures)
+        .transpose_apply(ztwz.as_ref())
+        .transpose()
+        .to_owned();
     let mut gradient = Vec::with_capacity(n_theta);
 
     for (block_idx, (structure, block_derivs)) in
@@ -947,7 +909,7 @@ pub fn profiled_deviance_with_gradient_impl(
         };
 
         for dlambda in block_derivs.iter().take(n_block_theta) {
-            let dv = compute_dv_dtheta(&ztwz, &lambda_blocks, dlambda, block_idx, structures);
+            let dv = compute_dv_dtheta(&ztwz_lambda, dlambda, block_idx, structures);
 
             let mut d_logdet_v = 0.0;
             for i in 0..q {
