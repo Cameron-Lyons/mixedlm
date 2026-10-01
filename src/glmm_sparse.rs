@@ -234,6 +234,16 @@ pub enum RandomFactor {
     Sparse(NumericFactorization),
 }
 
+impl fmt::Debug for RandomFactor {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Diagonal(diagonal) => formatter.debug_tuple("Diagonal").field(diagonal).finish(),
+            Self::Dense(factor) => formatter.debug_tuple("Dense").field(factor).finish(),
+            Self::Sparse(_) => formatter.debug_struct("Sparse").finish_non_exhaustive(),
+        }
+    }
+}
+
 impl RandomFactor {
     pub fn logdet(&self) -> f64 {
         match self {

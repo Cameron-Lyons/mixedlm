@@ -2135,3 +2135,26 @@ def test_benchmark_prepared_glmm_threads(benchmark, kind, workers):
         for value, reference in zip(result, expected, strict=True):
             np.testing.assert_array_equal(value, reference)
         assert result[3]
+
+
+@pytest.mark.benchmark(group="native-constant-weight-glmm")
+@pytest.mark.parametrize("width", [2, 32])
+@pytest.mark.parametrize("fixed", [False, True])
+@pytest.mark.parametrize("prepared", [False, True])
+def test_benchmark_constant_weight_glmm(benchmark, width, fixed, prepared):
+    from mixedlm import _rust
+
+    from tests.test_lmm_covariance_transforms import wide_problem
+    from tests.test_native_covariance_transforms import _args
+
+    matrices, theta, _ = wide_problem(width, False, False, fixed=fixed)
+    args = _args(matrices, theta, "gaussian")
+    expected = _rust.glmm_deviance(*args, 1)
+    if prepared:
+        problem = _rust.GlmmProblem(*args[:8], *args[9:])
+        actual = benchmark(problem.evaluate, theta)
+    else:
+        actual = benchmark(_rust.glmm_deviance, *args, 1)
+    for value, reference in zip(actual, expected, strict=True):
+        np.testing.assert_array_equal(value, reference)
+    assert actual[3]

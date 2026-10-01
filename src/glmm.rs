@@ -527,24 +527,29 @@ fn factor_random_system(
     lambda: &CovarianceFactor,
     prepared: Option<&WeightedRandomDesign>,
     weights: &DVector<f64>,
-) -> Result<RandomFactor, LinalgError> {
+) -> Result<(RandomFactor, bool), LinalgError> {
     if let Some(prepared) = prepared {
         let weights = weights
             .try_as_col_major()
             .expect("owned weights are contiguous");
         return prepared
             .factor(weights.as_slice(), 0.0)
-            .or_else(|_| prepared.factor(weights.as_slice(), 1e-6));
+            .map(|factor| (factor, false))
+            .or_else(|_| {
+                prepared
+                    .factor(weights.as_slice(), 1e-6)
+                    .map(|factor| (factor, true))
+            });
     }
     let mut matrix = dense_penalized_crossproduct(z, lambda, weights);
     match Llt::new(matrix.as_ref(), Side::Lower) {
-        Ok(factor) => Ok(RandomFactor::Dense(factor)),
+        Ok(factor) => Ok((RandomFactor::Dense(factor), false)),
         Err(_) => {
             for i in 0..z.ncols() {
                 matrix[(i, i)] += 1e-6;
             }
             Llt::new(matrix.as_ref(), Side::Lower)
-                .map(RandomFactor::Dense)
+                .map(|factor| (RandomFactor::Dense(factor), true))
                 .map_err(|_| LinalgError::NotPositiveDefinite)
         }
     }
@@ -665,6 +670,7 @@ pub struct PirlsResult {
     mean: DVector<f64>,
     covariance: CovarianceFactor,
     random_system: Option<WeightedRandomDesign>,
+    constant_factor: Option<RandomFactor>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -701,6 +707,10 @@ pub fn pirls_impl(
         DVector::zeros(q)
     };
 
+    // Gaussian identity-link working weights are constant for this solve.
+    // Keep the factor local: a new response, offset, or theta starts afresh.
+    let constant_weights = family == FamilyType::Gaussian && link == LinkFunction::Identity;
+    let mut cached_factor = None;
     let mut converged = false;
     let mut w_vec = DVector::zeros(n);
     let mut z_vec = DVector::zeros(n);
@@ -754,21 +764,28 @@ pub fn pirls_impl(
             ztwz_vec[j] = sum;
         }
 
-        let chol_c = match factor_random_system(z, &lambda, random_system.as_ref(), &w_vec) {
-            Ok(factor) => factor,
-            Err(_) => {
-                return PirlsResult {
-                    beta,
-                    spherical,
-                    u: random_effects,
-                    deviance: 1e10,
-                    converged: false,
-                    mean: mu,
-                    covariance: lambda,
-                    random_system,
-                };
-            }
-        };
+        if !constant_weights {
+            cached_factor = None;
+        }
+        if cached_factor.is_none() {
+            cached_factor = match factor_random_system(z, &lambda, random_system.as_ref(), &w_vec) {
+                Ok(factor) => Some(factor),
+                Err(_) => {
+                    return PirlsResult {
+                        beta,
+                        spherical,
+                        u: random_effects,
+                        deviance: 1e10,
+                        converged: false,
+                        mean: mu,
+                        covariance: lambda,
+                        random_system,
+                        constant_factor: None,
+                    };
+                }
+            };
+        }
+        let (chol_c, _) = cached_factor.as_ref().unwrap();
 
         let spherical_ztwz = lambda.transpose_apply_vector(&ztwz_vec);
         let (beta_new, mut spherical_new) = if p == 0 {
@@ -847,6 +864,11 @@ pub fn pirls_impl(
         }
     }
 
+    let constant_factor = cached_factor.and_then(|(factor, regularized)| {
+        // The likelihood uses the unregularized determinant. A stabilized
+        // working solve must still take the existing determinant fallback.
+        (constant_weights && !regularized).then_some(factor)
+    });
     let random_effects = lambda.apply(&spherical);
     update_fixed_linear_predictor(&mut eta, x, &beta, offset);
     for j in 0..q {
@@ -874,6 +896,7 @@ pub fn pirls_impl(
         mean: mu_final,
         covariance: lambda,
         random_system,
+        constant_factor,
     }
 }
 
@@ -925,21 +948,24 @@ pub fn laplace_deviance_impl(
         family.deviance_resids(y, &mu, weights) + spherical.squared_norm_l2()
     };
 
-    let mut w_vec = family.weights(&mu, link);
-    for i in 0..n {
-        w_vec[i] = (w_vec[i] * weights[i]).max(1e-10);
-    }
-
-    let logdet_h = if let Some(prepared) = result.random_system.as_ref() {
-        let weights = w_vec
-            .try_as_col_major()
-            .expect("owned weights are contiguous");
-        match prepared.factor(weights.as_slice(), 0.0) {
-            Ok(factor) => factor.logdet(),
-            Err(_) => dense_logdet(z, &lambda, &w_vec),
-        }
+    let logdet_h = if let Some(factor) = result.constant_factor {
+        factor.logdet()
     } else {
-        dense_logdet(z, &lambda, &w_vec)
+        let mut w_vec = family.weights(&mu, link);
+        for i in 0..n {
+            w_vec[i] = (w_vec[i] * weights[i]).max(1e-10);
+        }
+        if let Some(prepared) = result.random_system.as_ref() {
+            let weights = w_vec
+                .try_as_col_major()
+                .expect("owned weights are contiguous");
+            match prepared.factor(weights.as_slice(), 0.0) {
+                Ok(factor) => factor.logdet(),
+                Err(_) => dense_logdet(z, &lambda, &w_vec),
+            }
+        } else {
+            dense_logdet(z, &lambda, &w_vec)
+        }
     };
 
     deviance += logdet_h;
@@ -1421,6 +1447,87 @@ pub fn glmm_deviance<'py>(
 #[cfg(test)]
 mod quadrature_tests {
     use super::*;
+
+    #[test]
+    fn only_constant_working_weights_keep_a_final_factor() {
+        let z = CscMatrix::try_from_usize(
+            &[1.0, 0.5, -0.25, 1.0, 0.5, 1.0, 1.0, -0.5],
+            &[0, 1, 2, 3, 0, 1, 2, 3],
+            &[0, 4, 8],
+            (4, 2),
+        )
+        .unwrap();
+        let structures = [RandomEffectStructure {
+            n_levels: 2,
+            n_terms: 1,
+            correlated: true,
+        }];
+        let x = DMatrix::from_fn(4, 1, |_, _| 1.0);
+        let y = DVector::from_fn(4, |i| [0.2, 0.4, 0.3, 0.6][i]);
+        let offset = DVector::from_fn(4, |i| i as f64 / 16.0);
+        let weights = [0.5, 1.0, 1.5, 2.0];
+        for (family, link) in [
+            (FamilyType::Gaussian, LinkFunction::Identity),
+            (FamilyType::Gaussian, LinkFunction::Log),
+            (FamilyType::Poisson, LinkFunction::Log),
+            (FamilyType::Binomial, LinkFunction::Logit),
+        ] {
+            for maxiter in [1, 10] {
+                let state = pirls_impl(
+                    &y,
+                    &x,
+                    &z,
+                    &weights,
+                    &offset,
+                    &[0.4],
+                    &structures,
+                    family,
+                    link,
+                    None,
+                    None,
+                    maxiter,
+                    1e-8,
+                );
+                assert_eq!(
+                    state.constant_factor.is_some(),
+                    family == FamilyType::Gaussian && link == LinkFunction::Identity
+                );
+                if let Some(factor) = state.constant_factor {
+                    let expected =
+                        dense_logdet(&z, &state.covariance, &DVector::from_fn(4, |i| weights[i]));
+                    assert_eq!(factor.logdet(), expected);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn random_system_factor_reports_regularization() {
+        let z = CscMatrix::try_from_usize(&[1.0], &[0], &[0, 1], (1, 1)).unwrap();
+        let covariance = CovarianceFactor::new(
+            &[1.0],
+            &[RandomEffectStructure {
+                n_levels: 1,
+                n_terms: 1,
+                correlated: true,
+            }],
+        );
+        let prepared = WeightedRandomDesign::new(&z, &covariance).unwrap();
+        for design in [None, Some(&prepared)] {
+            for (weight, regularized) in [(0.5, false), (-1.0 - 5e-7, true)] {
+                let (factor, actual) =
+                    factor_random_system(&z, &covariance, design, &DVector::from_fn(1, |_| weight))
+                        .unwrap();
+                assert_eq!(actual, regularized);
+                let precision = 1.0 + weight + if regularized { 1e-6 } else { 0.0 };
+                assert!((factor.logdet() - precision.ln()).abs() < 1e-9);
+            }
+            assert!(
+                factor_random_system(&z, &covariance, design, &DVector::from_fn(1, |_| -2.0))
+                    .is_err()
+            );
+        }
+    }
 
     #[test]
     #[cfg(not(miri))]
