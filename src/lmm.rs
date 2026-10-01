@@ -39,6 +39,28 @@ fn validate_prior_weights(weights: ArrayView1<'_, f64>, n: usize) -> PyResult<(V
     Ok((values, logdet))
 }
 
+fn random_effect_structures(
+    n_levels: Vec<usize>,
+    n_terms: Vec<usize>,
+    correlated: Vec<bool>,
+) -> PyResult<Vec<RandomEffectStructure>> {
+    if n_levels.len() != n_terms.len() || n_levels.len() != correlated.len() {
+        return Err(PyValueError::new_err(
+            "random-effect structure arrays must have equal lengths",
+        ));
+    }
+    Ok(n_levels
+        .into_iter()
+        .zip(n_terms)
+        .zip(correlated)
+        .map(|((n_levels, n_terms), correlated)| RandomEffectStructure {
+            n_levels,
+            n_terms,
+            correlated,
+        })
+        .collect())
+}
+
 fn csc_from_scipy(
     data: &[f64],
     indices: &[i64],
@@ -346,6 +368,145 @@ impl PreparedLmmResponse {
             .map_or(1e10, |evaluation| evaluation.0)
     }
 
+    fn deviance_with_gradient(&self, theta: &[f64], reml: bool) -> (f64, Vec<f64>) {
+        let design = &self.design;
+        let (x, z, w) = (&design.x, &design.z, &design.weights);
+        let (n, p, q) = (x.nrows(), x.ncols(), z.ncols());
+        let (xtwx, ztwx, ztwz) = (&design.xtwx, &design.ztwx, &design.ztwz);
+        let (y_adj, xtwy, ztwy) = (&self.y_adj, &self.xtwy, &self.ztwy);
+        let structures = &design.structures;
+        let logdet_w = design.logdet_weights;
+        let n_theta = design.n_theta;
+        if q == 0 {
+            return (self.deviance(theta, reml), Vec::new());
+        }
+
+        let lambda_blocks = build_lambda_blocks(theta, structures);
+
+        let blocked_v = BlockedMatrix::from_lambda_ztwz_with_pattern(
+            ztwz,
+            &lambda_blocks,
+            structures,
+            true,
+            &design.independent_levels,
+        );
+        let chol_v = match BlockedCholesky::factor(&blocked_v) {
+            Ok(c) => c,
+            Err(_) => return (1e10, vec![0.0; n_theta]),
+        };
+
+        let logdet_v = chol_v.logdet();
+
+        let factor = CovarianceFactor::from_blocks(lambda_blocks, structures);
+        let cu = factor.transpose_apply(ztwy.as_ref());
+        let cu_star = chol_v.solve_lower(&cu);
+
+        let lambdat_ztwx = factor.transpose_apply(ztwx.as_ref());
+        let rzx = chol_v.solve_lower(&lambdat_ztwx);
+
+        let rzx_t_rzx = rzx.transpose() * &rzx;
+        let xtvinvx = xtwx - &rzx_t_rzx;
+
+        let chol_xtvinvx = match Llt::new(xtvinvx.as_ref(), Side::Lower) {
+            Ok(c) => c,
+            Err(_) => return (1e10, vec![0.0; n_theta]),
+        };
+
+        let l_xtvinvx = chol_xtvinvx.L();
+        let logdet_xtvinvx: f64 = 2.0 * (0..p).map(|i| l_xtvinvx[(i, i)].ln()).sum::<f64>();
+
+        let cu_star_rzx_beta_term = rzx.transpose() * &cu_star;
+        let xty_adj = xtwy - &cu_star_rzx_beta_term;
+        let beta = chol_xtvinvx.solve(&xty_adj);
+
+        let mut resid = marginal_residual(x, &beta, y_adj);
+
+        let zt_w_resid = compute_ztwy_sparse(z, w, &resid, q);
+        let lambda_t_zt_resid = factor.transpose_apply(zt_w_resid.as_ref());
+        let u_star = chol_v.solve(&lambda_t_zt_resid);
+
+        let random = factor.apply(&u_star.col(0).to_owned());
+        z.subtract_product(random.as_ref(), &mut resid);
+        let wrss: f64 = (0..n).map(|i| w[i] * resid[i] * resid[i]).sum();
+        let ussq: f64 = (0..q).map(|i| u_star[(i, 0)] * u_star[(i, 0)]).sum();
+        let pwrss = wrss + ussq;
+        let zt_w_conditional = compute_ztwy_sparse(z, w, &resid, q);
+
+        let denom = if reml { n - p } else { n } as f64;
+        let sigma2 = pwrss / denom;
+
+        let mut dev =
+            denom * (1.0 + (2.0 * std::f64::consts::PI * sigma2).ln()) + logdet_v - logdet_w;
+        if reml {
+            dev += logdet_xtvinvx;
+        }
+
+        let v_inv = chol_v.solve(&Mat::<f64>::identity(q, q));
+        let v_inv_b = chol_v.solve(&lambdat_ztwx);
+        let xtvinvx_inv = if reml {
+            Some(chol_xtvinvx.solve(&Mat::<f64>::identity(p, p)))
+        } else {
+            None
+        };
+
+        let ztwz_lambda = factor.transpose_apply(ztwz.as_ref()).transpose().to_owned();
+        let mut gradient = Vec::with_capacity(n_theta);
+
+        for derivative in lambda_derivatives(structures) {
+            let dv = derivative.crossproduct_derivative(&ztwz_lambda);
+
+            let mut d_logdet_v = 0.0;
+            for i in 0..q {
+                for j in 0..q {
+                    d_logdet_v += v_inv[(i, j)] * dv[(j, i)];
+                }
+            }
+
+            let dc = derivative.apply::<true>(&zt_w_resid);
+            let dv_u = &dv * &u_star;
+            let d_u = chol_v.solve(&(&dc - &dv_u));
+            let lambda_d_u = factor.apply(&d_u.col(0).to_owned());
+            let d_lambda_u = derivative.apply::<false>(&u_star);
+            // Differentiate the conditional residual norm and spherical penalty
+            // through the mode solve. Holding beta fixed is valid at its optimum.
+            // This avoids cancellation between large marginal quadratic forms,
+            // and remains valid when a covariance factor is singular.
+            let d_pwrss = 2.0
+                * (0..q)
+                    .map(|i| {
+                        u_star[(i, 0)] * d_u[(i, 0)]
+                            - zt_w_conditional[(i, 0)] * (d_lambda_u[(i, 0)] + lambda_d_u[i])
+                    })
+                    .sum::<f64>();
+
+            let mut grad_k = d_logdet_v + denom / pwrss * d_pwrss;
+
+            if let Some(xtvinvx_inv) = &xtvinvx_inv {
+                let db = derivative.apply::<true>(ztwx);
+                let dv_v_inv_b = &dv * &v_inv_b;
+                let mut d_logdet_xtvinvx = 0.0;
+
+                for i in 0..p {
+                    for j in 0..p {
+                        let mut dm_ji = 0.0;
+                        for r in 0..q {
+                            dm_ji -= db[(r, j)] * v_inv_b[(r, i)];
+                            dm_ji -= v_inv_b[(r, j)] * db[(r, i)];
+                            dm_ji += v_inv_b[(r, j)] * dv_v_inv_b[(r, i)];
+                        }
+                        d_logdet_xtvinvx += xtvinvx_inv[(i, j)] * dm_ji;
+                    }
+                }
+
+                grad_k += d_logdet_xtvinvx;
+            }
+
+            gradient.push(grad_k);
+        }
+
+        (dev, gradient)
+    }
+
     fn evaluate<const ESTIMATES: bool>(&self, theta: &[f64], reml: bool) -> Option<LmmEvaluation> {
         let design = &self.design;
         let (x, z, w) = (&design.x, &design.z, &design.weights);
@@ -517,11 +678,7 @@ impl LmmDesign {
         n_terms: Vec<usize>,
         correlated: Vec<bool>,
     ) -> PyResult<Self> {
-        if n_levels.len() != n_terms.len() || n_levels.len() != correlated.len() {
-            return Err(PyValueError::new_err(
-                "random-effect structure arrays must have equal lengths",
-            ));
-        }
+        let structures = random_effect_structures(n_levels, n_terms, correlated)?;
         // Check before the CSC parser computes the expected indptr length.
         if z_shape.1 == usize::MAX {
             return Err(PyValueError::new_err("random-effect dimensions overflow"));
@@ -536,16 +693,6 @@ impl LmmDesign {
             z_indptr.as_slice()?,
             z_shape,
         )?;
-        let structures = n_levels
-            .into_iter()
-            .zip(n_terms)
-            .zip(correlated)
-            .map(|((n_levels, n_terms), correlated)| RandomEffectStructure {
-                n_levels,
-                n_terms,
-                correlated,
-            })
-            .collect();
         let weights_owned = weights.as_array().to_vec();
         let offset_owned = offset.as_array().to_vec();
         // Drop every NumPy borrow before preprocessing the owned snapshot, so
@@ -615,8 +762,7 @@ impl LmmResponse {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn profiled_deviance_impl(
-    theta: &[f64],
+fn prepare_lmm_response(
     y: ArrayView1<'_, f64>,
     x_data: ArrayView2<'_, f64>,
     z_data: &[f64],
@@ -625,10 +771,9 @@ pub fn profiled_deviance_impl(
     z_shape: (usize, usize),
     weights: ArrayView1<'_, f64>,
     offset: ArrayView1<'_, f64>,
-    structures: &[RandomEffectStructure],
-    reml: bool,
+    structures: Vec<RandomEffectStructure>,
     ztwz_cache: Option<&[f64]>,
-) -> PyResult<f64> {
+) -> PyResult<PreparedLmmResponse> {
     let x = Mat::from_fn(x_data.nrows(), x_data.ncols(), |i, j| x_data[[i, j]]);
     let z = csc_from_scipy(z_data, z_indices, z_indptr, z_shape)?;
     let design = Arc::new(
@@ -637,20 +782,16 @@ pub fn profiled_deviance_impl(
             z,
             weights.to_vec(),
             offset.to_vec(),
-            structures.to_vec(),
+            structures,
             ztwz_cache,
         )
         .map_err(PyValueError::new_err)?,
     );
-    let response = design.with_response(y).map_err(PyValueError::new_err)?;
-    response
-        .validate_parameters(theta, reml)
-        .map_err(PyValueError::new_err)?;
-    Ok(response.deviance(theta, reml))
+    design.with_response(y).map_err(PyValueError::new_err)
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn profiled_deviance_with_gradient_impl(
+fn profiled_deviance_impl(
     theta: &[f64],
     y: ArrayView1<'_, f64>,
     x_data: ArrayView2<'_, f64>,
@@ -660,205 +801,17 @@ pub fn profiled_deviance_with_gradient_impl(
     z_shape: (usize, usize),
     weights: ArrayView1<'_, f64>,
     offset: ArrayView1<'_, f64>,
-    structures: &[RandomEffectStructure],
+    structures: Vec<RandomEffectStructure>,
     reml: bool,
     ztwz_cache: Option<&[f64]>,
-) -> PyResult<(f64, Vec<f64>)> {
-    let n = y.len();
-    let p = x_data.ncols();
-    let q = z_shape.1;
-    let n_theta = theta.len();
-
-    let y_adj: Vec<f64> = y
-        .iter()
-        .zip(offset.iter())
-        .map(|(yi, oi)| yi - oi)
-        .collect();
-    let (w, logdet_w) = validate_prior_weights(weights, n)?;
-    let sqrt_w: Vec<f64> = w.iter().map(|wi| wi.sqrt()).collect();
-
-    let x = Mat::from_fn(n, p, |i, j| x_data[[i, j]]);
-
-    if q == 0 {
-        let wx = Mat::from_fn(n, p, |i, j| sqrt_w[i] * x[(i, j)]);
-        let wy = Mat::from_fn(n, 1, |i, _| sqrt_w[i] * y_adj[i]);
-
-        let xtwx = wx.transpose() * &wx;
-        let xtwy = wx.transpose() * &wy;
-
-        let chol = match Llt::new(xtwx.as_ref(), Side::Lower) {
-            Ok(c) => c,
-            Err(_) => return Ok((1e10, vec![0.0; n_theta])),
-        };
-
-        let beta = chol.solve(&xtwy);
-
-        let mut wrss = 0.0;
-        for i in 0..n {
-            let mut pred = 0.0;
-            for j in 0..p {
-                pred += x[(i, j)] * beta[(j, 0)];
-            }
-            let resid = y_adj[i] - pred;
-            wrss += w[i] * resid * resid;
-        }
-
-        let denom = if reml { n - p } else { n } as f64;
-        let sigma2 = wrss / denom;
-
-        let logdet_xtwx: f64 = if reml {
-            let l = chol.L();
-            2.0 * (0..p).map(|i| l[(i, i)].ln()).sum::<f64>()
-        } else {
-            0.0
-        };
-
-        let mut dev = denom * (1.0 + (2.0 * std::f64::consts::PI * sigma2).ln()) - logdet_w;
-        if reml {
-            dev += logdet_xtwx;
-        }
-
-        return Ok((dev, vec![0.0; n_theta]));
-    }
-
-    let z = csc_from_scipy(z_data, z_indices, z_indptr, z_shape)?;
-    let lambda_blocks = build_lambda_blocks(theta, structures);
-
-    let ztwz = if let Some(cached_data) = ztwz_cache {
-        mat_from_flat_array(cached_data, q)
-    } else {
-        compute_ztwz_sparse(&z, &w)
-    };
-
-    let blocked_v = BlockedMatrix::from_lambda_ztwz(&ztwz, &lambda_blocks, structures, true);
-    let chol_v = match BlockedCholesky::factor(&blocked_v) {
-        Ok(c) => c,
-        Err(_) => return Ok((1e10, vec![0.0; n_theta])),
-    };
-
-    let logdet_v = chol_v.logdet();
-
-    let ztwy = compute_ztwy_sparse(&z, &w, &y_adj, q);
-    let factor = CovarianceFactor::from_blocks(lambda_blocks, structures);
-    let cu = factor.transpose_apply(ztwy.as_ref());
-    let cu_star = chol_v.solve_lower(&cu);
-
-    let wx = Mat::from_fn(n, p, |i, j| sqrt_w[i] * x[(i, j)]);
-
-    let ztwx = compute_ztwx_sparse(&z, &w, &x, q, p);
-    let lambdat_ztwx = factor.transpose_apply(ztwx.as_ref());
-    let rzx = chol_v.solve_lower(&lambdat_ztwx);
-
-    let xtwx = wx.transpose() * &wx;
-    let mut xtwy = Mat::zeros(p, 1);
-    for i in 0..p {
-        let mut sum = 0.0;
-        for row in 0..n {
-            sum += wx[(row, i)] * sqrt_w[row] * y_adj[row];
-        }
-        xtwy[(i, 0)] = sum;
-    }
-
-    let rzx_t_rzx = rzx.transpose() * &rzx;
-    let xtvinvx = &xtwx - &rzx_t_rzx;
-
-    let chol_xtvinvx = match Llt::new(xtvinvx.as_ref(), Side::Lower) {
-        Ok(c) => c,
-        Err(_) => return Ok((1e10, vec![0.0; n_theta])),
-    };
-
-    let l_xtvinvx = chol_xtvinvx.L();
-    let logdet_xtvinvx: f64 = 2.0 * (0..p).map(|i| l_xtvinvx[(i, i)].ln()).sum::<f64>();
-
-    let cu_star_rzx_beta_term = rzx.transpose() * &cu_star;
-    let xty_adj = &xtwy - &cu_star_rzx_beta_term;
-    let beta = chol_xtvinvx.solve(&xty_adj);
-
-    let mut resid = marginal_residual(&x, &beta, &y_adj);
-
-    let zt_w_resid = compute_ztwy_sparse(&z, &w, &resid, q);
-    let lambda_t_zt_resid = factor.transpose_apply(zt_w_resid.as_ref());
-    let u_star = chol_v.solve(&lambda_t_zt_resid);
-
-    let random = factor.apply(&u_star.col(0).to_owned());
-    z.subtract_product(random.as_ref(), &mut resid);
-    let wrss: f64 = (0..n).map(|i| w[i] * resid[i] * resid[i]).sum();
-    let ussq: f64 = (0..q).map(|i| u_star[(i, 0)] * u_star[(i, 0)]).sum();
-    let pwrss = wrss + ussq;
-    let zt_w_conditional = compute_ztwy_sparse(&z, &w, &resid, q);
-
-    let denom = if reml { n - p } else { n } as f64;
-    let sigma2 = pwrss / denom;
-
-    let mut dev = denom * (1.0 + (2.0 * std::f64::consts::PI * sigma2).ln()) + logdet_v - logdet_w;
-    if reml {
-        dev += logdet_xtvinvx;
-    }
-
-    let v_inv = chol_v.solve(&Mat::<f64>::identity(q, q));
-    let v_inv_b = chol_v.solve(&lambdat_ztwx);
-    let xtvinvx_inv = if reml {
-        Some(chol_xtvinvx.solve(&Mat::<f64>::identity(p, p)))
-    } else {
-        None
-    };
-
-    let ztwz_lambda = factor.transpose_apply(ztwz.as_ref()).transpose().to_owned();
-    let mut gradient = Vec::with_capacity(n_theta);
-
-    for derivative in lambda_derivatives(structures) {
-        let dv = derivative.crossproduct_derivative(&ztwz_lambda);
-
-        let mut d_logdet_v = 0.0;
-        for i in 0..q {
-            for j in 0..q {
-                d_logdet_v += v_inv[(i, j)] * dv[(j, i)];
-            }
-        }
-
-        let dc = derivative.apply::<true>(&zt_w_resid);
-        let dv_u = &dv * &u_star;
-        let d_u = chol_v.solve(&(&dc - &dv_u));
-        let lambda_d_u = factor.apply(&d_u.col(0).to_owned());
-        let d_lambda_u = derivative.apply::<false>(&u_star);
-        // Differentiate the conditional residual norm and spherical penalty
-        // through the mode solve. Holding beta fixed is valid at its optimum.
-        // This avoids cancellation between large marginal quadratic forms,
-        // and remains valid when a covariance factor is singular.
-        let d_pwrss = 2.0
-            * (0..q)
-                .map(|i| {
-                    u_star[(i, 0)] * d_u[(i, 0)]
-                        - zt_w_conditional[(i, 0)] * (d_lambda_u[(i, 0)] + lambda_d_u[i])
-                })
-                .sum::<f64>();
-
-        let mut grad_k = d_logdet_v + denom / pwrss * d_pwrss;
-
-        if let Some(xtvinvx_inv) = &xtvinvx_inv {
-            let db = derivative.apply::<true>(&ztwx);
-            let dv_v_inv_b = &dv * &v_inv_b;
-            let mut d_logdet_xtvinvx = 0.0;
-
-            for i in 0..p {
-                for j in 0..p {
-                    let mut dm_ji = 0.0;
-                    for r in 0..q {
-                        dm_ji -= db[(r, j)] * v_inv_b[(r, i)];
-                        dm_ji -= v_inv_b[(r, j)] * db[(r, i)];
-                        dm_ji += v_inv_b[(r, j)] * dv_v_inv_b[(r, i)];
-                    }
-                    d_logdet_xtvinvx += xtvinvx_inv[(i, j)] * dm_ji;
-                }
-            }
-
-            grad_k += d_logdet_xtvinvx;
-        }
-
-        gradient.push(grad_k);
-    }
-
-    Ok((dev, gradient))
+) -> PyResult<f64> {
+    let response = prepare_lmm_response(
+        y, x_data, z_data, z_indices, z_indptr, z_shape, weights, offset, structures, ztwz_cache,
+    )?;
+    response
+        .validate_parameters(theta, reml)
+        .map_err(PyValueError::new_err)?;
+    Ok(response.deviance(theta, reml))
 }
 
 #[pyfunction]
@@ -925,16 +878,7 @@ pub fn profiled_deviance_cached<'py>(
     reml: bool,
     ztwz_cache: Option<numpy::PyArrayLike1<'py, f64>>,
 ) -> PyResult<f64> {
-    let structures: Vec<RandomEffectStructure> = n_levels
-        .into_iter()
-        .zip(n_terms)
-        .zip(correlated)
-        .map(|((nl, nt), c)| RandomEffectStructure {
-            n_levels: nl,
-            n_terms: nt,
-            correlated: c,
-        })
-        .collect();
+    let structures = random_effect_structures(n_levels, n_terms, correlated)?;
 
     let ztwz_data = ztwz_cache.as_ref().map(|arr| arr.as_slice()).transpose()?;
 
@@ -948,7 +892,7 @@ pub fn profiled_deviance_cached<'py>(
         z_shape,
         weights.as_array(),
         offset.as_array(),
-        &structures,
+        structures,
         reml,
         ztwz_data,
     )
@@ -986,16 +930,7 @@ pub fn profiled_deviance<'py>(
     correlated: Vec<bool>,
     reml: bool,
 ) -> PyResult<f64> {
-    let structures: Vec<RandomEffectStructure> = n_levels
-        .into_iter()
-        .zip(n_terms)
-        .zip(correlated)
-        .map(|((nl, nt), c)| RandomEffectStructure {
-            n_levels: nl,
-            n_terms: nt,
-            correlated: c,
-        })
-        .collect();
+    let structures = random_effect_structures(n_levels, n_terms, correlated)?;
 
     profiled_deviance_impl(
         theta.as_slice()?,
@@ -1007,7 +942,7 @@ pub fn profiled_deviance<'py>(
         z_shape,
         weights.as_array(),
         offset.as_array(),
-        &structures,
+        structures,
         reml,
         None,
     )
@@ -1046,19 +981,9 @@ pub fn profiled_deviance_with_gradient<'py>(
     correlated: Vec<bool>,
     reml: bool,
 ) -> PyResult<(f64, Py<PyArray1<f64>>)> {
-    let structures: Vec<RandomEffectStructure> = n_levels
-        .into_iter()
-        .zip(n_terms)
-        .zip(correlated)
-        .map(|((nl, nt), c)| RandomEffectStructure {
-            n_levels: nl,
-            n_terms: nt,
-            correlated: c,
-        })
-        .collect();
+    let structures = random_effect_structures(n_levels, n_terms, correlated)?;
 
-    let (dev, grad) = profiled_deviance_with_gradient_impl(
-        theta.as_slice()?,
+    let response = prepare_lmm_response(
         y.as_array(),
         x.as_array(),
         z_data.as_slice()?,
@@ -1067,10 +992,15 @@ pub fn profiled_deviance_with_gradient<'py>(
         z_shape,
         weights.as_array(),
         offset.as_array(),
-        &structures,
-        reml,
+        structures,
         None,
     )?;
+
+    let theta = theta.as_slice()?;
+    response
+        .validate_parameters(theta, reml)
+        .map_err(PyValueError::new_err)?;
+    let (dev, grad) = response.deviance_with_gradient(theta, reml);
 
     Ok((dev, PyArray1::from_vec(py, grad).into()))
 }

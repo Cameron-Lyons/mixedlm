@@ -73,6 +73,7 @@ impl BlockedMatrix {
             .collect()
     }
 
+    #[cfg(test)]
     pub fn from_lambda_ztwz(
         ztwz: &Mat<f64>,
         lambda_blocks: &[Mat<f64>],

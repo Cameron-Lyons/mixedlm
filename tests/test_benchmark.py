@@ -1673,6 +1673,30 @@ def test_benchmark_lmm_covariance_transforms(benchmark, width, independent, oper
     np.testing.assert_allclose(actual, expected, rtol=2e-12, atol=2e-11)
 
 
+@pytest.mark.benchmark(group="lmm-gradient-validation")
+@pytest.mark.parametrize("layout", ["fixed_only", "mode_only", "slope", "crossed"])
+@pytest.mark.parametrize("size", [64, 65536])
+def test_benchmark_lmm_validated_gradient(benchmark, layout, size):
+    from mixedlm import _rust
+    from mixedlm.estimation.reml import _profiled_deviance_core
+
+    from tests.test_glmm_final_state import mode_problem
+    from tests.test_lmm_prepared_design import native_arguments, parameters
+
+    matrices, _, _ = mode_problem("gaussian", layout, n_obs=size, n_groups=16)
+    theta = parameters(matrices)
+    expected = _profiled_deviance_core(theta, matrices).deviance
+    value, gradient = benchmark(
+        _rust.profiled_deviance_with_gradient,
+        theta=theta,
+        y=matrices.y,
+        **native_arguments(matrices),
+    )
+    np.testing.assert_allclose(value, expected, rtol=2e-12, atol=2e-9)
+    assert gradient.shape == theta.shape
+    assert np.all(np.isfinite(gradient))
+
+
 @pytest.mark.benchmark(group="lmm-residual-rows")
 @pytest.mark.parametrize("layout", ["intercept", "slope"])
 @pytest.mark.parametrize("size", [64, 65536])
