@@ -808,6 +808,8 @@ class LMMOptimizer:
         method: str = "L-BFGS-B",
         maxiter: int = 1000,
         options: dict[str, Any] | None = None,
+        *,
+        restart_edge: bool = True,
     ) -> OptimizationResult:
         if start is None:
             start = self.get_start_theta()
@@ -832,6 +834,7 @@ class LMMOptimizer:
             bounds=bounds,
             options=opt_options,
             callback=callback,
+            restart_edge=restart_edge,
         )
 
         theta_opt = result.x

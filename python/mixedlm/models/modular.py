@@ -527,6 +527,8 @@ def optimizeLmer(
     method: str = "L-BFGS-B",
     maxiter: int = 1000,
     verbose: int = 0,
+    *,
+    restart_edge: bool = True,
 ) -> OptimizeResult:
     """Optimize the deviance function for a linear mixed model.
 
@@ -545,6 +547,9 @@ def optimizeLmer(
         Maximum number of iterations.
     verbose : int, default 0
         Verbosity level.
+    restart_edge : bool, default True
+        Check zero covariance scales for likelihood improvement and restart
+        the requested optimizer within the remaining iteration budget.
 
     Returns
     -------
@@ -564,7 +569,7 @@ def optimizeLmer(
     mkLmerDevfun : Create deviance function.
     mkLmerMod : Create final model from optimization results.
     """
-    from scipy.optimize import minimize
+    from mixedlm.estimation.optimizers import run_optimizer
 
     if start is None:
         start = devfun.get_start()
@@ -578,13 +583,14 @@ def optimizeLmer(
             dev = devfun(x)
             print(f"theta = {x}, deviance = {dev:.6f}")
 
-    result = minimize(
+    result = run_optimizer(
         devfun,
         start,
         method=method,
         bounds=bounds,
         options={"maxiter": maxiter},
         callback=callback,
+        restart_edge=restart_edge,
     )
 
     return OptimizeResult(
@@ -648,7 +654,13 @@ def optimizeGlmer(
         if devfun.control is not None
         else None
     )
-    result = optimizer.optimize(start=start, method=method, maxiter=maxiter, options=options)
+    result = optimizer.optimize(
+        start=start,
+        method=method,
+        maxiter=maxiter,
+        options=options,
+        restart_edge=devfun.control.restart_edge if devfun.control is not None else True,
+    )
     message = result.message
     if not result.pirls_converged:
         message += "; inner PIRLS solver did not converge"

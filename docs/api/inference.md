@@ -656,7 +656,9 @@ inference.
 
 GLMM fixed-effect profiles re-optimize every other fixed coefficient and the
 covariance parameters at each constrained value, using the fitted model's
-Laplace or adaptive-quadrature likelihood. `model.confint(method="profile")`
+Laplace or adaptive-quadrature likelihood. Profiles check zero variance scales
+for improving directions and restart the nuisance optimizer when needed, so
+constrained optima can leave a zero-variance fit. `model.confint(method="profile")`
 uses the same calculation. These intervals can be asymmetric; they are no
 longer copies of the Wald intervals.
 

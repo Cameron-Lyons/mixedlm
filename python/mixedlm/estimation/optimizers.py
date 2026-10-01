@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import warnings
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from importlib.util import find_spec
 from typing import Any
 
@@ -619,7 +619,7 @@ def nlminbwrap(
     return _optimize_scipy(fun, x0, "L-BFGS-B", bounds, options)
 
 
-def run_optimizer(
+def _run_optimizer_once(
     fun: Callable[[NDArray[np.floating]], float],
     x0: NDArray[np.floating],
     method: str,
@@ -675,3 +675,108 @@ def run_optimizer(
             )
         return _optimize_nlopt(fun, x0, bounds, options, algorithm)
     return _optimize_scipy(fun, x0, method, bounds, options, callback, jac)
+
+
+def run_optimizer(
+    fun: Callable[[NDArray[np.floating]], float],
+    x0: NDArray[np.floating],
+    method: str,
+    bounds: list[tuple[float | None, float | None]],
+    options: dict[str, Any] | None = None,
+    callback: Callable[[NDArray[np.floating]], None] | None = None,
+    jac: Callable[[NDArray[np.floating]], NDArray[np.floating]] | str | None = None,
+    *,
+    restart_edge: bool = False,
+) -> OptimizeResult:
+    """Optimize, optionally checking zero variance scales for downhill directions.
+
+    Covariance scales have lower bound zero and no upper bound. Their gradient
+    can vanish at zero even when positive variance improves the likelihood.
+    Small inward probes detect this before accepting convergence. Restarts use
+    the requested solver and the remaining iteration/evaluation budget.
+    """
+    if not isinstance(restart_edge, (bool, np.bool_)):
+        raise ValueError("restart_edge must be a boolean")
+    if not restart_edge:
+        return _run_optimizer_once(fun, x0, method, bounds, options, callback, jac)
+
+    original_options = dict(options or {})
+    maxiter = original_options.get("maxiter", 1000)
+    limits = [original_options[key] for key in ("maxfun", "maxfev") if key in original_options]
+    maxeval = min(limits) if limits else np.inf
+    nfev = 0
+    iterations = 0
+    restarts = 0
+
+    def counted(values: NDArray[np.floating]) -> float:
+        nonlocal nfev
+        nfev += 1
+        return fun(values)
+
+    result = _run_optimizer_once(counted, x0, method, bounds, original_options, callback, jac)
+    iterations += result.nit
+    variance_indices = [i for i, bound in enumerate(bounds) if bound == (0.0, None)]
+    scale = np.maximum(np.abs(x0), 1.0)
+
+    def finish() -> OptimizeResult:
+        message = str(result.message)
+        if restarts:
+            message += f"; {restarts} variance-boundary restart(s)"
+        return replace(result, nit=iterations, nfev=nfev, message=message)
+
+    while result.success and np.isfinite(result.fun):
+        boundary = [i for i in variance_indices if abs(result.x[i]) <= 1e-6 * scale[i]]
+        if not boundary:
+            return finish()
+        point, value = result.x.copy(), float(result.fun)
+        tolerance = 64 * np.finfo(float).eps * max(1.0, abs(value))
+
+        for index in boundary:
+            for step in (1e-3, 1e-2, 1e-1):
+                if nfev >= maxeval:
+                    result = replace(
+                        result,
+                        x=point,
+                        fun=value,
+                        success=False,
+                        jac=None,
+                        message="Evaluation budget exhausted during variance-boundary check",
+                    )
+                    return finish()
+                candidate = point.copy()
+                candidate[index] = step * scale[index]
+                trial = counted(candidate)
+                if np.isfinite(trial) and trial < value - tolerance:
+                    point, value = candidate, float(trial)
+        if value >= result.fun - tolerance:
+            return finish()
+        if iterations >= maxiter or nfev >= maxeval or restarts >= len(variance_indices) + 1:
+            result = replace(
+                result,
+                x=point,
+                fun=value,
+                success=False,
+                jac=None,
+                message="Variance-boundary improvement found but restart budget exhausted",
+            )
+            return finish()
+        remaining = dict(original_options)
+        remaining["maxiter"] = maxiter - iterations
+        for key in ("maxfun", "maxfev"):
+            if key in remaining:
+                remaining[key] = max(1, remaining[key] - nfev)
+        restarted = _run_optimizer_once(counted, point, method, bounds, remaining, callback, jac)
+        iterations += restarted.nit
+        restarts += 1
+        if not np.isfinite(restarted.fun) or restarted.fun > value + tolerance:
+            result = replace(
+                restarted,
+                x=point,
+                fun=value,
+                success=False,
+                jac=None,
+                message="Variance-boundary restart failed to retain the improved likelihood",
+            )
+            return finish()
+        result = restarted
+    return finish()
