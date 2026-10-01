@@ -923,7 +923,9 @@ mod tests {
         let x = Mat::from_fn(n, 2, |i, j| if j == 0 { 1.0 } else { i as f64 });
         let z = Mat::from_fn(n, 4, |i, j| if i / 5 == j { 1.0 } else { 0.0 });
 
-        let result = augmented_ai_reml_iterate(&y, &x, &[z], &[1.0], 1.0, 50, 1e-4);
+        // Miri checks the iterative numerical path; native tests run the full limit.
+        let maxiter = if cfg!(miri) { 5 } else { 50 };
+        let result = augmented_ai_reml_iterate(&y, &x, &[z], &[1.0], 1.0, maxiter, 1e-4);
         assert!(result.is_ok());
     }
 
@@ -935,7 +937,8 @@ mod tests {
         let z = Mat::from_fn(n, 4, |i, j| if i / 5 == j { 1.0 } else { 0.0 });
 
         let init_s = Mat::from_fn(1, 1, |_, _| 1.0);
-        let result = riemannian_reml_iterate(&y, &x, &[z], &init_s, 1.0, 50, 1e-4, 0.1);
+        let maxiter = if cfg!(miri) { 5 } else { 50 };
+        let result = riemannian_reml_iterate(&y, &x, &[z], &init_s, 1.0, maxiter, 1e-4, 0.1);
         assert!(result.is_ok());
     }
 }

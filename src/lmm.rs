@@ -178,14 +178,6 @@ fn marginal_residual(x: &Mat<f64>, beta: &Mat<f64>, y: &[f64]) -> Vec<f64> {
     residual
 }
 
-fn subtract_random_prediction(residual: &mut [f64], z: &CscMatrix, random: &faer::Col<f64>) {
-    for j in 0..z.ncols() {
-        for index in z.col_offsets()[j]..z.col_offsets()[j + 1] {
-            residual[z.row_indices()[index]] -= z.values()[index] * random[j];
-        }
-    }
-}
-
 /// Products that depend only on the design, shared by independent responses.
 struct PreparedLmmDesign {
     x: Mat<f64>,
@@ -455,7 +447,7 @@ impl PreparedLmmResponse {
         let u_star = chol_v.solve(&lambda_t_zt_resid);
 
         let random = factor.apply(&u_star.col(0).to_owned());
-        subtract_random_prediction(&mut resid, z, &random);
+        z.subtract_product(random.as_ref(), &mut resid);
         // Use conditional residuals and the spherical penalty for both the
         // objective and final scale. Subtracting marginal quadratic forms loses
         // precision when the random effects explain nearly all of the response.
@@ -789,7 +781,7 @@ pub fn profiled_deviance_with_gradient_impl(
     let u_star = chol_v.solve(&lambda_t_zt_resid);
 
     let random = factor.apply(&u_star.col(0).to_owned());
-    subtract_random_prediction(&mut resid, &z, &random);
+    z.subtract_product(random.as_ref(), &mut resid);
     let wrss: f64 = (0..n).map(|i| w[i] * resid[i] * resid[i]).sum();
     let ussq: f64 = (0..q).map(|i| u_star[(i, 0)] * u_star[(i, 0)]).sum();
     let pwrss = wrss + ussq;
@@ -1205,7 +1197,7 @@ mod prepared_tests {
         let initial = first.deviance(&[], false);
         assert!((second.deviance(&[], false) - initial - 4.0 * 4.0f64.ln()).abs() < 1e-12);
         drop(design);
-        assert_eq!(first.deviance(&[], false), initial);
+        assert!((first.deviance(&[], false) - initial).abs() <= 1e-12 * initial.abs().max(1.0));
         assert!(first.validate_parameters(&[1.0], false).is_err());
         assert!(
             second

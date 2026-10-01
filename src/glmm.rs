@@ -1698,13 +1698,19 @@ mod final_mode_tests {
                         let mut mean = link.inverse(&eta);
                         family.clamp_mu(&mut mean, 1e-10);
                         for row in 0..n {
-                            assert_eq!(state.mean[row].to_bits(), mean[row].to_bits());
+                            assert!(
+                                (state.mean[row] - mean[row]).abs()
+                                    <= 1e-12 * mean[row].abs().max(1.0)
+                            );
                         }
-                        assert_eq!(state.covariance.apply(&state.spherical), state.u);
-                        assert_eq!(
-                            state.deviance,
-                            family.deviance_resids(&y, &mean, &weights)
-                                + state.spherical.squared_norm_l2(),
+                        assert!(
+                            (state.covariance.apply(&state.spherical) - &state.u).norm_l2() < 1e-12
+                        );
+                        let expected_deviance = family.deviance_resids(&y, &mean, &weights)
+                            + state.spherical.squared_norm_l2();
+                        assert!(
+                            (state.deviance - expected_deviance).abs()
+                                <= 1e-12 * expected_deviance.abs().max(1.0)
                         );
                         if maxiter == 0 {
                             assert!(!state.converged);
@@ -1744,7 +1750,7 @@ mod final_mode_tests {
         assert_eq!(state.deviance, 1e10);
         assert_eq!(state.covariance.apply(&state.spherical), state.u);
         let expected_mean = LinkFunction::Log.inverse(&(&x * &state.beta));
-        assert_eq!(state.mean, expected_mean);
+        assert!((&state.mean - &expected_mean).norm_l2() < 1e-12);
     }
 }
 

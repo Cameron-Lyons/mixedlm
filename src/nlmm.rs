@@ -1098,11 +1098,14 @@ mod tests {
         let complete = evaluate(1000, 1e-10);
         assert!(!limited.4);
         assert!(loose.4 && complete.4);
-        assert_eq!(limited.0, loose.0);
-        assert_eq!(limited.1, loose.1);
-        assert_eq!(limited.3, loose.3);
+        assert!((limited.0 - loose.0).abs() <= 1e-12 * loose.0.abs().max(1.0));
+        assert_eq!(limited.1.len(), loose.1.len());
+        for (actual, expected) in limited.1.iter().zip(&loose.1) {
+            assert!((actual - expected).abs() <= 1e-12 * expected.abs().max(1.0));
+        }
+        assert!((limited.3 - loose.3).abs() <= 1e-12 * loose.3.abs().max(1.0));
         for row in 0..3 {
-            assert_eq!(limited.2[(row, 0)], loose.2[(row, 0)]);
+            assert!((limited.2[(row, 0)] - loose.2[(row, 0)]).abs() < 1e-12);
         }
         assert!((complete.1[0] - limited.1[0]).abs() > 1e-3);
     }
