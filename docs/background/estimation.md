@@ -163,6 +163,9 @@ designs require a full inverse and can make analytic gradients more expensive
 than numerical derivatives. Eligibility depends on exact zeros in the design
 crossproducts, so zero variance parameters do not hide coupled levels.
 
+REML gradients also share the fixed-effect information solve across covariance
+parameters, reducing repeated work for models with many fixed effects.
+
 `LMMOptimizer.optimize(use_analytic_gradient=True)` enables the same path for
 prepared fits and response refits. `optimizeLmer()` inherits this setting from
 the control passed to `mkLmerDevfun()` and accepts an explicit override.

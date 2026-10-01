@@ -33,6 +33,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Native REML gradients share a fixed-effect solve across covariance parameters and contract each derivative directly. This avoids an explicit fixed-effect information inverse and repeated quadratic work in the number of fixed effects.
+
 - Native LMM gradients use compact per-level inverses and crossproducts when the weighted design separates across all levels and grouping structures. Eligibility is cached from the design, including exact checks for tiny couplings. These gradient temporaries use per-level block sizes; the prepared design still stores the full crossproduct.
 
 - Native LMM covariance assembly transforms complete grouping blocks in place, avoiding temporary matrices for each pair of levels. Independent-level blocks retain their compact representation and skip redundant copies.
