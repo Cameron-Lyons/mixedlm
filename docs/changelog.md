@@ -23,6 +23,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- GLMM profile confidence intervals now use constrained likelihood fits and likelihood-ratio cutoffs, with nuisance covariance and fixed coefficients re-optimized, instead of returning Wald intervals.
+
 - `GlmerControl.tolPwrss` now governs PIRLS stopping in native and Python likelihoods, quadrature, modular fitting, and final extraction; invalid inner controls are rejected before solving
 
 - Prediction offsets reject complex, masked, and non-finite values before evaluating

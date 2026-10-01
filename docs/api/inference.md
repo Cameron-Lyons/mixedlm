@@ -642,6 +642,31 @@ one-parameter curves and two-parameter slices reuse the fitted precision
 solver. Large random-effect systems stay sparse, including calculations in
 parallel workers.
 
+GLMM fixed-effect profiles re-optimize every other fixed coefficient and the
+covariance parameters at each constrained value, using the fitted model's
+Laplace or adaptive-quadrature likelihood. `model.confint(method="profile")`
+uses the same calculation. These intervals can be asymmetric; they are no
+longer copies of the Wald intervals.
+
+```python
+profiles = model.profile(which="x", n_points=20, level=0.95)
+interval = model.confint(parm="x", method="profile", level=0.95)
+```
+
+The profiler first refines the joint likelihood optimum over fixed coefficients
+and covariance parameters. This can shift the center from the original fit's
+joint PIRLS approximation. `ProfileResult.mle` records the refined center, and
+a warning identifies shifts greater than 0.001 fitted standard errors. The
+original fitted result is unchanged.
+
+The likelihood-ratio endpoints are solved independently of the plotting grid;
+`n_points` must be an integer of at least 3. Nearby constrained solutions and
+repeated evaluations are reused. Quadrature order, prior weights, offsets,
+trial counts, and PIRLS controls are retained. The input fit and each inner and
+outer solve must converge. Failed optimization or an interval that cannot be
+bracketed raises an error, without substituting a Wald interval. GLMM profiling
+currently runs serially and costs more than Wald inference.
+
 ### plot_profiles
 
 Plot 1D profile likelihood curves.

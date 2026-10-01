@@ -1418,7 +1418,8 @@ class GlmerResult(MerResultMixin):
             return result
 
         elif method == "profile":
-            profiles = profile_glmer(self, which=parm, level=level)
+            # Endpoints use root finding; confidence intervals need no interior plot grid.
+            profiles = profile_glmer(self, which=parm, level=level, n_points=3)
             return {p: (profiles[p].ci_lower, profiles[p].ci_upper) for p in parm if p in profiles}
 
         elif method == "boot":

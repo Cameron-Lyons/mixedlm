@@ -376,7 +376,12 @@ Compute information criteria.
 result.profile(which=None, n_points=20, level=0.95)
 ```
 
-Compute profile likelihood.
+Compute fixed-effect likelihood profiles. GLMM profiles re-optimize nuisance
+fixed coefficients and covariance parameters using the fitted quadrature and
+inner solver controls. The refined profile center can differ from the fitted
+coefficient; the original result is unchanged. GLMM `n_points` must be at least
+3 and affects the plotted curve, not the interval endpoint accuracy. See
+[profile likelihood](inference.md#profile-likelihood) for convergence behavior.
 
 **Returns:** Dictionary mapping parameter names to `ProfileResult` objects.
 
