@@ -169,8 +169,8 @@ class LmerControl:
         If any variance component is smaller than this value,
         the fit is considered singular.
     restart_edge : bool, default True
-        Check zero variance scales for likelihood improvement and restart the
-        requested optimizer when needed, within its remaining budget.
+        Check zero and near-zero variance scales for likelihood improvement.
+        Restart the requested optimizer when needed, within its remaining budget.
     check_conv : bool, default True
         Whether to check convergence and warn if not converged.
     check_singular : bool, default True
@@ -300,8 +300,8 @@ class GlmerControl:
     boundary_tol : float, default 1e-4
         Tolerance for detecting boundary (singular) fits.
     restart_edge : bool, default True
-        Check zero variance scales and restart within each outer stage's
-        remaining budget when positive variance improves the likelihood.
+        Check zero and near-zero variance scales and restart within each outer
+        stage's remaining budget when positive variance improves the likelihood.
     check_conv : bool, default True
         Whether to check convergence and warn if not converged.
     check_singular : bool, default True

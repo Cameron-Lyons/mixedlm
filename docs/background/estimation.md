@@ -170,6 +170,14 @@ Custom modular deviance callables retain numerical derivatives for their full ob
 Analytic derivatives can change the optimization path; convergence checks and
 variance-boundary restarts still apply.
 
+With `restart_edge=True`, fitting checks zero and near-zero covariance scales
+for likelihood improvement before accepting convergence. The check includes
+scales within `1e-4 * max(1, abs(start))` of zero, where numerical derivatives
+can appear stationary. It retains the fitted value unless an inward probe
+improves the likelihood, then restarts the requested optimizer within the
+remaining budget. Genuine small positive estimates are not rounded to zero.
+Set `restart_edge=False` to disable these checks.
+
 Callers using `mixedlm._rust.LmmDesign` can reuse the same preparation for
 analytic covariance gradients. After `response = design.with_response(y)`,
 `response.deviance_with_gradient(theta, reml=True)` returns the profiled

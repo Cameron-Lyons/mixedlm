@@ -695,10 +695,10 @@ def run_optimizer(
     *,
     restart_edge: bool = False,
 ) -> OptimizeResult:
-    """Optimize, optionally checking zero variance scales for downhill directions.
+    """Optimize, optionally checking near-zero variance scales for downhill directions.
 
     Covariance scales have lower bound zero and no upper bound. Their gradient
-    can vanish at zero even when positive variance improves the likelihood.
+    can vanish near zero even when positive variance improves the likelihood.
     Small inward probes detect this before accepting convergence. Restarts use
     the requested solver and the remaining iteration/evaluation budget.
     """
@@ -732,7 +732,9 @@ def run_optimizer(
         return replace(result, nit=iterations, nfev=nfev, message=message)
 
     while result.success and np.isfinite(result.fun):
-        boundary = [i for i in variance_indices if abs(result.x[i]) <= 1e-6 * scale[i]]
+        # Small positive scales can also appear stationary to finite differences.
+        # Probe them before accepting convergence, without rounding them to zero.
+        boundary = [i for i in variance_indices if abs(result.x[i]) <= 1e-4 * scale[i]]
         if not boundary:
             return finish()
         point, value = result.x.copy(), float(result.fun)
