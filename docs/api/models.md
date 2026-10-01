@@ -54,10 +54,16 @@ result = mlm.glmer(formula, data, family, nAGQ=1, control=None)
 - `formula`: Model formula string
 - `data`: DataFrame
 - `family`: Distribution family (e.g., `mlm.families.Binomial()`)
-- `nAGQ`: Positive integer number of quadrature points. 1 = Laplace approximation. Values above one require a single random-effect term with one coefficient per group. Models with no random effects are also supported.
+- `nAGQ`: Nonnegative integer. 0 selects the faster joint-PIRLS approximation; 1 uses Laplace approximation with joint optimization of fixed coefficients and covariance parameters. Values above one use adaptive quadrature and require a single random-effect term with one coefficient per group. Models with no random effects are also supported.
 - `control`: Optional GlmerControl object
 
 **Returns:** GlmerMod result object
+
+The default fit optimizes the integrated likelihood over both `theta` and `beta`.
+This can change estimates and increase fitting time relative to the previous
+theta-only algorithm, which is available through `nAGQ=0`. Zero selects that
+fitting algorithm; it does not request an integral with zero quadrature nodes.
+`result.joint_fit` records whether the result uses the joint likelihood objective.
 
 **Example:**
 
@@ -171,6 +177,13 @@ control = mlm.GlmerControl(
 **Parameters:**
 
 - The outer optimizer settings are the same as `LmerControl`.
+- `nAGQ0initStep`: Boolean, default `True`. Initialize a joint fit with the
+  `nAGQ=0` covariance optimization. `False` starts joint optimization after one
+  PIRLS evaluation at the starting covariance parameters. This setting has no
+  effect when fitting with `nAGQ=0`.
+- `maxiter` applies to each outer optimization stage; `result.n_iter` sums the
+  iterations from both stages. Models with no random effects, and Laplace models
+  with no fixed effects or a Gaussian identity link, avoid a redundant joint stage.
 - `tolPwrss`: Positive finite tolerance for the maximum absolute changes in fixed
   effects and spherical random effects during PIRLS. The default is `1e-7`.
 - `pirls_maxiter`: Positive integer limit on inner PIRLS iterations per likelihood
@@ -181,6 +194,7 @@ control = mlm.GlmerControl(
 These inner controls apply to Laplace and adaptive quadrature, including final
 coefficient extraction and modular fitting. Results retain `pirls_maxiter` and
 `pirls_tol`; `result.refit()` inherits them and accepts overrides with those names.
+Refits also retain `nAGQ` and accept `nAGQ0initStep=False` to skip initialization.
 Reconstructed objectives, model updates, bootstrap, optimizer comparisons,
 term deletion, and cross-validation also preserve the fitted inner settings.
 An explicit `control` supplied to an update or cross-validation fit overrides them.
@@ -265,12 +279,25 @@ it uses the deviance function's setting. An explicit `mkGlmerMod(..., nAGQ=...)`
 must agree with the setting used for optimization. To change it, create a new
 deviance function and optimize again.
 
-Quadrature requests must use a positive integer. Values above one require a
+Fitting requests must use a nonnegative integer. Values above one require a
 single random-effect term with one coefficient per group (for example, `(1 | g)`
 or `(0 + x | g)`). Multiple random-effect terms and random-intercept/slope blocks
-require `nAGQ=1`. Unsupported requests raise `ValueError` before numerical
-optimization. `nAGQ=0` is not implemented. These checks also apply to direct GLMM
+support `nAGQ=0` or `nAGQ=1`. Unsupported requests raise `ValueError` before numerical
+optimization. These checks also apply to direct GLMM
 fitting and the Python quadrature evaluators.
+
+`optimizeGlmer()` performs joint optimization for `nAGQ>=1` and stores the fixed
+coefficients in `opt_result.beta`. `mkGlmerMod()` preserves them when evaluating
+the final likelihood. A custom `OptimizeResult` with `beta=None` retains the
+theta-only PIRLS extraction behavior.
+
+For custom optimizers, `devfun.get_start(joint=True)` and
+`devfun.get_bounds(joint=True)` describe a vector ordered as `[theta, beta]`.
+Passing this full vector to `devfun` evaluates the joint likelihood, solving only
+for random effects internally. The default start and bounds contain only `theta`;
+passing that shorter vector retains the PIRLS objective at the chosen quadrature
+order. In particular, `devfun(opt_result.theta)` generally differs from the final
+joint deviance; evaluate `devfun(np.r_[opt_result.theta, opt_result.beta])` instead.
 
 ## Usage Examples
 

@@ -249,7 +249,7 @@ def _optimize_scipy(
     bounds: list[tuple[float | None, float | None]],
     options: dict[str, Any],
     callback: Callable[[NDArray[np.floating]], None] | None = None,
-    jac: Callable[[NDArray[np.floating]], NDArray[np.floating]] | None = None,
+    jac: Callable[[NDArray[np.floating]], NDArray[np.floating]] | str | None = None,
 ) -> OptimizeResult:
     scipy_options = dict(options)
     if method == "TNC" and "maxiter" in scipy_options:
@@ -626,6 +626,7 @@ def run_optimizer(
     bounds: list[tuple[float | None, float | None]],
     options: dict[str, Any] | None = None,
     callback: Callable[[NDArray[np.floating]], None] | None = None,
+    jac: Callable[[NDArray[np.floating]], NDArray[np.floating]] | str | None = None,
 ) -> OptimizeResult:
     options = options or {}
 
@@ -673,4 +674,4 @@ def run_optimizer(
                 f"nlopt is required for '{method}'. Install it with: pip install nlopt"
             )
         return _optimize_nlopt(fun, x0, bounds, options, algorithm)
-    return _optimize_scipy(fun, x0, method, bounds, options, callback)
+    return _optimize_scipy(fun, x0, method, bounds, options, callback, jac)

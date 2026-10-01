@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 import pytest
 from mixedlm import GlmerControl, families, glmer
-from mixedlm.estimation import laplace
+from mixedlm.estimation import joint_glmm, laplace
 from mixedlm.inference import glmm_profile
 from mixedlm.inference.profile import profile_glmer
 from numpy.testing import assert_allclose, assert_array_equal
@@ -140,8 +140,7 @@ def random_intercept_fit(order=1):
 
 def test_random_covariance_is_reoptimized_against_independent_laplace_oracle():
     fitted, group = random_intercept_fit()
-    with pytest.warns(UserWarning, match="refined the joint optimum"):
-        profile = fitted.profile(n_points=7)["(Intercept)"]
+    profile = fitted.profile(n_points=7)["(Intercept)"]
     y, weights, offset = fitted.matrices.y, fitted.matrices.weights, fitted.matrices.offset
 
     def deviance(theta, beta):
@@ -192,14 +191,14 @@ def test_profiles_preserve_quadrature_controls_and_input_arrays(order, backend):
             array.copy()
             for array in (fitted.beta, fitted.theta, fitted.matrices.X, fitted.matrices.offset)
         ]
-        evaluate = glmm_profile.glmm_deviance_with_status
+        evaluate = joint_glmm.glmm_deviance_with_status
         calls = []
 
         def record(theta, matrices, family, **kwargs):
             calls.append(kwargs)
             return evaluate(theta, matrices, family, **kwargs)
 
-        with patch.object(glmm_profile, "glmm_deviance_with_status", side_effect=record):
+        with patch.object(joint_glmm, "glmm_deviance_with_status", side_effect=record):
             profile = fitted.profile(n_points=3)["(Intercept)"]
     assert np.isfinite(profile.zeta).all()
     assert all(c == {"nAGQ": order, "pirls_maxiter": 200, "pirls_tol": 1e-10} for c in calls)
@@ -236,7 +235,7 @@ def test_solver_failures_do_not_return_wald_intervals():
     ):
         fitted.confint(method="profile")
     with (
-        patch.object(glmm_profile, "glmm_deviance_with_status", return_value=(1, [], [], False)),
+        patch.object(joint_glmm, "glmm_deviance_with_status", return_value=(1, [], [], False)),
         pytest.raises(RuntimeError, match="converged inner PIRLS solve"),
     ):
         fitted.profile()
@@ -253,8 +252,7 @@ def test_empty_selections_need_no_likelihood_evaluations():
 
 def test_adaptive_quadrature_profile_matches_independent_normal_integration():
     fitted, group = random_intercept_fit(order=11)
-    with pytest.warns(UserWarning, match="refined the joint optimum"):
-        profile = fitted.profile(n_points=5)["(Intercept)"]
+    profile = fitted.profile(n_points=5)["(Intercept)"]
     nodes, weights = np.polynomial.hermite.hermgauss(240)
     normal = np.sqrt(2) * nodes
     log_weights = np.log(weights) - np.log(np.pi) / 2

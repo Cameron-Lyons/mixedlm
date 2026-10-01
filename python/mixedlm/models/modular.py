@@ -178,7 +178,9 @@ class GlmerDevfun:
     """Deviance function for generalized linear mixed models.
 
     This class wraps the Laplace or adaptive-quadrature deviance function
-    and provides methods for evaluation and optimization.
+    and provides methods for evaluation and optimization. Full [theta, beta]
+    vectors evaluate the joint likelihood; theta-only vectors estimate beta
+    through PIRLS at the configured quadrature order.
 
     Attributes
     ----------
@@ -190,41 +192,49 @@ class GlmerDevfun:
 
     parsed: GlmerParsedFormula
     optimizer: GLMMOptimizer
+    control: GlmerControl | None = None
 
     def __call__(self, theta: NDArray[np.floating]) -> float:
-        """Evaluate the deviance function at theta.
+        """Evaluate theta with PIRLS beta, or a full [theta, beta] vector.
 
         Parameters
         ----------
         theta : NDArray
-            Variance component parameters (relative covariance factors).
+            Covariance parameters, optionally followed by fixed coefficients.
 
         Returns
         -------
         float
             The deviance approximation at the configured quadrature setting.
         """
+        if len(theta) == self.parsed.n_theta + self.parsed.n_fixed and self.parsed.n_fixed:
+            return self.optimizer.joint_objective()(theta)
         return self.optimizer.objective(theta)
 
-    def get_start(self) -> NDArray[np.floating]:
-        """Get default starting values for theta.
+    def get_start(self, *, joint: bool = False) -> NDArray[np.floating]:
+        """Get starting theta, or [theta, beta] when joint=True.
 
         Returns
         -------
         NDArray
-            Starting values (ones by default).
+            Starting covariance parameters, optionally followed by PIRLS beta.
         """
-        return self.optimizer.get_start_theta()
+        theta = self.optimizer.get_start_theta()
+        if joint:
+            _, beta, _, _ = self.optimizer._final_evaluation_with_status(theta, nAGQ=1)
+            return np.r_[theta, beta]
+        return theta
 
-    def get_bounds(self) -> list[tuple[float | None, float | None]]:
-        """Get bounds for theta parameters.
+    def get_bounds(self, *, joint: bool = False) -> list[tuple[float | None, float | None]]:
+        """Get theta bounds, optionally followed by unbounded beta entries.
 
         Returns
         -------
         list of tuple
             Bounds for each theta parameter.
         """
-        return _build_theta_bounds(self.parsed.matrices.random_structures, self.parsed.n_theta)
+        bounds = _build_theta_bounds(self.parsed.matrices.random_structures, self.parsed.n_theta)
+        return bounds + [(None, None)] * self.parsed.n_fixed if joint else bounds
 
 
 @dataclass
@@ -246,6 +256,9 @@ class OptimizeResult:
     nAGQ : int, optional
         Quadrature setting recorded by optimizeGlmer; omitted for linear models
         and custom optimization results unless supplied explicitly.
+    beta : NDArray, optional
+        Jointly optimized fixed coefficients for GLMMs. None retains theta-only
+        PIRLS extraction in mkGlmerMod and is the default for custom results.
     """
 
     theta: NDArray[np.floating]
@@ -255,6 +268,7 @@ class OptimizeResult:
     message: str
     nAGQ: int | None = None
     pirls_converged: bool | None = None
+    beta: NDArray[np.floating] | None = None
 
 
 def lFormula(
@@ -467,8 +481,9 @@ def mkGlmerDevfun(
     control : GlmerControl, optional
         Control parameters for the optimizer.
     nAGQ : int, default 1
-        Positive number of quadrature points. Values above one require a single
-        random-effect term with one coefficient per group.
+        Nonnegative fitting order: 0 for the theta-only PIRLS approximation,
+        1 for joint Laplace fitting. Values above one use adaptive quadrature
+        and require a single random-effect term with one coefficient per group.
 
     Returns
     -------
@@ -500,9 +515,10 @@ def mkGlmerDevfun(
         nAGQ=nAGQ,
         pirls_maxiter=control.pirls_maxiter,
         pirls_tol=control.tolPwrss,
+        nAGQ0initStep=control.nAGQ0initStep,
     )
 
-    return GlmerDevfun(parsed=parsed, optimizer=optimizer)
+    return GlmerDevfun(parsed=parsed, optimizer=optimizer, control=control)
 
 
 def optimizeLmer(
@@ -589,7 +605,8 @@ def optimizeGlmer(
 ) -> OptimizeResult:
     """Optimize the deviance function for a generalized linear mixed model.
 
-    This is the third step in the modular interface for GLMMs.
+    This is the third step in the modular interface for GLMMs. At nAGQ>=1,
+    optimize both theta and beta, optionally initializing with a theta-only fit.
 
     Parameters
     ----------
@@ -600,14 +617,15 @@ def optimizeGlmer(
     method : str, default "L-BFGS-B"
         Optimization method (passed to scipy.optimize.minimize).
     maxiter : int, default 1000
-        Maximum number of iterations.
+        Maximum iterations per outer optimization stage.
     verbose : int, default 0
         Verbosity level.
 
     Returns
     -------
     OptimizeResult
-        Optimization result containing theta, deviance, and convergence info.
+        Theta, joint beta (when applicable), deviance, convergence information,
+        and the total iteration count across optimization stages.
 
     Examples
     --------
@@ -621,45 +639,28 @@ def optimizeGlmer(
     --------
     mkGlmerDevfun : Create deviance function.
     """
-    from scipy.optimize import minimize
+    from copy import copy
 
-    from mixedlm.estimation.laplace import _validate_quadrature
-
-    _validate_quadrature(devfun.optimizer.nAGQ, devfun.parsed.matrices)
-
-    if start is None:
-        start = devfun.get_start()
-
-    bounds = devfun.get_bounds()
-
-    callback: Callable[[NDArray[np.floating]], None] | None = None
-    if verbose > 0:
-
-        def callback(x: NDArray[np.floating]) -> None:
-            dev = devfun(x)
-            print(f"theta = {x}, deviance = {dev:.6f}")
-
-    result = minimize(
-        devfun,
-        start,
-        method=method,
-        bounds=bounds,
-        options={"maxiter": maxiter},
-        callback=callback,
+    optimizer = copy(devfun.optimizer)
+    optimizer.verbose = verbose
+    options = (
+        devfun.control.get_scipy_options(optimizer=method, maxiter=maxiter)
+        if devfun.control is not None
+        else None
     )
-
-    deviance, _, _, pirls_converged = devfun.optimizer._final_evaluation_with_status(result.x)
-    message = str(result.message) if hasattr(result, "message") else ""
-    if not pirls_converged:
+    result = optimizer.optimize(start=start, method=method, maxiter=maxiter, options=options)
+    message = result.message
+    if not result.pirls_converged:
         message += "; inner PIRLS solver did not converge"
     return OptimizeResult(
-        theta=result.x,
-        deviance=deviance,
-        converged=bool(result.success and pirls_converged),
-        pirls_converged=pirls_converged,
-        n_iter=result.nit,
+        theta=result.theta,
+        beta=result.beta if result.joint_fit else None,
+        deviance=result.deviance,
+        converged=result.converged,
+        pirls_converged=result.pirls_converged,
+        n_iter=result.n_iter,
         message=message,
-        nAGQ=devfun.optimizer.nAGQ,
+        nAGQ=optimizer.nAGQ,
     )
 
 
@@ -770,7 +771,7 @@ def mkGlmerMod(
             "create a deviance function with the requested nAGQ and optimize it again"
         )
     deviance, beta, u, pirls_converged = devfun.optimizer._final_evaluation_with_status(
-        opt.theta, nAGQ=nAGQ
+        opt.theta, nAGQ=nAGQ, beta=opt.beta
     )
 
     return GlmerResult(
@@ -785,6 +786,7 @@ def mkGlmerMod(
         pirls_converged=pirls_converged,
         pirls_maxiter=devfun.optimizer.pirls_maxiter,
         pirls_tol=devfun.optimizer.pirls_tol,
+        joint_fit=opt.beta is not None,
         n_iter=opt.n_iter,
         nAGQ=nAGQ,
     )

@@ -132,6 +132,11 @@ where \(\hat{\mathbf{b}}\) is the mode and \(\mathbf{H}\) is the Hessian at the 
 2. Compute the Hessian at the mode
 3. Approximate the integral using the Gaussian formula
 
+At `nAGQ>=1`, outer optimization varies both fixed coefficients and covariance
+parameters. Each likelihood evaluation holds these parameters fixed and solves
+only for the conditional random-effect mode. This includes the effect of the
+curvature correction on the optimal fixed coefficients.
+
 **Accuracy:**
 
 - Works well for large cluster sizes (many observations per random effect)
@@ -161,6 +166,7 @@ For more accuracy, use numerical integration with Gauss-Hermite quadrature:
 
 | nAGQ | Accuracy | Speed | Use case |
 |------|----------|-------|----------|
+| 0 | Joint-PIRLS approximation | Fastest | Preliminary fits, previous fitting behavior |
 | 1 | Moderate | Fast | Default, large clusters |
 | 5-10 | High | Medium | Small clusters, binary data |
 | 25+ | Very high | Slow | Research, validation |
@@ -217,7 +223,19 @@ For fitting GLMMs, mixedlm uses Penalized Iteratively Reweighted Least Squares (
 4. Update \(\mathbf{b}\)
 5. Repeat until convergence
 
-This is nested within the outer optimization over variance parameters.
+For `nAGQ=0`, PIRLS updates fixed and random effects together inside an outer
+optimization over covariance parameters. This reproduces the previous fitting
+algorithm. It need not maximize the integrated Laplace likelihood over fixed
+coefficients.
+
+For `nAGQ>=1`, this preliminary fit initializes joint optimization over covariance
+and fixed-effect parameters. During the joint stage, `X @ beta` becomes a fixed
+offset and PIRLS updates only random effects. Set
+`GlmerControl(nAGQ0initStep=False)` to skip the preliminary covariance optimization;
+a single PIRLS solve still supplies starting coefficients. The outer `maxiter`
+limit applies separately to each stage, and `n_iter` totals both. Exact GLM and
+Gaussian identity-link Laplace fits, and Laplace fits with no fixed effects,
+avoid redundant optimization.
 
 `GlmerControl(tolPwrss=1e-8, pirls_maxiter=100)` controls the inner solve.
 `tolPwrss` bounds the maximum absolute coefficient update in both the fixed and
