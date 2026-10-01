@@ -31,6 +31,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Native LMM analytic gradients compute covariance-derivative traces and products directly from the affected factor rows, avoiding a full square derivative matrix for each parameter. ML gradients also skip the fixed-effect correction solve used only by REML.
+
 - Native LMM fits and response refits extract final estimates from their prepared design products, avoiding a second Python crossproduct cache. Final residual scale uses conditional residuals plus the spherical random-effect penalty, and extraction can run concurrently across Python threads. Fixed-only fits retain their existing solve and least-squares fallback.
 
 - Native sparse input parsing reuses converted row-index and column-offset buffers for canonical CSC matrices and reserves conversion storage once, reducing temporary allocation during model preparation and sparse solves.

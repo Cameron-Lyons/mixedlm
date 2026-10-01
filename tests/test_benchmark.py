@@ -1721,6 +1721,56 @@ def test_benchmark_lmm_validated_gradient(benchmark, layout, size):
     assert np.all(np.isfinite(gradient))
 
 
+@pytest.mark.benchmark(group="lmm-gradient-contractions")
+@pytest.mark.parametrize("width", [16, 32])
+@pytest.mark.parametrize("independent", [False, True])
+@pytest.mark.parametrize("reml", [False, True])
+def test_benchmark_wide_lmm_gradient_contractions(benchmark, width, independent, reml):
+    from mixedlm import _rust
+
+    from tests.test_lmm_covariance_transforms import wide_problem
+    from tests.test_lmm_gradient_contractions import observation_gradient
+    from tests.test_lmm_prepared_design import native_arguments, observation_likelihood
+
+    matrices, theta, _ = wide_problem(width, independent, singular=False)
+    response = _rust.LmmDesign(**native_arguments(matrices)).with_response(matrices.y)
+    value, gradient = benchmark(response.deviance_with_gradient, theta, reml)
+    np.testing.assert_allclose(
+        value, observation_likelihood(matrices, theta, reml), rtol=2e-12, atol=2e-10
+    )
+    np.testing.assert_allclose(
+        gradient, observation_gradient(matrices, theta, reml), rtol=2e-10, atol=2e-9
+    )
+
+
+@pytest.mark.benchmark(group="lmm-gradient-contractions")
+@pytest.mark.parametrize("groups", [8, 64])
+@pytest.mark.parametrize("overlap", [False, True])
+@pytest.mark.parametrize("reml", [False, True])
+def test_benchmark_multilevel_lmm_gradient_contractions(benchmark, groups, overlap, reml):
+    from dataclasses import replace
+
+    from mixedlm import _rust
+
+    from tests.test_glmm_final_state import mode_problem
+    from tests.test_lmm_gradient_contractions import observation_gradient
+    from tests.test_lmm_prepared_design import native_arguments, observation_likelihood, parameters
+
+    matrices, _, _ = mode_problem("gaussian", "slope", n_obs=256, n_groups=groups)
+    if overlap:
+        columns = np.roll(np.arange(matrices.n_random), 2)
+        matrices = replace(matrices, Z=(matrices.Z + 0.15 * matrices.Z[:, columns]).tocsc())
+    theta = parameters(matrices)
+    response = _rust.LmmDesign(**native_arguments(matrices)).with_response(matrices.y)
+    value, gradient = benchmark(response.deviance_with_gradient, theta, reml)
+    np.testing.assert_allclose(
+        value, observation_likelihood(matrices, theta, reml), rtol=2e-12, atol=2e-10
+    )
+    np.testing.assert_allclose(
+        gradient, observation_gradient(matrices, theta, reml), rtol=2e-10, atol=2e-9
+    )
+
+
 @pytest.mark.benchmark(group="lmm-residual-rows")
 @pytest.mark.parametrize("layout", ["intercept", "slope"])
 @pytest.mark.parametrize("size", [64, 65536])
