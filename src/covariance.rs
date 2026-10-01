@@ -72,8 +72,14 @@ impl CovarianceFactor {
                 dimension,
             };
         }
+        Self::from_blocks(build_lambda_blocks(theta, structures), structures)
+    }
+
+    /// Reuse factors already built for a blocked normal-matrix factorization.
+    pub(crate) fn from_blocks(blocks: Vec<Mat<f64>>, structures: &[RandomEffectStructure]) -> Self {
+        debug_assert_eq!(blocks.len(), structures.len());
         let mut offset = 0;
-        let blocks = build_lambda_blocks(theta, structures)
+        let blocks = blocks
             .into_iter()
             .zip(structures)
             .map(|(lower, structure)| {
@@ -87,7 +93,10 @@ impl CovarianceFactor {
                 block
             })
             .collect();
-        Self { blocks, dimension }
+        Self {
+            blocks,
+            dimension: offset,
+        }
     }
 
     pub fn apply(&self, vector: &Col<f64>) -> Col<f64> {
