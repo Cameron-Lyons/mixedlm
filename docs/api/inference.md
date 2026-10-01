@@ -566,6 +566,8 @@ boot = mlm.bootMer(model, nsim=500, seed=42)
 - `model`: Fitted model
 - `nsim`: Number of bootstrap simulations
 - `seed`: Optional reproducibility seed
+- `n_jobs`: Positive worker count or `-1` for available CPUs for linear and
+  generalized bootstrap; default 1
 
 **Returns:** BootstrapResult object
 
@@ -584,6 +586,13 @@ next_batch = mlm.bootstrap_lmer(model, n_boot=100, seed=rng)
 ```
 
 The sample count must be a positive integer.
+
+Parallel linear and generalized bootstrap initialize the fitted design once per
+worker and keep at most two tasks per worker outstanding. Worker count is capped
+at the number of replicates. Each task sends its index and random seed; returned
+samples retain replicate order. Output arrays still retain every sample.
+Invalid worker counts fail before consuming a supplied random stream. Queued
+tasks are cancelled if the run is interrupted or the worker pool fails.
 
 **Methods:**
 

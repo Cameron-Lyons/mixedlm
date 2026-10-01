@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 import os
-from concurrent.futures import ProcessPoolExecutor, as_completed
+import sys
+from collections.abc import Callable, Generator
+from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wait
+from contextlib import closing
+from copy import deepcopy
 from dataclasses import dataclass, replace
 from numbers import Integral
-from typing import TYPE_CHECKING, Any
+from threading import local
+from typing import TYPE_CHECKING, Any, TypeVar
 
 import numpy as np
 from numpy.typing import NDArray
@@ -195,6 +200,70 @@ class BootstrapResult:
         )
 
 
+_BootstrapSample = TypeVar("_BootstrapSample")
+_bootstrap_worker_state = local()
+
+
+def _bootstrap_worker_count(n_jobs: int, n_boot: int) -> int:
+    if isinstance(n_jobs, bool | np.bool_) or not isinstance(n_jobs, Integral):
+        raise TypeError("n_jobs must be -1 or a positive integer")
+    if n_jobs != -1 and n_jobs < 1:
+        raise ValueError("n_jobs must be -1 or a positive integer")
+    if n_jobs == -1:
+        workers = os.cpu_count() or 1
+        if sys.platform == "win32":
+            workers = min(workers, 61)
+    else:
+        workers = int(n_jobs)
+    return min(workers, n_boot)
+
+
+def _initialize_bootstrap_worker(
+    worker: Callable[[tuple[Any, ...]], Any],
+    data: tuple[Any, ...],
+) -> None:
+    # Thread-local storage also isolates independent pools in threaded callers.
+    _bootstrap_worker_state.worker = worker
+    _bootstrap_worker_state.data = data
+
+
+def _run_bootstrap_task(task: tuple[int, int]) -> Any:
+    return _bootstrap_worker_state.worker((*task, *_bootstrap_worker_state.data))
+
+
+def _parallel_bootstrap_samples(
+    worker: Callable[[tuple[Any, ...]], _BootstrapSample],
+    data: tuple[Any, ...],
+    seeds: NDArray[np.integer],
+    workers: int,
+) -> Generator[_BootstrapSample, None, None]:
+    tasks = iter(enumerate(seeds))
+    with ProcessPoolExecutor(
+        max_workers=workers,
+        initializer=_initialize_bootstrap_worker,
+        initargs=(worker, data),
+    ) as executor:
+        pending: set[Future[_BootstrapSample]] = set()
+        try:
+            for _ in range(min(2 * workers, len(seeds))):
+                index, seed = next(tasks)
+                pending.add(executor.submit(_run_bootstrap_task, (index, int(seed))))
+            while pending:
+                completed, pending = wait(pending, return_when=FIRST_COMPLETED)
+                while completed:
+                    future = completed.pop()
+                    yield future.result()
+                    following = next(tasks, None)
+                    if following is not None:
+                        index, seed = following
+                        pending.add(executor.submit(_run_bootstrap_task, (index, int(seed))))
+        except BaseException:
+            # Interruptions and pool failures must not run the remaining bootstrap.
+            for future in pending:
+                future.cancel()
+            raise
+
+
 def _refit_lmer_response(
     matrices: ModelMatrices,
     response: NDArray[np.floating],
@@ -276,6 +345,8 @@ def _glmer_bootstrap_worker(args: tuple[Any, ...]) -> tuple[int, NDArray | None,
     rng = np.random.RandomState(seed)
 
     try:
+        # Each task previously deserialized its own family; preserve that isolation.
+        family = deepcopy(family)
         y_sim = _simulate_glmer_components(matrices, beta, theta, family, rng)
         boot_result = _refit_glmer_response(
             matrices, y_sim, theta, family, nAGQ, pirls_maxiter, pirls_tol
@@ -323,8 +394,13 @@ def bootstrap_lmer(
     Failed replicates remain entirely NaN and increment ``n_failed`` in both
     serial and parallel execution. Confidence bounds and standard errors
     require at least two valid samples per parameter.
+
+    ``n_jobs`` must be a positive integer or -1 for available CPUs. Parallel
+    workers reuse the fitted design and keep only a bounded number of tasks
+    outstanding; the worker count never exceeds ``n_boot``.
     """
     validate_simulation_count(n_boot, "n_boot")
+    workers = _bootstrap_worker_count(n_jobs, n_boot)
     p = result.matrices.n_fixed
     n_theta = len(result.theta)
 
@@ -365,36 +441,16 @@ def bootstrap_lmer(
                 n_failed += 1
                 continue
     else:
-        if n_jobs == -1:
-            n_jobs = os.cpu_count() or 1
-
         worker_data = _prepare_lmer_worker_data(result)
-        tasks = [
-            (
-                b,
-                int(seeds[b]),
-                worker_data["matrices"],
-                worker_data["beta"],
-                worker_data["theta"],
-                worker_data["sigma"],
-                worker_data["REML"],
-            )
-            for b in range(n_boot)
-        ]
-
         n_failed = 0
-        completed = 0
-
-        with ProcessPoolExecutor(max_workers=n_jobs) as executor:
-            futures = {executor.submit(_lmer_bootstrap_worker, task): task[0] for task in tasks}
-
-            for future in as_completed(futures):
-                boot_idx, beta, theta, sigma = future.result()
-                completed += 1
-
+        with closing(
+            _parallel_bootstrap_samples(
+                _lmer_bootstrap_worker, tuple(worker_data.values()), seeds, workers
+            )
+        ) as samples:
+            for completed, (boot_idx, beta, theta, sigma) in enumerate(samples, start=1):
                 if verbose and completed % 100 == 0:
                     print(f"Bootstrap iteration {completed}/{n_boot}")
-
                 if beta is not None:
                     beta_samples[boot_idx, :] = beta
                     theta_samples[boot_idx, :] = theta
@@ -455,8 +511,13 @@ def bootstrap_glmer(
     Failed or invalid replicates remain entirely NaN and increment ``n_failed``
     in both serial and parallel execution. Confidence bounds and standard errors
     require at least two valid samples per parameter.
+
+    ``n_jobs`` must be a positive integer or -1 for available CPUs. Parallel
+    workers reuse the fitted design and keep only a bounded number of tasks
+    outstanding; the worker count never exceeds ``n_boot``.
     """
     validate_simulation_count(n_boot, "n_boot")
+    workers = _bootstrap_worker_count(n_jobs, n_boot)
     p = result.matrices.n_fixed
     n_theta = len(result.theta)
 
@@ -497,38 +558,16 @@ def bootstrap_glmer(
                 n_failed += 1
                 continue
     else:
-        if n_jobs == -1:
-            n_jobs = os.cpu_count() or 1
-
         worker_data = _prepare_glmer_worker_data(result)
-        tasks = [
-            (
-                b,
-                int(seeds[b]),
-                worker_data["matrices"],
-                worker_data["beta"],
-                worker_data["theta"],
-                worker_data["family"],
-                worker_data["nAGQ"],
-                worker_data["pirls_maxiter"],
-                worker_data["pirls_tol"],
-            )
-            for b in range(n_boot)
-        ]
-
         n_failed = 0
-        completed = 0
-
-        with ProcessPoolExecutor(max_workers=n_jobs) as executor:
-            futures = {executor.submit(_glmer_bootstrap_worker, task): task[0] for task in tasks}
-
-            for future in as_completed(futures):
-                boot_idx, beta, theta = future.result()
-                completed += 1
-
+        with closing(
+            _parallel_bootstrap_samples(
+                _glmer_bootstrap_worker, tuple(worker_data.values()), seeds, workers
+            )
+        ) as samples:
+            for completed, (boot_idx, beta, theta) in enumerate(samples, start=1):
                 if verbose and completed % 100 == 0:
                     print(f"Bootstrap iteration {completed}/{n_boot}")
-
                 if beta is not None:
                     beta_samples[boot_idx, :] = beta
                     theta_samples[boot_idx, :] = theta
@@ -603,7 +642,8 @@ def bootMer(
     seed : int, optional
         Random seed for reproducibility.
     n_jobs : int, default 1
-        Number of parallel jobs. Use -1 for all available cores.
+        Positive worker count for linear and generalized bootstrap, or -1 for
+        available CPUs. The worker count never exceeds the number of replicates.
     verbose : bool, default False
         Print progress information.
     bootstrap_type : str, default "parametric"
