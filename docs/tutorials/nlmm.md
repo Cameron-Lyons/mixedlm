@@ -284,6 +284,13 @@ classes use the native fast path when available and their prediction and
 gradient methods are unchanged. Replacing either method on a built-in instance
 or class selects the Python path as well.
 
+Python fits reuse group and weight preparation across covariance evaluations.
+The low-level `NLMMOptimizer(..., n_jobs=2)` shares a worker pool across the fit
+when there are at least two groups. Threads are released when fitting finishes,
+including after a model error or interruption. The default `n_jobs=1` runs
+serially; threading is most useful for expensive group prediction and gradient
+functions and can add overhead for small models.
+
 ## Convergence Issues
 
 During optimization, a failed trial evaluation receives a finite penalty so the

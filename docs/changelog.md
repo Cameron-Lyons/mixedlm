@@ -23,6 +23,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Python nonlinear fits reuse group and weight preparation across covariance evaluations, share one worker pool per fit, and compute final residual variance once per evaluation.
+
 - Python LMM likelihood evaluation uses scalar solves for diagonal random-effect systems, avoiding covariance-matrix assembly and factorization during fitting and likelihood profiling.
 
 - Native GLMMs with diagonal random-effect precision use scalar solves and log determinants at every model size, reusing the prepared design across PIRLS iterations.

@@ -15,6 +15,30 @@ from mixedlm.utils.variance import cov2sdcor, sdcor2cov
 from scipy import sparse
 
 
+@pytest.mark.benchmark(group="python-nonlinear-likelihood")
+@pytest.mark.parametrize("n_groups,n_jobs", [(4, 1), (4, 2), (40, 1), (40, 2)])
+def test_benchmark_python_nonlinear_likelihood(benchmark, n_groups, n_jobs):
+    from mixedlm.estimation.nlmm import _nlmm_deviance_rust, nlmm_deviance
+    from mixedlm.nlme.models import SSasymp
+
+    rng = np.random.default_rng(765)
+    model = SSasymp()
+    phi = np.array([10.0, 3.0, -1.0])
+    groups = np.repeat(np.arange(n_groups), 10)
+    x = np.tile(np.linspace(0.1, 6, 10), n_groups)
+    effects = rng.normal(0, 0.3, n_groups)
+    y = np.concatenate([model.predict(phi + [effect, 0, 0], x[:10]) for effect in effects])
+    y += rng.normal(0, 0.1, len(y))
+    weights = np.geomspace(0.5, 2, len(y))
+    theta = np.array([0.7])
+    b = np.zeros((n_groups, 1))
+    args = (theta, y, x, groups, model, phi, b, [0], 0.3)
+    expected = _nlmm_deviance_rust(*args, weights)
+    actual = benchmark(nlmm_deviance, *args, weights=weights, n_jobs=n_jobs)
+    for value, reference in zip(actual, expected, strict=True):
+        np.testing.assert_allclose(value, reference, rtol=1e-8, atol=1e-8)
+
+
 @pytest.mark.benchmark(group="diagonal-lmm-likelihood")
 @pytest.mark.parametrize("n_groups", [8, 255, 256, 4096])
 def test_benchmark_diagonal_lmm_likelihood(benchmark, n_groups):

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
+from collections.abc import Callable, Iterator
+from concurrent.futures import ThreadPoolExecutor, wait
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
+from typing import TypeVar
 
 import numpy as np
 from numpy.typing import NDArray
@@ -144,6 +146,59 @@ def _grouped_observation_indices(groups: NDArray[np.integer]) -> list[NDArray[np
     return list(np.split(order, boundaries))
 
 
+_GroupResult = TypeVar("_GroupResult")
+
+
+@dataclass
+class _NLMMWorkspace:
+    y: NDArray[np.floating]
+    x: NDArray[np.floating]
+    group_rows: list[NDArray[np.intp]]
+    weights: NDArray[np.float64]
+    sqrt_weights: NDArray[np.float64]
+    executor: ThreadPoolExecutor | None
+
+    def map_groups(
+        self,
+        function: Callable[[int, NDArray[np.intp]], _GroupResult],
+        *,
+        parallel: bool = True,
+    ) -> Iterator[_GroupResult]:
+        indices = range(len(self.group_rows))
+        if not parallel or self.executor is None:
+            yield from map(function, indices, self.group_rows)
+            return
+        futures = []
+        try:
+            for g, rows in enumerate(self.group_rows):
+                futures.append(self.executor.submit(function, g, rows))
+            for future in futures:
+                yield future.result()
+        except BaseException:
+            # A failed trial must finish using the model before the next trial.
+            for future in futures:
+                future.cancel()
+            wait(futures)
+            raise
+
+
+@contextmanager
+def _nlmm_workspace(
+    y: NDArray[np.floating],
+    x: NDArray[np.floating],
+    groups: NDArray[np.integer],
+    weights: NDArray[np.floating] | None,
+    n_jobs: int,
+) -> Iterator[_NLMMWorkspace]:
+    """Reuse immutable preparation and scope worker lifetime to one call or fit."""
+    prior_weights = _as_prior_weights(weights, len(y))
+    group_rows = _grouped_observation_indices(groups)
+    workers = (os.cpu_count() or 1) if n_jobs == -1 else n_jobs
+    use_parallel = workers > 1 and len(group_rows) >= workers
+    with ThreadPoolExecutor(max_workers=workers) if use_parallel else nullcontext() as executor:
+        yield _NLMMWorkspace(y, x, group_rows, prior_weights, np.sqrt(prior_weights), executor)
+
+
 def _compute_group_resid_grad(
     g: int,
     rows: NDArray,
@@ -240,39 +295,24 @@ def pnls_step(
     weights: NDArray[np.floating] | None = None,
 ) -> tuple[NDArray[np.floating], NDArray[np.floating], float]:
     """Update parameters with random-effect rows in sorted group-label order."""
-    return _pnls_step(
-        y,
-        x,
-        _grouped_observation_indices(groups),
-        model,
-        phi,
-        b,
-        Psi,
-        sigma,
-        random_params,
-        n_jobs=n_jobs,
-        weights=weights,
-    )
+    with _nlmm_workspace(y, x, groups, weights, n_jobs) as workspace:
+        phi_new, b_new, sigma_sq = _pnls_step(workspace, model, phi, b, Psi, random_params)
+    return phi_new, b_new, np.sqrt(sigma_sq)
 
 
 def _pnls_step(
-    y: NDArray[np.floating],
-    x: NDArray[np.floating],
-    group_rows: list[NDArray[np.intp]],
+    workspace: _NLMMWorkspace,
     model: NonlinearModel,
     phi: NDArray[np.floating],
     b: NDArray[np.floating],
     Psi: NDArray[np.floating],
-    sigma: float,
     random_params: list[int],
-    n_jobs: int = 1,
-    weights: NDArray[np.floating] | None = None,
 ) -> tuple[NDArray[np.floating], NDArray[np.floating], float]:
-    _ = sigma
+    """Return updated parameters and the profiled residual variance."""
+    y, x = workspace.y, workspace.x
     n = len(y)
-    prior_weights = _as_prior_weights(weights, n)
-    sqrt_weights = np.sqrt(prior_weights)
-    n_groups = len(group_rows)
+    prior_weights = workspace.weights
+    sqrt_weights = workspace.sqrt_weights
     n_phi = len(phi)
     n_random = len(random_params)
 
@@ -286,47 +326,24 @@ def _pnls_step(
 
     phi_new = phi.copy()
     b_new = b.copy()
-
-    if n_jobs == -1:
-        n_jobs = os.cpu_count() or 1
-
-    use_parallel = n_jobs > 1 and n_groups >= n_jobs
-
     reg_phi = _PNLS_REGULARIZATION * np.eye(n_phi)
+    resid_total = np.empty(n, dtype=np.float64)
+    grad_total = np.empty((n, n_phi), dtype=np.float64)
+
+    def residual_gradient(g: int, rows: NDArray[np.intp]) -> tuple[int, NDArray, NDArray, NDArray]:
+        return _compute_group_resid_grad(g, rows, x, y, phi, b, random_params, model)
+
+    def update_random_effects(g: int, rows: NDArray[np.intp]) -> tuple[int, NDArray]:
+        return _update_group_random_effects(
+            g, rows, x, y, phi_new, b, random_params, model, Psi_inv, prior_weights
+        )
 
     for _iteration in range(_PNLS_MAX_ITER):
         # After the first iteration b and b_new share storage.
         b_previous = b.copy()
-        resid_total = np.zeros(n, dtype=np.float64)
-        grad_total = np.zeros((n, n_phi), dtype=np.float64)
-
-        if use_parallel:
-            with ThreadPoolExecutor(max_workers=n_jobs) as executor:
-                residual_futures = [
-                    executor.submit(
-                        _compute_group_resid_grad,
-                        g,
-                        group_rows[g],
-                        x,
-                        y,
-                        phi,
-                        b,
-                        random_params,
-                        model,
-                    )
-                    for g in range(n_groups)
-                ]
-                for residual_future in residual_futures:
-                    g, rows, resid_g, grad_g = residual_future.result()
-                    resid_total[rows] = resid_g
-                    grad_total[rows, :] = grad_g
-        else:
-            for g in range(n_groups):
-                _, rows, resid_g, grad_g = _compute_group_resid_grad(
-                    g, group_rows[g], x, y, phi, b, random_params, model
-                )
-                resid_total[rows] = resid_g
-                grad_total[rows, :] = grad_g
+        for _, rows, resid_g, grad_g in workspace.map_groups(residual_gradient):
+            resid_total[rows] = resid_g
+            grad_total[rows, :] = grad_g
 
         resid_total *= sqrt_weights
         grad_total *= sqrt_weights[:, None]
@@ -339,84 +356,27 @@ def _pnls_step(
             delta_phi = linalg.lstsq(GtG, Gtr)[0]
 
         phi_new = phi + 0.5 * delta_phi
-
-        if use_parallel and Psi_chol is not None:
-            with ThreadPoolExecutor(max_workers=n_jobs) as executor:
-                update_futures = [
-                    executor.submit(
-                        _update_group_random_effects,
-                        g,
-                        group_rows[g],
-                        x,
-                        y,
-                        phi_new,
-                        b,
-                        random_params,
-                        model,
-                        Psi_inv,
-                        prior_weights,
-                    )
-                    for g in range(n_groups)
-                ]
-                for update_future in update_futures:
-                    result = update_future.result()
-                    b_new[result[0], :] = result[1]
-        else:
-            for g in range(n_groups):
-                _, b_new[g, :] = _update_group_random_effects(
-                    g,
-                    group_rows[g],
-                    x,
-                    y,
-                    phi_new,
-                    b,
-                    random_params,
-                    model,
-                    Psi_inv,
-                    prior_weights,
-                )
+        for g, b_g in workspace.map_groups(update_random_effects, parallel=Psi_chol is not None):
+            b_new[g, :] = b_g
 
         max_delta = max(
             float(np.max(np.abs(phi_new - phi))),
             float(np.max(np.abs(b_new - b_previous))),
         )
-
         phi = phi_new
         b = b_new
         if max_delta < _PNLS_TOL:
             break
 
-    rss: float
-    if use_parallel:
-        with ThreadPoolExecutor(max_workers=n_jobs) as executor:
-            rss_futures = [
-                executor.submit(
-                    _compute_group_rss,
-                    g,
-                    group_rows[g],
-                    x,
-                    y,
-                    phi_new,
-                    b_new,
-                    random_params,
-                    model,
-                    prior_weights,
-                )
-                for g in range(n_groups)
-            ]
-            rss = float(sum(future.result() for future in rss_futures))
-    else:
-        rss = sum(
-            _compute_group_rss(
-                g, group_rows[g], x, y, phi_new, b_new, random_params, model, prior_weights
-            )
-            for g in range(n_groups)
+    def group_rss(g: int, rows: NDArray[np.intp]) -> float:
+        return _compute_group_rss(
+            g, rows, x, y, phi_new, b_new, random_params, model, prior_weights
         )
 
+    rss = sum(workspace.map_groups(group_rss))
     penalty = float(np.einsum("gi,ij,gj->", b_new, Psi_inv, b_new, optimize=True))
-    sigma_new = np.sqrt(max((rss + penalty) / n, _MIN_VARIANCE))
-
-    return phi_new, b_new, sigma_new
+    sigma_sq = max((rss + penalty) / n, _MIN_VARIANCE)
+    return phi_new, b_new, sigma_sq
 
 
 def nlmm_deviance(
@@ -433,81 +393,32 @@ def nlmm_deviance(
     weights: NDArray[np.floating] | None = None,
 ) -> tuple[float, NDArray[np.floating], NDArray[np.floating], float]:
     """Evaluate deviance with random-effect rows in sorted group-label order."""
-    n = len(y)
-    prior_weights = _as_prior_weights(weights, n)
-    group_rows = _grouped_observation_indices(groups)
-    n_groups = len(group_rows)
-    n_random = len(random_params)
+    with _nlmm_workspace(y, x, groups, weights, n_jobs) as workspace:
+        return _nlmm_deviance(theta, workspace, model, phi, b, random_params)
 
+
+def _nlmm_deviance(
+    theta: NDArray[np.floating],
+    workspace: _NLMMWorkspace,
+    model: NonlinearModel,
+    phi: NDArray[np.floating],
+    b: NDArray[np.floating],
+    random_params: list[int],
+) -> tuple[float, NDArray[np.floating], NDArray[np.floating], float]:
+    n = len(workspace.y)
+    n_random = len(random_params)
     Psi_factor = _build_psi_factor(theta, n_random)
     Psi = Psi_factor @ Psi_factor.T
-
-    phi_new, b_new, _sigma_new = _pnls_step(
-        y,
-        x,
-        group_rows,
-        model,
-        phi,
-        b,
-        Psi,
-        sigma,
-        random_params,
-        n_jobs=n_jobs,
-        weights=prior_weights,
-    )
-
-    if n_jobs == -1:
-        n_jobs = os.cpu_count() or 1
-
-    use_parallel = n_jobs > 1 and n_groups >= n_jobs
-
-    rss: float
-    if use_parallel:
-        with ThreadPoolExecutor(max_workers=n_jobs) as executor:
-            rss_futures = [
-                executor.submit(
-                    _compute_group_rss,
-                    g,
-                    group_rows[g],
-                    x,
-                    y,
-                    phi_new,
-                    b_new,
-                    random_params,
-                    model,
-                    prior_weights,
-                )
-                for g in range(n_groups)
-            ]
-            rss = float(sum(future.result() for future in rss_futures))
-    else:
-        rss = sum(
-            _compute_group_rss(
-                g, group_rows[g], x, y, phi_new, b_new, random_params, model, prior_weights
-            )
-            for g in range(n_groups)
-        )
-
-    Psi_reg = Psi + _PSI_REGULARIZATION * np.eye(n_random)
-    try:
-        Psi_chol = linalg.cholesky(Psi_reg, lower=True)
-        Psi_inv = linalg.cho_solve((Psi_chol, True), np.eye(n_random))
-    except linalg.LinAlgError:
-        Psi_inv = linalg.pinv(Psi_reg)
-
-    penalty = float(np.einsum("gi,ij,gj->", b_new, Psi_inv, b_new, optimize=True))
-    pwrss = rss + penalty
-    sigma_sq = max(pwrss / n, _MIN_VARIANCE)
+    phi_new, b_new, sigma_sq = _pnls_step(workspace, model, phi, b, Psi, random_params)
 
     laplace_correction = 0.0
     identity = np.eye(n_random, dtype=np.float64)
-    for g in range(n_groups):
-        rows = group_rows[g]
+    for g, rows in enumerate(workspace.group_rows):
         params_g = phi_new.copy()
         np.add.at(params_g, random_params, b_new[g, :])
-        grad_g = model.gradient(params_g, x[rows])
+        grad_g = model.gradient(params_g, workspace.x[rows])
         Z_g = grad_g[:, random_params]
-        weights_g = prior_weights[rows]
+        weights_g = workspace.weights[rows]
         # Stable form of log|Psi| + log|Z'WZ + Psi^-1| for Psi = L L'.
         ZtWZ = Z_g.T @ (weights_g[:, None] * Z_g)
         system = identity + Psi_factor.T @ ZtWZ @ Psi_factor
@@ -581,6 +492,7 @@ class NLMMOptimizer:
         self._start_phi: NDArray[np.floating] | None = None
         self._start_b = np.zeros((self.n_groups, self.n_random), dtype=np.float64)
         self._start_sigma = _weighted_standard_deviation(self.y, self.weights)
+        self._workspace: _NLMMWorkspace | None = None
         self._last_theta: NDArray[np.floating] | None = None
         self._last_failure: str | None = None
         self._last_evaluation: (
@@ -637,6 +549,15 @@ class NLMMOptimizer:
                         self.random_params,
                         self._start_sigma,
                         self.weights,
+                    )
+                elif self._workspace is not None:
+                    evaluation = _nlmm_deviance(
+                        theta,
+                        self._workspace,
+                        self.model,
+                        self._start_phi,
+                        self._start_b,
+                        self.random_params,
                     )
                 else:
                     evaluation = nlmm_deviance(
@@ -739,16 +660,26 @@ class NLMMOptimizer:
                 dev = self.objective(x)
                 print(f"theta = {x}, deviance = {dev:.6f}")
 
-        result = minimize(
-            self.objective,
-            start_theta,
-            method=method,
-            bounds=bounds,
-            options={"maxiter": maxiter},
-            callback=callback,
+        context = (
+            nullcontext()
+            if self.use_rust
+            else _nlmm_workspace(self.y, self.x, self.groups, self.weights, self.n_jobs)
         )
+        with context as workspace:
+            self._workspace = workspace
+            try:
+                result = minimize(
+                    self.objective,
+                    start_theta,
+                    method=method,
+                    bounds=bounds,
+                    options={"maxiter": maxiter},
+                    callback=callback,
+                )
+                deviance, phi, b, sigma = self._evaluate(result.x)
+            finally:
+                self._workspace = None
 
-        deviance, phi, b, sigma = self._evaluate(result.x)
         if self._last_failure is not None:
             raise RuntimeError(
                 f"Nonlinear optimization did not produce a valid fit: {self._last_failure}"
