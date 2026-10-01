@@ -96,6 +96,37 @@ impl LambdaDerivative {
         result
     }
 
+    fn crossproduct_actions(
+        &self,
+        ztwz_lambda: &Mat<f64>,
+        inverse: &Mat<f64>,
+        rhs: &Mat<f64>,
+    ) -> (f64, Mat<f64>) {
+        // D = dLambda' A + A' dLambda, where A = Z'WZ Lambda.
+        // Each selected row contributes to both sides of this symmetric update.
+        // Contract it directly instead of allocating the q-by-q derivative.
+        let q = ztwz_lambda.nrows();
+        let mut trace = 0.0;
+        let mut product = Mat::zeros(q, rhs.ncols());
+        for column in 0..q {
+            for level in 0..self.n_levels {
+                let offset = self.offset + level * self.n_terms;
+                let source = offset + self.row;
+                let target = offset + self.column;
+                let value = ztwz_lambda[(source, column)];
+                if value != 0.0 {
+                    trace += value * (inverse[(column, target)] + inverse[(target, column)]);
+                    for right in 0..rhs.ncols() {
+                        product[(target, right)] += value * rhs[(column, right)];
+                        product[(column, right)] += value * rhs[(target, right)];
+                    }
+                }
+            }
+        }
+        (trace, product)
+    }
+
+    #[cfg(test)]
     fn crossproduct_derivative(&self, ztwz_lambda: &Mat<f64>) -> Mat<f64> {
         // d(Lambda' Z'WZ Lambda) = dLambda' (Z'WZ Lambda) + its transpose.
         // Retain products across every level and structure, including overlap.
@@ -442,7 +473,11 @@ impl PreparedLmmResponse {
         }
 
         let v_inv = chol_v.solve(&Mat::<f64>::identity(q, q));
-        let v_inv_b = chol_v.solve(&lambdat_ztwx);
+        let v_inv_b = if reml {
+            chol_v.solve(&lambdat_ztwx)
+        } else {
+            Mat::zeros(q, 0)
+        };
         let xtvinvx_inv = if reml {
             Some(chol_xtvinvx.solve(&Mat::<f64>::identity(p, p)))
         } else {
@@ -450,21 +485,24 @@ impl PreparedLmmResponse {
         };
 
         let ztwz_lambda = factor.transpose_apply(ztwz.as_ref()).transpose().to_owned();
+        let derivative_rhs = Mat::from_fn(q, 1 + v_inv_b.ncols(), |row, column| {
+            if column == 0 {
+                u_star[(row, 0)]
+            } else {
+                v_inv_b[(row, column - 1)]
+            }
+        });
         let mut gradient = Vec::with_capacity(n_theta);
 
         for derivative in lambda_derivatives(structures) {
-            let dv = derivative.crossproduct_derivative(&ztwz_lambda);
+            let (d_logdet_v, products) =
+                derivative.crossproduct_actions(&ztwz_lambda, &v_inv, &derivative_rhs);
 
-            let mut d_logdet_v = 0.0;
-            for i in 0..q {
-                for j in 0..q {
-                    d_logdet_v += v_inv[(i, j)] * dv[(j, i)];
-                }
+            let mut dc = derivative.apply::<true>(&zt_w_resid);
+            for row in 0..q {
+                dc[(row, 0)] -= products[(row, 0)];
             }
-
-            let dc = derivative.apply::<true>(&zt_w_resid);
-            let dv_u = &dv * &u_star;
-            let d_u = chol_v.solve(&(&dc - &dv_u));
+            let d_u = chol_v.solve(&dc);
             let lambda_d_u = factor.apply(&d_u.col(0).to_owned());
             let d_lambda_u = derivative.apply::<false>(&u_star);
             // Differentiate the conditional residual norm and spherical penalty
@@ -483,7 +521,6 @@ impl PreparedLmmResponse {
 
             if let Some(xtvinvx_inv) = &xtvinvx_inv {
                 let db = derivative.apply::<true>(ztwx);
-                let dv_v_inv_b = &dv * &v_inv_b;
                 let mut d_logdet_xtvinvx = 0.0;
 
                 for i in 0..p {
@@ -492,7 +529,7 @@ impl PreparedLmmResponse {
                         for r in 0..q {
                             dm_ji -= db[(r, j)] * v_inv_b[(r, i)];
                             dm_ji -= v_inv_b[(r, j)] * db[(r, i)];
-                            dm_ji += v_inv_b[(r, j)] * dv_v_inv_b[(r, i)];
+                            dm_ji += v_inv_b[(r, j)] * products[(r, i + 1)];
                         }
                         d_logdet_xtvinvx += xtvinvx_inv[(i, j)] * dm_ji;
                     }
@@ -1110,6 +1147,21 @@ mod prepared_tests {
                     derivative.crossproduct_derivative(&product),
                     &term + term.transpose()
                 );
+                let derivative_matrix = &term + term.transpose();
+                // Deliberately nonsymmetric: both inverse orientations contribute.
+                let inverse = Mat::from_fn(11, 11, |i, j| (2 * i + j) as f64 / 8.0);
+                let mut expected_trace = 0.0;
+                for i in 0..11 {
+                    for j in 0..11 {
+                        expected_trace += inverse[(i, j)] * derivative_matrix[(j, i)];
+                    }
+                }
+                for ncols in [0, 1, 4] {
+                    let rhs = Mat::from_fn(11, ncols, |i, j| (i + 3 * j) as f64 - 5.0);
+                    let (trace, actual) = derivative.crossproduct_actions(&product, &inverse, &rhs);
+                    assert_eq!(trace, expected_trace);
+                    assert_eq!(actual, &derivative_matrix * &rhs);
+                }
             }
         }
     }
