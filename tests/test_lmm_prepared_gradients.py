@@ -161,8 +161,6 @@ def test_prepared_gradient_rejects_invalid_reml_degrees_of_freedom():
 
 @pytest.mark.parametrize("change_layout", [False, True])
 def test_prepared_gradient_detaches_and_snapshots_parameters(change_layout):
-    if not getattr(sys, "_is_gil_enabled", lambda: True)():
-        pytest.skip("Interpreter lock is already disabled")
     # A separate interpreter keeps the long switch interval out of the runner.
     script = textwrap.dedent("""
         import json
@@ -172,6 +170,7 @@ def test_prepared_gradient_detaches_and_snapshots_parameters(change_layout):
         from scipy import sparse
         from mixedlm import _rust
 
+        assert getattr(sys, "_is_gil_enabled", lambda: True)(), "This test requires the GIL"
         n = 3_000_000
         z = sparse.csc_matrix((np.ones(n), np.arange(n), [0, n]), shape=(n, 1))
         design = _rust.LmmDesign(
@@ -208,7 +207,14 @@ def test_prepared_gradient_detaches_and_snapshots_parameters(change_layout):
     """)
     if change_layout:
         script = script.replace("theta[:] = 2", "theta[:] = 2; theta.shape = ()")
-    env = dict(os.environ, OPENBLAS_NUM_THREADS="1", OMP_NUM_THREADS="1", RAYON_NUM_THREADS="1")
+    # Test GIL release explicitly, regardless of the parent's current GIL state.
+    env = dict(
+        os.environ,
+        PYTHON_GIL="1",
+        OPENBLAS_NUM_THREADS="1",
+        OMP_NUM_THREADS="1",
+        RAYON_NUM_THREADS="1",
+    )
     run = subprocess.run(
         [sys.executable, "-c", script], env=env, text=True, capture_output=True, timeout=50
     )

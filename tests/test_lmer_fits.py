@@ -236,7 +236,7 @@ class TestGlmer:
         assert np.max(result.fitted()) > 10
 
     def test_glmer_aic_bic(self) -> None:
-        result = glmer("y ~ period + (1 | herd)", CBPP, family=families.Binomial())
+        result = glmer("incidence / size ~ period + (1 | herd)", CBPP, family=families.Binomial())
 
         aic = result.AIC()
         bic = result.BIC()

@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Binomial GLMMs accept two-level factor responses, preserve the success level through refits, updates, and cross-validation, and return numeric simulations using the fitted encoding.
+
+- Power curves now support actual group-count and within-group sample-size changes, absolute coefficient values, and per-point simulation diagnostics. Power results expose `n_failed` for excluded simulations.
+
 - Nonlinear fits accept `pnls_maxiter` and `pnls_tol` for inner iteration control on both backends. Results expose `pnls_converged` and retain the controls for refits and updates.
 
 - `LmerControl` and `GlmerControl` accept `restart_edge` to control likelihood checks and optimizer restarts at zero variance; enabled by default.
@@ -24,6 +28,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Nonlinear new-data predictions accept scalar, array, or column-based response offsets.
 
 ### Changed
+
+- CI uses locked test dependencies, checks optional plotting and optimizer features, enforces an 87% combined line/branch coverage floor in the complete feature job, validates workflows, and exercises installed wheels and rebuilt source distributions before publication. A single required-check gate aggregates all CI jobs.
+
+- Blocked Cholesky solves skip zero contributions, and dense Schur updates accumulate into their destination without allocating full products. Reproducible independent/crossed likelihood benchmarks run in CI.
 
 - Native LMM factorization consumes its assembled random-effect blocks directly, avoiding duplicate working matrices during likelihood and gradient evaluations.
 
@@ -48,6 +56,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   behavior, including per-unit rates from models fitted with log-exposure offsets.
 
 ### Fixed
+
+- GLMM log-likelihoods, information criteria, and reported marginal deviance include the response-distribution constants for every quadrature setting. The stored `deviance` retains the optimization criterion. Built-in families expose normalized conditional likelihoods; custom distributions can implement the same hook, and quasi likelihoods report unavailable information criteria.
+
+- Grouped binomial updates, reduced-model tests, and optimizer comparisons apply trial counts once while preserving original prior weights and offsets. Model selection rejects different binomial trial counts even when effective fitting weights coincide.
+
+- Response refits synchronize the stored model frame, so subsequent updates, cross-validation, and reduced-model tests use the refitted response rather than the original observations.
+
+- Gaussian, Gamma, and inverse-Gaussian GLMM simulations honor prior precision weights for single and batched draws. Power design extension preserves Polars factor order, and contrast coding and validation work with the supported minimum NumPy and pandas versions.
+
+- Built-in datasets now contain the original lme4 observations from a pinned upstream revision, including full InstEval and VerbAgg tables, with offline bundled data and recorded provenance. Earlier altered, truncated, and synthetic observations are corrected; fitted results can change. Canonical column names are restored, with documented aliases for `total_fruits` and `cTICKS`.
+
+- Cross-validation preserves held-out offsets, contrast coding, and grouped-binomial trials without multiplying trial weights twice. Weighted R² retains response and weight scale invariance, including large baselines, and custom metrics cannot overwrite fold metadata.
+
+- Blocked Cholesky retains fill-in between structures coupled through earlier blocks, fixing affected likelihoods, estimates, and gradients. Nonfinite diagonal pivots are rejected.
+
+- Power simulations exclude unconverged or invalid refits and require Boolean test decisions. Sample-size curves change their simulation designs while retaining pilot parameters and row metadata, and named coefficient curves test the varied coefficient by default. Extreme numeric group labels can be extended without rounding collisions or overflow.
 
 - Bootstrap refits require convergence and finite real estimates of the expected shapes in both serial and parallel execution. Failed samples stay entirely missing, and all confidence interval methods require at least two valid samples per parameter.
 

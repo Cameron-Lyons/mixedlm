@@ -7,6 +7,7 @@ from numpy.typing import NDArray
 
 from mixedlm.families.base import Family, Link
 from mixedlm.families.base import InverseSquaredLink as _InverseSquaredLink
+from mixedlm.families.likelihood import likelihood_inputs
 
 InverseSquaredLink = _InverseSquaredLink
 
@@ -33,6 +34,29 @@ class InverseGaussian(Family):
         y = np.maximum(y, eps)
 
         return wt * ((y - mu) ** 2) / (mu**2 * y)
+
+    def log_likelihood(
+        self,
+        y: NDArray[np.floating],
+        mu: NDArray[np.floating],
+        wt: NDArray[np.floating],
+        *,
+        trials: NDArray[np.floating] | None = None,
+    ) -> float:
+        y, mu, wt = likelihood_inputs(y, mu, wt)
+        if np.any(y <= 0) or np.any(mu <= 0):
+            raise ValueError("Inverse Gaussian likelihood responses and means must be positive")
+        return float(
+            np.sum(
+                0.5
+                * (
+                    np.log(wt)
+                    - np.log(2 * np.pi)
+                    - 3 * np.log(y)
+                    - wt * (y - mu) ** 2 / (y * mu**2)
+                )
+            )
+        )
 
     def simulate(self, mu: NDArray[np.floating], rng: Any | None = None) -> NDArray[np.floating]:
         rng = np.random if rng is None else rng

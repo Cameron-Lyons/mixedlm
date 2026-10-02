@@ -761,12 +761,12 @@ def _simulate_glmer_components(
         eta = matrices.X @ beta + matrices.offset
 
     mu = family.link.inverse(eta)
+    from mixedlm.utils.simulation import simulate_glmm_response
+
+    response = simulate_glmm_response(family, mu, matrices.weights, trials=matrices.trials, rng=rng)
     if family.__class__.__name__ == "Binomial" and matrices.trials is not None:
-        mu = family.clamp_mu(mu, eps=1e-6)
-        trials = matrices.trials.astype(np.int64)
-        successes = rng.binomial(trials, mu).astype(np.float64)
-        return successes / trials
-    return family.simulate(mu, rng=rng)
+        return response / matrices.trials
+    return response
 
 
 def bootMer(

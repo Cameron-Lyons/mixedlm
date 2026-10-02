@@ -1,0 +1,249 @@
+{
+  "source_repository": "https://github.com/lme4/lme4",
+  "source_commit": "67d71b0e264bda95f22bdc3ec52261c5fc993d4a",
+  "upstream_version": "2.1-0",
+  "upstream_license": "GPL (>= 2)",
+  "conversion": "pyreadr 0.5.7; pandas CSV, original row/column order, index=False, float_format=%.17g, line endings LF; gzip mtime=0",
+  "datasets": {
+    "sleepstudy": {
+      "source_url": "https://raw.githubusercontent.com/lme4/lme4/67d71b0e264bda95f22bdc3ec52261c5fc993d4a/data/sleepstudy.rda",
+      "source_sha256": "65acebb1584c681b0181906744864de8388c7e6ef6052733db7991e18e82a621",
+      "file": "sleepstudy.csv.gz",
+      "compressed_sha256": "29f250126ddfe4da8ba5771be15ea1a31d7618855cb9253210588eb0684232ec",
+      "csv_sha256": "9c69c2a71b48397f9b92941b198ae34b2db14ec8ca5d96a20cd56790e867a2e7",
+      "rows": 180,
+      "columns": [
+        "Reaction",
+        "Days",
+        "Subject"
+      ],
+      "dtypes": {
+        "Reaction": "float64",
+        "Days": "float64",
+        "Subject": "object"
+      }
+    },
+    "cbpp": {
+      "source_url": "https://raw.githubusercontent.com/lme4/lme4/67d71b0e264bda95f22bdc3ec52261c5fc993d4a/data/cbpp.rda",
+      "source_sha256": "c61f75fe66678c55898f0a2313a0636156e5b1a4b2194e154dc9b7601fc80870",
+      "file": "cbpp.csv.gz",
+      "compressed_sha256": "f157f891038f7496db4de64bbd37d494c984656a0646b61bd87f3af787daf53f",
+      "csv_sha256": "1a2c82ed41e8b4168d943848b61eebfe5d8a79af24e534c6551df0c41e1e17ba",
+      "rows": 56,
+      "columns": [
+        "herd",
+        "incidence",
+        "size",
+        "period"
+      ],
+      "dtypes": {
+        "herd": "object",
+        "incidence": "float64",
+        "size": "float64",
+        "period": "object"
+      }
+    },
+    "Dyestuff": {
+      "source_url": "https://raw.githubusercontent.com/lme4/lme4/67d71b0e264bda95f22bdc3ec52261c5fc993d4a/data/Dyestuff.rda",
+      "source_sha256": "b243c5c0cd4e911c87c83867fabe7cc7fe580d357926d2fd29a93000241bbc75",
+      "file": "Dyestuff.csv.gz",
+      "compressed_sha256": "c92441e8851125d327991c33b0d516f3266690de616419d6c280a3f0bf11a6c6",
+      "csv_sha256": "4fa4c10f8db617562965d43014e2bb15df244f2cc0a1f83f47b3cd4ac40c17a1",
+      "rows": 30,
+      "columns": [
+        "Batch",
+        "Yield"
+      ],
+      "dtypes": {
+        "Batch": "object",
+        "Yield": "float64"
+      }
+    },
+    "Dyestuff2": {
+      "source_url": "https://raw.githubusercontent.com/lme4/lme4/67d71b0e264bda95f22bdc3ec52261c5fc993d4a/data/Dyestuff2.rda",
+      "source_sha256": "1dcd53a310209061c178916e4410477e6af6a5e4571d89381b447e7dd736422f",
+      "file": "Dyestuff2.csv.gz",
+      "compressed_sha256": "1d6be54c7acd90dc7d9925acd215671a1042728b6856d3d43eed27ec188bc51f",
+      "csv_sha256": "53a2aa3de1b8852e31d3cf1be6168d3c03fa5b6437ac869cac8908c999fd6003",
+      "rows": 30,
+      "columns": [
+        "Batch",
+        "Yield"
+      ],
+      "dtypes": {
+        "Batch": "object",
+        "Yield": "float64"
+      }
+    },
+    "Penicillin": {
+      "source_url": "https://raw.githubusercontent.com/lme4/lme4/67d71b0e264bda95f22bdc3ec52261c5fc993d4a/data/Penicillin.rda",
+      "source_sha256": "263e0257c6ee7747bb1e03f3567aaf6de9ed409fa7c9ad2cbd1b38b2b78064c5",
+      "file": "Penicillin.csv.gz",
+      "compressed_sha256": "442f7882aa65973f4c2d2a7eca5e7bc4b9b1e8233f90d6e07512078b2aa943d1",
+      "csv_sha256": "9a26c574d34d1b6d5a6fcb31d296ffa65fe0339eea4b77f502d90b7f2b4eca24",
+      "rows": 144,
+      "columns": [
+        "diameter",
+        "plate",
+        "sample"
+      ],
+      "dtypes": {
+        "diameter": "float64",
+        "plate": "object",
+        "sample": "object"
+      }
+    },
+    "cake": {
+      "source_url": "https://raw.githubusercontent.com/lme4/lme4/67d71b0e264bda95f22bdc3ec52261c5fc993d4a/data/cake.rda",
+      "source_sha256": "e21fbee9c8fc1970a9ef2dfe6d701b2aa1370a823914f7630602ae6698d32646",
+      "file": "cake.csv.gz",
+      "compressed_sha256": "c6ae2ed6c061187b66288694dcc652519ce94ad2e718f3bc17bd4e419f316b78",
+      "csv_sha256": "51dd01508ef9ca1b11b61d3ee48005bbb2352fc6bcee5677b9d0791c721d029f",
+      "rows": 270,
+      "columns": [
+        "replicate",
+        "recipe",
+        "temperature",
+        "angle",
+        "temp"
+      ],
+      "dtypes": {
+        "replicate": "object",
+        "recipe": "object",
+        "temperature": "object",
+        "angle": "int64",
+        "temp": "float64"
+      }
+    },
+    "Pastes": {
+      "source_url": "https://raw.githubusercontent.com/lme4/lme4/67d71b0e264bda95f22bdc3ec52261c5fc993d4a/data/Pastes.rda",
+      "source_sha256": "82af78bb57e12e12b3fe103f7c165fcac84563c4cf0702b3f81e27bdb0e2f443",
+      "file": "Pastes.csv.gz",
+      "compressed_sha256": "070162f6afd6707fb91d9c515adc5a3beb79ea9f0a0f22f29402c6c8eb004f17",
+      "csv_sha256": "0bdc6a81e886faa0d279df29be111bf67adc04713b3255165f65c641f8a65b09",
+      "rows": 60,
+      "columns": [
+        "strength",
+        "batch",
+        "cask",
+        "sample"
+      ],
+      "dtypes": {
+        "strength": "float64",
+        "batch": "object",
+        "cask": "object",
+        "sample": "object"
+      }
+    },
+    "InstEval": {
+      "source_url": "https://raw.githubusercontent.com/lme4/lme4/67d71b0e264bda95f22bdc3ec52261c5fc993d4a/data/InstEval.rda",
+      "source_sha256": "ad7231a53aedc7e4a6dcc5deaec078c8e1845bb8bb3871726030d953797a0f6c",
+      "file": "InstEval.csv.gz",
+      "compressed_sha256": "8818dae311ee2e21af04bcd957b3c2e5515371a96ee87804add324497ce1fc4e",
+      "csv_sha256": "78dbe99f11bc6b9108f2785823cf2ae86aad35314f2f8a0ae3041873782399c7",
+      "rows": 73421,
+      "columns": [
+        "s",
+        "d",
+        "studage",
+        "lectage",
+        "service",
+        "dept",
+        "y"
+      ],
+      "dtypes": {
+        "s": "object",
+        "d": "object",
+        "studage": "object",
+        "lectage": "object",
+        "service": "object",
+        "dept": "object",
+        "y": "int64"
+      }
+    },
+    "Arabidopsis": {
+      "source_url": "https://raw.githubusercontent.com/lme4/lme4/67d71b0e264bda95f22bdc3ec52261c5fc993d4a/data/Arabidopsis.rda",
+      "source_sha256": "4a507dc49aec01ea32919978737e7b408a4ef84c6ff141dcb57fcfde98b62d5f",
+      "file": "Arabidopsis.csv.gz",
+      "compressed_sha256": "9ad25d19e9dc469bf5f7eb297de3fdfae7d0ca8faa5683fa91a6052500a09040",
+      "csv_sha256": "7d5247d6850e2fbd1bbdf4be7e8ca4a830a861aea28eed9979a252cf7e003e4d",
+      "rows": 625,
+      "columns": [
+        "reg",
+        "popu",
+        "gen",
+        "rack",
+        "nutrient",
+        "amd",
+        "status",
+        "total.fruits"
+      ],
+      "dtypes": {
+        "reg": "object",
+        "popu": "object",
+        "gen": "int64",
+        "rack": "int64",
+        "nutrient": "int64",
+        "amd": "object",
+        "status": "object",
+        "total.fruits": "int64"
+      }
+    },
+    "grouseticks": {
+      "source_url": "https://raw.githubusercontent.com/lme4/lme4/67d71b0e264bda95f22bdc3ec52261c5fc993d4a/data/grouseticks.rda",
+      "source_sha256": "caedfcf7742c3f6de8cf91060de609a044f0cfc7a03876d9ccd968292dbe76bb",
+      "file": "grouseticks.csv.gz",
+      "compressed_sha256": "7eb55ab501ac0eb717955f8f3a29268102cbe0c304205734bf26c3e341526013",
+      "csv_sha256": "33599b8d7e0e702f4396d4087409e748e52744383f157c52c71b0537392404ae",
+      "rows": 403,
+      "columns": [
+        "INDEX",
+        "TICKS",
+        "BROOD",
+        "HEIGHT",
+        "YEAR",
+        "LOCATION",
+        "cHEIGHT"
+      ],
+      "dtypes": {
+        "INDEX": "object",
+        "TICKS": "float64",
+        "BROOD": "object",
+        "HEIGHT": "float64",
+        "YEAR": "object",
+        "LOCATION": "object",
+        "cHEIGHT": "float64"
+      }
+    },
+    "VerbAgg": {
+      "source_url": "https://raw.githubusercontent.com/lme4/lme4/67d71b0e264bda95f22bdc3ec52261c5fc993d4a/data/VerbAgg.rda",
+      "source_sha256": "7e4e01eb8e637c172aca3110b4d3d3cc3b3b7b99a19426bc66534b8680679cd3",
+      "file": "VerbAgg.csv.gz",
+      "compressed_sha256": "97a61d929466578c528b67b1750f7812d14992a43a8853d84dfd01595ee98f52",
+      "csv_sha256": "51f7f5b490c2b62c8f05c11d527b0572d7507973075e8e7978ba2cc2b38b05c6",
+      "rows": 7584,
+      "columns": [
+        "Anger",
+        "Gender",
+        "item",
+        "resp",
+        "id",
+        "btype",
+        "situ",
+        "mode",
+        "r2"
+      ],
+      "dtypes": {
+        "Anger": "int64",
+        "Gender": "object",
+        "item": "object",
+        "resp": "object",
+        "id": "object",
+        "btype": "object",
+        "situ": "object",
+        "mode": "object",
+        "r2": "object"
+      }
+    }
+  }
+}

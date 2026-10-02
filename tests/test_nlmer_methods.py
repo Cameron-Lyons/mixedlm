@@ -8,16 +8,18 @@ import pytest
 from mixedlm import coef, fixef, getME, nlme, nlmer, ranef
 from mixedlm.inference.bootstrap import bootstrap_nlmer
 
+from tests.test_reporting import nlmm_model as nlmm_model
+
 
 def create_nlme_data(n_groups: int = 8, n_per_group: int = 10, seed: int = 42) -> pd.DataFrame:
-    np.random.seed(seed)
+    rng = np.random.RandomState(seed)
     data_rows = []
     for subj in range(n_groups):
-        asym = 200 + np.random.randn() * 20
-        r0 = 180 + np.random.randn() * 10
-        lrc = -3 + np.random.randn() * 0.2
+        asym = 200 + rng.standard_normal() * 20
+        r0 = 180 + rng.standard_normal() * 10
+        lrc = -3 + rng.standard_normal() * 0.2
         for t in np.linspace(0, 10, n_per_group):
-            y = asym + (r0 - asym) * np.exp(-np.exp(lrc) * t) + np.random.randn() * 5
+            y = asym + (r0 - asym) * np.exp(-np.exp(lrc) * t) + rng.standard_normal() * 5
             data_rows.append({"subject": f"S{subj + 1}", "time": t, "y": y})
     return pd.DataFrame(data_rows)
 
@@ -171,14 +173,19 @@ class TestNlmerUpdate:
         for field in ("phi", "theta", "b", "deviance", "converged", "pnls_converged"):
             np.testing.assert_array_equal(getattr(updated, field), getattr(result, field))
 
-    def test_update_with_start(self) -> None:
-        model = nlme.SSasymp()
-        result = nlmer(model, NLME_DATA, x_var="time", y_var="y", group_var="subject")
-
-        start = {"Asym": 200.0, "R0": 180.0, "lrc": -3.0}
+    def test_update_with_start(self, request) -> None:
+        result = request.getfixturevalue("nlmm_model")
+        start = {"Asym": 11.0, "R0": 3.0, "lrc": -0.8}
         updated = result.update(start=start)
         assert updated.converged and updated.pnls_converged
-        direct = nlmer(model, NLME_DATA, x_var="time", y_var="y", group_var="subject", start=start)
+        direct = nlmer(
+            result.model,
+            result.model_frame(),
+            x_var="time",
+            y_var="response",
+            group_var="subject",
+            start=start,
+        )
         for field in ("phi", "theta", "b", "deviance", "converged", "pnls_converged"):
             np.testing.assert_array_equal(getattr(updated, field), getattr(direct, field))
 

@@ -12,10 +12,12 @@ from mixedlm import (
     glmer,
     is_mixed_formula,
     lmer,
+    load_cbpp,
     nobars,
     parse_formula,
     subbars,
 )
+from scipy import stats
 
 from tests._lmer_data import CBPP, SLEEPSTUDY
 
@@ -520,9 +522,10 @@ class TestDrop1:
         assert "Days" in output
 
     def test_drop1_glmer_basic(self) -> None:
-        result = glmer("y ~ period + (1 | herd)", CBPP, family=families.Binomial())
+        data = load_cbpp()
+        result = glmer("incidence / size ~ period + (1 | herd)", data)
 
-        drop1_result = result.drop1(data=CBPP)
+        drop1_result = result.drop1(data=data)
 
         assert len(drop1_result.terms) >= 1
         assert any("period" in t for t in drop1_result.terms)
@@ -944,22 +947,23 @@ class TestLogLik:
         assert np.isclose(result.BIC(), expected_bic)
 
     def test_glmer_loglik_basic(self):
-        result = glmer("y ~ period + (1 | herd)", CBPP, family=families.Binomial())
+        data = load_cbpp()
+        result = glmer("incidence / size ~ period + (1 | herd)", data)
         ll = result.logLik()
 
         assert ll.value < 0
         assert ll.df > 0
-        assert ll.nobs == len(CBPP)
+        assert ll.nobs == len(data)
         assert ll.REML is False
 
     def test_glmer_loglik_df(self):
-        result = glmer("y ~ period + (1 | herd)", CBPP, family=families.Binomial())
+        result = glmer("incidence / size ~ period + (1 | herd)", load_cbpp())
         ll = result.logLik()
 
         assert ll.df == 5
 
     def test_glmer_aic_bic_consistency(self):
-        result = glmer("y ~ period + (1 | herd)", CBPP, family=families.Binomial())
+        result = glmer("incidence / size ~ period + (1 | herd)", load_cbpp())
         ll = result.logLik()
 
         expected_aic = -2 * ll.value + 2 * ll.df
@@ -1004,27 +1008,36 @@ class TestDeviance:
         assert np.isclose(-2 * ll.value, result.deviance, rtol=1e-6)
 
     def test_glmer_get_deviance(self):
-        result = glmer("y ~ period + (1 | herd)", CBPP, family=families.Binomial())
+        data = load_cbpp()
+        result = glmer("incidence / size ~ period + (1 | herd)", data)
         dev = result.get_deviance()
+        saturated = stats.binom.logpmf(
+            data.incidence, data["size"], data.incidence / data["size"]
+        ).sum()
 
         assert isinstance(dev, float)
         assert dev > 0
-        assert dev == result.deviance
+        assert dev == pytest.approx(result.deviance - 2 * saturated)
 
     def test_glmer_remlcrit(self):
-        result = glmer("y ~ period + (1 | herd)", CBPP, family=families.Binomial())
+        data = load_cbpp()
+        result = glmer("incidence / size ~ period + (1 | herd)", data)
         crit = result.REMLcrit()
+        saturated = stats.binom.logpmf(
+            data.incidence, data["size"], data.incidence / data["size"]
+        ).sum()
 
         assert isinstance(crit, float)
         assert crit > 0
-        assert crit == result.deviance
+        assert crit == pytest.approx(result.deviance - 2 * saturated)
         assert not result.isREML()
 
     def test_glmer_deviance_loglik_relation(self):
-        result = glmer("y ~ period + (1 | herd)", CBPP, family=families.Binomial())
+        result = glmer("incidence / size ~ period + (1 | herd)", load_cbpp())
         ll = result.logLik()
 
-        assert np.isclose(-2 * ll.value, result.deviance, rtol=1e-6)
+        assert result.get_deviance() == pytest.approx(-2 * ll.value)
+        assert result.REMLcrit() == pytest.approx(result.get_deviance())
 
 
 class TestModelMatrix:

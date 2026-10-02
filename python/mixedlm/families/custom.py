@@ -214,3 +214,16 @@ class QuasiFamily(CustomFamily):
         self, y: NDArray[np.floating], mu: NDArray[np.floating], wt: NDArray[np.floating]
     ) -> NDArray[np.floating]:
         return self.base_family.deviance_resids(y, mu, wt) / self.phi
+
+    def log_likelihood(
+        self,
+        y: NDArray[np.floating],
+        mu: NDArray[np.floating],
+        wt: NDArray[np.floating],
+        *,
+        trials: NDArray[np.floating] | None = None,
+    ) -> float:
+        raise ValueError(
+            "Normalized likelihood and information criteria are undefined "
+            "for quasi-likelihood models"
+        )

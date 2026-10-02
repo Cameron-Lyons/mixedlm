@@ -119,7 +119,13 @@ def test_contrast_encoding_preserves_level_order_and_lookup_semantics(
 
 @pytest.mark.parametrize(
     "values,categories",
-    [(np.array([False, True]), [0, 1]), (np.array([0, 1]), [False, True])],
+    [
+        (np.array([False, True]), [0, 1]),
+        (np.array([False, True], dtype=object), [0, 1]),
+        (np.array([0, 1]), [False, True]),
+        (np.array([0.0, 1.0]), [False, True]),
+        (np.array([0, 1], dtype=object), [False, True]),
+    ],
 )
 def test_numeric_and_boolean_levels_keep_dictionary_equality(
     values, categories, encoding_size_threshold

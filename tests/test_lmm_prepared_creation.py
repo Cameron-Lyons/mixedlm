@@ -63,8 +63,6 @@ def test_detached_design_validation_errors_leave_other_constructions_usable(fiel
 
 @pytest.mark.parametrize("change_layout", [False, True])
 def test_creation_releases_interpreter_lock_and_snapshots_all_arrays(change_layout):
-    if not getattr(sys, "_is_gil_enabled", lambda: True)():
-        pytest.skip("Interpreter lock is already disabled")
     script = textwrap.dedent("""
         import json
         import sys
@@ -73,6 +71,7 @@ def test_creation_releases_interpreter_lock_and_snapshots_all_arrays(change_layo
         from scipy import sparse
         from mixedlm import _rust
 
+        assert getattr(sys, "_is_gil_enabled", lambda: True)(), "This test requires the GIL"
         rng = np.random.default_rng(275)
         n, groups = 1_000_000, 16
         x = np.column_stack((np.ones(n), rng.normal(size=(n, 3))))
@@ -118,7 +117,14 @@ def test_creation_releases_interpreter_lock_and_snapshots_all_arrays(change_layo
             "array.fill(0)",
             "array.fill(0); array.shape = (array.size,) if array.ndim == 2 else (array.size, 1)",
         )
-    env = dict(os.environ, OPENBLAS_NUM_THREADS="1", OMP_NUM_THREADS="1", RAYON_NUM_THREADS="1")
+    # Test GIL release explicitly, regardless of the parent's current GIL state.
+    env = dict(
+        os.environ,
+        PYTHON_GIL="1",
+        OPENBLAS_NUM_THREADS="1",
+        OMP_NUM_THREADS="1",
+        RAYON_NUM_THREADS="1",
+    )
     result = subprocess.run(
         [sys.executable, "-c", script], env=env, text=True, capture_output=True, timeout=50
     )

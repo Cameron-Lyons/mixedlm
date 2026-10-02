@@ -59,9 +59,34 @@ mlm.families.Binomial(link="logit")
 # Binary outcome
 model = mlm.glmer("success ~ x + (1 | g)", data, family=mlm.families.Binomial())
 
+# Two-level factor outcome, such as the N/Y response in VerbAgg
+model = mlm.glmer("r2 ~ Anger + (1 | id)", mlm.load_verbagg())
+
 # Proportion (successes / trials)
 model = mlm.glmer("successes / trials ~ x + (1 | g)", data, family=mlm.families.Binomial())
 ```
+
+Binomial responses can be numeric 0/1 values, proportions with trial weights,
+or factors with exactly two levels. The second factor level represents success.
+Pandas categorical and Polars Enum responses use their declared category order;
+ordinary string responses use sorted labels, so `N` maps to 0 and `Y` to 1.
+Polars categorical responses use the order of their observed categories,
+excluding labels shared with unrelated columns in the category pool.
+To choose a different success label, declare the factor order explicitly:
+
+```python
+import pandas as pd
+
+data["outcome"] = pd.Categorical(data["outcome"], categories=["Y", "N"])
+model = mlm.glmer("outcome ~ x + (1 | g)", data)  # predicts the probability of N
+```
+
+The fitted level order is retained for updates, refits, and cross-validation,
+including training subsets that contain one class. `simulate()` returns numeric
+0/1 responses. `refit()` accepts either those encoded numeric values or factor
+labels; numeric arrays keep their 0/1 meaning even when the factor order is
+reversed. Unknown labels raise `ValueError`. Missing labels follow `na_action`
+during fitting. Numeric and Boolean responses keep their original values.
 
 ### Poisson
 
@@ -123,9 +148,58 @@ model = mlm.glmer(
     family=mlm.families.NegativeBinomial(theta=2.0)
 )
 
-# Estimate theta automatically
+# Fit with the supplied fixed theta (default 1.0)
 model = mlm.glmer_nb("count ~ x + (1 | g)", data)
 ```
+
+## Likelihood Reporting
+
+`model.logLik()` includes the response-density constants for all built-in
+families, using the fitted Laplace or adaptive Gauss-Hermite approximation.
+`AIC()`, `BIC()`, `extractAIC()`, and `model_selection()` use this normalized
+likelihood. `get_deviance()` and `REMLcrit()` return `-2 * logLik().value`.
+The stored `model.deviance` and `as_function("deviance")` retain the fitting
+criterion relative to the saturated conditional density; they remain suitable
+for optimization and likelihood-ratio profiles. Continuous response simulation
+uses the same precision weights as the conditional densities below.
+
+These quantities differ by a response-dependent constant. For grouped binomial
+data with successes \(k_i\), trials \(n_i\), and prior weights \(a_i\),
+
+\[
+\log L = -\tfrac12\,\text{model.deviance}
+          + \sum_i a_i\log\Pr\{K_i=k_i\mid n_i,p_i=k_i/n_i\}.
+\]
+
+The trial counts are retained separately from the effective fitting weights
+\(a_i n_i\). Numeric proportions supplied without explicit trials use their
+weights as trial counts. Normalized binomial likelihood reporting requires
+whole-number trials and successes; fitting a fractional-count criterion remains
+possible, but its `logLik()` raises `ValueError`. Binary 0/1 responses have a zero
+saturated constant and permit arbitrary positive prior weights.
+
+| Family | Conditional density and weight meaning |
+| --- | --- |
+| Binomial | Bernoulli for binary responses; binomial counts for grouped responses. Prior weights multiply each log probability. |
+| Poisson | Poisson mean \(\mu_i\); weights multiply each log probability. |
+| NegativeBinomial | Negative binomial mean \(\mu_i\) and fixed `theta`; weights multiply each log probability. |
+| Gaussian | Normal mean \(\mu_i\), variance \(1/w_i\). |
+| Gamma | Gamma shape \(w_i\), scale \(\mu_i/w_i\). |
+| InverseGaussian | Inverse Gaussian mean \(\mu_i\), shape \(w_i\). |
+
+Continuous GLMM families fix dispersion at one: their prior weights specify
+precision, and their densities have variance \(V(\mu_i)/w_i\). The dispersion
+is not estimated or counted as a fitted parameter. Use `lmer()` for a Gaussian
+model with estimated residual scale. Poisson and negative binomial weights
+give ordinary replicated-observation likelihoods when integral, and weighted
+power likelihoods otherwise. `glmer_nb()` fixes `theta` at the supplied value.
+
+The [R family documentation](https://stat.ethz.ch/R-manual/R-devel/library/stats/html/family.html)
+describes the response encodings, and the
+[lme4 deviance documentation](https://lme4.github.io/lme4/reference/merMod-class.html#deviance-and-log-likelihood-of-glmms)
+distinguishes relative and absolute, conditional and marginal deviances. lme4
+documents that its adaptive-quadrature likelihood may omit response constants;
+mixedlm includes them for every supported approximation.
 
 ## Custom Families
 
@@ -144,12 +218,33 @@ class MyFamily(CustomFamily):
         super().__init__(link="log")
 
     def variance(self, mu):
-        return mu ** 1.5  # Custom variance function
+        return mu  # Poisson variance in this example
 
     def deviance_resids(self, y, mu, wt):
         # Custom deviance residuals
         return 2 * wt * (y * np.log(y / mu) - (y - mu))
 ```
+
+Custom families can fit using their variance and deviance functions alone.
+To enable normalized `logLik()`, AIC, and BIC, also implement the optional
+`log_likelihood(y, mu, wt, *, trials=None)` hook. For the Poisson example above:
+
+```python
+from scipy import stats
+
+def log_likelihood(self, y, mu, wt, *, trials=None):
+    return float(np.sum(wt * stats.poisson.logpmf(y, mu)))
+
+MyFamily.log_likelihood = log_likelihood
+```
+
+The hook must include all response-density constants and handle the saturated
+mean `mu=y`, including boundary values. It must satisfy
+`sum(deviance_resids(y, mu, wt)) == 2 * (log_likelihood(y, y, wt) - log_likelihood(y, mu, wt))`.
+Without this hook, likelihood reporting raises `NotImplementedError`; model
+summaries display `NA` for these quantities. A quasi family defines a mean and
+variance relationship without a probability density, so its normalized
+likelihood and information criteria raise `ValueError`.
 
 ### QuasiFamily
 

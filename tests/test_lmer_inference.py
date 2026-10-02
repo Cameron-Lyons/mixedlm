@@ -170,8 +170,8 @@ class TestInference:
         assert "Chisq" in output
 
     def test_anova_glmer(self) -> None:
-        model1 = glmer("y ~ 1 + (1 | herd)", CBPP, family=families.Binomial())
-        model2 = glmer("y ~ period + (1 | herd)", CBPP, family=families.Binomial())
+        model1 = glmer("incidence / size ~ 1 + (1 | herd)", CBPP, family=families.Binomial())
+        model2 = glmer("incidence / size ~ period + (1 | herd)", CBPP, family=families.Binomial())
 
         result = anova(model1, model2)
 

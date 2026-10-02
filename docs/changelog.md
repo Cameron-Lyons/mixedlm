@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Binomial GLMMs accept two-level factor responses, preserve the success level through refits, updates, and cross-validation, and return numeric simulations using the fitted encoding.
+
+- Power curves now support actual group-count and within-group sample-size changes, absolute coefficient values, and per-point simulation diagnostics. Power results expose `n_failed` for excluded simulations.
+
 - LMM fitting accepts `use_analytic_gradient=True` through `lmerControl()`, `LMMOptimizer.optimize()`, and `optimizeLmer()`. Supported native gradient-based solvers share value/gradient evaluations within each fit. The option is disabled by default because its benefit depends on the model and optimizer, and large coupled random-effect systems can make analytic gradients more expensive than numerical derivatives.
 
 - Prepared native LMM responses expose `deviance_with_gradient(theta, reml=True)`, reusing validated design and response products for analytic covariance gradients. Calls snapshot parameters and release the interpreter lock, allowing concurrent evaluations and direct use with SciPy's `jac=True` interface.
@@ -32,6 +36,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Nonlinear new-data predictions accept scalar, array, or column-based response offsets.
 
 ### Changed
+
+- CI uses locked test dependencies, checks optional plotting and optimizer features, enforces an 87% combined line/branch coverage floor in the complete feature job, validates workflows, and exercises installed wheels and rebuilt source distributions before publication. A single required-check gate aggregates all CI jobs.
+
+- Blocked Cholesky solves skip zero contributions, and dense Schur updates accumulate into their destination without allocating full products. Reproducible independent/crossed likelihood benchmarks run in CI.
 
 - Native LMM covariance assembly reuses one intermediate transform per independent random-effect structure, reducing small-matrix allocations during likelihood and gradient evaluations.
 
@@ -96,6 +104,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   behavior, including per-unit rates from models fitted with log-exposure offsets.
 
 ### Fixed
+
+- GLMM log-likelihoods, information criteria, and reported marginal deviance include the response-distribution constants for every quadrature setting. The stored `deviance` retains the optimization criterion. Built-in families expose normalized conditional likelihoods; custom distributions can implement the same hook, and quasi likelihoods report unavailable information criteria.
+
+- Grouped binomial updates, reduced-model tests, and optimizer comparisons apply trial counts once while preserving original prior weights and offsets. Model selection rejects different binomial trial counts even when effective fitting weights coincide.
+
+- Response refits synchronize the stored model frame, so subsequent updates, cross-validation, and reduced-model tests use the refitted response rather than the original observations.
+
+- Gaussian, Gamma, and inverse-Gaussian GLMM simulations honor prior precision weights for single and batched draws. Power design extension preserves Polars factor order, and contrast coding and validation work with the supported minimum NumPy and pandas versions.
+
+- Built-in datasets now contain the original lme4 observations from a pinned upstream revision, including full InstEval and VerbAgg tables, with offline bundled data and recorded provenance. Earlier altered, truncated, and synthetic observations are corrected; fitted results can change. Canonical column names are restored, with documented aliases for `total_fruits` and `cTICKS`.
+
+- Cross-validation preserves held-out offsets, contrast coding, and grouped-binomial trials without multiplying trial weights twice. Weighted R² retains response and weight scale invariance, including large baselines, and custom metrics cannot overwrite fold metadata.
+
+- Blocked Cholesky retains fill-in between structures coupled through earlier blocks, fixing affected likelihoods, estimates, and gradients. Nonfinite diagonal pivots are rejected.
+
+- Power simulations exclude unconverged or invalid refits and require Boolean test decisions. Sample-size curves change their simulation designs while retaining pilot parameters and row metadata, and named coefficient curves test the varied coefficient by default. Extreme numeric group labels can be extended without rounding collisions or overflow.
 
 - COBYLA fits return results when SciPy supplies an evaluation count without an iteration count. The normalized iteration count uses evaluations, matching COBYLA's `maxiter` budget units. Boundary probes and restarts share that evaluation budget, retaining the best probe when too few evaluations remain to initialize a restart.
 

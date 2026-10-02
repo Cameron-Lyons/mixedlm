@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import pytest
-from mixedlm import cross_validate, families, glmer, lmer, lmerControl
+from mixedlm import cross_validate, families, glmer, glmerControl, lmer, lmerControl
 from mixedlm.inference.cross_validation import (
     CrossValidationResult,
     make_folds,
@@ -91,6 +91,61 @@ def test_weighted_r2_handles_constant_responses() -> None:
     observed = np.ones(4)
     assert weighted_r2(observed, observed) == 1
     assert weighted_r2(observed, np.zeros(4)) == 0
+
+
+@pytest.mark.parametrize("scale", [1e-150, 1.0, 1e150])
+def test_weighted_r2_does_not_classify_tiny_constant_errors_as_perfect(scale: float) -> None:
+    observed = np.full(4, scale)
+    predicted = observed * (1.0 + 1e-8)
+
+    assert weighted_r2(observed, predicted) == 0
+
+
+def test_weighted_r2_reports_unrepresentable_error_ratio_without_dividing_by_zero() -> None:
+    assert weighted_r2(np.array([1e-200, 2e-200]), np.ones(2)) == float("-inf")
+
+
+@pytest.mark.parametrize(
+    ("prediction", "weights", "expected"),
+    [
+        (np.array([2.0, 2.0, 2.0]), None, 0.0),
+        (np.array([2.0, 4.0, 6.0]), None, -0.5),
+        (np.array([2.0, 2.0, 2.0]), np.array([1.0, 2.0, 3.0]), -0.2),
+        (np.array([2.0, 4.0, 6.0]), np.array([1.0, 2.0, 3.0]), -0.8),
+    ],
+)
+def test_weighted_r2_preserves_representable_differences_at_large_baselines(
+    prediction, weights, expected
+) -> None:
+    observed = np.array([0.0, 2.0, 4.0])
+    assert weighted_r2(observed, prediction, weights) == pytest.approx(expected, abs=1e-14)
+    assert weighted_r2(1e16 + observed, 1e16 + prediction, weights) == pytest.approx(
+        expected, abs=1e-14
+    )
+
+
+def test_weighted_r2_supports_finite_values_whose_range_overflows() -> None:
+    observed = np.array([-1e308, 0.0, 1e308])
+
+    assert weighted_r2(observed, np.zeros(3)) == pytest.approx(0.0)
+    assert weighted_r2(observed, observed) == 1.0
+
+
+@pytest.mark.parametrize("response_scale", [1e-150, 1e-10, 1.0, 1e150])
+@pytest.mark.parametrize("weight_scale", [1e-150, 1.0, 1e150])
+def test_weighted_r2_is_invariant_to_response_and_weight_units(
+    response_scale: float, weight_scale: float
+) -> None:
+    observed = np.array([1.0, 2.0, 5.0, 8.0])
+    predicted = np.array([1.5, 1.0, 6.0, 7.0])
+    weights = np.array([1.0, 2.0, 3.0, 4.0])
+    # Exact weighted sums: weighted response mean = 5.2, SSE = 9.25,
+    # and centered sum of squares = 69.6. Changing units cannot change R2.
+    expected = 1.0 - 9.25 / 69.6
+
+    assert weighted_r2(
+        response_scale * observed, response_scale * predicted, weight_scale * weights
+    ) == pytest.approx(expected)
 
 
 def test_score_validation_rejects_bad_arrays() -> None:
@@ -191,6 +246,57 @@ def test_case_level_lmm_cross_validation(weighted_lmm) -> None:
     assert "case-level" in str(result)
 
 
+@pytest.mark.parametrize("group", [None, "group"], ids=["conditional", "new-groups"])
+def test_lmm_cross_validation_matches_independent_weighted_offset_refits(
+    weighted_lmm, group: str | None
+) -> None:
+    model, data = weighted_lmm
+    control = lmerControl(check_singular=False)
+    result = cross_validate(
+        model,
+        cv=2,
+        group=group,
+        random_state=61,
+        metrics=["mse", "mae"],
+        fit_kwargs={"control": control},
+    )
+    expected = np.empty(len(data))
+    weights = model.weights()
+    offsets = model.offset()
+    for fold in result.folds:
+        trained = lmer(
+            str(model.formula),
+            data.iloc[fold.train_indices],
+            weights=weights[fold.train_indices],
+            offset=offsets[fold.train_indices],
+            REML=False,
+            control=control,
+        )
+        held_out = data.iloc[fold.test_indices]
+        means = (
+            trained.beta[0]
+            + trained.beta[1] * held_out["x"].to_numpy()
+            + offsets[fold.test_indices]
+        )
+        if group is None:
+            structure = trained.matrices.random_structures[0]
+            random_intercepts = trained.ranef()["group"]["(Intercept)"]
+            means += np.array(
+                [
+                    random_intercepts[structure.level_map[level]]
+                    if level in structure.level_map
+                    else 0.0
+                    for level in held_out["group"]
+                ]
+            )
+        expected[fold.test_indices] = means
+
+    assert_allclose(result.predictions, expected, rtol=1e-8, atol=1e-8)
+    errors = data["y"].to_numpy() - expected
+    assert result["mse"] == pytest.approx(np.sum(weights * errors**2) / np.sum(weights))
+    assert result["mae"] == pytest.approx(np.sum(weights * np.abs(errors)) / np.sum(weights))
+
+
 @pytest.fixture(scope="module")
 def grouped_binomial_model():
     data = CBPP.copy()
@@ -218,6 +324,136 @@ def test_grouped_glmm_cross_validation_includes_deviance(grouped_binomial_model)
     assert result["deviance"] >= 0
     assert result.fold_scores["n_test"].sum() == grouped_binomial_model.nobs()
     assert "singular" in result.fold_scores
+
+
+def test_grouped_binomial_count_syntax_matches_manual_proportion_cross_validation() -> None:
+    data = CBPP.assign(proportion=CBPP["incidence"] / CBPP["size"])
+    prior_weights = np.linspace(0.7, 1.6, len(data))
+    effective_weights = prior_weights * data["size"].to_numpy()
+    grouped = glmer("incidence / size ~ period + (1 | herd)", data, weights=prior_weights)
+    manual = glmer("proportion ~ period + (1 | herd)", data, weights=effective_weights)
+    grouped_cv = cross_validate(grouped, cv=2, group="herd", random_state=109)
+    manual_cv = cross_validate(manual, cv=2, group="herd", random_state=109)
+
+    assert_allclose(grouped_cv.predictions, manual_cv.predictions, rtol=1e-8, atol=1e-8)
+    assert grouped_cv.scores == pytest.approx(manual_cv.scores)
+    assert_allclose(
+        grouped_cv.fold_scores[["rmse", "deviance"]],
+        manual_cv.fold_scores[["rmse", "deviance"]],
+        rtol=1e-8,
+        atol=1e-8,
+    )
+    observed = data["proportion"].to_numpy()
+    predicted = grouped_cv.predictions
+    binomial_terms = np.zeros(len(observed))
+    positive = observed > 0
+    below_one = observed < 1
+    binomial_terms[positive] += observed[positive] * np.log(
+        observed[positive] / predicted[positive]
+    )
+    binomial_terms[below_one] += (1 - observed[below_one]) * np.log(
+        (1 - observed[below_one]) / (1 - predicted[below_one])
+    )
+    expected_deviance = 2 * np.sum(effective_weights * binomial_terms) / np.sum(effective_weights)
+    assert grouped_cv["deviance"] == pytest.approx(expected_deviance)
+
+    # Identical proportions with different denominators represent different
+    # observations and cannot inherit the original trial weights.
+    changed_trials = data.copy()
+    changed_trials.loc[0, ["incidence", "size"]] *= 2
+    with pytest.raises(ValueError, match="trial counts.*aligned"):
+        cross_validate(grouped, changed_trials, cv=2)
+
+
+def test_glmm_cross_validation_applies_exposure_before_inverse_link() -> None:
+    rng = np.random.default_rng(289)
+    groups = np.repeat(np.arange(8), 10)
+    x = rng.normal(size=len(groups))
+    exposure = rng.uniform(0.5, 5.0, size=len(groups))
+    offset = np.log(exposure)
+    group_effects = rng.normal(scale=0.4, size=8)
+    y = rng.poisson(np.exp(0.5 + 0.35 * x + group_effects[groups] + offset))
+    data = pd.DataFrame({"y": y, "x": x, "group": groups.astype(str)})
+    control = glmerControl(check_singular=False, check_nlev_gtreq_5="ignore")
+    model = glmer("y ~ x + (1 | group)", data, families.Poisson(), offset=offset, control=control)
+    result = cross_validate(
+        model, cv=2, group="group", random_state=53, fit_kwargs={"control": control}
+    )
+    expected = np.empty(len(data))
+    for fold in result.folds:
+        trained = glmer(
+            str(model.formula),
+            data.iloc[fold.train_indices],
+            families.Poisson(),
+            offset=offset[fold.train_indices],
+            control=control,
+        )
+        expected[fold.test_indices] = exposure[fold.test_indices] * np.exp(
+            trained.beta[0] + trained.beta[1] * x[fold.test_indices]
+        )
+
+    assert_allclose(result.predictions, expected, rtol=1e-8, atol=1e-8)
+    # Compute the Poisson deviance directly, with the zero-count convention.
+    positive = y > 0
+    contribution = expected - y
+    contribution[positive] += y[positive] * np.log(y[positive] / expected[positive])
+    assert result["deviance"] == pytest.approx(2.0 * np.mean(contribution))
+
+
+@pytest.mark.parametrize("name", ["fold", "n_train", "n_test", "converged", "singular"])
+def test_custom_metric_cannot_replace_fold_metadata(weighted_lmm, name: str) -> None:
+    def scorer(y_true, y_pred, weights) -> float:
+        return 1.0
+
+    scorer.__name__ = name
+    model, _ = weighted_lmm
+    with pytest.raises(ValueError, match="reserved.*fold metadata"):
+        cross_validate(model, cv=2, metrics=scorer)
+
+
+@pytest.mark.parametrize("generalized", [False, True], ids=["lmer", "glmer"])
+def test_cross_validation_preserves_categorical_random_slope_contrasts(
+    generalized: bool,
+) -> None:
+    rng = np.random.default_rng(489)
+    groups = np.repeat(np.arange(12), 8)
+    coded_condition = np.tile([-1.0, 1.0], len(groups) // 2)
+    intercepts = rng.normal(scale=0.6, size=12)
+    slopes = rng.normal(scale=0.3, size=12)
+    eta = 1.0 + 0.5 * coded_condition + intercepts[groups] + slopes[groups] * coded_condition
+    y = rng.poisson(np.exp(eta)) if generalized else eta + rng.normal(scale=0.3, size=len(groups))
+    data = pd.DataFrame(
+        {
+            "y": y,
+            "condition": np.where(coded_condition < 0, "A", "B"),
+            "group": groups.astype(str),
+        }
+    )
+    contrasts = {"condition": np.array([[-1.0], [1.0]])}
+    formula = "y ~ condition + (condition || group)"
+    control = (
+        glmerControl(check_singular=False) if generalized else lmerControl(check_singular=False)
+    )
+    fit_options = (
+        {"family": families.Poisson(), "control": control}
+        if generalized
+        else {"REML": False, "control": control}
+    )
+    fit = glmer if generalized else lmer
+    model = fit(formula, data, contrasts=contrasts, **fit_options)
+    result = cross_validate(
+        model, cv=2, random_state=88, metrics="mse", fit_kwargs={"control": control}
+    )
+    expected = np.empty(len(data))
+    for fold in result.folds:
+        trained = fit(formula, data.iloc[fold.train_indices], contrasts=contrasts, **fit_options)
+        expected[fold.test_indices] = trained.predict(
+            data.iloc[fold.test_indices], allow_new_levels=True
+        )
+
+    # The diagonal random covariance is defined in the fitted contrast basis.
+    # Switching to treatment contrasts during refits changes the actual model.
+    assert_allclose(result.predictions, expected, rtol=1e-8, atol=1e-8)
 
 
 def test_polars_model_frame_cross_validation() -> None:

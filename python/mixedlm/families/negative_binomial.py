@@ -4,9 +4,10 @@ from typing import Any
 
 import numpy as np
 from numpy.typing import NDArray
-from scipy.special import gammaln
+from scipy.special import gammaln, xlogy
 
 from mixedlm.families.base import Family, Link
+from mixedlm.families.likelihood import likelihood_inputs, whole_counts
 
 
 class NegativeBinomial(Family):
@@ -38,16 +39,24 @@ class NegativeBinomial(Family):
         return 2 * wt * (term1 - term2)
 
     def log_likelihood(
-        self, y: NDArray[np.floating], mu: NDArray[np.floating], wt: NDArray[np.floating]
+        self,
+        y: NDArray[np.floating],
+        mu: NDArray[np.floating],
+        wt: NDArray[np.floating],
+        *,
+        trials: NDArray[np.floating] | None = None,
     ) -> float:
-        mu = self.clamp_mu(mu)
+        y, mu, wt = likelihood_inputs(y, mu, wt)
+        y = whole_counts(y, "negative binomial")
+        if np.any(mu < 0):
+            raise ValueError("Negative binomial likelihood means must be nonnegative")
         theta = self.theta
         ll = (
             gammaln(y + theta)
             - gammaln(theta)
             - gammaln(y + 1)
             + theta * np.log(theta / (mu + theta))
-            + y * np.log(mu / (mu + theta))
+            + xlogy(y, mu / (mu + theta))
         )
         return float(np.sum(wt * ll))
 

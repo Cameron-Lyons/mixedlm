@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 from mixedlm.estimation.laplace import GLMMOptimizer, _build_lambda, _count_theta
 from mixedlm.families.base import Family
 from mixedlm.formula.terms import Formula
-from mixedlm.matrices.design import ModelMatrices
+from mixedlm.matrices.design import ModelMatrices, _restore_binomial_factor
 from mixedlm.models.control import GlmerControl
 from mixedlm.models.lmer_types import (
     LogLik,
@@ -32,7 +32,11 @@ from mixedlm.models.shared_utils import (
 )
 from mixedlm.utils import _format_pvalue, _get_signif_code
 from mixedlm.utils.random import RandomSeed, native_seed, random_stream, validate_simulation_count
-from mixedlm.utils.simulation import simulate_random_effects, simulation_parameters
+from mixedlm.utils.simulation import (
+    simulate_glmm_response,
+    simulate_random_effects,
+    simulation_parameters,
+)
 from mixedlm.utils.validation import _validate_confidence_level
 
 
@@ -1136,7 +1140,9 @@ class GlmerResult(MerResultMixin):
         family : Family, optional
             New GLM family. If None, uses the original family.
         weights : array-like, optional
-            New weights. If None, uses the original weights.
+            New prior weights. If None and the data length is unchanged, uses
+            the original prior weights. Grouped binomial trial counts are
+            multiplied once using the updated response denominator.
         offset : array-like, optional
             New offset. If None, uses the original offset.
         nAGQ : int, optional
@@ -1176,10 +1182,25 @@ class GlmerResult(MerResultMixin):
         if family is None:
             family = self.family
 
+        from mixedlm.families.binomial import Binomial
+        from mixedlm.formula.parser import parse_formula
+
+        if (
+            isinstance(family, Binomial)
+            and parse_formula(new_formula).response == self.formula.response
+        ):
+            data = _restore_binomial_factor(
+                data, self.formula.response, self.matrices.response_levels
+            )
+
         data_size_changed = len(data) != self.matrices.n_obs
 
         if weights is None and not data_size_changed:
-            weights = self.matrices.weights
+            weights = (
+                self.matrices.weights
+                if self.matrices.trials is None
+                else self.matrices.weights / self.matrices.trials
+            )
         if offset is None and not data_size_changed:
             offset = self.matrices.offset
         if nAGQ is None:
@@ -1225,30 +1246,46 @@ class GlmerResult(MerResultMixin):
         else:
             return new_formula
 
+    @cached_property
+    def _saturated_log_likelihood(self) -> float:
+        return self.family.log_likelihood(
+            self.matrices.y,
+            self.matrices.y,
+            self.matrices.weights,
+            trials=self.matrices.trials,
+        )
+
     def logLik(self) -> LogLik:
+        """Report the marginal log likelihood including response-density constants.
+
+        The stored ``deviance`` remains the fitting objective relative to the
+        saturated conditional density. Custom families must implement
+        ``Family.log_likelihood()``; quasi likelihoods have no normalized density.
+        """
         n = self.matrices.n_obs
         n_theta = _count_theta(self.matrices.random_structures)
         df = self.matrices.n_fixed + n_theta
-        value = -0.5 * self.deviance
+        value = -0.5 * self.deviance + self._saturated_log_likelihood
 
         return LogLik(value=value, df=df, nobs=n, REML=False)
 
     def get_deviance(self) -> float:
-        """Get the deviance of the fitted model.
+        """Get minus twice the normalized marginal log likelihood.
 
-        For generalized linear mixed models, this returns the Laplace
-        approximation to the deviance.
+        Uses the fitted Laplace or adaptive quadrature approximation, including
+        the response-density constants. The ``deviance`` attribute and
+        ``as_function("deviance")`` retain the optimizer's unnormalized criterion.
 
         Returns
         -------
         float
-            The deviance value.
+            The absolute marginal deviance, ``-2 * logLik().value``.
 
         See Also
         --------
         logLik : Get the log-likelihood.
         """
-        return self.deviance
+        return -2 * self.logLik().value
 
     def REMLcrit(self) -> float:
         """Get the ML deviance (GLMMs do not use REML).
@@ -1274,7 +1311,7 @@ class GlmerResult(MerResultMixin):
         logLik : Get the log-likelihood.
         isREML : Check if the model was fit with REML (always False for GLMMs).
         """
-        return self.deviance
+        return self.get_deviance()
 
     def AIC(self) -> float:
         ll = self.logLik()
@@ -1533,14 +1570,13 @@ class GlmerResult(MerResultMixin):
         mu: NDArray[np.floating],
         rng: Any | None = None,
     ) -> NDArray[np.floating]:
-        rng = np.random if rng is None else rng
-        if self.family.__class__.__name__ == "Binomial" and self.matrices.trials is not None:
-            mu = self.family.clamp_mu(mu, eps=1e-6)
-            trials = self.matrices.trials.astype(np.int64)
-            if mu.ndim > 1:
-                trials = trials[:, None]
-            return rng.binomial(trials, mu).astype(np.float64)
-        return self.family.simulate(mu, rng=rng)
+        return simulate_glmm_response(
+            self.family,
+            mu,
+            self.matrices.weights,
+            trials=self.matrices.trials,
+            rng=rng,
+        )
 
     def _refit_from_matrices(self, matrices: ModelMatrices, **kwargs) -> GlmerResult:
         optimizer = GLMMOptimizer(
@@ -1589,7 +1625,7 @@ class GlmerResult(MerResultMixin):
 
     def refit(
         self,
-        newresp: NDArray[np.floating] | None = None,
+        newresp: ArrayLike | None = None,
         **kwargs,
     ) -> GlmerResult:
         """Refit the model with a new response vector.
@@ -1604,7 +1640,9 @@ class GlmerResult(MerResultMixin):
             New response values. Must have the same length as the original
             response. For grouped binomial models, provide success counts;
             the original trial counts are reused. If None, refits with the
-            original response.
+            original response. Two-level factor models accept the fitted labels
+            or encoded numeric 0/1 responses. Numeric responses keep their
+            encoded meaning regardless of the fitted factor order.
         **kwargs
             Additional arguments passed to the optimizer (start, method, maxiter).
             Inner controls pirls_maxiter and pirls_tol default to the original
@@ -1661,17 +1699,27 @@ class GlmerResult(MerResultMixin):
 
     def summary(self) -> str:
         lines = []
-        lines.append("Generalized linear mixed model fit by maximum likelihood (Laplace)")
+        approximation = "adaptive Gauss-Hermite quadrature" if self.nAGQ > 1 else "Laplace"
+        lines.append(f"Generalized linear mixed model fit by maximum likelihood ({approximation})")
         lines.append(
             f" Family: {self.family.__class__.__name__} ({self.family.link.__class__.__name__})"
         )
         lines.append(f"Formula: {self.formula}")
         lines.append("")
 
-        lines.append("     AIC      BIC   logLik deviance")
-        lines.append(
-            f"{self.AIC():8.1f} {self.BIC():8.1f} {self.logLik().value:8.1f} {self.deviance:8.1f}"
-        )
+        lines.append("     AIC      BIC   logLik  -2logL")
+        try:
+            ll = self.logLik()
+        except (NotImplementedError, ValueError) as exc:
+            lines.append(f"{'NA':>8} {'NA':>8} {'NA':>8} {'NA':>8}")
+            lines.append(str(exc))
+        else:
+            absolute_deviance = -2 * ll.value
+            lines.append(
+                f"{absolute_deviance + 2 * ll.df:8.1f} "
+                f"{absolute_deviance + ll.df * np.log(ll.nobs):8.1f} "
+                f"{ll.value:8.1f} {absolute_deviance:8.1f}"
+            )
         lines.append("")
 
         lines.append(str(self.VarCorr()))

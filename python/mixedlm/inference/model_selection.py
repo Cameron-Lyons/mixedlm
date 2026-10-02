@@ -112,6 +112,7 @@ class _ModelStats:
     family_signature: tuple[Any, ...] | None
     response_values: NDArray[np.float64] | None
     prior_weights: NDArray[np.float64] | None
+    response_trials: NDArray[np.float64] | None
     fixed_design: tuple[NDArray[np.float64], NDArray[np.float64]] | None
     reml: bool
     nobs: int
@@ -268,6 +269,7 @@ def _extract_model_stats(model: Any, name: str) -> _ModelStats:
         family_signature=_family_signature(model) if kind == "GLMM" else None,
         response_values=response_values,
         prior_weights=prior_weights,
+        response_trials=_comparison_trials(model),
         fixed_design=_fixed_design(model),
         reml=reml,
         nobs=nobs,
@@ -293,6 +295,7 @@ def _validate_comparability(stats: tuple[_ModelStats, ...], allow_reml: bool) ->
 
     _validate_equal_arrays(stats, "response_values", "response observations")
     _validate_equal_arrays(stats, "prior_weights", "prior weights")
+    _validate_equal_arrays(stats, "response_trials", "binomial trial counts")
 
     family_signatures = {
         item.family_signature for item in stats if item.family_signature is not None
@@ -359,6 +362,21 @@ def _comparison_data(
         else np.asarray(weights_value, dtype=np.float64).reshape(-1)
     )
     return response, weights
+
+
+def _comparison_trials(model: Any) -> NDArray[np.float64] | None:
+    """Distinguish response distributions with identical effective fit weights."""
+    from mixedlm.families.binomial import Binomial
+
+    matrices = getattr(model, "matrices", None)
+    if matrices is None or not isinstance(getattr(model, "family", None), Binomial):
+        return None
+    if matrices.trials is not None:
+        return np.asarray(matrices.trials, dtype=np.float64)
+    y = np.asarray(matrices.y, dtype=np.float64)
+    if np.all((y == 0.0) | (y == 1.0)):
+        return np.ones_like(y)
+    return np.asarray(matrices.weights, dtype=np.float64)
 
 
 def _fixed_design(

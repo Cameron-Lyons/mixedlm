@@ -74,19 +74,29 @@ class _GLMMProfileLikelihood:
         if not np.any(free):
             return self.deviance(template), template
         bounds = [bound for bound, keep in zip(self.bounds, free, strict=True) if keep]
-        fitted = run_optimizer(
-            objective,
-            template[free],
-            method="L-BFGS-B",
-            jac="3-point",
-            bounds=bounds,
-            options={"maxiter": 1000, "ftol": 1e-12, "gtol": 1e-6},
-            restart_edge=True,
-        )
-        if not fitted.success:
-            raise RuntimeError(f"GLMM profile nuisance optimization failed: {fitted.message}")
-        parameters = unpack(fitted.x)
-        return self.deviance(parameters), parameters
+        failures = []
+        for method in ("L-BFGS-B", "COBYQA"):
+            # The converged mode solve can leave enough objective roundoff to
+            # stall a finite-difference line search near a constrained optimum.
+            # Retry the same bounded likelihood from the valid starting point.
+            fitted = run_optimizer(
+                objective,
+                template[free],
+                method=method,
+                jac="3-point" if method == "L-BFGS-B" else None,
+                bounds=bounds,
+                options=(
+                    {"maxiter": 1000, "ftol": 1e-12, "gtol": 1e-6}
+                    if method == "L-BFGS-B"
+                    else {"maxiter": 2000, "final_tr_radius": 1e-8}
+                ),
+                restart_edge=True,
+            )
+            if fitted.success:
+                parameters = unpack(fitted.x)
+                return self.deviance(parameters), parameters
+            failures.append(f"{method}: {fitted.message}")
+        raise RuntimeError("GLMM profile nuisance optimization failed: " + "; ".join(failures))
 
 
 class _GLMMParameterProfile:

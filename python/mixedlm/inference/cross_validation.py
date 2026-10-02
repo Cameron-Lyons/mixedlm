@@ -12,6 +12,7 @@ import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
+from mixedlm.matrices.design import _build_response, _restore_binomial_factor
 from mixedlm.utils.dataframe import (
     dataframe_length,
     ensure_dataframe,
@@ -31,6 +32,7 @@ MetricSpec: TypeAlias = str | MetricFunction
 
 _BUILTIN_METRICS = {"mse", "rmse", "mae", "r2", "deviance"}
 _RESERVED_FIT_ARGUMENTS = {"data", "family", "formula", "na_action", "offset", "weights"}
+_FOLD_METADATA = {"fold", "n_train", "n_test", "converged", "singular"}
 
 
 @dataclass(frozen=True)
@@ -171,13 +173,37 @@ def weighted_r2(
     y_pred: NDArray[np.floating],
     weights: NDArray[np.floating] | None = None,
 ) -> float:
-    """Compute weighted coefficient of determination."""
+    """Compute weighted coefficient of determination, independent of unit scales.
+
+    Constant responses return one for exact predictions and zero otherwise.
+    """
     observed, predicted, score_weights = _validate_score_inputs(y_true, y_pred, weights)
-    mean = float(np.average(observed, weights=score_weights))
-    residual_sum = float(np.sum(score_weights * np.square(observed - predicted)))
-    total_sum = float(np.sum(score_weights * np.square(observed - mean)))
-    if total_sum <= np.finfo(np.float64).eps:
-        return 1.0 if residual_sum <= np.finfo(np.float64).eps else 0.0
+    if np.all(observed == observed[0]):
+        return 1.0 if np.array_equal(observed, predicted) else 0.0
+
+    # Remove the baseline before scaling so nearby values retain their exact
+    # representable differences. Fall back to scaling first only when finite
+    # inputs have an unrepresentable range (for example, -1e308 to 1e308).
+    with np.errstate(over="ignore"):
+        centered = observed - observed[0]
+        residuals = observed - predicted
+    if not np.all(np.isfinite(centered)) or not np.all(np.isfinite(residuals)):
+        input_scale = max(float(np.max(np.abs(observed))), float(np.max(np.abs(predicted))))
+        observed = observed / input_scale
+        predicted = predicted / input_scale
+        centered = observed - observed[0]
+        residuals = observed - predicted
+    # R2 is dimensionless. Scale differences and weights before squaring to
+    # avoid overflow or underflow from response units and large prior weights.
+    scale = max(float(np.max(np.abs(centered))), float(np.max(np.abs(residuals))))
+    centered = centered / scale
+    residuals = residuals / scale
+    score_weights = score_weights / np.max(score_weights)
+    mean = float(np.average(centered, weights=score_weights))
+    residual_sum = float(np.sum(score_weights * np.square(residuals)))
+    total_sum = float(np.sum(score_weights * np.square(centered - mean)))
+    if total_sum == 0.0:
+        return 1.0 if residual_sum == 0.0 else float("-inf")
     return 1 - residual_sum / total_sum
 
 
@@ -313,6 +339,8 @@ def _resolve_metrics(
             scorer = metric
         else:
             raise TypeError("each metric must be a supported name or callable")
+        if name in _FOLD_METADATA:
+            raise ValueError(f"metric name '{name}' is reserved for fold metadata")
         if name in seen:
             raise ValueError(f"duplicate metric name: {name}")
         seen.add(name)
@@ -375,7 +403,7 @@ def _fit_fold(
 
     formula = str(model.formula)
     if isinstance(model, LmerResult):
-        kwargs: dict[str, Any] = {"REML": model.REML}
+        kwargs: dict[str, Any] = {"REML": model.REML, "contrasts": model.matrices.contrasts}
         kwargs.update(fit_kwargs)
         return lmer(
             formula,
@@ -386,8 +414,15 @@ def _fit_fold(
             **kwargs,
         )
 
-    kwargs = {"nAGQ": model.nAGQ, "control": model._refit_control()}
+    kwargs = {
+        "nAGQ": model.nAGQ,
+        "control": model._refit_control(),
+        "contrasts": model.matrices.contrasts,
+    }
     kwargs.update(fit_kwargs)
+    train_data = _restore_binomial_factor(
+        train_data, model.formula.response, model.matrices.response_levels
+    )
     return glmer(
         formula,
         train_data,
@@ -420,9 +455,11 @@ def cross_validate(
     generalization to unseen clusters.
 
     Custom metric callables receive ``(y_true, y_pred, weights)`` arrays and
-    must return one finite scalar. Original model weights and offsets are
-    subset and preserved for every refit. Set ``n_jobs`` above one to fit
-    independent folds concurrently with threads.
+    must return one finite scalar. Original weights are preserved for refits
+    and scoring; original offsets are preserved for refits and held-out
+    predictions. Set ``n_jobs`` above one to fit independent folds concurrently
+    with threads. Categorical contrast coding and grouped binomial trial counts
+    are retained from the fitted model.
     """
     from mixedlm.models.glmer import GlmerResult
     from mixedlm.models.lmer import LmerResult
@@ -445,19 +482,30 @@ def cross_validate(
     if group is not None and group not in get_columns(frame):
         raise ValueError(f"group column '{group}' is not present in the cross-validation data")
 
+    is_glmm = isinstance(model, GlmerResult)
+    from mixedlm.families.binomial import Binomial
+
+    is_binomial = isinstance(model, GlmerResult) and isinstance(model.family, Binomial)
     y: NDArray[np.float64] = np.asarray(model.matrices.y, dtype=np.float64)
-    response = np.asarray(
-        get_column_numpy(frame, model.formula.response, dtype=float), dtype=np.float64
+    raw_response, trials = _build_response(
+        model.formula,
+        frame,
+        grouped_binomial=is_binomial,
+        response_levels=model.matrices.response_levels,
     )
+    response = np.asarray(raw_response, dtype=np.float64)
     if response.shape != y.shape or not np.array_equal(response, y):
         raise ValueError("data response values are not aligned with the fitted model")
+    if trials is not None and (
+        model.matrices.trials is None or not np.array_equal(trials, model.matrices.trials)
+    ):
+        raise ValueError("data binomial trial counts are not aligned with the fitted model")
 
     fit_options = {} if fit_kwargs is None else dict(fit_kwargs)
     conflicts = sorted(_RESERVED_FIT_ARGUMENTS.intersection(fit_options))
     if conflicts:
         raise ValueError(f"fit_kwargs cannot override reserved arguments: {', '.join(conflicts)}")
 
-    is_glmm = isinstance(model, GlmerResult)
     resolved_metrics = _resolve_metrics(metrics, is_glmm=is_glmm)
     group_values = None if group is None else get_column_numpy(frame, group)
     folds = make_folds(
@@ -469,6 +517,10 @@ def cross_validate(
     )
 
     weights: NDArray[np.float64] = np.asarray(model.weights(), dtype=np.float64)
+    # Grouped binomial matrices store prior weights multiplied by trial counts.
+    # Refitting the count formula applies that multiplication again, so pass
+    # the original prior weights while retaining effective weights for scores.
+    fit_weights = weights if trials is None else weights / trials
     offset: NDArray[np.float64] = np.asarray(model.offset(), dtype=np.float64)
     family = model.family if isinstance(model, GlmerResult) else None
     predictions = np.full(n_samples, np.nan, dtype=np.float64)
@@ -483,7 +535,7 @@ def cross_validate(
         fold_model = _fit_fold(
             model,
             train_data,
-            weights[fold.train_indices],
+            fit_weights[fold.train_indices],
             offset[fold.train_indices],
             fit_options,
         )
@@ -493,12 +545,14 @@ def cross_validate(
                 type="response",
                 re_form=prediction_re_form,
                 allow_new_levels=True,
+                offset=offset[fold.test_indices],
             )
         else:
             raw_predictions = fold_model.predict(
                 test_data,
                 re_form=prediction_re_form,
                 allow_new_levels=True,
+                offset=offset[fold.test_indices],
             )
         fold_predictions: NDArray[np.float64] = np.asarray(raw_predictions, dtype=np.float64)
         if fold_predictions.shape != fold.test_indices.shape:

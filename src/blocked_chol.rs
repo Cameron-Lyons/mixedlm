@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use faer::dyn_stack::{MemBuffer, MemStack};
 use faer::linalg::cholesky::llt::factor::{cholesky_in_place, cholesky_in_place_scratch};
 use faer::{Mat, MatMut, MatRef};
@@ -307,7 +309,7 @@ impl BlockedCholesky {
                     let mut aii = a_block;
 
                     for lik in row_blocks.iter().take(i) {
-                        rank_update_subtract(&mut aii, lik, lik)?;
+                        rank_update_subtract(&mut aii, lik, lik);
                     }
 
                     let lii = chol_block(aii)?;
@@ -316,7 +318,7 @@ impl BlockedCholesky {
                     let mut aij = a_block;
 
                     for (lik, ljk) in row_blocks.iter().take(j).zip(l_blocks[j].iter().take(j)) {
-                        rank_update_subtract(&mut aij, lik, ljk)?;
+                        rank_update_subtract(&mut aij, lik, ljk);
                     }
 
                     let ljj = &l_blocks[j][j];
@@ -406,6 +408,9 @@ impl BlockedCholesky {
             let offset_i = block_offsets[i];
             let dim_i = self.block_dims[i];
             for (j, lij) in row_blocks.iter().enumerate().take(i) {
+                if matches!(lij, BlockType::Zero { .. }) {
+                    continue;
+                }
                 let offset_j = block_offsets[j];
                 let dim_j = self.block_dims[j];
                 let contrib = block_matvec(lij, rhs.subrows(offset_j, dim_j));
@@ -430,6 +435,9 @@ impl BlockedCholesky {
             let offset_i = block_offsets[i];
             let dim_i = self.block_dims[i];
             for (j, row_blocks_j) in self.l_blocks.iter().enumerate().skip(i + 1) {
+                if matches!(row_blocks_j[i], BlockType::Zero { .. }) {
+                    continue;
+                }
                 let offset_j = block_offsets[j];
                 let dim_j = self.block_dims[j];
                 let contrib =
@@ -490,7 +498,7 @@ fn chol_block(mut block: BlockType) -> Result<BlockType, LinalgError> {
         BlockType::Dense(matrix) => chol_dense_in_place(matrix)?,
         BlockType::Diagonal(diagonal) => {
             for value in diagonal {
-                if *value <= 0.0 {
+                if *value <= 0.0 || !value.is_finite() {
                     return Err(LinalgError::NotPositiveDefinite);
                 }
                 *value = value.sqrt();
@@ -508,113 +516,77 @@ fn chol_block(mut block: BlockType) -> Result<BlockType, LinalgError> {
     Ok(block)
 }
 
-fn rank_update_subtract_inplace(target: &mut BlockType, l: &BlockType, r: &BlockType) {
-    if matches!(l, BlockType::Zero { .. }) || matches!(r, BlockType::Zero { .. }) {
-        return;
-    }
-    if matches!(target, BlockType::Zero { .. }) {
-        return;
-    }
-
-    match (&*target, l, r) {
-        (BlockType::Dense(_), BlockType::Dense(l_mat), BlockType::Dense(r_mat)) => {
-            let update = l_mat * r_mat.transpose();
-            if let BlockType::Dense(t) = target {
-                for i in 0..t.nrows() {
-                    for j in 0..t.ncols() {
-                        t[(i, j)] -= update[(i, j)];
-                    }
-                }
-            }
-        }
-        (
-            BlockType::BlockDiagonal { .. },
-            BlockType::BlockDiagonal {
-                blocks: l_blocks, ..
-            },
-            BlockType::BlockDiagonal {
-                blocks: r_blocks, ..
-            },
-        ) => {
-            if let BlockType::BlockDiagonal {
-                block_size: bs,
-                blocks: t_blocks,
-            } = target
-            {
-                let bs = *bs;
-                for (k, t_block) in t_blocks.iter_mut().enumerate() {
-                    let update = &l_blocks[k] * r_blocks[k].transpose();
-                    for i in 0..bs {
-                        for j in 0..bs {
-                            t_block[(i, j)] -= update[(i, j)];
-                        }
-                    }
-                }
-            }
-        }
-        (BlockType::Diagonal(_), BlockType::Diagonal(l_diag), BlockType::Diagonal(r_diag)) => {
-            if let BlockType::Diagonal(t_diag) = target {
-                for i in 0..t_diag.len() {
-                    t_diag[i] -= l_diag[i] * r_diag[i];
-                }
-            }
-        }
-        _ => {
-            let l_dense = l.to_dense();
-            let r_dense = r.to_dense();
-            let update = &l_dense * r_dense.transpose();
-
-            if let BlockType::Dense(t) = target {
-                for i in 0..t.nrows() {
-                    for j in 0..t.ncols() {
-                        t[(i, j)] -= update[(i, j)];
-                    }
-                }
-            }
-        }
-    }
+fn subtract_dense_product(target: MatMut<'_, f64>, left: MatRef<'_, f64>, right: MatRef<'_, f64>) {
+    // Accumulate directly into the Schur complement, without allocating a full
+    // product and traversing the target a second time to subtract it.
+    faer::linalg::matmul::matmul(
+        target,
+        faer::Accum::Add,
+        left,
+        right.transpose(),
+        -1.0,
+        faer::get_global_parallelism(),
+    );
 }
 
-fn rank_update_subtract(
-    target: &mut BlockType,
-    l: &BlockType,
-    r: &BlockType,
-) -> Result<(), LinalgError> {
+fn rank_update_subtract(target: &mut BlockType, l: &BlockType, r: &BlockType) {
     if matches!(l, BlockType::Zero { .. }) || matches!(r, BlockType::Zero { .. }) {
-        return Ok(());
-    }
-    if matches!(target, BlockType::Zero { .. }) {
-        return Ok(());
+        return;
     }
 
-    let needs_conversion = match &*target {
-        BlockType::BlockDiagonal { .. } => {
-            matches!(l, BlockType::Dense(_)) || matches!(r, BlockType::Dense(_))
-        }
-        BlockType::Diagonal(_) => {
-            !matches!((l, r), (BlockType::Diagonal(_), BlockType::Diagonal(_)))
-        }
-        _ => false,
-    };
-
-    if needs_conversion {
-        let mut dense_target = target.to_dense();
-        let l_dense = l.to_dense();
-        let r_dense = r.to_dense();
-        let update = &l_dense * r_dense.transpose();
-
-        for i in 0..dense_target.nrows() {
-            for j in 0..dense_target.ncols() {
-                dense_target[(i, j)] -= update[(i, j)];
+    match (&mut *target, l, r) {
+        (
+            BlockType::BlockDiagonal {
+                block_size: t_size,
+                blocks: t_blocks,
+            },
+            BlockType::BlockDiagonal {
+                block_size: l_size,
+                blocks: l_blocks,
+            },
+            BlockType::BlockDiagonal {
+                block_size: r_size,
+                blocks: r_blocks,
+            },
+        ) if t_size == l_size
+            && t_size == r_size
+            && t_blocks.len() == l_blocks.len()
+            && t_blocks.len() == r_blocks.len() =>
+        {
+            for ((target, left), right) in t_blocks.iter_mut().zip(l_blocks).zip(r_blocks) {
+                subtract_dense_product(target.as_mut(), left.as_ref(), right.as_ref());
             }
+            return;
         }
-
-        *target = BlockType::Dense(dense_target);
-    } else {
-        rank_update_subtract_inplace(target, l, r);
+        (BlockType::Diagonal(t_diag), BlockType::Diagonal(l_diag), BlockType::Diagonal(r_diag)) => {
+            for i in 0..t_diag.len() {
+                t_diag[i] -= l_diag[i] * r_diag[i];
+            }
+            return;
+        }
+        _ => {}
     }
-
-    Ok(())
+    // An original zero block can acquire fill-in when both structures couple
+    // to an earlier block. Only zero factors, above, imply a zero update.
+    if !matches!(target, BlockType::Dense(_)) {
+        *target = BlockType::Dense(target.to_dense());
+    }
+    let BlockType::Dense(matrix) = target else {
+        unreachable!("Schur update target has been promoted to dense storage")
+    };
+    let left = match l {
+        BlockType::Dense(matrix) => Cow::Borrowed(matrix),
+        _ => Cow::Owned(l.to_dense()),
+    };
+    let right = match r {
+        BlockType::Dense(matrix) => Cow::Borrowed(matrix),
+        _ => Cow::Owned(r.to_dense()),
+    };
+    subtract_dense_product(
+        matrix.as_mut(),
+        left.as_ref().as_ref(),
+        right.as_ref().as_ref(),
+    );
 }
 
 fn solve_lower_rows_into(l: &Mat<f64>, b: &Mat<f64>, result: &mut Mat<f64>, column_offset: usize) {
@@ -809,6 +781,140 @@ mod tests {
     use super::*;
     use faer::Side;
     use faer::linalg::solvers::{Llt, Solve};
+
+    #[test]
+    fn zero_cross_structure_blocks_acquire_fill_in_and_preserve_residuals() {
+        let dimensions = [2, 3, 2, 1];
+        let offsets = [0, 2, 5, 7, 8];
+        let n = offsets[4];
+        // A diagonally dominant star is positive definite. The leaf-to-leaf
+        // entries are exactly zero before eliminating the shared first block.
+        let matrix = Mat::from_fn(n, n, |row, column| {
+            if row == column {
+                5.0 + row as f64 / 8.0
+            } else if (row < 2) != (column < 2) {
+                (1 + (row + column) % 3) as f64 / 8.0
+            } else {
+                0.0
+            }
+        });
+        let dense = Llt::new(matrix.as_ref(), Side::Lower).unwrap();
+        for root_kind in 0..3 {
+            let blocks = dimensions
+                .iter()
+                .enumerate()
+                .map(|(i, &rows)| {
+                    dimensions[..=i]
+                        .iter()
+                        .enumerate()
+                        .map(|(j, &cols)| {
+                            if i != j && j > 0 {
+                                BlockType::Zero { rows, cols }
+                            } else if i == j && (i > 0 || root_kind == 1) {
+                                BlockType::Diagonal(
+                                    (offsets[i]..offsets[i + 1])
+                                        .map(|k| matrix[(k, k)])
+                                        .collect(),
+                                )
+                            } else if i == j && root_kind == 2 {
+                                BlockType::BlockDiagonal {
+                                    block_size: 1,
+                                    blocks: (offsets[i]..offsets[i + 1])
+                                        .map(|k| Mat::full(1, 1, matrix[(k, k)]))
+                                        .collect(),
+                                }
+                            } else {
+                                BlockType::Dense(
+                                    matrix
+                                        .submatrix(offsets[i], offsets[j], rows, cols)
+                                        .to_owned(),
+                                )
+                            }
+                        })
+                        .collect()
+                })
+                .collect();
+            let factor = BlockedCholesky::factor(BlockedMatrix {
+                block_dims: dimensions.to_vec(),
+                blocks,
+            })
+            .unwrap();
+            assert!(matches!(factor.l_blocks[2][1], BlockType::Dense(_)));
+            assert!(matches!(factor.l_blocks[3][2], BlockType::Dense(_)));
+            let expected_logdet = 2.0 * (0..n).map(|i| dense.L()[(i, i)].ln()).sum::<f64>();
+            assert!((factor.logdet() - expected_logdet).abs() < 1e-12);
+            let widths: &[usize] = if cfg!(miri) {
+                &[0, 1, 3]
+            } else {
+                &[0, 1, 7, 17]
+            };
+            for &width in widths {
+                let rhs = Mat::from_fn(n, width, |i, j| ((i + 3 * j + 1) as f64).sin());
+                let result = factor.solve(&rhs);
+                let residual = &matrix * &result - &rhs;
+                for column in 0..width {
+                    for row in 0..n {
+                        assert!(residual[(row, column)].abs() < 1e-12);
+                    }
+                }
+            }
+            let inverse_residual = &matrix * factor.inverse() - Mat::<f64>::identity(n, n);
+            for column in 0..n {
+                for row in 0..n {
+                    assert!(inverse_residual[(row, column)].abs() < 1e-12);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn schur_updates_preserve_products_across_block_representations() {
+        let blocks = [
+            BlockType::Dense(Mat::from_fn(4, 4, |i, j| (i + 2 * j + 1) as f64 / 16.0)),
+            BlockType::Diagonal(vec![0.5, 0.25, -0.5, 0.75]),
+            BlockType::BlockDiagonal {
+                block_size: 2,
+                blocks: (0..2)
+                    .map(|k| Mat::from_fn(2, 2, |i, j| (i + j + k + 1) as f64 / 8.0))
+                    .collect(),
+            },
+            BlockType::BlockDiagonal {
+                block_size: 1,
+                blocks: (0..4)
+                    .map(|k| Mat::full(1, 1, (k + 1) as f64 / 8.0))
+                    .collect(),
+            },
+            BlockType::Zero { rows: 4, cols: 4 },
+        ];
+        for target in &blocks {
+            for left in &blocks {
+                for right in &blocks {
+                    let original = target.to_dense();
+                    let left_dense = left.to_dense();
+                    let right_dense = right.to_dense();
+                    let expected = Mat::from_fn(4, 4, |i, j| {
+                        original[(i, j)]
+                            - (0..4)
+                                .map(|k| left_dense[(i, k)] * right_dense[(j, k)])
+                                .sum::<f64>()
+                    });
+                    let mut actual = target.clone();
+                    rank_update_subtract(&mut actual, left, right);
+                    assert_eq!(actual.to_dense(), expected);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn diagonal_factorization_rejects_nonfinite_pivots() {
+        for invalid in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 0.0, -1.0] {
+            assert!(matches!(
+                chol_block(BlockType::Diagonal(vec![1.0, invalid])),
+                Err(LinalgError::NotPositiveDefinite)
+            ));
+        }
+    }
 
     #[test]
     fn owned_factors_match_lower_triangle_reference_and_reuse_buffers() {

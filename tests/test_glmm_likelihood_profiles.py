@@ -19,6 +19,20 @@ def poisson_fit():
     return glmer("y ~ 1", pd.DataFrame({"y": [0.0, 0.0, 0.0, 1.0]}), family=families.Poisson())
 
 
+def force_gradient_failure(monkeypatch):
+    original = glmm_profile.run_optimizer
+    methods = []
+
+    def fail_gradient(fun, start, **kwargs):
+        methods.append(kwargs["method"])
+        if kwargs["method"] == "L-BFGS-B":
+            return SimpleNamespace(success=False, message="ABNORMAL_TERMINATION_IN_LNSRCH")
+        return original(fun, start, **kwargs)
+
+    monkeypatch.setattr(glmm_profile, "run_optimizer", fail_gradient)
+    return methods
+
+
 @pytest.mark.parametrize("backend", ["native", "python"])
 @pytest.mark.parametrize("level", [0.8, 0.95, 0.999])
 @pytest.mark.parametrize("n_points", [3, 8, 15])
@@ -89,7 +103,11 @@ def test_grouped_binomial_profile_uses_trial_counts_and_prior_weights():
     assert_allclose(profile.zeta**2, 2 * (nll(profile.values) - nll(mle)), atol=2e-7)
 
 
-def test_logistic_profile_reoptimizes_other_fixed_coefficients():
+@pytest.mark.parametrize("gradient_failure", [False, True])
+@pytest.mark.parametrize("level", [0.95, np.nextafter(1.0, 0.0)])
+def test_logistic_profile_reoptimizes_other_fixed_coefficients(
+    monkeypatch, gradient_failure, level
+):
     rng = np.random.default_rng(840)
     x = rng.normal(loc=1, size=80)
     offset = np.linspace(-0.3, 0.4, 80)
@@ -102,7 +120,11 @@ def test_logistic_profile_reoptimizes_other_fixed_coefficients():
         weights=weights,
         family=families.Binomial(),
     )
-    profile = fitted.profile(which="x", n_points=7)["x"]
+    methods = force_gradient_failure(monkeypatch) if gradient_failure else []
+    profile = fitted.profile(which="x", n_points=7, level=level)["x"]
+    if gradient_failure:
+        assert methods
+        assert methods == ["L-BFGS-B", "COBYQA"] * (len(methods) // 2)
 
     def nll(beta):
         eta = beta[0] + beta[1] * x + offset
@@ -114,6 +136,9 @@ def test_logistic_profile_reoptimizes_other_fixed_coefficients():
         nuisance = optimize.minimize_scalar(lambda intercept, v=value: nll([intercept, v]))
         independent.append(2 * (nuisance.fun - baseline))
     assert_allclose(profile.zeta**2, independent, atol=2e-6)
+    assert_allclose(
+        stats.norm.sf(np.abs(profile.zeta[[0, -1]])), (1 - level) / 2, rtol=2e-6, atol=0
+    )
     fixed_nuisance = np.array(
         [2 * (nll([fitted.beta[0], value]) - baseline) for value in profile.values]
     )
@@ -138,9 +163,16 @@ def random_intercept_fit(order=1):
     return fitted, group
 
 
-def test_random_covariance_is_reoptimized_against_independent_laplace_oracle():
+@pytest.mark.parametrize("gradient_failure", [False, True])
+def test_random_covariance_is_reoptimized_against_independent_laplace_oracle(
+    monkeypatch, gradient_failure
+):
     fitted, group = random_intercept_fit()
+    methods = force_gradient_failure(monkeypatch) if gradient_failure else []
     profile = fitted.profile(n_points=7)["(Intercept)"]
+    if gradient_failure:
+        assert methods
+        assert methods == ["L-BFGS-B", "COBYQA"] * (len(methods) // 2)
     y, weights, offset = fitted.matrices.y, fitted.matrices.weights, fitted.matrices.offset
 
     def deviance(theta, beta):
@@ -237,7 +269,10 @@ def test_solver_failures_do_not_return_wald_intervals():
             "run_optimizer",
             return_value=SimpleNamespace(success=False, message="limit"),
         ),
-        pytest.raises(RuntimeError, match="nuisance optimization failed: limit"),
+        pytest.raises(
+            RuntimeError,
+            match="nuisance optimization failed: L-BFGS-B: limit; COBYQA: limit",
+        ),
     ):
         fitted.confint(method="profile")
     with (

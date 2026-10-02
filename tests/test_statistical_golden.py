@@ -1,152 +1,169 @@
-"""Golden statistical checks for canonical mixed-model datasets."""
+"""Canonical data checks against published lme4 results and observation-space GLS.
+
+The LMM oracle builds the n-by-n marginal covariance directly and optimizes
+SciPy's independent Gaussian likelihood. It does not call mixedlm's design,
+covariance, likelihood, optimizer, or reporting implementations.
+"""
 
 from __future__ import annotations
 
 import mixedlm as mlm
+import numpy as np
 import pytest
 from mixedlm import families, pvalues
 from numpy.testing import assert_allclose
+from scipy import linalg, optimize, stats
 
 from tests._lmer_data import CBPP
 
-_LMM_FLOAT_ATOL = 2e-5
-_PENICILLIN_FLOAT_ATOL = 2e-5
 _CBPP_FLOAT_ATOL = 1e-6
 
 
-@pytest.fixture(scope="class")
-def model() -> mlm.LmerResult:
-    data = mlm.load_sleepstudy()
-    return mlm.lmer("Reaction ~ Days + (Days | Subject)", data, REML=True)
+def observation_space_reference(data, *, slopes):
+    y = data["Reaction" if slopes else "diameter"].to_numpy(dtype=float)
+    n = len(y)
+    if slopes:
+        days = data["Days"].to_numpy(dtype=float)
+        X = np.column_stack((np.ones(n), days))
+        membership = data["Subject"].to_numpy()
+        same = (membership[:, None] == membership[None, :]).astype(float)
 
+        def covariance(theta):
+            lower = np.array([[theta[0], 0.0], [theta[1], theta[2]]])
+            G = lower @ lower.T
+            return np.eye(n) + same * (X @ G @ X.T)
 
-@pytest.mark.filterwarnings("ignore:Model is singular")
-class TestSleepstudyGolden:
-    def test_likelihood_and_variance_components(self, model: mlm.LmerResult) -> None:
-        assert model.converged
-        assert_allclose(model.beta, [251.19101636363638, 10.529083771043759], rtol=0, atol=1e-10)
-        assert_allclose(
-            model.theta,
-            [0.9467987315840892, 0.018801466252854657, 0.22768771787157],
-            rtol=0,
-            atol=_LMM_FLOAT_ATOL,
+        start = [1.0, 0.02, 0.2]
+    else:
+        X = np.ones((n, 1))
+        grouping = [data[name].to_numpy() for name in ("plate", "sample")]
+        same = [(values[:, None] == values[None, :]).astype(float) for values in grouping]
+
+        def covariance(theta):
+            return np.eye(n) + sum(
+                value**2 * matrix for value, matrix in zip(theta, same, strict=True)
+            )
+
+        start = [1.5, 3.5]
+    df = n - X.shape[1]
+
+    def evaluate(theta):
+        V = covariance(theta)
+        factor = linalg.cho_factor(V, lower=True)
+        inverse_X = linalg.cho_solve(factor, X)
+        information = X.T @ inverse_X
+        beta = np.linalg.solve(information, X.T @ linalg.cho_solve(factor, y))
+        residuals = y - X @ beta
+        inverse_residuals = linalg.cho_solve(factor, residuals)
+        sigma_squared = float(residuals @ inverse_residuals / df)
+        deviance = (
+            2 * np.log(np.diag(factor[0])).sum()
+            + np.linalg.slogdet(information)[1]
+            + df * (1 + np.log(2 * np.pi * sigma_squared))
         )
-        assert model.sigma == pytest.approx(25.828313444164642, abs=_LMM_FLOAT_ATOL)
-        assert model.deviance == pytest.approx(1746.069424187031, abs=_LMM_FLOAT_ATOL)
+        random_part = (V - np.eye(n)) @ inverse_residuals
+        return {
+            "deviance": float(deviance),
+            "beta": beta,
+            "sigma": np.sqrt(sigma_squared),
+            "vcov": sigma_squared * np.linalg.inv(information),
+            "fitted": X @ beta + random_part,
+            "residuals": residuals - random_part,
+        }
 
+    optimum = optimize.minimize(
+        lambda theta: evaluate(theta)["deviance"],
+        start,
+        method="Nelder-Mead",
+        options={"xatol": 1e-9, "fatol": 1e-10, "maxiter": 2000},
+    )
+    assert optimum.success, optimum.message
+    reference = evaluate(optimum.x)
+    reference["theta"] = optimum.x
+    return reference
+
+
+@pytest.fixture(scope="class")
+def model():
+    return mlm.lmer("Reaction ~ Days + (Days | Subject)", mlm.load_sleepstudy(), REML=True)
+
+
+@pytest.fixture(scope="class")
+def sleepstudy_reference():
+    return observation_space_reference(mlm.load_sleepstudy(), slopes=True)
+
+
+class TestSleepstudyGolden:
+    def test_published_lme4_results(self, model):
+        # https://lme4.github.io/lme4/reference/lmer.html
+        # Respect published precision and optimizer variation for covariance.
+        assert model.converged
+        assert_allclose(model.beta, [251.40510, 10.46729], rtol=0, atol=5e-6)
+        assert model.deviance == pytest.approx(1743.628, abs=5e-4)
+        assert model.sigma == pytest.approx(25.592, abs=0.002)
+        subject = model.VarCorr().groups["Subject"]
+        assert subject.variance["(Intercept)"] == pytest.approx(612.10, abs=0.02)
+        assert subject.variance["Days"] == pytest.approx(35.07, abs=0.01)
+
+    def test_likelihood_and_variance_components(self, model, sleepstudy_reference):
+        reference = sleepstudy_reference
+        assert_allclose(model.beta, reference["beta"], rtol=0, atol=1e-10)
+        assert_allclose(model.theta, reference["theta"], rtol=0, atol=2e-5)
+        assert model.sigma == pytest.approx(reference["sigma"], abs=2e-5)
+        assert model.deviance == pytest.approx(reference["deviance"], abs=2e-8)
         loglik = model.logLik()
-        assert loglik.value == pytest.approx(-873.0347120935155, abs=_LMM_FLOAT_ATOL)
+        assert loglik.value == pytest.approx(-reference["deviance"] / 2, abs=1e-8)
         assert loglik.df == 6
         assert loglik.nobs == 180
-        assert model.AIC() == pytest.approx(1758.069424187031, abs=_LMM_FLOAT_ATOL)
-        assert model.BIC() == pytest.approx(1777.2271652923723, abs=_LMM_FLOAT_ATOL)
+        assert model.AIC() == pytest.approx(reference["deviance"] + 12, abs=2e-8)
+        assert model.BIC() == pytest.approx(reference["deviance"] + 6 * np.log(180), abs=2e-8)
+        lower = np.array([[reference["theta"][0], 0], reference["theta"][1:]])
+        covariance = reference["sigma"] ** 2 * (lower @ lower.T)
+        subject = model.VarCorr().groups["Subject"]
+        assert subject.variance["(Intercept)"] == pytest.approx(covariance[0, 0], abs=0.002)
+        assert subject.variance["Days"] == pytest.approx(covariance[1, 1], abs=0.0002)
+        assert model.VarCorr().residual == pytest.approx(reference["sigma"] ** 2, abs=0.002)
 
-        varcorr = model.VarCorr()
-        subject = varcorr.groups["Subject"]
-        assert subject.variance["(Intercept)"] == pytest.approx(
-            598.0086023071216, abs=_LMM_FLOAT_ATOL
-        )
-        assert subject.variance["Days"] == pytest.approx(34.81950525086068, abs=_LMM_FLOAT_ATOL)
-        assert varcorr.residual == pytest.approx(667.1017683274486, abs=_LMM_FLOAT_ATOL)
-
-    def test_vcov_residuals_fitted_and_pvalues(self, model: mlm.LmerResult) -> None:
-        assert_allclose(
-            model.vcov(),
-            [
-                [46.025663493861, -1.361786361477],
-                [-1.361786361477, 2.383643743142],
-            ],
-            rtol=0,
-            atol=_LMM_FLOAT_ATOL,
-        )
-        assert_allclose(
-            model.fitted()[:8],
-            [
-                253.870523528942,
-                273.495137452821,
-                293.1197513767,
-                312.744365300579,
-                332.368979224458,
-                351.993593148337,
-                371.618207072216,
-                391.242820996095,
-            ],
-            rtol=0,
-            atol=_LMM_FLOAT_ATOL,
-        )
-        assert_allclose(
-            model.residuals()[:8],
-            [
-                -4.310523528942,
-                -14.790437452821,
-                -42.3191513767,
-                8.695434699421,
-                24.482920775542,
-                62.696506851663,
-                10.585592927784,
-                -101.094220996095,
-            ],
-            rtol=0,
-            atol=_LMM_FLOAT_ATOL,
-        )
-
-        normal = pvalues(model, method="normal")
-        satterthwaite = pvalues(model, method="Satterthwaite")
-        kenward_roger = pvalues(model, method="Kenward-Roger")
-
-        assert normal["(Intercept)"] == pytest.approx(4.409011734024056e-300, rel=1e-10)
-        assert normal["Days"] == pytest.approx(9.118459226341482e-12, rel=1e-10)
-        assert satterthwaite["(Intercept)"] == pytest.approx(1.0751823526652316e-17, rel=1e-10)
-        assert satterthwaite["Days"] == pytest.approx(2.982985321028681e-06, rel=1e-10)
-        assert kenward_roger["(Intercept)"] == pytest.approx(1.0751823526652316e-17, rel=1e-10)
-        assert kenward_roger["Days"] == pytest.approx(2.982985321028681e-06, rel=1e-10)
+    def test_vcov_residuals_fitted_and_pvalues(self, model, sleepstudy_reference):
+        reference = sleepstudy_reference
+        assert_allclose(model.vcov(), reference["vcov"], rtol=0, atol=2e-4)
+        assert_allclose(model.fitted(), reference["fitted"], rtol=0, atol=2e-4)
+        assert_allclose(model.residuals(), reference["residuals"], rtol=0, atol=2e-4)
+        z = reference["beta"] / np.sqrt(np.diag(reference["vcov"]))
+        expected_normal = 2 * stats.norm.sf(np.abs(z))
+        # With identical time grids and a complete random intercept/slope
+        # covariance, the balanced-study denominator df is groups minus one.
+        expected_t = 2 * stats.t.sf(np.abs(z), df=17)
+        for method, expected in (
+            ("normal", expected_normal),
+            ("Satterthwaite", expected_t),
+            ("Kenward-Roger", expected_t),
+        ):
+            observed = pvalues(model, method=method)
+            assert_allclose(list(observed.values()), expected, rtol=5e-4, atol=0)
 
 
-@pytest.mark.filterwarnings("ignore:Model is singular")
-def test_penicillin_crossed_random_effects_golden() -> None:
+def test_penicillin_crossed_random_effects_golden():
     data = mlm.load_penicillin()
     model = mlm.lmer("diameter ~ 1 + (1 | plate) + (1 | sample)", data, REML=True)
-
+    reference = observation_space_reference(data, slopes=False)
+    # https://lme4.github.io/lme4/reference/Penicillin.html
     assert model.converged
-    assert_allclose(model.beta, [22.81944444444444], rtol=0, atol=2e-12)
-    assert_allclose(
-        model.theta,
-        [1.720313360433691, 2.12067267084168],
-        rtol=0,
-        atol=_PENICILLIN_FLOAT_ATOL,
-    )
-    assert model.sigma == pytest.approx(0.9376710791427862, abs=_PENICILLIN_FLOAT_ATOL)
-    assert model.deviance == pytest.approx(483.25999628008196, abs=_PENICILLIN_FLOAT_ATOL)
-
-    loglik = model.logLik()
-    assert loglik.value == pytest.approx(-241.62999814004098, abs=_PENICILLIN_FLOAT_ATOL)
-    assert loglik.df == 4
-    assert loglik.nobs == 144
-    assert_allclose(model.vcov(), [[0.773542313559]], rtol=0, atol=_PENICILLIN_FLOAT_ATOL)
-    assert_allclose(
-        model.residuals()[:8],
-        [
-            0.275783317045,
-            -0.669187933892,
-            0.431740141015,
-            0.734473923786,
-            0.239063856371,
-            -0.687547664229,
-            2.066848859365,
-            1.121877608428,
-        ],
-        rtol=0,
-        atol=_PENICILLIN_FLOAT_ATOL,
-    )
-
+    assert model.deviance == pytest.approx(330.8606, abs=5e-5)
+    assert model.sigma == pytest.approx(0.5499, abs=5e-5)
+    assert_allclose(model.beta, [data["diameter"].mean()], rtol=0, atol=1e-10)
+    assert_allclose(model.theta, reference["theta"], rtol=0, atol=5e-5)
+    assert model.sigma == pytest.approx(reference["sigma"], abs=2e-5)
+    assert model.deviance == pytest.approx(reference["deviance"], abs=2e-8)
+    assert_allclose(model.vcov(), reference["vcov"], rtol=0, atol=2e-5)
+    assert_allclose(model.fitted(), reference["fitted"], rtol=0, atol=2e-5)
+    assert_allclose(model.residuals(), reference["residuals"], rtol=0, atol=2e-5)
     varcorr = model.VarCorr()
-    assert varcorr.groups["plate"].variance["(Intercept)"] == pytest.approx(
-        2.6020531704258327, abs=_PENICILLIN_FLOAT_ATOL
-    )
-    assert varcorr.groups["sample"].variance["(Intercept)"] == pytest.approx(
-        3.954106128219207, abs=_PENICILLIN_FLOAT_ATOL
-    )
-    assert varcorr.residual == pytest.approx(0.8792270612569914, abs=_PENICILLIN_FLOAT_ATOL)
+    for group, theta in zip(("plate", "sample"), reference["theta"], strict=True):
+        assert varcorr.groups[group].variance["(Intercept)"] == pytest.approx(
+            (theta * reference["sigma"]) ** 2, abs=2e-4
+        )
+    assert varcorr.residual == pytest.approx(reference["sigma"] ** 2, abs=2e-5)
 
 
 @pytest.mark.filterwarnings("ignore:divide by zero encountered in log")
@@ -175,11 +192,13 @@ def test_cbpp_binomial_glmer_fast_approximation_golden() -> None:
     assert model.deviance == pytest.approx(74.03136198466316, abs=_CBPP_FLOAT_ATOL)
 
     loglik = model.logLik()
-    assert loglik.value == pytest.approx(-37.01568099233158, abs=_CBPP_FLOAT_ATOL)
+    saturated_loglik = stats.binom.logpmf(data["incidence"], data["size"], data["y"]).sum()
+    normalized_deviance = 74.03136198466316 - 2 * saturated_loglik
+    assert loglik.value == pytest.approx(-0.5 * normalized_deviance, abs=_CBPP_FLOAT_ATOL)
     assert loglik.df == 5
     assert loglik.nobs == 56
-    assert model.AIC() == pytest.approx(84.03136198466316, abs=_CBPP_FLOAT_ATOL)
-    assert model.BIC() == pytest.approx(94.15812043833891, abs=_CBPP_FLOAT_ATOL)
+    assert model.AIC() == pytest.approx(normalized_deviance + 10, abs=_CBPP_FLOAT_ATOL)
+    assert model.BIC() == pytest.approx(normalized_deviance + 5 * np.log(56), abs=_CBPP_FLOAT_ATOL)
     assert_allclose(
         model.vcov(),
         [
@@ -225,3 +244,29 @@ def test_cbpp_binomial_glmer_fast_approximation_golden() -> None:
     herd = model.VarCorr().groups["herd"]
     assert herd.variance["(Intercept)"] == pytest.approx(0.23766168832997042, abs=_CBPP_FLOAT_ATOL)
     assert herd.stddev["(Intercept)"] == pytest.approx(0.4875055777424197, abs=_CBPP_FLOAT_ATOL)
+
+
+@pytest.mark.parametrize(
+    "nAGQ,beta,scale",
+    [
+        (0, [-1.3605, -0.9762, -1.1111, -1.5597], 0.6418),
+        (1, [-1.3983, -0.9919, -1.1282, -1.5797], 0.6421),
+        (9, [-1.3992, -0.9914, -1.1278, -1.5795], 0.6475),
+    ],
+)
+def test_original_cbpp_matches_published_lme4_estimates(nAGQ, beta, scale):
+    # https://lme4.github.io/lme4/reference/glmer.html
+    # Published rounded coefficients differ slightly with optimizer precision.
+    model = mlm.glmer(
+        "incidence / size ~ period + (1 | herd)",
+        mlm.load_cbpp(),
+        family=families.Binomial(),
+        nAGQ=nAGQ,
+    )
+    assert model.converged and model.pirls_converged
+    assert model.ngrps()["herd"] == 15
+    assert_allclose(model.beta, beta, rtol=0, atol=0.001)
+    assert_allclose(model.theta, [scale], rtol=0, atol=0.0003)
+    if nAGQ == 9:
+        # This published higher-order criterion uses unit deviance residuals.
+        assert model.deviance == pytest.approx(100.0100, abs=0.0001)

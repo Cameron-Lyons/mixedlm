@@ -4,6 +4,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field
 from functools import cached_property
 from itertools import product
+from numbers import Real
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -68,6 +69,7 @@ class ModelMatrices:
     # display names may coincide with other variables or encoded factors.
     fixed_source_names: tuple[str, ...] | None = field(default=None, repr=False)
     fixed_column_indices: tuple[int, ...] | None = field(default=None, repr=False)
+    response_levels: tuple[Any, Any] | None = field(default=None)
 
     @cached_property
     def Zt(self) -> sparse.csc_matrix:
@@ -140,7 +142,14 @@ def build_model_matrices(
         }
     )
 
-    y, trials = _build_response(formula, clean_data, grouped_binomial=grouped_binomial)
+    response_levels = (
+        _binomial_factor_levels(clean_data, formula.response)
+        if grouped_binomial and formula.response_denominator is None
+        else None
+    )
+    y, trials = _build_response(
+        formula, clean_data, grouped_binomial=grouped_binomial, response_levels=response_levels
+    )
     X, fixed_names = build_fixed_matrix(
         formula,
         clean_data,
@@ -181,6 +190,7 @@ def build_model_matrices(
         frame=model_frame,
         na_info=na_info,
         trials=trials,
+        response_levels=response_levels,
         category_levels=category_levels,
         contrasts=stored_contrasts,
     )
@@ -191,10 +201,22 @@ def _build_response(
     data: Any,
     *,
     grouped_binomial: bool,
+    response_levels: tuple[Any, Any] | None = None,
 ) -> tuple[NDArray[np.floating], NDArray[np.floating] | None]:
-    successes = get_column_numpy(data, formula.response, dtype=np.float64)
     denominator = formula.response_denominator
     if denominator is None:
+        if grouped_binomial:
+            levels = response_levels or _binomial_factor_levels(data, formula.response)
+            if levels is not None and _response_is_factor(data, formula.response):
+                return _encode_binomial_factor(
+                    get_column_numpy(data, formula.response), levels
+                ), None
+        try:
+            successes = np.asarray(
+                get_column_numpy(data, formula.response, dtype=np.float64), dtype=np.float64
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Non-numeric responses are only supported for binomial GLMMs") from exc
         return successes, None
 
     if not grouped_binomial:
@@ -202,8 +224,83 @@ def _build_response(
             "The 'successes / trials' response syntax is only supported for binomial GLMMs"
         )
 
+    successes = get_column_numpy(data, formula.response, dtype=np.float64)
     trials = get_column_numpy(data, denominator, dtype=np.float64)
     return _normalize_grouped_binomial_response(successes, trials), trials
+
+
+def _numeric_response(values: Any) -> bool:
+    """Recognize numeric responses without treating numeric-looking labels as numbers."""
+    dtype_name = str(getattr(values, "dtype", ""))
+    if dtype_name == "category" or "Categorical" in dtype_name or "Enum" in dtype_name:
+        return False
+    array = np.asarray(values)
+    return array.dtype.kind in "biuf" or (
+        array.dtype.kind == "O" and all(isinstance(value, Real | np.bool_) for value in array)
+    )
+
+
+def _response_is_factor(data: Any, name: str) -> bool:
+    if not is_categorical_or_string(data, name):
+        return False
+    dtype_name = str(data[name].dtype)
+    if dtype_name == "category" or "Categorical" in dtype_name or "Enum" in dtype_name:
+        return True
+    return not _numeric_response(get_column_numpy(data, name))
+
+
+def _binomial_factor_levels(data: Any, name: str) -> tuple[Any, Any] | None:
+    """Use declared factor order, or sorted labels for an untyped string response."""
+    if not _response_is_factor(data, name):
+        return None
+    levels = get_categories(data, name)
+    if type(data).__module__.startswith("polars") and "Categorical" in str(data[name].dtype):
+        # Polars categoricals may share a process-wide pool with unrelated
+        # columns. Only Enum categories declare unobserved response levels.
+        observed = set(get_column_numpy(data, name))
+        levels = [level for level in levels if level in observed]
+    if len(levels) != 2:
+        raise ValueError(
+            f"Binomial factor responses require exactly two levels; '{name}' has {len(levels)}"
+        )
+    return levels[0], levels[1]
+
+
+def _encode_binomial_factor(
+    values: Any, levels: tuple[Any, Any], *, allow_missing: bool = False
+) -> NDArray[np.float64]:
+    import pandas as pd
+
+    values = np.asarray(values)
+    codes = pd.Categorical(values, categories=list(levels)).codes
+    unknown = codes < 0
+    if allow_missing:
+        unknown &= ~pd.isna(values)
+    if np.any(unknown):
+        raise ValueError(f"Missing or unknown binomial response levels; expected {levels!r}")
+    encoded = codes.astype(np.float64)
+    encoded[codes < 0] = np.nan
+    return encoded
+
+
+def _restore_binomial_factor(data: Any, name: str, levels: tuple[Any, Any] | None) -> Any:
+    """Retain a fitted response's two levels in subsets and formula-based refits."""
+    if levels is None:
+        return data
+    data = ensure_dataframe(data)
+    if name not in get_columns(data) or not _response_is_factor(data, name):
+        return data
+    values = get_column_numpy(data, name)
+    _encode_binomial_factor(values, levels, allow_missing=True)
+    if type(data).__module__.startswith("pandas"):
+        import pandas as pd
+
+        restored = data.copy()
+        restored[name] = pd.Categorical(values, categories=list(levels))
+        return restored
+    import polars as pl
+
+    return data.with_columns(pl.col(name).cast(pl.Enum(list(levels))))
 
 
 def _normalize_grouped_binomial_response(
