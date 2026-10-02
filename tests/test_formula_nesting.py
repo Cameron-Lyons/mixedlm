@@ -87,7 +87,7 @@ def test_nested_covariance_matches_manual_parent_and_child_indicators(frame_type
     child = np.eye(len(children))[child_codes]
     if frame_type == "polars":
         pl = pytest.importorskip("polars")
-        data = pl.from_pandas(data)
+        data = pl.DataFrame({name: data[name].to_numpy() for name in data.columns})
     matrices = build_model_matrices(parse_formula("y ~ x + (1 | school/classroom)"), data)
     assert [structure.grouping_factor for structure in matrices.random_structures] == [
         "school",
