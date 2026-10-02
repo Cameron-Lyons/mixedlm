@@ -206,8 +206,8 @@ jobs:
       - name: Require source-matched native backend
         run: uv run --no-sync python -m tools.native_build
 
-      - name: Require imports to preserve free-threaded execution
-        run: uv run --no-sync python -c "import sys, sysconfig, mixedlm._rust; assert sysconfig.get_config_var('Py_GIL_DISABLED') == 1; assert not sys._is_gil_enabled()"
+      - name: Require installed-wheel checks to preserve free-threaded execution
+        run: uv run --no-sync python -I tools/check_wheel.py --expect-free-threaded
 
       - name: Run tests
         run: uv run --no-sync pytest tests/ --strict-config --strict-markers -ra --ignore=tests/test_property.py --ignore=tests/test_benchmark.py

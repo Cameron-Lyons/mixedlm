@@ -248,8 +248,21 @@ def test_sparse_random_product_preserves_duplicate_and_column_accumulation_order
 
     actual = compute_zu(coefficients, data, indices, indptr, design.shape, 2)
 
+    # SciPy's sparse product may fuse multiplication and addition on ARM,
+    # changing these cancellation-sensitive results. Build each row separately
+    # from COO entries and force the product to round before adding it instead.
+    entries = design.tocoo()
+    reference = np.zeros(design.shape[0])
+    for row in range(design.shape[0]):
+        total = 0.0
+        for entry_row, column, value in zip(entries.row, entries.col, entries.data, strict=True):
+            if entry_row == row:
+                product = float(value) * float(coefficients[column])
+                total += product
+        reference[row] = total
+
     np.testing.assert_array_equal(actual, expected)
-    np.testing.assert_array_equal(actual, design @ coefficients)
+    np.testing.assert_array_equal(actual, reference)
     for array, saved in zip((data, indices, indptr, coefficients), original, strict=True):
         np.testing.assert_array_equal(array, saved)
 
