@@ -183,7 +183,10 @@ jobs:
       - name: Install locked test dependencies
         env:
           CI_PYTHON_EXECUTABLE: ${{ steps.python.outputs.python-path }}
-        run: uv sync --locked --no-install-project --python "$CI_PYTHON_EXECUTABLE" --extra plots
+        # Polars has no free-threaded wheels; its optional tests run in the standard Python jobs.
+        run: >-
+          uv sync --locked --no-install-project --python "$CI_PYTHON_EXECUTABLE" --extra plots
+          --no-install-package polars --no-install-package polars-runtime-32
 
       - name: Build package (free-threaded)
         uses: PyO3/maturin-action@v1
