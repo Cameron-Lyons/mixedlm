@@ -116,6 +116,7 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Set up Python
+        id: python
         uses: actions/setup-python@v7
         with:
           python-version: "3.12"
@@ -136,8 +137,10 @@ jobs:
           args: --out dist
 
       - name: Rebuild and verify the source distribution
+        env:
+          CI_PYTHON_EXECUTABLE: ${{ steps.python.outputs.python-path }}
         run: |
-          uv venv --python python .venv-sdist
+          uv venv --python "$CI_PYTHON_EXECUTABLE" .venv-sdist
           uv pip install --python .venv-sdist/bin/python --config-setting=build-args=--locked dist/*.tar.gz
           mkdir sdist-source
           tar -xzf dist/*.tar.gz -C sdist-source

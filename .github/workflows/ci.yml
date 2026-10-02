@@ -166,6 +166,7 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Set up Python 3.14t (free-threaded)
+        id: python
         uses: actions/setup-python@v7
         with:
           python-version: "3.14t"
@@ -180,7 +181,9 @@ jobs:
         uses: astral-sh/setup-uv@v7
 
       - name: Install locked test dependencies
-        run: uv sync --locked --no-install-project --python python --extra plots
+        env:
+          CI_PYTHON_EXECUTABLE: ${{ steps.python.outputs.python-path }}
+        run: uv sync --locked --no-install-project --python "$CI_PYTHON_EXECUTABLE" --extra plots
 
       - name: Build package (free-threaded)
         uses: PyO3/maturin-action@v1
@@ -208,6 +211,7 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Set up Python 3.10
+        id: python
         uses: actions/setup-python@v7
         with:
           python-version: "3.10"
@@ -222,9 +226,11 @@ jobs:
           path: dist
 
       - name: Install locked test tools and minimum runtime dependencies
+        env:
+          CI_PYTHON_EXECUTABLE: ${{ steps.python.outputs.python-path }}
         run: |
           uv export --locked --only-group dev --no-emit-project --no-hashes --format requirements-txt --output-file test-tools.txt
-          uv venv --python python .venv-minimum
+          uv venv --python "$CI_PYTHON_EXECUTABLE" .venv-minimum
           uv pip install --python .venv-minimum/bin/python --requirements test-tools.txt numpy==1.23.5 scipy==1.14.0 pandas==1.4.0
           uv pip install --python .venv-minimum/bin/python --no-deps dist/*.whl
 
@@ -496,6 +502,7 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Set up Python
+        id: python
         uses: actions/setup-python@v7
         with:
           python-version: "3.12"
@@ -516,8 +523,10 @@ jobs:
           args: --out dist
 
       - name: Rebuild and verify the source distribution
+        env:
+          CI_PYTHON_EXECUTABLE: ${{ steps.python.outputs.python-path }}
         run: |
-          uv venv --python python .venv-sdist
+          uv venv --python "$CI_PYTHON_EXECUTABLE" .venv-sdist
           uv pip install --python .venv-sdist/bin/python --config-setting=build-args=--locked dist/*.tar.gz
           mkdir sdist-source
           tar -xzf dist/*.tar.gz -C sdist-source
