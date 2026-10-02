@@ -212,6 +212,20 @@ When groups are nested (e.g., students within schools):
 ```
 
 The shorthand `school/class` expands to `school + school:class`.
+Each parent gets its own variance component: `(1 | school/class/student)`
+adds random intercepts for `school`, `school:class`, and `school:class:student`.
+Use `(1 | school:class)` when only the joint school/class factor is wanted.
+Random slopes and `||` apply to every factor introduced by `/`.
+
+Formula objects store the expanded factors and print them with `:` so parsing
+their string representation preserves the same model. Reported group names use
+these expressions, such as `school:class`. Non-syntactic column names retain
+backticks in group labels: a literal column named `school:class` is reported as
+`` `school:class` `` and remains distinct from the joint factor `school:class`.
+Use these labels when selecting a group or setting its covariance structure;
+`result.ngrps()` shows the available names. Slashes and backslashes within
+individual group labels are escaped when constructing joint levels, preventing
+distinct combinations from merging.
 
 ### Example
 
@@ -346,6 +360,14 @@ is_mixed_formula("y ~ x")            # False
 ```
 
 ## Common Mistakes
+
+### Invalid or Incomplete Expressions
+
+The parser rejects an incomplete term, missing operator, unmatched parenthesis,
+or unsupported expression with its position in the formula. It never fits only
+the valid prefix of a formula. For example, `"y ~ x +"` and
+`"y ~ x / z + (1 | group)"` raise errors; `/` is supported for grouping factors,
+as in `"y ~ x + (1 | group/subgroup)"`.
 
 ### Forgetting the Intercept in Random Effects
 

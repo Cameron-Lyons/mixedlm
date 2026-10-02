@@ -479,9 +479,12 @@ class MerResultMixin:
             n_u = n_levels * n_terms
 
             if rterm.is_nested:
-                group_values = concat_columns_as_string(data, list(rterm.grouping_factors))
+                group_values = concat_columns_as_string(
+                    data, list(rterm.grouping_factors), escape=True
+                )
             else:
-                group_values = get_column_numpy(data, group_col)
+                assert isinstance(rterm.grouping, str)
+                group_values = get_column_numpy(data, rterm.grouping)
 
             string_level_map = {str(level): idx for level, idx in struct.level_map.items()}
             group_series = pd.Series(group_values, copy=False)

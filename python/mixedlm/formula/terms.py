@@ -180,4 +180,4 @@ def _format_random(random: RandomTerm) -> str:
 
 def _format_grouping(grouping: str | tuple[str, ...]) -> str:
     groups = grouping if isinstance(grouping, tuple) else (grouping,)
-    return "/".join(_format_identifier(group) for group in groups)
+    return ":".join(_format_identifier(group) for group in groups)

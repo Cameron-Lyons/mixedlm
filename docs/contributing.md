@@ -108,6 +108,11 @@ python -m pip install -e ".[dev]"
 python tools/native_build.py
 ```
 
+Finish the rebuild before starting model fits or tests. When manually installing
+an extension from a wheel, write a sibling temporary file and replace the old
+file with `os.replace()`; overwriting a library that a running process has mapped
+can crash that process. Restart Python processes to load the rebuilt library.
+
 The test suite checks that the loaded native library matches the checkout's
 Rust sources. The check covers `src/**/*.rs`, `Cargo.toml`, `Cargo.lock`, and
 `build.rs` using their contents, so it detects changes even when file timestamps
@@ -136,13 +141,32 @@ CI uses `uv sync --locked --no-install-project` to install dependencies, builds
 the native backend explicitly, and runs tools with `uv run --no-sync`. This
 prevents a test command from quietly rebuilding or switching the backend under
 test. The native-source check is required before the Python suites execute.
-Python 3.12 exercises plotting and nlopt alongside the core suite, and standard
-Python jobs cover Polars. Free-threaded 3.14t also checks plotting and verifies
+Standard Python jobs cover 3.10 through 3.14. Python 3.12 exercises plotting and
+nlopt alongside the core suite, and standard Python jobs cover Polars.
+Free-threaded 3.14t also checks plotting and verifies
 that native imports keep the GIL disabled. It omits Polars and its runtime because
 compatible free-threaded wheels are unavailable. This job builds a wheel and
 installs it with `uv pip install --no-deps` to preserve the locked environment
 without reinstalling the development group. Property tests and benchmarks run
-in dedicated jobs.
+in dedicated jobs. The property suite generates unbalanced, weighted designs
+with offsets, random slopes, independent terms, and crossed groups. It compares
+both backends with independently assembled observation-space Gaussian
+likelihoods, checks affine response transformations and response-cache
+independence, and verifies public fitted values against generalized least
+squares. Hypothesis statistics show the number of examples exercised.
+
+The required fuzz smoke job compiles the production CSC and sparse Cholesky
+modules, checks their mathematical oracles with deterministic tests, then fuzzes
+both targets with address sanitization for ten seconds each. A separate weekly
+job runs each target for sixty seconds. `fuzz/Cargo.lock` locks this standalone
+crate's dependencies. Sparse solves use known generated solutions and an
+independent scalar log-determinant calculation; CSC validation and weighted
+products use a dense reference. Run the deterministic checks locally with:
+
+```bash
+cargo test --locked --manifest-path fuzz/Cargo.toml --lib
+```
+
 The Python 3.12 job enforces 87% combined line/branch coverage, based on the
 measured complete feature suite. Other Python jobs report coverage without this
 floor because they exercise different optional-feature combinations.

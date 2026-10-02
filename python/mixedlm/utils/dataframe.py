@@ -166,8 +166,14 @@ def copy_dataframe(data: Any) -> Any:
     return data.copy()
 
 
-def concat_columns_as_string(data: Any, columns: list[str], separator: str = "/") -> NDArray:
-    """Concatenate multiple columns into a single string column."""
+def concat_columns_as_string(
+    data: Any,
+    columns: list[str],
+    separator: str = "/",
+    *,
+    escape: bool = False,
+) -> NDArray:
+    """Concatenate columns, optionally escaping separators within group labels."""
     import numpy as np
 
     if not columns:
@@ -177,12 +183,25 @@ def concat_columns_as_string(data: Any, columns: list[str], separator: str = "/"
     if _is_polars(data):
         import polars as pl
 
-        expr = pl.concat_str([pl.col(c).cast(pl.Utf8) for c in columns], separator=separator)
+        expressions = [pl.col(c).cast(pl.Utf8) for c in columns]
+        if escape:
+            expressions = [
+                expression.str.replace_all("\\", "\\\\", literal=True).str.replace_all(
+                    separator, "\\" + separator, literal=True
+                )
+                for expression in expressions
+            ]
+        expr = pl.concat_str(expressions, separator=separator)
         result = data.select(expr.alias("_combined")).get_column("_combined")
         return result.to_numpy()
 
     values = data[list(columns)].to_numpy(dtype=object)
-    string_values = np.frompyfunc(str, 1, 1)(values)
+    stringify = (
+        (lambda value: str(value).replace("\\", "\\\\").replace(separator, "\\" + separator))
+        if escape
+        else str
+    )
+    string_values = np.frompyfunc(stringify, 1, 1)(values)
     combine = np.frompyfunc(lambda left, right: left + separator + right, 2, 1)
     combined = string_values[:, 0]
     for column_index in range(1, string_values.shape[1]):

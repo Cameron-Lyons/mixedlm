@@ -30,6 +30,7 @@ jobs:
 
   rust-test:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
 
@@ -44,6 +45,7 @@ jobs:
 
   clippy:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
 
@@ -60,6 +62,7 @@ jobs:
 
   rust-fmt:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v7
 
@@ -73,6 +76,7 @@ jobs:
 
   lint:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
 
@@ -93,6 +97,7 @@ jobs:
 
   typecheck:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
 
@@ -114,7 +119,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.10", "3.11", "3.12", "3.13"]
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@v7
 
@@ -253,6 +258,7 @@ jobs:
 
   rust-coverage:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
 
@@ -278,6 +284,7 @@ jobs:
 
   docs:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
 
@@ -339,6 +346,7 @@ jobs:
 
   msrv:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
 
@@ -353,6 +361,8 @@ jobs:
 
   miri:
     runs-on: ubuntu-latest
+    # Full Miri normally takes about 45 minutes; cap hangs without dropping its coverage.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v7
 
@@ -403,10 +413,59 @@ jobs:
         run: uv run --no-sync python -m tools.native_build
 
       - name: Run property-based tests
-        run: uv run --no-sync pytest tests/test_property.py --strict-config --strict-markers
+        run: uv run --no-sync pytest tests/test_property.py --strict-config --strict-markers --hypothesis-show-statistics
+
+  fuzz-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src, rustfmt, clippy
+
+      - name: Install cargo-fuzz
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+
+      - name: Verify cargo-fuzz installation
+        run: cargo +nightly fuzz --version
+
+      - name: Rust fuzz cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz -> target
+
+      - name: Verify mathematical fuzz oracles
+        run: cargo test --locked --manifest-path fuzz/Cargo.toml --lib
+
+      - name: Require fuzz formatting and clippy
+        run: |
+          cargo fmt --all --manifest-path fuzz/Cargo.toml -- --check
+          cargo clippy --locked --manifest-path fuzz/Cargo.toml --all-targets --all-features -- -D warnings
+
+      - name: Fuzz production sparse factorization and input validation
+        working-directory: fuzz
+        run: |
+          # Prebuilt cargo-fuzz may default to musl; ASAN needs the runner's GNU target.
+          cargo +nightly fuzz run fuzz_cholesky --target x86_64-unknown-linux-gnu -- -max_total_time=10
+          cargo +nightly fuzz run fuzz_csc --target x86_64-unknown-linux-gnu -- -max_total_time=10
+          git diff --exit-code -- Cargo.lock
+
+      - name: Upload reproducible fuzz failures
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fuzz-smoke-crashes
+          path: fuzz/artifacts/
+          if-no-files-found: ignore
 
   build:
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -464,6 +523,7 @@ jobs:
 
   build-free-threaded:
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -567,6 +627,7 @@ jobs:
       - msrv
       - miri
       - property-tests
+      - fuzz-smoke
       - build
       - build-free-threaded
       - sdist

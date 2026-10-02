@@ -2,7 +2,7 @@
 name = "mixedlm-fuzz"
 version = "0.0.0"
 publish = false
-edition = "2021"
+edition = "2024"
 
 [package.metadata]
 cargo-fuzz = true
@@ -10,11 +10,20 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 arbitrary = { version = "1", features = ["derive"] }
-faer = "0.23"
+faer = { version = "0.24.0", default-features = false, features = ["std", "rayon", "linalg", "sparse-linalg"] }
+numpy = "0.29.0"
+pyo3 = { version = "0.29.0", features = ["abi3-py310"] }
 
 [[bin]]
 name = "fuzz_cholesky"
 path = "fuzz_targets/fuzz_cholesky.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_csc"
+path = "fuzz_targets/fuzz_csc.rs"
 test = false
 doc = false
 bench = false

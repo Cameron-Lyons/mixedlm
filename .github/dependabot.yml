@@ -42,3 +42,14 @@ updates:
       actions:
         patterns:
           - "*"
+
+  - package-ecosystem: "cargo"
+    directory: "/fuzz"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    groups:
+      fuzz-dependencies:
+        patterns:
+          - "*"

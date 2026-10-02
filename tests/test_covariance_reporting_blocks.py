@@ -178,8 +178,11 @@ def test_duplicate_coefficient_names_stay_in_separate_blocks(make_result):
 
     report = result.VarCorr()
 
+    assert len(result.formula.random) == len(result.matrices.random_structures) == 2
     assert list(report.groups) == ["group", "group.1"]
     assert report.groups["group"].term_names == report.groups["group.1"].term_names
+    assert_allclose(report.groups["group"].cov, [[0.4**2 * _scale(result)]])
+    assert_allclose(report.groups["group.1"].cov, [[0.7**2 * _scale(result)]])
     assert_allclose(result.rePCA()["group"].sdev, np.array([0.7, 0.4]) * np.sqrt(_scale(result)))
 
 

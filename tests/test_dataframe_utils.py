@@ -99,10 +99,15 @@ def test_nested_design_uses_distinct_vectorized_group_keys() -> None:
 
     matrices = build_model_matrices(formula, data)
 
-    structure = matrices.random_structures[0]
-    assert structure.level_map == {"a/1": 0, "a/2": 1, "b/1": 2, "b/2": 3}
-    assert matrices.Z.shape == (4, 4)
-    assert np.array_equal(matrices.Z.toarray(), np.eye(4))
+    parent, child = matrices.random_structures
+    assert parent.grouping_factor == "site"
+    assert parent.level_map == {"a": 0, "b": 1}
+    assert child.grouping_factor == "site:subject"
+    assert child.level_map == {"a/1": 0, "a/2": 1, "b/1": 2, "b/2": 3}
+    expected_parent = np.array([[1, 0], [1, 0], [0, 1], [0, 1]])
+    expected = np.column_stack([expected_parent, np.eye(4)])
+    assert matrices.Z.shape == (4, 6)
+    assert np.array_equal(matrices.Z.toarray(), expected)
 
 
 def test_missing_group_does_not_alias_literal_nan_group() -> None:
@@ -137,10 +142,15 @@ def test_nested_polars_design_matches_pandas() -> None:
     pandas_matrices = build_model_matrices(formula, pd.DataFrame(values))
     polars_matrices = build_model_matrices(formula, pl.DataFrame(values))
 
-    assert polars_matrices.random_structures[0].level_map == {
+    assert polars_matrices.random_structures[0].level_map == {"a": 0, "b": 1}
+    assert polars_matrices.random_structures[1].level_map == {
         "a/1": 0,
         "a/2": 1,
         "b/1": 2,
         "b/2": 3,
     }
+    expected_parent = np.array([[1, 0], [1, 0], [0, 1], [0, 1]])
+    assert np.array_equal(
+        polars_matrices.Z.toarray(), np.column_stack([expected_parent, np.eye(4)])
+    )
     assert np.array_equal(polars_matrices.Z.toarray(), pandas_matrices.Z.toarray())

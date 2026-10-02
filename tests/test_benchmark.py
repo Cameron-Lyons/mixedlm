@@ -569,7 +569,26 @@ def test_benchmark_large_nested_sparse_design_build(benchmark, large_crossed_spa
         return build_model_matrices(formula, large_crossed_sparse_data)
 
     matrices = benchmark(build_design)
-    assert matrices.Z.nnz == len(large_crossed_sparse_data)
+    _assert_nested_intercept_design(matrices, large_crossed_sparse_data, "group1", "group2")
+
+
+def _assert_nested_intercept_design(matrices, data, parent, child):
+    parent_labels = data[parent]
+    joint_labels = parent_labels.astype(str) + "/" + data[child].astype(str)
+    expected = sparse.hstack(
+        [
+            pd.get_dummies(parent_labels, sparse=True).sparse.to_coo(),
+            pd.get_dummies(joint_labels, sparse=True).sparse.to_coo(),
+        ],
+        format="csc",
+    )
+    assert [structure.grouping_factor for structure in matrices.random_structures] == [
+        parent,
+        f"{parent}:{child}",
+    ]
+    assert matrices.Z.shape == expected.shape
+    assert matrices.Z.nnz == 2 * len(data)
+    assert (matrices.Z - expected).nnz == 0
 
 
 @pytest.mark.benchmark(group="sparse-design")
@@ -674,7 +693,7 @@ def test_benchmark_large_district_school_sparse_design_build(benchmark, large_ne
     formula = parse_formula("y ~ 1 + (1 | district/school)")
 
     matrices = benchmark(build_model_matrices, formula, large_nested_sparse_data)
-    assert matrices.Z.nnz == len(large_nested_sparse_data)
+    _assert_nested_intercept_design(matrices, large_nested_sparse_data, "district", "school")
 
 
 @pytest.mark.benchmark(group="conditional-variance")
@@ -2199,3 +2218,30 @@ def test_benchmark_blocked_structure_likelihood(benchmark, layout, operation):
     assert np.isfinite(value)
     assert value == pytest.approx(expected, abs=1e-10)
     benchmark(evaluate, theta, True)
+
+
+@pytest.mark.benchmark(group="native-reml-steps")
+@pytest.mark.parametrize("algorithm", ["mm_reml", "augmented_ai_reml", "riemannian_reml"])
+@pytest.mark.parametrize("n,groups", [(48, 8), (96, 12), (240, 24)])
+def test_benchmark_native_reml_steps(benchmark, algorithm, n, groups):
+    from mixedlm import _rust
+
+    from tests.test_reml_algorithms import dense_reml_projection
+
+    rng = np.random.default_rng(334)
+    z = np.eye(groups)[np.repeat(np.arange(groups), n // groups)]
+    x = np.column_stack((np.ones(n), rng.normal(size=n)))
+    y = (
+        x @ np.array([1.0, 0.3])
+        + z @ rng.normal(scale=1.1, size=groups)
+        + rng.normal(scale=0.6, size=n)
+    )
+    initial = np.array([0.8, 1.2])
+    evaluate = getattr(_rust, algorithm)
+    variances, sigma2, iterations, _ = benchmark(
+        evaluate, y, x, [z], initial[:1], initial[1], max_iter=1, tol=1e-12
+    )
+    _, initial_objective = dense_reml_projection(y, x, [z], initial)
+    _, fitted_objective = dense_reml_projection(y, x, [z], np.r_[variances, sigma2])
+    assert iterations == 1
+    assert fitted_objective < initial_objective

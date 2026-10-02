@@ -33,6 +33,7 @@ from mixedlm.formula.terms import (
     PowerTerm,
     RandomTerm,
     VariableTerm,
+    _format_grouping,
 )
 
 
@@ -635,7 +636,7 @@ def _build_random_block(
     Z_block = _build_sparse_Z_block(level_indices, term_cols, n, n_levels, n_terms)
 
     structure = RandomEffectStructure(
-        grouping_factor=grouping_factor,
+        grouping_factor=_format_grouping(grouping_factor),
         term_names=term_names,
         n_levels=n_levels,
         n_terms=n_terms,
@@ -656,7 +657,7 @@ def _build_nested_random_block(
     category_levels: dict[str, list[Any]] | None = None,
 ) -> tuple[sparse.csc_matrix, RandomEffectStructure]:
     grouping_factors = rterm.grouping_factors
-    combined_group = concat_columns_as_string(data, list(grouping_factors), separator="/")
+    combined_group = concat_columns_as_string(data, list(grouping_factors), escape=True)
 
     level_indices, level_map = factorize_levels(combined_group)
     n_levels = len(level_map)
@@ -668,7 +669,7 @@ def _build_nested_random_block(
     Z_block = _build_sparse_Z_block(level_indices, term_cols, n, n_levels, n_terms)
 
     structure = RandomEffectStructure(
-        grouping_factor="/".join(grouping_factors),
+        grouping_factor=_format_grouping(rterm.grouping),
         term_names=term_names,
         n_levels=n_levels,
         n_terms=n_terms,

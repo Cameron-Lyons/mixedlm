@@ -225,6 +225,8 @@ def _validate_design(
 ) -> None:
     if design.ndim != 2:
         raise ValueError("Fixed-effect design must be a two-dimensional matrix")
+    if design.shape[0] == 0:
+        raise ValueError("Collinearity diagnostics require at least one observation")
     if design.shape[1] != len(names):
         raise ValueError(
             f"Fixed-effect design has {design.shape[1]} columns but {len(names)} names"
@@ -243,28 +245,43 @@ def _weighted_standardize(
     weights: NDArray[np.float64],
     center: bool,
 ) -> tuple[NDArray[np.float64], list[str]]:
-    if center:
-        weight_sum = float(np.sum(weights))
-        means = np.sum(weights[:, None] * design, axis=0) / weight_sum
-        transformed = design - means
-    else:
-        transformed = design
-    sum_squares = np.sum(weights[:, None] * transformed**2, axis=0)
-    reference_squares = np.sum(weights[:, None] * design**2, axis=0)
-    column_tolerance = (
-        np.finfo(np.float64).eps
-        * max(design.shape)
-        * np.maximum(reference_squares, np.finfo(np.float64).tiny)
-    )
-    varying = sum_squares > column_tolerance
+    # A column's location and units cannot determine whether it is constant.
+    # Comparing representable values directly also keeps subnormal predictors.
+    varying = np.any(design != (design[0] if center else 0.0), axis=0)
     retained = [index for index, keep in enumerate(varying) if keep]
     if not retained:
         return np.empty((design.shape[0], 0), dtype=np.float64), []
 
-    transformed = transformed[:, retained]
-    sum_squares = sum_squares[retained]
-    normalized = transformed * np.sqrt(weights[:, None] / sum_squares)
-    return normalized, [names[index] for index in retained]
+    transformed = design[:, retained]
+    if center:
+        # Subtract a baseline before scaling to preserve small differences near
+        # a large offset. Opposite extreme values can overflow subtraction; only
+        # those columns need to be scaled before removing the baseline.
+        with np.errstate(over="ignore"):
+            shifted = transformed - transformed[0]
+        overflow = ~np.all(np.isfinite(shifted), axis=0)
+        if np.any(overflow):
+            extreme = transformed[:, overflow]
+            scaled = extreme / np.max(np.abs(extreme), axis=0)
+            shifted[:, overflow] = scaled - scaled[0]
+        transformed = shifted
+    transformed /= np.max(np.abs(transformed), axis=0)
+
+    # Taking square roots before normalizing retains extreme relative weights
+    # whose ratios would underflow if weights were divided first.
+    sqrt_weights = np.sqrt(weights)
+    sqrt_weights /= np.max(sqrt_weights)
+    if center:
+        normalized_weights = sqrt_weights**2
+        means = np.sum(normalized_weights[:, None] * transformed, axis=0) / np.sum(
+            normalized_weights
+        )
+        transformed -= means
+
+    transformed *= sqrt_weights[:, None]
+    transformed /= np.max(np.abs(transformed), axis=0)
+    transformed /= np.sqrt(np.sum(transformed**2, axis=0))
+    return transformed, [names[index] for index in retained]
 
 
 def _group_term_indices(names: list[str]) -> dict[str, list[int]]:

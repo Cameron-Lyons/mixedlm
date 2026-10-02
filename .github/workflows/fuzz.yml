@@ -11,22 +11,36 @@ permissions:
 jobs:
   fuzz:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
 
       - name: Set up Rust nightly
         uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
 
       - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+
+      - name: Verify cargo-fuzz installation
+        run: cargo +nightly fuzz --version
 
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz -> target
 
       - name: Run fuzz tests
         run: |
           cd fuzz
-          cargo +nightly fuzz run fuzz_cholesky -- -max_total_time=60
+          cargo test --locked --lib
+          # Prebuilt cargo-fuzz may default to musl; ASAN needs the runner's GNU target.
+          cargo +nightly fuzz run fuzz_cholesky --target x86_64-unknown-linux-gnu -- -max_total_time=60
+          cargo +nightly fuzz run fuzz_csc --target x86_64-unknown-linux-gnu -- -max_total_time=60
+          git diff --exit-code -- Cargo.lock
 
       - name: Upload crash artifacts
         uses: actions/upload-artifact@v7

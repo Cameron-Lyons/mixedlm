@@ -1251,9 +1251,10 @@ class TestFormulaUtilities:
     def test_findbars_nested(self):
         bars = findbars("y ~ x + (1 | group/subgroup)")
 
-        assert len(bars) == 1
-        assert bars[0].is_nested
-        assert bars[0].grouping_factors == ("group", "subgroup")
+        assert len(bars) == 2
+        assert bars[0].grouping_factors == ("group",)
+        assert bars[1].is_nested
+        assert bars[1].grouping_factors == ("group", "subgroup")
 
 
 class TestCoef:

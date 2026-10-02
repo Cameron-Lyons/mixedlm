@@ -19,6 +19,9 @@ class InfluenceResult:
 
     Linear-model residuals and design rows include square-root prior weights.
     Generalized-model values use the final IRLS working projection.
+    Coefficient deletion diagnostics hold variance components fixed; generalized
+    models also hold the final working weights fixed. They account for the
+    random effects when computing changes to fixed-effect coefficients.
     """
 
     hat_values: NDArray[np.floating]
@@ -89,6 +92,10 @@ def _influence_lmer(model: LmerResult) -> InfluenceResult:
     vcov = model.vcov()
     information_inv = vcov / model.sigma**2
     residuals = projection.sqrt_weights * model.residuals(type="response", na_expand=False)
+    adjusted_X = projection.weighted_X
+    if projection.lambda_matrix is not None:
+        weighted_random = projection.weighted_Z @ projection.lambda_matrix
+        adjusted_X = adjusted_X - weighted_random @ projection.random_fixed_map
 
     return InfluenceResult(
         hat_values=model.hatvalues(),
@@ -98,13 +105,27 @@ def _influence_lmer(model: LmerResult) -> InfluenceResult:
         beta=model.beta,
         vcov=vcov,
         model_type="lmer",
-        _beta_sensitivity=projection.weighted_X @ information_inv,
+        _beta_sensitivity=adjusted_X @ information_inv,
     )
 
 
 def _influence_glmer(model: GlmerResult) -> InfluenceResult:
     projection = model._working_projection
     vcov = model.vcov()
+    adjusted_X = projection.weighted_X
+    if model.matrices.n_random:
+        weighted_random = projection.weighted_Z @ projection.Lambda
+        adjusted_X = adjusted_X - weighted_random @ projection.random_fixed_map
+
+    mu = model.family.clamp_mu(model.fitted(type="response", na_expand=False))
+    # Convert Pearson residuals to the final weighted working residual. This
+    # retains the derivative's sign for decreasing links and the actual working
+    # weights when PIRLS clips them at numerical bounds.
+    working_scale = (
+        np.sqrt(projection.weights)
+        * model.family.link.deriv(mu)
+        * np.sqrt(model.family.variance(mu) / model.matrices.weights)
+    )
 
     return InfluenceResult(
         hat_values=model.hatvalues(),
@@ -114,7 +135,7 @@ def _influence_glmer(model: GlmerResult) -> InfluenceResult:
         beta=model.beta,
         vcov=vcov,
         model_type="glmer",
-        _beta_sensitivity=projection.weighted_X @ vcov,
+        _beta_sensitivity=(adjusted_X @ vcov) * working_scale[:, None],
     )
 
 
