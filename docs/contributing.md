@@ -139,8 +139,10 @@ test. The native-source check is required before the Python suites execute.
 Python 3.12 exercises plotting and nlopt alongside the core suite, and standard
 Python jobs cover Polars. Free-threaded 3.14t also checks plotting and verifies
 that native imports keep the GIL disabled. It omits Polars and its runtime because
-compatible free-threaded wheels are unavailable. Property tests and benchmarks
-run in dedicated jobs.
+compatible free-threaded wheels are unavailable. This job builds a wheel and
+installs it with `uv pip install --no-deps` to preserve the locked environment
+without reinstalling the development group. Property tests and benchmarks run
+in dedicated jobs.
 The Python 3.12 job enforces 87% combined line/branch coverage, based on the
 measured complete feature suite. Other Python jobs report coverage without this
 floor because they exercise different optional-feature combinations.

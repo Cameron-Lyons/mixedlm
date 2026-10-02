@@ -191,10 +191,12 @@ jobs:
       - name: Build package (free-threaded)
         uses: PyO3/maturin-action@v1
         with:
-          command: develop
-          args: --release --locked --uv
-        env:
-          VIRTUAL_ENV: ${{ github.workspace }}/.venv
+          command: build
+          manylinux: "off"
+          args: --release --locked --interpreter .venv/bin/python --out dist
+
+      - name: Install package without changing locked dependencies
+        run: uv pip install --python .venv/bin/python --no-deps dist/*.whl
 
       - name: Require source-matched native backend
         run: uv run --no-sync python -m tools.native_build
