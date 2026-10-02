@@ -18,9 +18,11 @@ env:
   CARGO_MANIFEST_PATH: fuzz/Cargo.toml
 
 jobs:
+  # Stable compatibility complements the main workflow's nightly sanitizer/lint gate.
   rust:
     name: Rust checks (fuzz/Cargo.toml)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
 
     steps:
       - name: Checkout
@@ -35,7 +37,10 @@ jobs:
         run: cargo fmt --all --manifest-path "$CARGO_MANIFEST_PATH" -- --check
 
       - name: Build with warnings denied
-        run: cargo build --manifest-path "$CARGO_MANIFEST_PATH" --all-targets --all-features
+        run: cargo build --locked --manifest-path "$CARGO_MANIFEST_PATH" --all-targets --all-features
+
+      - name: Verify fuzz mathematical oracles and production sparse code
+        run: cargo test --locked --manifest-path "$CARGO_MANIFEST_PATH" --lib
 
       - name: Run clippy with warnings denied
-        run: cargo clippy --manifest-path "$CARGO_MANIFEST_PATH" --all-targets --all-features -- -D warnings
+        run: cargo clippy --locked --manifest-path "$CARGO_MANIFEST_PATH" --all-targets --all-features -- -D warnings

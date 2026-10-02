@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from numpy.typing import NDArray
-from scipy import linalg, sparse, special
+from scipy import linalg, optimize, sparse, special
 
 from mixedlm.estimation.optimizers import run_optimizer
 from mixedlm.estimation.pirls_control import validate_pirls_controls
@@ -18,7 +18,15 @@ from mixedlm.estimation.reml import (
     _count_theta,
 )
 from mixedlm.estimation.validation import validate_finite_real
-from mixedlm.families.base import Family, IdentityLink, LogitLink, LogLink
+from mixedlm.families.base import (
+    Family,
+    IdentityLink,
+    InverseLink,
+    InverseSquaredLink,
+    LogitLink,
+    LogLink,
+    SqrtLink,
+)
 from mixedlm.families.binomial import Binomial
 from mixedlm.families.gaussian import Gaussian
 from mixedlm.families.poisson import Poisson
@@ -28,8 +36,6 @@ from mixedlm.utils.quadrature import _positive_integer, hermite_rule
 if TYPE_CHECKING:
     from mixedlm.estimation.joint_glmm import JointGLMMObjective
 
-_ETA_CLIP_MIN = -30.0
-_ETA_CLIP_MAX = 30.0
 _MU_EPS = 1e-7
 _MU_EPS_STRICT = 1e-10
 _WEIGHT_CLIP_MIN = 1e-10
@@ -168,6 +174,102 @@ def _random_effects_to_spherical(
     return np.asarray(solution, dtype=np.float64)
 
 
+def _pirls_mean(family: Family, eta: NDArray[np.floating]) -> NDArray[np.floating] | None:
+    """Validate the predictor before any numerical mean clamping."""
+    if not np.all(np.isfinite(eta)):
+        return None
+    validator = getattr(family, "valideta", None)
+    if callable(validator) and not np.all(validator(eta)):
+        return None
+    if isinstance(family.link, (InverseLink, InverseSquaredLink, SqrtLink)) and np.any(eta <= 0):
+        return None
+    with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
+        mu = np.asarray(family.link.inverse(eta), dtype=np.float64)
+    if mu.shape != eta.shape or not np.all(np.isfinite(mu)):
+        return None
+    lower, upper = family._mean_bounds()
+    # Unrestricted links can reach their mathematical endpoints numerically
+    # (for example expit(1000)==1). Stabilize those endpoints; identity-link
+    # predictors and custom mean restrictions still need strict domain checks.
+    if lower is not None and (
+        np.any(mu < lower) or (family.link.mu_lower_bound != lower and np.any(mu == lower))
+    ):
+        return None
+    if upper is not None and (
+        np.any(mu > upper) or (family.link.mu_upper_bound != upper and np.any(mu == upper))
+    ):
+        return None
+    mu = np.asarray(family.clamp_mu(mu, eps=_MU_EPS_STRICT), dtype=np.float64)
+    validator = getattr(family, "validmu", None)
+    if callable(validator) and not np.all(validator(mu)):
+        return None
+    return mu
+
+
+def _pirls_eta_bounds(family: Family) -> tuple[float, float]:
+    """Linear predictor bounds for links with restricted domains."""
+    lower, upper = family._mean_bounds()
+    if isinstance(family.link, IdentityLink):
+        return (-np.inf if lower is None else lower, np.inf if upper is None else upper)
+    if isinstance(family.link, (InverseLink, InverseSquaredLink)):
+        power = 2 if isinstance(family.link, InverseSquaredLink) else 1
+        return (
+            0.0 if upper is None else 1.0 / upper**power,
+            np.inf if lower is None or lower <= 0 else 1.0 / lower**power,
+        )
+    if isinstance(family.link, SqrtLink):
+        return (
+            0.0 if lower is None else float(np.sqrt(max(0.0, lower))),
+            np.inf if upper is None else float(np.sqrt(upper)),
+        )
+    if isinstance(family.link, LogLink):
+        return (
+            -np.inf if lower is None or lower <= 0 else float(np.log(lower)),
+            np.inf if upper is None else float(np.log(upper)),
+        )
+    return -np.inf, np.inf
+
+
+def _feasible_pirls_start(
+    matrices: ModelMatrices, family: Family, Lambda: sparse.csc_matrix
+) -> tuple[NDArray[np.float64], NDArray[np.float64]] | None:
+    """Find a feasible predictor close to initialized means when projection fails.
+
+    Linear constraints apply to observations, including their offsets, rather
+    than to individual coefficients. This also works without an intercept.
+    """
+    lower, upper = _pirls_eta_bounds(family)
+    if not np.isfinite(lower) and not np.isfinite(upper):
+        return None
+    design = sparse.hstack([sparse.csc_matrix(matrices.X), matrices.Z @ Lambda], format="csc")
+    n_parameters = design.shape[1]
+    if n_parameters == 0:
+        return None
+    target = family.link(family.initialize_mu(matrices.y)) - matrices.offset
+    slack = sparse.csc_matrix(-np.ones((matrices.n_obs, 1)))
+    constraints = [sparse.hstack([design, slack]), sparse.hstack([-design, slack])]
+    bounds = [target, -target]
+    zero_slack = sparse.csc_matrix((matrices.n_obs, 1))
+    if np.isfinite(lower):
+        margin = 1e-7 * max(1.0, abs(lower))
+        constraints.append(sparse.hstack([-design, zero_slack]))
+        bounds.append(matrices.offset - lower - margin)
+    if np.isfinite(upper):
+        margin = 1e-7 * max(1.0, abs(upper))
+        constraints.append(sparse.hstack([design, zero_slack]))
+        bounds.append(upper - margin - matrices.offset)
+    result = optimize.linprog(
+        np.r_[np.zeros(n_parameters), 1.0],
+        A_ub=sparse.vstack(constraints, format="csc"),
+        b_ub=np.concatenate(bounds),
+        bounds=[(None, None)] * n_parameters + [(0.0, None)],
+        method="highs",
+    )
+    if not result.success:
+        return None
+    return result.x[: matrices.n_fixed], result.x[matrices.n_fixed : n_parameters]
+
+
 def _pirls_state(
     matrices: ModelMatrices,
     family: Family,
@@ -208,15 +310,36 @@ def _pirls_state(
         else _random_effects_to_spherical(Lambda, u_start)
     )
 
+    def evaluate(
+        fixed: NDArray[np.floating], random: NDArray[np.floating]
+    ) -> tuple[NDArray[np.floating], NDArray[np.floating], float] | None:
+        eta = matrices.X @ fixed + matrices.Z @ (Lambda @ random) + offset
+        mu = _pirls_mean(family, eta)
+        if mu is None:
+            return None
+        with np.errstate(over="ignore", divide="ignore", invalid="ignore"):
+            deviance = float(
+                np.sum(family.deviance_resids(matrices.y, mu, prior_weights))
+                + np.dot(random, random)
+            )
+        return (eta, mu, deviance) if np.isfinite(deviance) else None
+
+    current = evaluate(beta, spherical)
+    if current is None:
+        feasible = _feasible_pirls_start(matrices, family, Lambda)
+        if feasible is not None:
+            beta, spherical = feasible
+            current = evaluate(beta, spherical)
+        if current is None:
+            return _PIRLSState(beta, spherical, np.asarray(Lambda @ spherical), np.inf, False)
+
     W = np.empty(matrices.n_obs, dtype=np.float64)
     z = np.empty(matrices.n_obs, dtype=np.float64)
 
     converged = False
     for _iteration in range(maxiter):
-        random_effects = np.asarray(Lambda @ spherical).ravel()
-        eta = matrices.X @ beta + matrices.Z @ random_effects + offset
-        np.clip(eta, _ETA_CLIP_MIN, _ETA_CLIP_MAX, out=eta)
-        mu = family.link.inverse(eta)
+        eta, mu, old_deviance = current
+        mu = mu.copy()
         family.clamp_mu(mu, eps=_MU_EPS, out=mu)
 
         np.multiply(family.weights(mu), prior_weights, out=W)
@@ -302,7 +425,7 @@ def _pirls_state(
             XtVinvX += _CHOLESKY_REGULARIZATION * np.eye(XtVinvX.shape[0])
             beta_new = linalg.lstsq(XtVinvX, XtVinvz)[0]
         if not np.all(np.isfinite(beta_new)):
-            beta_new = beta.copy()
+            break
 
         if q > 0:
             spherical_rhs = ZtWz_spherical - ZtWX_spherical @ beta_new
@@ -320,22 +443,33 @@ def _pirls_state(
         delta_beta = np.max(np.abs(beta_new - beta), initial=0.0)
         delta_u = np.max(np.abs(spherical_new - spherical)) if q > 0 else 0.0
 
-        beta = beta_new
-        spherical = spherical_new
+        # Keep every accepted step inside the family/link domain and reduce the
+        # penalized response deviance. A clipped invalid predictor must never
+        # become a spurious stationary solution.
+        accepted = None
+        step = 1.0
+        for _halving in range(31):
+            candidate_beta = beta + step * (beta_new - beta)
+            candidate_spherical = spherical + step * (spherical_new - spherical)
+            candidate = evaluate(candidate_beta, candidate_spherical)
+            if candidate is not None and candidate[2] <= old_deviance + 1e-12 * (
+                1.0 + abs(old_deviance)
+            ):
+                accepted = candidate
+                break
+            step *= 0.5
+        if accepted is None:
+            break
+        beta = candidate_beta
+        spherical = candidate_spherical
+        current = accepted
 
         if delta_beta < tol and delta_u < tol:
             converged = True
             break
 
     random_effects = np.asarray(Lambda @ spherical).ravel()
-    eta = matrices.X @ beta + matrices.Z @ random_effects + offset
-    mu = family.link.inverse(eta)
-    family.clamp_mu(mu, eps=_MU_EPS_STRICT, out=mu)
-
-    dev_resids = family.deviance_resids(matrices.y, mu, prior_weights)
-    deviance = np.sum(dev_resids)
-
-    deviance += np.dot(spherical, spherical)
+    deviance = current[2]
 
     return _PIRLSState(
         beta=beta,
@@ -497,8 +631,10 @@ def _compute_group_quadrature(
             continue
         spherical_quad = spherical_mode + sqrt2 * scale * node
         eta_quad = eta_fixed + z_values * (relative_scale * spherical_quad)
-        mu_quad = family.link.inverse(eta_quad)
-        mu_quad = family.clamp_mu(mu_quad, eps=_MU_EPS_STRICT)
+        mu_quad = _pirls_mean(family, eta_quad)
+        if mu_quad is None:
+            log_terms[i] = -np.inf
+            continue
         log_lik_y = -0.5 * np.sum(family.deviance_resids(y, mu_quad, prior_weights))
         log_prior = -0.5 * spherical_quad**2
         log_terms[i] = np.log(weight) + log_lik_y + log_prior + node**2

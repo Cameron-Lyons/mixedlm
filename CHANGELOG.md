@@ -29,6 +29,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Standard Python 3.14 joins the test matrix. Property tests compare generated weighted and crossed designs against independent Gaussian likelihoods. Required CI runs locked, sanitized fuzz targets against the production sparse routines, with mathematical solve and input-validation oracles.
+
 - CI uses locked test dependencies, checks optional plotting and optimizer features, enforces an 87% combined line/branch coverage floor in the complete feature job, validates workflows, and exercises installed wheels and rebuilt source distributions before publication. A single required-check gate aggregates all CI jobs.
 
 - Blocked Cholesky solves skip zero contributions, and dense Schur updates accumulate into their destination without allocating full products. Reproducible independent/crossed likelihood benchmarks run in CI.
@@ -56,6 +58,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   behavior, including per-unit rates from models fitted with log-exposure offsets.
 
 ### Fixed
+
+- Nested random effects expand to every parent factor, and explicit `:` grouping is supported. Joint levels escape separators within labels. Formula parsing rejects malformed or unsupported trailing expressions instead of silently fitting a truncated model. Nested fits can change because earlier versions omitted parent factors.
+
+- Group display names and covariance-selection keys quote unusual identifiers, distinguishing a literal column such as `a:b` from the joint `a:b` factor. Ordinary names retain their existing keys; use the names shown by `ngrps()` for quoted or joint factors.
+
+- Native MM, augmented AI, and Riemannian REML use corrected variance scores and information, safeguard likelihood updates, and check boundary stationarity before reporting convergence. Projection and covariance-direction reuse reduce temporary matrices and repeated line-search preparation.
+
+- Fixed-coefficient deletion diagnostics include changes in random effects and decreasing-link derivatives. Collinearity retains varying predictors under large translations, extreme units, and weight scales.
+
+- Python GLMM iterations keep predictors in the family and link domains, recover feasible starting values, and backtrack invalid or worsening steps. Quadrature assigns zero likelihood outside the valid support instead of clamping invalid predictors into it.
 
 - GLMM log-likelihoods, information criteria, and reported marginal deviance include the response-distribution constants for every quadrature setting. The stored `deviance` retains the optimization criterion. Built-in families expose normalized conditional likelihoods; custom distributions can implement the same hook, and quasi likelihoods report unavailable information criteria.
 

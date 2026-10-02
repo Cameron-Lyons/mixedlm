@@ -11,22 +11,30 @@ permissions:
 jobs:
   fuzz:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
 
       - name: Set up Rust nightly
         uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
 
       - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz
+        uses: taiki-e/install-action@cargo-fuzz
 
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz -> target
 
       - name: Run fuzz tests
         run: |
           cd fuzz
+          cargo test --locked --lib
           cargo +nightly fuzz run fuzz_cholesky -- -max_total_time=60
+          cargo +nightly fuzz run fuzz_csc -- -max_total_time=60
+          git diff --exit-code -- Cargo.lock
 
       - name: Upload crash artifacts
         uses: actions/upload-artifact@v7

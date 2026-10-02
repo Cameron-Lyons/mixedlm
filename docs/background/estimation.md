@@ -504,6 +504,15 @@ native solver uses the same starting-mean convention as Python, including prior
 weights and offsets. Its inner convergence flag remains false if an update or
 final deviance is nonfinite.
 
+For Python families and links with restricted predictor domains, PIRLS validates
+each proposed predictor before computing its mean. If the initial coefficients
+violate the domain, a sparse feasibility solve finds an interior starting point
+subject to the observation offsets. Accepted updates remain feasible and reduce
+the penalized deviance through step halving. An impossible domain or unfinished
+inner solve cannot report convergence. Quadrature nodes outside the valid domain
+contribute zero likelihood. Numerically saturated probabilities for unrestricted
+logit and similar links retain the existing stable mean clamping.
+
 The native PIRLS solver handles the fixed-effect and working-response columns in
 one triangular solve, borrowing the Cholesky factor. It reuses the transformed
 columns to recover random effects with a transpose triangular solve. This avoids

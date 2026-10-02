@@ -41,9 +41,10 @@ class TestFormulaParser:
 
     def test_nested_random_effects(self) -> None:
         formula = parse_formula("y ~ x + (1 | group/subgroup)")
-        assert len(formula.random) == 1
-        assert formula.random[0].is_nested
-        assert formula.random[0].grouping == ("group", "subgroup")
+        assert len(formula.random) == 2
+        assert formula.random[0].grouping == "group"
+        assert formula.random[1].is_nested
+        assert formula.random[1].grouping == ("group", "subgroup")
 
     def test_crossed_random_effects(self) -> None:
         formula = parse_formula("y ~ x + (1 | group1) + (1 | group2)")
@@ -130,8 +131,9 @@ class TestFormulaParser:
     def test_backticks_support_nested_grouping_factors(self) -> None:
         formula = parse_formula("y ~ x + (1 | `school id`/`class/id`)")
 
-        assert formula.random[0].grouping == ("school id", "class/id")
-        assert str(formula) == "y ~ x + (1 | `school id`/`class/id`)"
+        assert formula.random[0].grouping == "school id"
+        assert formula.random[1].grouping == ("school id", "class/id")
+        assert str(formula) == "y ~ x + (1 | `school id`) + (1 | `school id`:`class/id`)"
 
     def test_quoted_random_slope_without_intercept_round_trips(self) -> None:
         formula = parse_formula("y ~ x + (0 + `random slope` | `group id`)")
@@ -291,5 +293,5 @@ class TestModelMatrices:
 
         assert np.array_equal(matrices.y, data["response value"].to_numpy())
         assert matrices.fixed_names == ["(Intercept)", "fixed + value"]
-        assert matrices.random_structures[0].grouping_factor == "group/id"
+        assert matrices.random_structures[0].grouping_factor == "`group/id`"
         assert matrices.Z.shape == (4, 2)

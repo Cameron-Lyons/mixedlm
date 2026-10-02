@@ -200,6 +200,10 @@ diagnostics.plot_resid_group(model, group, ax=None)
 The convenience functions below accept either a fitted model directly or an
 `InfluenceResult` returned by `influence()`. Calculations use the final mixed-model
 projection, including random effects, offsets, prior weights, and GLMM working weights.
+Coefficient-deletion diagnostics hold variance components fixed. GLMM diagnostics
+also hold the final working weights fixed, giving a local approximation to a full
+GLMM deletion refit. They account for the change in random effects when calculating
+the change in fixed coefficients, including the sign of decreasing links.
 
 ### influence
 

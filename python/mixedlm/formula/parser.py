@@ -184,6 +184,7 @@ class Parser:
         response, response_denominator = self._parse_response()
         self.expect(TokenType.TILDE)
         fixed_terms, random_terms, has_intercept = self._parse_rhs()
+        self.expect(TokenType.EOF)
 
         fixed = FixedTerm(terms=tuple(fixed_terms), has_intercept=has_intercept)
         return Formula(
@@ -213,26 +214,37 @@ class Parser:
         random_terms: list[RandomTerm] = []
         has_intercept = True
 
-        while self.peek().type != TokenType.EOF:
+        first = True
+        while True:
+            subtracting = False
+            if self.peek().type in (TokenType.PLUS, TokenType.MINUS):
+                subtracting = self.advance().type == TokenType.MINUS
+            elif not first:
+                if self.peek().type == TokenType.EOF:
+                    break
+                self._unexpected("'+' or '-' between terms")
+
             if self.peek().type == TokenType.LPAREN:
-                random_terms.append(self._parse_random_term())
+                parsed_random = self._parse_random_term()
+                if subtracting:
+                    random_terms = [term for term in random_terms if term not in parsed_random]
+                else:
+                    random_terms.extend(parsed_random)
             elif self.peek().type in (TokenType.IDENTIFIER, TokenType.NUMBER):
                 terms = self._parse_term()
-                has_intercept = self._add_parsed_terms(fixed_terms, terms, has_intercept)
-            elif self.peek().type == TokenType.MINUS:
-                self.advance()
-                if self.peek().type == TokenType.LPAREN:
-                    random_term = self._parse_random_term()
-                    random_terms = [term for term in random_terms if term != random_term]
-                else:
-                    terms = self._parse_term()
+                if subtracting:
                     has_intercept = self._subtract_parsed_terms(fixed_terms, terms, has_intercept)
-            elif self.peek().type == TokenType.PLUS:
-                self.advance()
+                else:
+                    has_intercept = self._add_parsed_terms(fixed_terms, terms, has_intercept)
             else:
-                break
+                self._unexpected("a formula term")
+            first = False
 
         return fixed_terms, random_terms, has_intercept
+
+    def _unexpected(self, expected: str) -> None:
+        token = self.peek()
+        raise ValueError(f"Expected {expected}, got {token.type.name} at position {token.position}")
 
     def _add_parsed_terms(
         self,
@@ -281,14 +293,9 @@ class Parser:
                 raise ValueError(f"Unexpected number {tok.value} in formula")
 
         terms = self._parse_base_terms()
-        if terms is None:
-            return None
-
         while self.peek().type in (TokenType.COLON, TokenType.STAR):
             op = self.advance()
             next_terms = self._parse_base_terms()
-            if next_terms is None:
-                continue
 
             if op.type == TokenType.COLON:
                 terms = self._combine_colon(terms, next_terms)
@@ -297,9 +304,9 @@ class Parser:
 
         return terms
 
-    def _parse_base_terms(self) -> list[ParsedTerm] | None:
+    def _parse_base_terms(self) -> list[ParsedTerm]:
         if self.peek().type != TokenType.IDENTIFIER:
-            return None
+            self._unexpected("a variable or I(variable**exponent)")
         tok = self.advance()
         if tok.value == "I" and self.peek().type == TokenType.LPAREN:
             self.advance()
@@ -354,24 +361,30 @@ class Parser:
                 self._append_unique(result, self._combine_interaction(left, right))
         return result
 
-    def _parse_random_term(self) -> RandomTerm:
+    def _parse_random_term(self) -> list[RandomTerm]:
         self.expect(TokenType.LPAREN)
 
         expr_terms: list[ParsedTerm] = []
         has_intercept = True
 
-        while self.peek().type not in (TokenType.PIPE, TokenType.DOUBLE_PIPE):
+        first = True
+        while True:
+            subtracting = False
+            if self.peek().type in (TokenType.PLUS, TokenType.MINUS):
+                subtracting = self.advance().type == TokenType.MINUS
+            elif not first:
+                if self.peek().type in (TokenType.PIPE, TokenType.DOUBLE_PIPE):
+                    break
+                self._unexpected("'+' or '-' between random-effect terms")
             if self.peek().type in (TokenType.NUMBER, TokenType.IDENTIFIER):
                 terms = self._parse_term()
-                has_intercept = self._add_parsed_terms(expr_terms, terms, has_intercept)
-            elif self.peek().type == TokenType.PLUS:
-                self.advance()
-            elif self.peek().type == TokenType.MINUS:
-                self.advance()
-                terms = self._parse_term()
-                has_intercept = self._subtract_parsed_terms(expr_terms, terms, has_intercept)
+                if subtracting:
+                    has_intercept = self._subtract_parsed_terms(expr_terms, terms, has_intercept)
+                else:
+                    has_intercept = self._add_parsed_terms(expr_terms, terms, has_intercept)
             else:
-                break
+                self._unexpected("a random-effect term")
+            first = False
 
         correlated = True
         if self.peek().type == TokenType.DOUBLE_PIPE:
@@ -380,27 +393,39 @@ class Parser:
         else:
             self.expect(TokenType.PIPE)
 
-        grouping = self._parse_grouping()
+        groupings = self._parse_grouping()
         self.expect(TokenType.RPAREN)
 
-        return RandomTerm(
-            expr=tuple(expr_terms),
-            grouping=grouping,
-            correlated=correlated,
-            has_intercept=has_intercept,
-        )
+        return [
+            RandomTerm(
+                expr=tuple(expr_terms),
+                grouping=grouping,
+                correlated=correlated,
+                has_intercept=has_intercept,
+            )
+            for grouping in groupings
+        ]
 
-    def _parse_grouping(self) -> str | tuple[str, ...]:
-        first = self.expect(TokenType.IDENTIFIER).value
-        groups = [first]
+    def _parse_grouping(self) -> list[str | tuple[str, ...]]:
+        """Expand nesting to every prefix; colons identify a single joint factor."""
+        groups: list[str] = []
+        groupings: list[str | tuple[str, ...]] = []
+        while True:
+            group = self.expect(TokenType.IDENTIFIER).value
+            if group not in groups:
+                groups.append(group)
+            while self.peek().type == TokenType.COLON:
+                self.advance()
+                group = self.expect(TokenType.IDENTIFIER).value
+                if group not in groups:
+                    groups.append(group)
 
-        while self.peek().type == TokenType.SLASH:
+            grouping = groups[0] if len(groups) == 1 else tuple(groups)
+            if grouping not in groupings:
+                groupings.append(grouping)
+            if self.peek().type != TokenType.SLASH:
+                return groupings
             self.advance()
-            groups.append(self.expect(TokenType.IDENTIFIER).value)
-
-        if len(groups) == 1:
-            return groups[0]
-        return tuple(groups)
 
 
 def parse_formula(formula: str) -> Formula:
@@ -508,11 +533,14 @@ def _split_update_rhs(rhs: str) -> list[tuple[str, str]]:
     depth = 0
     quoted = False
     escaped = False
+    seen_operator = False
 
-    def append_current() -> None:
+    def append_current(*, allow_empty: bool = False) -> None:
         term = "".join(current).strip()
         if term:
             updates.append((operation, term))
+        elif not allow_empty:
+            raise ValueError("Expected a formula update term between '+' and '-' operators")
         current.clear()
 
     for char in rhs:
@@ -534,13 +562,18 @@ def _split_update_rhs(rhs: str) -> list[tuple[str, str]]:
             current.append(char)
         elif char == ")":
             depth -= 1
+            if depth < 0:
+                raise ValueError("Unexpected ')' in formula update")
             current.append(char)
         elif depth == 0 and char in "+-":
-            append_current()
+            append_current(allow_empty=not updates and not seen_operator)
+            seen_operator = True
             operation = char
         else:
             current.append(char)
 
+    if quoted or depth:
+        raise ValueError("Unterminated quoted identifier or parenthesis in formula update")
     append_current()
     return updates
 
@@ -731,10 +764,7 @@ def set_cov_type(
     if isinstance(cov_type, str):
         if cov_type not in valid_types:
             raise ValueError(f"Invalid cov_type '{cov_type}'. Must be one of {valid_types}")
-        cov_map = {
-            rt.grouping if isinstance(rt.grouping, str) else rt.grouping[0]: cov_type
-            for rt in formula.random
-        }
+        cov_map = {_format_grouping(rt.grouping): cov_type for rt in formula.random}
     else:
         for ct in cov_type.values():
             if ct not in valid_types:
@@ -743,7 +773,7 @@ def set_cov_type(
 
     new_random = []
     for rt in formula.random:
-        group_key = rt.grouping if isinstance(rt.grouping, str) else rt.grouping[0]
+        group_key = _format_grouping(rt.grouping)
         new_cov = cov_map.get(group_key, rt.cov_type)
         new_rt = RandomTerm(
             expr=rt.expr,

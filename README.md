@@ -360,7 +360,7 @@ for stacked changes. Push-triggered checks run on `main`.
 
 - **Linting**: ruff, clippy, rustfmt, and actionlint for workflow definitions
 - **Type checking**: mypy
-- **Testing**: pytest across Python 3.10-3.13 with Polars, plus free-threaded 3.14t; the 3.12 run includes plotting and nlopt, and free-threaded tests include plotting
+- **Testing**: pytest across Python 3.10-3.14 with Polars, plus free-threaded 3.14t; the 3.12 run includes plotting and nlopt, and free-threaded tests include plotting
 - **Dependencies**: test, quality, and documentation environments use `uv.lock`; test commands preserve the explicitly built native backend
 - **Compatibility**: a Python 3.10 job installs the modern abi3 wheel with NumPy 1.23.5, SciPy 1.14.0, and pandas 1.4.0, then runs the core suite against these supported lower bounds
 - **Coverage**: branch coverage for Python and native Rust coverage, uploaded to codecov; the complete Python 3.12 feature run enforces 87% combined line/branch coverage

@@ -99,17 +99,6 @@ fn compute_trace_product_ref(a: &Mat<f64>, b: MatRef<'_, f64>) -> f64 {
     trace
 }
 
-fn compute_quadratic_form(x: &Mat<f64>, a: &Mat<f64>) -> f64 {
-    let n = x.nrows();
-    let mut result = 0.0;
-    for i in 0..n {
-        for j in 0..n {
-            result += x[(i, 0)] * a[(i, j)] * x[(j, 0)];
-        }
-    }
-    result
-}
-
 fn squared_norm(x: &Mat<f64>) -> f64 {
     let mut result = 0.0;
     for row in 0..x.nrows() {
@@ -120,6 +109,154 @@ fn squared_norm(x: &Mat<f64>) -> f64 {
     result
 }
 
+/// The REML projection is applied through factorizations, without forming P.
+/// Low-rank covariance derivatives can then be contracted with their Z blocks.
+struct RemlProjection {
+    covariance: Llt<f64>,
+    weighted_x: Mat<f64>,
+    fixed: Option<Llt<f64>>,
+}
+
+impl RemlProjection {
+    fn new(v: &Mat<f64>, x: &Mat<f64>) -> Result<Self, String> {
+        let covariance =
+            Llt::new(v.as_ref(), Side::Lower).map_err(|_| "V not positive definite".to_string())?;
+        let weighted_x = covariance.solve(x);
+        let fixed = if x.ncols() == 0 {
+            None
+        } else {
+            let information = x.transpose() * &weighted_x;
+            Some(
+                Llt::new(information.as_ref(), Side::Lower)
+                    .map_err(|_| "X'V^-1 X not positive definite".to_string())?,
+            )
+        };
+        Ok(Self {
+            covariance,
+            weighted_x,
+            fixed,
+        })
+    }
+
+    fn apply(&self, rhs: &Mat<f64>) -> Mat<f64> {
+        let weighted_rhs = self.covariance.solve(rhs);
+        if let Some(fixed) = &self.fixed {
+            let coefficients = fixed.solve(&(self.weighted_x.transpose() * rhs));
+            &weighted_rhs - &self.weighted_x * &coefficients
+        } else {
+            weighted_rhs
+        }
+    }
+
+    fn trace(&self) -> f64 {
+        let n = self.weighted_x.nrows();
+        let inverse = self.covariance.solve(&Mat::<f64>::identity(n, n));
+        let mut trace = (0..n).map(|i| inverse[(i, i)]).sum::<f64>();
+        if let Some(fixed) = &self.fixed {
+            let coefficients = fixed.solve(&self.weighted_x.transpose());
+            trace -= compute_trace_product_ref(&self.weighted_x, coefficients.as_ref());
+        }
+        trace
+    }
+
+    fn residual_trace(&self, random_trace: f64, sigma2: f64) -> f64 {
+        // tr(P V) = n-p. Reuse low-rank random-effect contractions instead
+        // of solving against n identity columns. A saturated random design
+        // can cause cancellation; use the direct trace in that rare case.
+        let df = (self.weighted_x.nrows() - self.weighted_x.ncols()) as f64;
+        let remainder = df - random_trace;
+        if remainder > 1e-8 * df {
+            remainder / sigma2
+        } else {
+            self.trace()
+        }
+    }
+
+    fn objective(&self, y: &Mat<f64>) -> f64 {
+        let mut logdet = cholesky_logdet(&self.covariance);
+        if let Some(fixed) = &self.fixed {
+            logdet += cholesky_logdet(fixed);
+        }
+        let projected_y = self.apply(y);
+        logdet + (y.transpose() * &projected_y)[(0, 0)]
+    }
+}
+
+fn cholesky_logdet(chol: &Llt<f64>) -> f64 {
+    let l = chol.L();
+    2.0 * (0..l.nrows()).map(|i| l[(i, i)].ln()).sum::<f64>()
+}
+
+fn variance_covariance(
+    z_blocks: &[Mat<f64>],
+    variances: &[f64],
+    sigma2: f64,
+    n: usize,
+) -> Mat<f64> {
+    let mut covariance = Mat::from_fn(n, n, |i, j| if i == j { sigma2 } else { 0.0 });
+    for (z, &variance) in z_blocks.iter().zip(variances) {
+        covariance += variance * (z * z.transpose());
+    }
+    covariance
+}
+
+fn correlated_covariance(z_blocks: &[Mat<f64>], s: &Mat<f64>, sigma2: f64) -> Mat<f64> {
+    let n = z_blocks[0].nrows();
+    let mut covariance = Mat::from_fn(n, n, |i, j| if i == j { sigma2 } else { 0.0 });
+    for (i, zi) in z_blocks.iter().enumerate() {
+        for (j, zj) in z_blocks.iter().enumerate() {
+            covariance += s[(i, j)] * (zi * zj.transpose());
+        }
+    }
+    covariance
+}
+
+fn mm_variance_update(variance: f64, quadratic: f64, trace: f64) -> f64 {
+    if trace > 0.0 {
+        // MM minimizes a*v + b/v, so the update contains a square root.
+        (variance * (quadratic.max(0.0) / trace).sqrt()).max(1e-10)
+    } else {
+        variance
+    }
+}
+
+fn variance_score_norm(
+    y: &Mat<f64>,
+    x: &Mat<f64>,
+    z_blocks: &[Mat<f64>],
+    variances: &[f64],
+    sigma2: f64,
+) -> Result<f64, String> {
+    let n = y.nrows() as f64;
+    let v = variance_covariance(z_blocks, variances, sigma2, y.nrows());
+    let projection = RemlProjection::new(&v, x)?;
+    let py = projection.apply(y);
+    let mut maximum = 0.0_f64;
+    let mut random_trace = 0.0;
+    for (z, &variance) in z_blocks.iter().zip(variances) {
+        let pz = projection.apply(z);
+        let trace = compute_trace_product_ref(&pz, z.transpose());
+        random_trace += variance * trace;
+        let score = 0.5 * (squared_norm(&(z.transpose() * &py)) - trace);
+        let scale = variance.max(sigma2 * n / squared_norm(z).max(f64::MIN_POSITIVE));
+        // At a zero variance, only a positive score violates the KKT condition.
+        let violation = if variance <= 1e-10 {
+            score.max(0.0)
+        } else {
+            score.abs()
+        };
+        maximum = maximum.max(violation * scale / n);
+    }
+    let residual_score =
+        0.5 * (squared_norm(&py) - projection.residual_trace(random_trace, sigma2));
+    let violation = if sigma2 <= 1e-10 {
+        residual_score.max(0.0)
+    } else {
+        residual_score.abs()
+    };
+    Ok(maximum.max(violation * sigma2 / n))
+}
+
 pub fn mm_reml_step(
     y: &Mat<f64>,
     x: &Mat<f64>,
@@ -128,73 +265,26 @@ pub fn mm_reml_step(
     sigma2: f64,
 ) -> Result<(Vec<f64>, f64), String> {
     validate_reml_inputs(y, x, z_blocks, current_variances, sigma2)?;
-
-    let n = y.nrows();
-    let p = x.ncols();
-    let k = z_blocks.len();
-
-    let mut v = Mat::zeros(n, n);
-    for i in 0..n {
-        v[(i, i)] = sigma2;
-    }
-    for (idx, z) in z_blocks.iter().enumerate() {
-        let zzt = z * z.transpose();
-        for i in 0..n {
-            for j in 0..n {
-                v[(i, j)] += current_variances[idx] * zzt[(i, j)];
-            }
-        }
-    }
-
-    let chol_v = Llt::new(v.as_ref(), Side::Lower).map_err(|_| "V not positive definite")?;
-    let v_inv_x = chol_v.solve(x);
-    let xt_vinv_x = x.transpose() * &v_inv_x;
-    let chol_xtvx = if p == 0 {
-        None
-    } else {
-        Some(
-            Llt::new(xt_vinv_x.as_ref(), Side::Lower)
-                .map_err(|_| "X'V^-1 X not positive definite")?,
-        )
-    };
-
-    let project = |rhs: &Mat<f64>| {
-        let v_inv_rhs = chol_v.solve(rhs);
-        if let Some(chol) = &chol_xtvx {
-            let fixed_rhs = x.transpose() * &v_inv_rhs;
-            let fixed_coefficients = chol.solve(&fixed_rhs);
-            &v_inv_rhs - &v_inv_x * &fixed_coefficients
-        } else {
-            v_inv_rhs
-        }
-    };
-
-    let py_vec = project(y);
-    let df = (n - p) as f64;
-
-    let mut new_variances = vec![0.0; k];
-    for (idx, z) in z_blocks.iter().enumerate() {
-        let zt = z.transpose();
-        let pz = project(z);
-        let trace_pzzt = compute_trace_product_ref(&pz, zt);
-
-        let zt_py = zt.as_ref() * &py_vec;
-        let quad_form = squared_norm(&zt_py);
-
-        let c = current_variances[idx] * current_variances[idx];
-        let numerator = quad_form;
-        let denominator = trace_pzzt;
-
-        if denominator.abs() > 1e-10 {
-            new_variances[idx] = (c * numerator / denominator).max(1e-10);
-        } else {
-            new_variances[idx] = current_variances[idx];
-        }
-    }
-
-    let py_quad = squared_norm(&py_vec);
-    let new_sigma2 = (sigma2 * sigma2 * py_quad / df).max(1e-10);
-
+    let v = variance_covariance(z_blocks, current_variances, sigma2, y.nrows());
+    let projection = RemlProjection::new(&v, x)?;
+    let py = projection.apply(y);
+    let mut random_trace = 0.0;
+    let new_variances = z_blocks
+        .iter()
+        .zip(current_variances)
+        .map(|(z, &variance)| {
+            let pz = projection.apply(z);
+            let trace = compute_trace_product_ref(&pz, z.transpose());
+            random_trace += variance * trace;
+            let quadratic = squared_norm(&(z.transpose() * &py));
+            mm_variance_update(variance, quadratic, trace)
+        })
+        .collect();
+    let new_sigma2 = mm_variance_update(
+        sigma2,
+        squared_norm(&py),
+        projection.residual_trace(random_trace, sigma2),
+    );
     Ok((new_variances, new_sigma2))
 }
 
@@ -228,7 +318,7 @@ pub fn mm_reml_iterate(
         variances = new_variances;
         sigma2 = new_sigma2;
 
-        if max_change < tol {
+        if max_change < tol && variance_score_norm(y, x, z_blocks, &variances, sigma2)? < tol {
             return Ok(RemlResult {
                 variance_components: variances,
                 sigma2,
@@ -254,93 +344,87 @@ pub fn augmented_ai_reml_step(
     sigma2: f64,
 ) -> Result<(Vec<f64>, f64, Mat<f64>), String> {
     validate_reml_inputs(y, x, z_blocks, current_variances, sigma2)?;
-
     let n = y.nrows();
-    let p = x.ncols();
     let k = z_blocks.len();
-
-    let mut v = Mat::zeros(n, n);
-    for i in 0..n {
-        v[(i, i)] = sigma2;
+    let v = variance_covariance(z_blocks, current_variances, sigma2, n);
+    let projection = RemlProjection::new(&v, x)?;
+    let py = projection.apply(y);
+    let mut score = vec![0.0; k + 1];
+    let mut actions = Mat::zeros(n, k + 1);
+    let mut random_trace = 0.0;
+    for (i, z) in z_blocks.iter().enumerate() {
+        let pz = projection.apply(z);
+        let coefficients = z.transpose() * &py;
+        let trace = compute_trace_product_ref(&pz, z.transpose());
+        random_trace += current_variances[i] * trace;
+        score[i] = 0.5 * (squared_norm(&coefficients) - trace);
+        actions.col_mut(i).copy_from((z * &coefficients).col(0));
     }
-    for (idx, z) in z_blocks.iter().enumerate() {
-        let zzt = z * z.transpose();
-        for i in 0..n {
-            for j in 0..n {
-                v[(i, j)] += current_variances[idx] * zzt[(i, j)];
+    actions.col_mut(k).copy_from(py.col(0));
+    score[k] = 0.5 * (squared_norm(&py) - projection.residual_trace(random_trace, sigma2));
+    // I_A(i,j) = 0.5 (V_i P y)' P (V_j P y). Batch all projections
+    // and retain only an n by (k+1) workspace, rather than n by n derivatives.
+    let projected_actions = projection.apply(&actions);
+    let information = 0.5 * (actions.transpose() * &projected_actions);
+    let parameters: Vec<f64> = current_variances.iter().copied().chain([sigma2]).collect();
+    let free: Vec<usize> = (0..=k)
+        .filter(|&i| parameters[i] > 1e-10 || score[i] > 0.0)
+        .collect();
+    if free.is_empty() {
+        return Ok((current_variances.to_vec(), sigma2, information));
+    }
+    let free_information = Mat::from_fn(free.len(), free.len(), |i, j| {
+        information[(free[i], free[j])]
+    });
+    let chol = Llt::new(free_information.as_ref(), Side::Lower)
+        .map_err(|_| "AI matrix not positive definite".to_string())?;
+    let delta = chol.solve(&Mat::from_fn(free.len(), 1, |i, _| score[free[i]]));
+    let mut full_parameters = parameters.clone();
+    for (i, &index) in free.iter().enumerate() {
+        full_parameters[index] = (parameters[index] + delta[(i, 0)]).max(1e-10);
+    }
+    let predicted_improvement = |candidate: &[f64]| {
+        2.0 * (0..=k)
+            .map(|i| score[i] * (candidate[i] - parameters[i]))
+            .sum::<f64>()
+    };
+    let mut improvement = predicted_improvement(&full_parameters);
+    if improvement < 0.0 {
+        // Projecting a coupled AI direction onto the variance bounds may
+        // remove ascent. Diagonal scaling retains the score's ascent signs.
+        for &index in &free {
+            full_parameters[index] =
+                (parameters[index] + score[index] / information[(index, index)]).max(1e-10);
+        }
+        improvement = predicted_improvement(&full_parameters);
+    }
+    let full_covariance =
+        variance_covariance(z_blocks, &full_parameters[..k], full_parameters[k], n);
+    let covariance_direction = &full_covariance - &v;
+    let objective = projection.objective(y);
+    let mut step = 1.0;
+    for _ in 0..40 {
+        // All trial points lie on the same feasible parameter segment. V is
+        // linear in the variance components, so reuse one covariance direction
+        // rather than assembling every Z Z' again during step halving.
+        let candidate: Vec<f64> = (0..=k)
+            .map(|i| parameters[i] + step * (full_parameters[i] - parameters[i]))
+            .collect();
+        let candidate_covariance = &v + step * &covariance_direction;
+        if let Ok(candidate_projection) = RemlProjection::new(&candidate_covariance, x) {
+            let candidate_objective = candidate_projection.objective(y);
+            if candidate_objective.is_finite()
+                && candidate_objective
+                    <= objective - 1e-4 * step * improvement.max(0.0)
+                        + 1e-12 * objective.abs().max(1.0)
+                && improvement >= 0.0
+            {
+                return Ok((candidate[..k].to_vec(), candidate[k], information));
             }
         }
+        step *= 0.5;
     }
-
-    let chol_v = Llt::new(v.as_ref(), Side::Lower).map_err(|_| "V not positive definite")?;
-    let v_inv = chol_v.solve(&Mat::<f64>::identity(n, n));
-
-    let xt_vinv = x.transpose() * &v_inv;
-    let xt_vinv_x = &xt_vinv * x;
-    let chol_xtvx =
-        Llt::new(xt_vinv_x.as_ref(), Side::Lower).map_err(|_| "X'V^-1 X not positive definite")?;
-    let xtvx_inv = chol_xtvx.solve(&Mat::<f64>::identity(p, p));
-
-    let mut p_mat = v_inv.clone();
-    let proj = &v_inv * x * &xtvx_inv * &xt_vinv;
-    for i in 0..n {
-        for j in 0..n {
-            p_mat[(i, j)] -= proj[(i, j)];
-        }
-    }
-
-    let py_vec = &p_mat * y;
-
-    let mut score = vec![0.0; k + 1];
-    let mut ai_matrix = Mat::zeros(k + 1, k + 1);
-
-    for (idx, z) in z_blocks.iter().enumerate() {
-        let zt = z.transpose();
-        let pz = &p_mat * z;
-        let zzt = z * zt.as_ref();
-
-        let trace_pzzt = compute_trace_product_ref(&pz, zt);
-        let zt_py = zt.as_ref() * &py_vec;
-        let quad = squared_norm(&zt_py);
-
-        score[idx] = -0.5 * trace_pzzt + 0.5 * quad;
-
-        let pzzt = &p_mat * &zzt;
-        let pzzt_py = &pzzt * &py_vec;
-        ai_matrix[(idx, idx)] = 0.5 * compute_quadratic_form(&pzzt_py, &p_mat);
-
-        for (jdx, z2) in z_blocks.iter().enumerate().skip(idx + 1) {
-            let z2t = z2.transpose();
-            let zz2t = z2 * z2t.as_ref();
-            let cross = 0.5 * compute_quadratic_form(&pzzt_py, &(&p_mat * &zz2t));
-            ai_matrix[(idx, jdx)] = cross;
-            ai_matrix[(jdx, idx)] = cross;
-        }
-
-        let cross_sigma = 0.5 * compute_quadratic_form(&pzzt_py, &p_mat);
-        ai_matrix[(idx, k)] = cross_sigma;
-        ai_matrix[(k, idx)] = cross_sigma;
-    }
-
-    let trace_p = (0..n).map(|i| p_mat[(i, i)]).sum::<f64>();
-    let py_quad = squared_norm(&py_vec);
-    score[k] = -0.5 * trace_p + 0.5 * py_quad;
-
-    let p_py = &p_mat * &py_vec;
-    ai_matrix[(k, k)] = 0.5 * compute_quadratic_form(&p_py, &p_mat);
-
-    let chol_ai =
-        Llt::new(ai_matrix.as_ref(), Side::Lower).map_err(|_| "AI matrix not positive definite")?;
-    let score_mat = Mat::from_fn(k + 1, 1, |i, _| score[i]);
-    let delta = chol_ai.solve(&score_mat);
-
-    let mut new_variances = vec![0.0; k];
-    for i in 0..k {
-        new_variances[i] = (current_variances[i] + delta[(i, 0)]).max(1e-10);
-    }
-    let new_sigma2 = (sigma2 + delta[(k, 0)]).max(1e-10);
-
-    Ok((new_variances, new_sigma2, ai_matrix))
+    Err("AI REML could not find a likelihood-improving step".to_string())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -374,7 +458,7 @@ pub fn augmented_ai_reml_iterate(
         variances = new_variances;
         sigma2 = new_sigma2;
 
-        if max_change < tol {
+        if max_change < tol && variance_score_norm(y, x, z_blocks, &variances, sigma2)? < tol {
             return Ok(RemlResult {
                 variance_components: variances,
                 sigma2,
@@ -392,28 +476,20 @@ pub fn augmented_ai_reml_iterate(
     })
 }
 
-fn spd_exponential(x: &Mat<f64>) -> Mat<f64> {
-    let n = x.nrows();
-    let mut result = Mat::zeros(n, n);
-
-    let mut term = Mat::<f64>::identity(n, n);
-    for i in 0..n {
-        for j in 0..n {
-            result[(i, j)] += term[(i, j)];
-        }
+fn symmetric_exponential(matrix: &Mat<f64>) -> Result<Mat<f64>, String> {
+    let eigen = matrix
+        .self_adjoint_eigen(Side::Lower)
+        .map_err(|_| "Riemannian eigendecomposition did not converge".to_string())?;
+    let eigenvectors = eigen.U();
+    let eigenvalues = eigen.S();
+    let scaled = Mat::from_fn(matrix.nrows(), matrix.ncols(), |i, j| {
+        eigenvectors[(i, j)] * eigenvalues[j].exp()
+    });
+    let result = &scaled * eigenvectors.transpose();
+    if !matrix_is_finite(&result) {
+        return Err("Riemannian covariance update overflowed".to_string());
     }
-
-    for k in 1..20 {
-        term = &term * x;
-        let factor = 1.0 / (1..=k).product::<usize>() as f64;
-        for i in 0..n {
-            for j in 0..n {
-                result[(i, j)] += factor * term[(i, j)];
-            }
-        }
-    }
-
-    result
+    Ok(result)
 }
 
 fn validate_riemannian_inputs(
@@ -467,90 +543,75 @@ fn validate_riemannian_inputs(
     Ok(())
 }
 
-pub fn riemannian_gradient(
+fn covariance_score(
+    projection: &RemlProjection,
+    y: &Mat<f64>,
+    z_blocks: &[Mat<f64>],
+) -> (Mat<f64>, Mat<f64>, Mat<f64>) {
+    let k = z_blocks.len();
+    let py = projection.apply(y);
+    let projected_z: Vec<Mat<f64>> = z_blocks.iter().map(|z| projection.apply(z)).collect();
+    let coefficients: Vec<Mat<f64>> = z_blocks.iter().map(|z| z.transpose() * &py).collect();
+    let mut score = Mat::zeros(k, k);
+    let mut traces = Mat::zeros(k, k);
+    for i in 0..k {
+        for j in 0..=i {
+            let trace = compute_trace_product_ref(&projected_z[i], z_blocks[j].transpose());
+            // Covariance couples the same level in each random-effect block.
+            let quadratic = (coefficients[i].transpose() * &coefficients[j])[(0, 0)];
+            let value = 0.5 * (quadratic - trace);
+            score[(i, j)] = value;
+            score[(j, i)] = value;
+            traces[(i, j)] = trace;
+            traces[(j, i)] = trace;
+        }
+    }
+    (score, py, traces)
+}
+
+fn covariance_score_norm(
     y: &Mat<f64>,
     x: &Mat<f64>,
     z_blocks: &[Mat<f64>],
-    current_s: &Mat<f64>,
+    s: &Mat<f64>,
     sigma2: f64,
-) -> Result<Mat<f64>, String> {
-    validate_riemannian_inputs(y, x, z_blocks, current_s, sigma2)?;
-
-    let n = y.nrows();
-    let p = x.ncols();
-    let k = current_s.nrows();
-
-    let mut v = Mat::zeros(n, n);
-    for i in 0..n {
-        v[(i, i)] = sigma2;
-    }
-
-    for (idx, z) in z_blocks.iter().enumerate() {
-        for (jdx, z2) in z_blocks.iter().enumerate() {
-            let factor = current_s[(idx, jdx)];
-            let zzt = z * z2.transpose();
-            for i in 0..n {
-                for j in 0..n {
-                    v[(i, j)] += factor * zzt[(i, j)];
-                }
-            }
-        }
-    }
-
-    let chol_v = Llt::new(v.as_ref(), Side::Lower).map_err(|_| "V not positive definite")?;
-    let v_inv = chol_v.solve(&Mat::<f64>::identity(n, n));
-
-    let xt_vinv = x.transpose() * &v_inv;
-    let xt_vinv_x = &xt_vinv * x;
-    let chol_xtvx =
-        Llt::new(xt_vinv_x.as_ref(), Side::Lower).map_err(|_| "X'V^-1 X not positive definite")?;
-    let xtvx_inv = chol_xtvx.solve(&Mat::<f64>::identity(p, p));
-
-    let mut p_mat = v_inv.clone();
-    let proj = &v_inv * x * &xtvx_inv * &xt_vinv;
-    for i in 0..n {
-        for j in 0..n {
-            p_mat[(i, j)] -= proj[(i, j)];
-        }
-    }
-
-    let py_vec = &p_mat * y;
-
-    let mut euclidean_grad = Mat::zeros(k, k);
-    for i in 0..k {
-        for j in 0..=i {
-            let zi = &z_blocks[i];
-            let zj = &z_blocks[j];
-            let zi_t = zi.transpose();
-            let zj_t = zj.transpose();
-
-            let pzi = &p_mat * zi;
-
-            let trace_term = compute_trace_product_ref(&pzi, zj_t);
-
-            let zi_py = zi_t.as_ref() * &py_vec;
-            let zj_py = zj_t.as_ref() * &py_vec;
-            let quad_term = {
-                let mut sum = 0.0;
-                for ii in 0..zi.ncols() {
-                    for jj in 0..zj.ncols() {
-                        sum += zi_py[(ii, 0)] * zj_py[(jj, 0)];
-                    }
-                }
-                sum
-            };
-
-            let grad_ij = -0.5 * trace_term + 0.5 * quad_term;
-            euclidean_grad[(i, j)] = grad_ij;
-            if i != j {
-                euclidean_grad[(j, i)] = grad_ij;
-            }
-        }
-    }
-
-    let riemannian_grad = current_s * &euclidean_grad * current_s;
-
-    Ok(riemannian_grad)
+) -> Result<f64, String> {
+    let n = y.nrows() as f64;
+    let v = correlated_covariance(z_blocks, s, sigma2);
+    let projection = RemlProjection::new(&v, x)?;
+    let (score, py, traces) = covariance_score(&projection, y, z_blocks);
+    let scales: Vec<f64> = z_blocks
+        .iter()
+        .enumerate()
+        .map(|(i, z)| {
+            s[(i, i)]
+                .max(sigma2 * n / squared_norm(z).max(f64::MIN_POSITIVE))
+                .sqrt()
+        })
+        .collect();
+    let normalized = Mat::from_fn(s.nrows(), s.ncols(), |i, j| {
+        score[(i, j)] * scales[i] * scales[j] / n
+    });
+    let eigenvalues = normalized
+        .self_adjoint_eigenvalues(Side::Lower)
+        .map_err(|_| "Riemannian score eigendecomposition did not converge".to_string())?;
+    // The PSD-constrained covariance KKT conditions are score <= 0 and
+    // tr(S score) = 0. Positive scores must be detected even as S approaches 0.
+    let positive_score = eigenvalues
+        .into_iter()
+        .fold(0.0_f64, |value, eigen| value.max(eigen));
+    let complementarity = compute_trace_product_ref(s, score.as_ref()).abs() / n;
+    let random_trace = compute_trace_product_ref(s, traces.as_ref());
+    let residual_score =
+        0.5 * (squared_norm(&py) - projection.residual_trace(random_trace, sigma2));
+    let residual = if sigma2 <= 1e-10 {
+        residual_score.max(0.0)
+    } else {
+        residual_score.abs()
+    };
+    Ok(positive_score
+        .max(complementarity)
+        .max(residual * sigma2 / n))
 }
 
 pub fn riemannian_reml_step(
@@ -561,64 +622,47 @@ pub fn riemannian_reml_step(
     sigma2: f64,
     step_size: f64,
 ) -> Result<(Mat<f64>, f64), String> {
+    validate_riemannian_inputs(y, x, z_blocks, current_s, sigma2)?;
     if !step_size.is_finite() || step_size <= 0.0 {
         return Err("step_size must be finite and greater than zero".to_string());
     }
-    let grad = riemannian_gradient(y, x, z_blocks, current_s, sigma2)?;
-
-    let k = current_s.nrows();
-    let chol_s =
-        Llt::new(current_s.as_ref(), Side::Lower).map_err(|_| "S not positive definite")?;
-    let s_inv = chol_s.solve(&Mat::<f64>::identity(k, k));
-
-    let scaled_grad = Mat::from_fn(k, k, |i, j| step_size * grad[(i, j)]);
-    let s_inv_grad = &s_inv * &scaled_grad;
-
-    let exp_term = spd_exponential(&s_inv_grad);
-    let new_s = current_s * &exp_term;
-
-    let n = y.nrows();
-    let p = x.ncols();
-
-    let mut v = Mat::zeros(n, n);
-    for i in 0..n {
-        v[(i, i)] = sigma2;
-    }
-    for (idx, z) in z_blocks.iter().enumerate() {
-        for (jdx, z2) in z_blocks.iter().enumerate() {
-            let factor = current_s[(idx, jdx)];
-            let zzt = z * z2.transpose();
-            for i in 0..n {
-                for j in 0..n {
-                    v[(i, j)] += factor * zzt[(i, j)];
+    let v = correlated_covariance(z_blocks, current_s, sigma2);
+    let projection = RemlProjection::new(&v, x)?;
+    let (score, py, traces) = covariance_score(&projection, y, z_blocks);
+    let chol = Llt::new(current_s.as_ref(), Side::Lower)
+        .map_err(|_| "S not positive definite".to_string())?;
+    let l = chol.L();
+    let tangent = l.transpose() * &score * l;
+    let random_trace = compute_trace_product_ref(current_s, traces.as_ref());
+    let residual_update = mm_variance_update(
+        sigma2,
+        squared_norm(&py),
+        projection.residual_trace(random_trace, sigma2),
+    );
+    let log_residual_ratio = (residual_update / sigma2).ln();
+    let objective = projection.objective(y);
+    let mut step = step_size;
+    for _ in 0..40 {
+        // Congruence with the Cholesky factor keeps the update symmetric and
+        // positive definite, including when a Taylor expansion would fail.
+        if let Ok(exponential) = symmetric_exponential(&(step * &tangent)) {
+            let new_s = l * &exponential * l.transpose();
+            let new_sigma2 = (sigma2 * (step / step_size * log_residual_ratio).exp()).max(1e-10);
+            if Llt::new(new_s.as_ref(), Side::Lower).is_ok() {
+                let v = correlated_covariance(z_blocks, &new_s, new_sigma2);
+                if let Ok(candidate_projection) = RemlProjection::new(&v, x) {
+                    let candidate_objective = candidate_projection.objective(y);
+                    if candidate_objective.is_finite()
+                        && candidate_objective <= objective + 1e-12 * objective.abs().max(1.0)
+                    {
+                        return Ok((new_s, new_sigma2));
+                    }
                 }
             }
         }
+        step *= 0.5;
     }
-
-    let chol_v = Llt::new(v.as_ref(), Side::Lower).map_err(|_| "V not positive definite")?;
-    let v_inv = chol_v.solve(&Mat::<f64>::identity(n, n));
-
-    let xt_vinv = x.transpose() * &v_inv;
-    let xt_vinv_x = &xt_vinv * x;
-    let chol_xtvx =
-        Llt::new(xt_vinv_x.as_ref(), Side::Lower).map_err(|_| "X'V^-1 X not positive definite")?;
-    let xtvx_inv = chol_xtvx.solve(&Mat::<f64>::identity(p, p));
-
-    let mut p_mat = v_inv.clone();
-    let proj = &v_inv * x * &xtvx_inv * &xt_vinv;
-    for i in 0..n {
-        for j in 0..n {
-            p_mat[(i, j)] -= proj[(i, j)];
-        }
-    }
-
-    let py_vec = &p_mat * y;
-    let df = (n - p) as f64;
-    let py_quad = squared_norm(&py_vec);
-    let new_sigma2 = (py_quad / df).max(1e-10);
-
-    Ok((new_s, new_sigma2))
+    Err("Riemannian REML could not find a likelihood-improving step".to_string())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -658,7 +702,7 @@ pub fn riemannian_reml_iterate(
         s = new_s;
         sigma2 = new_sigma2;
 
-        if max_change < tol {
+        if max_change < tol && covariance_score_norm(y, x, z_blocks, &s, sigma2)? < tol {
             let mut variances = vec![0.0; k];
             for i in 0..k {
                 variances[i] = s[(i, i)];
@@ -905,40 +949,138 @@ pub fn riemannian_reml<'py>(
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_mm_reml_basic() {
-        let n = 20;
-        let y = Mat::from_fn(n, 1, |i, _| (i as f64) + 0.5);
-        let x = Mat::from_fn(n, 2, |i, j| if j == 0 { 1.0 } else { i as f64 });
-        let z = Mat::from_fn(n, 4, |i, j| if i / 5 == j { 1.0 } else { 0.0 });
-
-        let result = mm_reml_iterate(&y, &x, &[z], &[1.0], 1.0, 50, 1e-4);
-        assert!(result.is_ok());
+    fn problem() -> (Mat<f64>, Mat<f64>, Vec<Mat<f64>>) {
+        let n = 12;
+        let x = Mat::from_fn(n, 2, |i, j| if j == 0 { 1.0 } else { (i % 3) as f64 - 1.0 });
+        let z = Mat::from_fn(n, 4, |i, j| if i / 3 == j { 1.0 } else { 0.0 });
+        let slope = Mat::from_fn(n, 4, |i, j| z[(i, j)] * x[(i, 1)]);
+        let y = Mat::from_fn(n, 1, |i, _| {
+            1.0 + 0.3 * x[(i, 1)]
+                + 0.7 * (i / 3) as f64
+                + [
+                    0.2, -0.5, 0.7, -0.4, 0.9, 0.1, 0.6, -0.2, 0.5, -0.6, 0.8, -0.3,
+                ][i]
+        });
+        (y, x, vec![z, slope])
     }
 
     #[test]
-    fn test_augmented_ai_reml_basic() {
-        let n = 20;
-        let y = Mat::from_fn(n, 1, |i, _| (i as f64) + 0.5);
-        let x = Mat::from_fn(n, 2, |i, j| if j == 0 { 1.0 } else { i as f64 });
-        let z = Mat::from_fn(n, 4, |i, j| if i / 5 == j { 1.0 } else { 0.0 });
-
-        // Miri checks the iterative numerical path; native tests run the full limit.
-        let maxiter = if cfg!(miri) { 5 } else { 50 };
-        let result = augmented_ai_reml_iterate(&y, &x, &[z], &[1.0], 1.0, maxiter, 1e-4);
-        assert!(result.is_ok());
+    fn residual_trace_handles_saturated_covariance_without_cancellation() {
+        let n = 5;
+        let variance = 1e14;
+        let sigma2 = 1.0;
+        let z = Mat::<f64>::identity(n, n);
+        let x = Mat::zeros(n, 0);
+        let v = variance_covariance(std::slice::from_ref(&z), &[variance], sigma2, n);
+        let projection = RemlProjection::new(&v, &x).unwrap();
+        let random_trace =
+            variance * compute_trace_product_ref(&projection.apply(&z), z.transpose());
+        let actual = projection.residual_trace(random_trace, sigma2);
+        let expected = n as f64 / (variance + sigma2);
+        assert!((actual / expected - 1.0).abs() < 1e-14);
     }
 
     #[test]
-    fn test_riemannian_reml_basic() {
-        let n = 20;
-        let y = Mat::from_fn(n, 1, |i, _| (i as f64) + 0.5);
-        let x = Mat::from_fn(n, 2, |i, j| if j == 0 { 1.0 } else { i as f64 });
-        let z = Mat::from_fn(n, 4, |i, j| if i / 5 == j { 1.0 } else { 0.0 });
+    fn ai_information_matches_dense_derivative_bilinear_forms() {
+        let (y, x, blocks) = problem();
+        let variances = [0.8, 0.2];
+        let sigma2 = 0.6;
+        let (_, _, actual) = augmented_ai_reml_step(&y, &x, &blocks, &variances, sigma2).unwrap();
+        let v = variance_covariance(&blocks, &variances, sigma2, y.nrows());
+        let projection = RemlProjection::new(&v, &x).unwrap();
+        let p = projection.apply(&Mat::<f64>::identity(y.nrows(), y.nrows()));
+        let py = &p * &y;
+        let mut derivatives: Vec<Mat<f64>> = blocks.iter().map(|z| z * z.transpose()).collect();
+        derivatives.push(Mat::<f64>::identity(y.nrows(), y.nrows()));
+        for i in 0..derivatives.len() {
+            for j in 0..derivatives.len() {
+                let expected =
+                    0.5 * (py.transpose() * &derivatives[i] * &p * &derivatives[j] * &py)[(0, 0)];
+                assert!((actual[(i, j)] - expected).abs() < 1e-10);
+            }
+        }
+    }
 
-        let init_s = Mat::from_fn(1, 1, |_, _| 1.0);
-        let maxiter = if cfg!(miri) { 5 } else { 50 };
-        let result = riemannian_reml_iterate(&y, &x, &[z], &init_s, 1.0, maxiter, 1e-4, 0.1);
-        assert!(result.is_ok());
+    #[test]
+    fn covariance_score_matches_reml_likelihood_finite_differences() {
+        let (y, x, blocks) = problem();
+        let s = Mat::from_fn(2, 2, |i, j| if i == j { 0.7 + 0.3 * i as f64 } else { 0.2 });
+        let sigma2 = 0.6;
+        let projection =
+            RemlProjection::new(&correlated_covariance(&blocks, &s, sigma2), &x).unwrap();
+        let (score, _, _) = covariance_score(&projection, &y, &blocks);
+        let epsilon = 1e-5;
+        for i in 0..2 {
+            for j in 0..=i {
+                let mut plus = s.clone();
+                let mut minus = s.clone();
+                plus[(i, j)] += epsilon;
+                minus[(i, j)] -= epsilon;
+                if i != j {
+                    plus[(j, i)] += epsilon;
+                    minus[(j, i)] -= epsilon;
+                }
+                let objective = |s: &Mat<f64>| {
+                    RemlProjection::new(&correlated_covariance(&blocks, s, sigma2), &x)
+                        .unwrap()
+                        .objective(&y)
+                };
+                let derivative = (objective(&plus) - objective(&minus)) / (2.0 * epsilon);
+                let expected = -2.0 * score[(i, j)] * if i == j { 1.0 } else { 2.0 };
+                assert!((derivative - expected).abs() < 1e-7);
+            }
+        }
+    }
+
+    #[test]
+    fn riemannian_large_step_preserves_positive_definiteness_and_likelihood() {
+        let (y, x, blocks) = problem();
+        let s = Mat::from_fn(2, 2, |i, j| if i == j { 0.7 + 0.3 * i as f64 } else { 0.2 });
+        let sigma2 = 0.6;
+        let objective = |s: &Mat<f64>, sigma2: f64| {
+            RemlProjection::new(&correlated_covariance(&blocks, s, sigma2), &x)
+                .unwrap()
+                .objective(&y)
+        };
+        let (updated_s, updated_sigma2) =
+            riemannian_reml_step(&y, &x, &blocks, &s, sigma2, 100.0).unwrap();
+        assert!(Llt::new(updated_s.as_ref(), Side::Lower).is_ok());
+        assert!((updated_s[(0, 1)] - updated_s[(1, 0)]).abs() < 1e-10);
+        assert!(updated_sigma2 > 0.0);
+        assert!(objective(&updated_s, updated_sigma2) < objective(&s, sigma2));
+    }
+
+    #[test]
+    fn iterative_reml_algorithms_improve_a_noisy_mixed_model() {
+        let (y, x, mut blocks) = problem();
+        blocks.truncate(1);
+        let initial =
+            RemlProjection::new(&variance_covariance(&blocks, &[0.8], 0.6, y.nrows()), &x)
+                .unwrap()
+                .objective(&y);
+        for result in [
+            mm_reml_iterate(&y, &x, &blocks, &[0.8], 0.6, 30, 1e-5),
+            augmented_ai_reml_iterate(&y, &x, &blocks, &[0.8], 0.6, 30, 1e-5),
+            riemannian_reml_iterate(
+                &y,
+                &x,
+                &blocks,
+                &Mat::from_fn(1, 1, |_, _| 0.8),
+                0.6,
+                30,
+                1e-5,
+                0.1,
+            ),
+        ] {
+            let result = result.unwrap();
+            let v = variance_covariance(
+                &blocks,
+                &result.variance_components,
+                result.sigma2,
+                y.nrows(),
+            );
+            let objective = RemlProjection::new(&v, &x).unwrap().objective(&y);
+            assert!(objective < initial);
+        }
     }
 }
