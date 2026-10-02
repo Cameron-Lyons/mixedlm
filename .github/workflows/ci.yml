@@ -427,7 +427,12 @@ jobs:
           components: rust-src, rustfmt, clippy
 
       - name: Install cargo-fuzz
-        uses: taiki-e/install-action@cargo-fuzz
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+
+      - name: Verify cargo-fuzz installation
+        run: cargo +nightly fuzz --version
 
       - name: Rust fuzz cache
         uses: Swatinem/rust-cache@v2
