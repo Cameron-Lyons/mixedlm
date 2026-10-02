@@ -450,8 +450,9 @@ jobs:
       - name: Fuzz production sparse factorization and input validation
         working-directory: fuzz
         run: |
-          cargo +nightly fuzz run fuzz_cholesky -- -max_total_time=10
-          cargo +nightly fuzz run fuzz_csc -- -max_total_time=10
+          # Prebuilt cargo-fuzz may default to musl; ASAN needs the runner's GNU target.
+          cargo +nightly fuzz run fuzz_cholesky --target x86_64-unknown-linux-gnu -- -max_total_time=10
+          cargo +nightly fuzz run fuzz_csc --target x86_64-unknown-linux-gnu -- -max_total_time=10
           git diff --exit-code -- Cargo.lock
 
       - name: Upload reproducible fuzz failures
