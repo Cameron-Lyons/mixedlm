@@ -814,6 +814,72 @@ def test_benchmark_random_effect_simulation(benchmark):
     assert np.asarray(result).shape == (1, 400_000)
 
 
+@pytest.mark.benchmark(group="rust-wide-random-effect-simulation")
+@pytest.mark.parametrize("width", [1, 8, 64])
+@pytest.mark.parametrize("correlated", [False, True])
+def test_benchmark_wide_random_effect_simulation(benchmark, width, correlated):
+    factor = np.diag(np.linspace(0.3, 1.2, width))
+    if correlated:
+        factor[np.tril_indices(width, -1)] = 0.05
+    theta = factor[np.tril_indices(width)] if correlated else factor.diagonal().copy()
+    args = (theta, 1.3, [200], [width], [correlated], 128)
+    standard = simulate_re_batch(np.ones(width), 1.0, [200], [width], [False], 128, seed=42)
+    expected = (standard.reshape(128, 200, width) @ (1.3 * factor).T).reshape(128, -1)
+    actual = benchmark(simulate_re_batch, *args, seed=42)
+    np.testing.assert_allclose(actual, expected, rtol=2e-14, atol=2e-14)
+
+
+@pytest.mark.benchmark(group="python-wide-random-effect-simulation")
+@pytest.mark.parametrize("width", [1, 8, 64])
+@pytest.mark.parametrize("correlated", [False, True])
+def test_benchmark_python_random_effect_simulation(benchmark, width, correlated):
+    from mixedlm.matrices.design import RandomEffectStructure
+    from mixedlm.utils.simulation import simulate_random_effects
+
+    factor = np.diag(np.linspace(0.3, 1.2, width))
+    if correlated:
+        factor[np.tril_indices(width, -1)] = 0.05
+    theta = factor[np.tril_indices(width)] if correlated else factor.diagonal().copy()
+    structures = [
+        RandomEffectStructure("group", [f"x{i}" for i in range(width)], 2000, width, correlated, {})
+    ]
+    expected = (np.random.RandomState(42).standard_normal((2000, width)) @ factor.T).ravel()
+
+    def draw():
+        return simulate_random_effects(theta, structures, rng=np.random.RandomState(42))
+
+    np.testing.assert_allclose(benchmark(draw), expected, rtol=2e-14, atol=2e-14)
+
+
+@pytest.mark.benchmark(group="cross-validation-error-scoring")
+@pytest.mark.parametrize("response_scale,weight_scale", [(1.0, 1.0), (1e150, 1e150)])
+def test_benchmark_combined_error_scores(benchmark, response_scale, weight_scale):
+    from mixedlm.inference.cross_validation import _score_metrics
+
+    rng = np.random.default_rng(627)
+    observed = rng.normal(size=100_000) * response_scale
+    predicted = observed + rng.normal(scale=0.3, size=len(observed)) * response_scale
+    weights = rng.uniform(0.5, 2.0, len(observed))
+    # Compute the reference in ordinary units before restoring response units.
+    difference = (observed - predicted) / response_scale
+    mse = np.average(difference**2, weights=weights)
+    expected = {
+        "mse": mse * response_scale * response_scale,
+        "rmse": np.sqrt(mse) * response_scale,
+        "mae": np.average(np.abs(difference), weights=weights) * response_scale,
+    }
+    actual = benchmark(
+        _score_metrics,
+        tuple((name, name) for name in expected),
+        observed,
+        predicted,
+        weights * weight_scale,
+        None,
+    )
+    for name, reference in expected.items():
+        assert actual[name] == pytest.approx(reference, rel=2e-14)
+
+
 @pytest.mark.benchmark(group="multiplicity-adjustment")
 @pytest.mark.parametrize("method", ["holm", "fdr"])
 def test_benchmark_large_pvalue_adjustment(benchmark, method):

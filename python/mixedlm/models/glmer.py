@@ -438,6 +438,15 @@ class GlmerResult(MerResultMixin):
         -------
         NDArray or PredictResult
             Predictions. Returns PredictResult if se_fit=True or interval!="none".
+
+        Notes
+        -----
+        Standard errors use the final PIRLS working approximation with fitted
+        covariance parameters held fixed. Conditional predictions include the
+        joint fixed/random-effect covariance. Allowed new grouping levels add
+        their prior random-effect variance on the link scale. Response-scale
+        standard errors use the delta method, and confidence limits transform
+        the link-scale interval.
         """
         level = _validate_confidence_level(level)
         if not isinstance(type, str) or type not in ("response", "link"):
@@ -455,6 +464,7 @@ class GlmerResult(MerResultMixin):
                 include_re=include_re,
                 extra_columns=(offset,) if isinstance(offset, str) else (),
             )
+        random_design: tuple[sparse.csr_matrix, NDArray[np.floating]] | None = None
 
         if newdata is None:
             if offset is not None:
@@ -470,7 +480,11 @@ class GlmerResult(MerResultMixin):
             eta = X @ self.beta + prediction_offset
 
             if include_re:
-                eta = self._add_random_effects_to_eta(eta, newdata, allow_new_levels)
+                if se_fit or interval != "none":
+                    random_design = self._prediction_random_matrix(newdata, allow_new_levels)
+                    eta += random_design[0] @ self.u
+                else:
+                    eta = self._add_random_effects_to_eta(eta, newdata, allow_new_levels)
 
         if not se_fit and interval == "none":
             if type == "link":
@@ -478,9 +492,8 @@ class GlmerResult(MerResultMixin):
             else:
                 return self.family.link.inverse(eta)
 
-        vcov_beta = self.vcov()
-        var_eta = dense_quadratic_form_diagonal(X, vcov_beta)
-        se_eta = np.sqrt(np.maximum(var_eta, 0.0))
+        var_eta = self._compute_prediction_variance(X, random_design, include_re=include_re)
+        se_eta = np.sqrt(var_eta)
 
         lower = upper = None
         if interval == "confidence":
@@ -507,6 +520,34 @@ class GlmerResult(MerResultMixin):
         """Add random effects contribution to linear predictor."""
         eta += self._random_effect_prediction_contrib(newdata, allow_new_levels, self.u)
         return eta
+
+    def _compute_prediction_variance(
+        self,
+        X: NDArray[np.floating],
+        random_design: tuple[sparse.csr_matrix, NDArray[np.floating]] | None,
+        *,
+        include_re: bool,
+    ) -> NDArray[np.floating]:
+        """Approximate link-scale mean variance from the joint working precision."""
+        vcov_beta = self.vcov()
+        if not include_re or self.matrices.n_random == 0:
+            return np.maximum(dense_quadratic_form_diagonal(X, vcov_beta), 0.0)
+
+        Z_pred: sparse.csr_matrix
+        prior_var: NDArray[np.floating]
+        if random_design is None:
+            Z_pred = self.matrices.Z.tocsr()
+            prior_var = np.zeros(X.shape[0], dtype=np.float64)
+        else:
+            Z_pred, prior_var = random_design
+
+        projection = self._working_projection
+        assert projection.random_factor is not None
+        transformed_Z = (Z_pred @ projection.Lambda).tocsr()
+        adjusted_X = X - np.asarray(transformed_Z @ projection.random_fixed_map)
+        var_fixed = dense_quadratic_form_diagonal(adjusted_X, vcov_beta)
+        var_random = projection.random_factor.quadratic_diagonal(transformed_Z)
+        return np.maximum(var_fixed + var_random + prior_var, 0.0)
 
     def vcov(self) -> NDArray[np.floating]:
         if self.matrices.n_fixed == 0:

@@ -17,8 +17,10 @@ from mixedlm.matrices.design import (
     _numeric_response,
     _random_term_columns,
     _restore_binomial_factor,
+    build_random_matrix,
 )
 from mixedlm.models.lmer_types import ModelTerms, RanefResult, RePCA, RePCAGroup, VarCorrGroup
+from mixedlm.models.shared_utils import sparse_covariance_factor_diagonal
 from mixedlm.utils.dataframe import (
     concat_columns_as_string,
     copy_dataframe,
@@ -159,6 +161,17 @@ class MerResultMixin:
         if missing:
             names = ", ".join(repr(name) for name in missing)
             raise ValueError(f"New data is missing {kind} variable(s): {names}.")
+        if kind == "random-effect":
+            missing_groups = sorted(
+                name
+                for name in self.formula.grouping_factors
+                if pd.isna(get_column_numpy(data, name)).any()
+            )
+            if missing_groups:
+                names = ", ".join(repr(name) for name in missing_groups)
+                raise ValueError(
+                    f"New data contains missing values in grouping factor(s): {names}."
+                )
 
         for name, fitted_levels in self.matrices.category_levels.items():
             if name not in variables:
@@ -528,6 +541,129 @@ class MerResultMixin:
             contrib[known_mask] += block_contrib
 
         return contrib
+
+    def _prediction_random_matrix(
+        self,
+        newdata: Any,
+        allow_new_levels: bool,
+        *,
+        scale: float = 1.0,
+    ) -> tuple[sparse.csr_matrix, NDArray[np.floating]]:
+        """Align new-data random-effect columns to the fitted coefficient order."""
+        fitted_structures = self.matrices.random_structures
+        data = self._validated_prediction_data(
+            newdata,
+            self.formula.random_variables | self.formula.grouping_factors,
+            "random-effect",
+        )
+        Z, new_structures = build_random_matrix(
+            self.formula,
+            data,
+            contrasts=self.matrices.contrasts,
+            category_levels=self.matrices.category_levels,
+        )
+        n_pred = Z.shape[0]
+        if len(new_structures) != len(fitted_structures):
+            raise ValueError("New data produced an incompatible random-effects structure")
+
+        from mixedlm.utils.variance import getL
+
+        level_factors = cast(
+            list[NDArray[np.floating]],
+            getL(self.theta, fitted_structures, sigma=scale, as_blocks=True),
+        )
+
+        known_rows: list[NDArray[np.integer]] = []
+        known_cols: list[NDArray[np.integer]] = []
+        known_values: list[NDArray[np.floating]] = []
+        prior_var = np.zeros(n_pred, dtype=np.float64)
+        fitted_offset = 0
+        new_offset = 0
+
+        for fitted, new, level_factor in zip(
+            fitted_structures, new_structures, level_factors, strict=True
+        ):
+            if fitted.grouping_factor != new.grouping_factor:
+                raise ValueError("New data produced an incompatible random-effects structure")
+
+            # The fitted contrast schema reproduces columns in their original order.
+            # Names can coincide (e.g. an encoded factor and a literal column), so
+            # their positions must retain identity instead of matching by a dict.
+            if new.term_names != fitted.term_names:
+                raise ValueError(
+                    f"New data produced incompatible random-effect columns for "
+                    f"'{fitted.grouping_factor}'"
+                )
+            mapped_terms = np.arange(fitted.n_terms, dtype=np.int64)
+
+            fitted_string_levels = {
+                str(fitted_level): index for fitted_level, index in fitted.level_map.items()
+            }
+            new_levels: list[Any | None] = [None] * new.n_levels
+            for stored_level, index in new.level_map.items():
+                new_levels[index] = stored_level
+
+            mapped_levels = np.full(new.n_levels, -1, dtype=np.int64)
+            unknown_levels: list[Any] = []
+            for index, candidate_level in enumerate(new_levels):
+                if candidate_level in fitted.level_map:
+                    mapped_levels[index] = fitted.level_map[candidate_level]
+                elif str(candidate_level) in fitted_string_levels:
+                    mapped_levels[index] = fitted_string_levels[str(candidate_level)]
+                else:
+                    unknown_levels.append(candidate_level)
+
+            if unknown_levels and not allow_new_levels:
+                raise ValueError(
+                    f"New level '{unknown_levels[0]}' in grouping factor "
+                    f"'{fitted.grouping_factor}'. Set allow_new_levels=True to predict "
+                    "with random effects = 0."
+                )
+
+            new_width = new.n_levels * new.n_terms
+            block = Z[:, new_offset : new_offset + new_width].tocoo()
+            entry_levels = block.col // new.n_terms
+            entry_terms = block.col % new.n_terms
+            target_levels = mapped_levels[entry_levels]
+            target_terms = mapped_terms[entry_terms]
+            known = target_levels >= 0
+
+            if np.any(known):
+                known_rows.append(block.row[known])
+                known_cols.append(
+                    fitted_offset + target_levels[known] * fitted.n_terms + target_terms[known]
+                )
+                known_values.append(block.data[known])
+
+            unknown = ~known
+            if np.any(unknown):
+                unknown_rows, compact_rows = np.unique(block.row[unknown], return_inverse=True)
+                unknown_design = sparse.csr_matrix(
+                    (block.data[unknown], (compact_rows, target_terms[unknown])),
+                    shape=(len(unknown_rows), fitted.n_terms),
+                )
+                prior_var[unknown_rows] += sparse_covariance_factor_diagonal(
+                    unknown_design, level_factor
+                )
+
+            fitted_offset += fitted.n_levels * fitted.n_terms
+            new_offset += new_width
+
+        if known_values:
+            rows = np.concatenate(known_rows)
+            cols = np.concatenate(known_cols)
+            values = np.concatenate(known_values)
+        else:
+            rows = np.array([], dtype=np.int64)
+            cols = np.array([], dtype=np.int64)
+            values = np.array([], dtype=np.float64)
+
+        aligned = sparse.csr_matrix(
+            (values, (rows, cols)),
+            shape=(n_pred, self.matrices.n_random),
+            dtype=np.float64,
+        )
+        return aligned, prior_var
 
     def _coerce_new_response(self, newresp: ArrayLike | None) -> NDArray[np.floating]:
         if newresp is None:

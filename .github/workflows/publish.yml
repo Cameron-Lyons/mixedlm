@@ -15,6 +15,7 @@ jobs:
   build-wheels:
     name: Build wheels on ${{ matrix.os }} (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -37,7 +38,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
       - name: Set up Python
+        id: python
         uses: actions/setup-python@v7
         with:
           python-version: "3.12"
@@ -59,6 +64,16 @@ jobs:
           python -I tools/native_build.py
           python -I tools/check_wheel.py
 
+      - name: Run installed-wheel numerical and thread regressions
+        shell: bash
+        env:
+          CI_PYTHON_EXECUTABLE: ${{ steps.python.outputs.python-path }}
+        run: |
+          uv sync --locked --no-install-project --python "$CI_PYTHON_EXECUTABLE"
+          uv pip install --no-deps dist/*.whl
+          uv run --no-sync python -I tools/check_wheel.py
+          uv run --no-sync python -I -m pytest tests/test_statistical_golden.py tests/test_joint_pnls.py tests/test_lmm_prepared_threads.py tests/test_prepared_glmm_threads.py tests/test_random_effect_simulation.py tests/test_glmm_prediction_uncertainty.py tests/test_cross_validation_scores.py --strict-config --strict-markers -ra
+
       - name: Upload wheels
         uses: actions/upload-artifact@v7
         with:
@@ -68,6 +83,7 @@ jobs:
   build-wheels-free-threaded:
     name: Build free-threaded wheels on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -82,7 +98,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
       - name: Set up Python 3.14t
+        id: python
         uses: actions/setup-python@v7
         with:
           python-version: "3.14t"
@@ -101,6 +121,17 @@ jobs:
           python -m pip install --force-reinstall dist/*.whl
           python -I tools/native_build.py
           python -I tools/check_wheel.py --expect-free-threaded
+
+      - name: Run installed-wheel numerical and thread regressions
+        shell: bash
+        env:
+          CI_PYTHON_EXECUTABLE: ${{ steps.python.outputs.python-path }}
+        run: |
+          # Polars has no free-threaded wheels; this suite uses core dependencies.
+          uv sync --locked --no-install-project --python "$CI_PYTHON_EXECUTABLE" --no-install-package polars --no-install-package polars-runtime-32
+          uv pip install --no-deps dist/*.whl
+          uv run --no-sync python -I tools/check_wheel.py --expect-free-threaded
+          uv run --no-sync python -I -m pytest tests/test_statistical_golden.py tests/test_joint_pnls.py tests/test_lmm_prepared_threads.py tests/test_prepared_glmm_threads.py tests/test_random_effect_simulation.py tests/test_glmm_prediction_uncertainty.py tests/test_cross_validation_scores.py --strict-config --strict-markers -ra
 
       - name: Upload wheels
         uses: actions/upload-artifact@v7

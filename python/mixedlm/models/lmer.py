@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import cached_property
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 
 from mixedlm.estimation.reml import LMMOptimizer, _build_lambda, _count_theta
 from mixedlm.formula.terms import Formula
-from mixedlm.matrices.design import ModelMatrices, build_random_matrix
+from mixedlm.matrices.design import ModelMatrices
 from mixedlm.models.lmer_types import (
     LogLik,
     ModelTerms,
@@ -455,7 +455,7 @@ class LmerResult(MerResultMixin):
             )
             if np.any(prediction_weights <= 0):
                 raise ValueError("Prediction weights must be strictly positive.")
-        pred_matrices: ModelMatrices | None = None
+        random_design: tuple[sparse.csr_matrix, NDArray[np.floating]] | None = None
 
         if newdata is None:
             if offset is not None:
@@ -473,39 +473,21 @@ class LmerResult(MerResultMixin):
             pred = X @ self.beta + prediction_offset
 
             if include_re:
-                pred = self._add_random_effects_to_pred(pred, newdata, allow_new_levels)
-
-            if include_re and (se_fit or interval != "none"):
-                Z, random_structures = build_random_matrix(
-                    self.formula,
-                    newdata,
-                    contrasts=self.matrices.contrasts,
-                    category_levels=self.matrices.category_levels,
-                )
-                n_pred = X.shape[0]
-                pred_matrices = ModelMatrices(
-                    y=np.empty(n_pred, dtype=np.float64),
-                    X=X,
-                    Z=Z,
-                    fixed_names=self.matrices.fixed_names,
-                    random_structures=random_structures,
-                    n_obs=n_pred,
-                    n_fixed=X.shape[1],
-                    n_random=Z.shape[1],
-                    weights=np.ones(n_pred, dtype=np.float64),
-                    offset=np.zeros(n_pred, dtype=np.float64),
-                    category_levels=self.matrices.category_levels,
-                    contrasts=self.matrices.contrasts,
-                )
+                if se_fit or interval != "none":
+                    random_design = self._prediction_random_matrix(
+                        newdata, allow_new_levels, scale=self.sigma
+                    )
+                    pred += random_design[0] @ self.u
+                else:
+                    pred = self._add_random_effects_to_pred(pred, newdata, allow_new_levels)
 
         if not se_fit and interval == "none":
             return pred
 
         var_fit = self._compute_prediction_variance(
             X,
-            pred_matrices,
+            random_design,
             include_re=include_re,
-            allow_new_levels=allow_new_levels,
         )
         se = np.sqrt(var_fit)
 
@@ -553,10 +535,9 @@ class LmerResult(MerResultMixin):
     def _compute_prediction_variance(
         self,
         X: NDArray[np.floating],
-        pred_matrices: ModelMatrices | None,
+        random_design: tuple[sparse.csr_matrix, NDArray[np.floating]] | None,
         *,
         include_re: bool,
-        allow_new_levels: bool,
     ) -> NDArray[np.floating]:
         """Compute pointwise mixed-model mean-prediction variance."""
         q = self.matrices.n_random
@@ -566,13 +547,11 @@ class LmerResult(MerResultMixin):
 
         Z_pred: sparse.csr_matrix
         prior_var: NDArray[np.floating]
-        if pred_matrices is None:
+        if random_design is None:
             Z_pred = self.matrices.Z.tocsr()
             prior_var = np.zeros(X.shape[0], dtype=np.float64)
         else:
-            Z_pred, prior_var = self._align_prediction_random_matrix(
-                pred_matrices, allow_new_levels
-            )
+            Z_pred, prior_var = random_design
 
         projection = self._weighted_projection
         assert projection.lambda_matrix is not None and projection.random_factor is not None
@@ -584,114 +563,6 @@ class LmerResult(MerResultMixin):
         var_random = self.sigma**2 * projection.random_factor.quadratic_diagonal(transformed_Z)
 
         return np.maximum(var_fixed + var_random + prior_var, 0.0)
-
-    def _align_prediction_random_matrix(
-        self,
-        pred_matrices: ModelMatrices,
-        allow_new_levels: bool,
-    ) -> tuple[sparse.csr_matrix, NDArray[np.floating]]:
-        """Align new-data random-effect columns to the fitted coefficient order."""
-        fitted_structures = self.matrices.random_structures
-        new_structures = pred_matrices.random_structures
-        if len(new_structures) != len(fitted_structures):
-            raise ValueError("New data produced an incompatible random-effects structure")
-
-        from mixedlm.utils.variance import getL
-
-        level_factors = cast(
-            list[NDArray[np.floating]],
-            getL(self.theta, fitted_structures, sigma=self.sigma, as_blocks=True),
-        )
-
-        known_rows: list[NDArray[np.integer]] = []
-        known_cols: list[NDArray[np.integer]] = []
-        known_values: list[NDArray[np.floating]] = []
-        prior_var = np.zeros(pred_matrices.n_obs, dtype=np.float64)
-        fitted_offset = 0
-        new_offset = 0
-
-        for fitted, new, level_factor in zip(
-            fitted_structures, new_structures, level_factors, strict=True
-        ):
-            if fitted.grouping_factor != new.grouping_factor:
-                raise ValueError("New data produced an incompatible random-effects structure")
-
-            term_indices = {name: index for index, name in enumerate(fitted.term_names)}
-            if set(new.term_names) != set(fitted.term_names):
-                raise ValueError(
-                    f"New data produced incompatible random-effect columns for "
-                    f"'{fitted.grouping_factor}'"
-                )
-            mapped_terms = np.asarray(
-                [term_indices[name] for name in new.term_names], dtype=np.int64
-            )
-
-            fitted_string_levels = {
-                str(fitted_level): index for fitted_level, index in fitted.level_map.items()
-            }
-            new_levels: list[Any | None] = [None] * new.n_levels
-            for stored_level, index in new.level_map.items():
-                new_levels[index] = stored_level
-
-            mapped_levels = np.full(new.n_levels, -1, dtype=np.int64)
-            unknown_levels: list[Any] = []
-            for index, candidate_level in enumerate(new_levels):
-                if candidate_level in fitted.level_map:
-                    mapped_levels[index] = fitted.level_map[candidate_level]
-                elif str(candidate_level) in fitted_string_levels:
-                    mapped_levels[index] = fitted_string_levels[str(candidate_level)]
-                else:
-                    unknown_levels.append(candidate_level)
-
-            if unknown_levels and not allow_new_levels:
-                raise ValueError(
-                    f"New level '{unknown_levels[0]}' in grouping factor "
-                    f"'{fitted.grouping_factor}'. Set allow_new_levels=True to predict "
-                    "with random effects = 0."
-                )
-
-            new_width = new.n_levels * new.n_terms
-            block = pred_matrices.Z[:, new_offset : new_offset + new_width].tocoo()
-            entry_levels = block.col // new.n_terms
-            entry_terms = block.col % new.n_terms
-            target_levels = mapped_levels[entry_levels]
-            target_terms = mapped_terms[entry_terms]
-            known = target_levels >= 0
-
-            if np.any(known):
-                known_rows.append(block.row[known])
-                known_cols.append(
-                    fitted_offset + target_levels[known] * fitted.n_terms + target_terms[known]
-                )
-                known_values.append(block.data[known])
-
-            unknown = ~known
-            if np.any(unknown):
-                unknown_design = sparse.coo_matrix(
-                    (block.data[unknown], (block.row[unknown], target_terms[unknown])),
-                    shape=(pred_matrices.n_obs, fitted.n_terms),
-                ).toarray()
-                prior_cov = level_factor @ level_factor.T
-                prior_var += np.sum((unknown_design @ prior_cov) * unknown_design, axis=1)
-
-            fitted_offset += fitted.n_levels * fitted.n_terms
-            new_offset += new_width
-
-        if known_values:
-            rows = np.concatenate(known_rows)
-            cols = np.concatenate(known_cols)
-            values = np.concatenate(known_values)
-        else:
-            rows = np.array([], dtype=np.int64)
-            cols = np.array([], dtype=np.int64)
-            values = np.array([], dtype=np.float64)
-
-        aligned = sparse.csr_matrix(
-            (values, (rows, cols)),
-            shape=(pred_matrices.n_obs, self.matrices.n_random),
-            dtype=np.float64,
-        )
-        return aligned, prior_var
 
     def vcov(self) -> NDArray[np.floating]:
         if self.matrices.n_fixed == 0:

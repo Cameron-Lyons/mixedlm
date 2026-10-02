@@ -160,6 +160,14 @@ mae = mlm.weighted_mae(y_true, y_pred, weights)
 r2 = mlm.weighted_r2(y_true, y_pred, weights)
 ```
 
+Inputs must be aligned, finite, unmasked real vectors with strictly positive weights.
+Scores remain stable across extreme response and weight units by scaling intermediate
+products. RMSE can remain finite even when its squared value exceeds floating-point range;
+MSE returns infinity when the final squared score is unrepresentable. R² retains small
+weights attached to large observations, and constant responses score one for exact
+predictions and zero otherwise. Fold means and sample standard deviations also avoid
+overflow from intermediate sums and squares.
+
 ## Model Comparison
 
 ### model_selection

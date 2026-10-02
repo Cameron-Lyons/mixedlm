@@ -7,9 +7,16 @@ use rand::prelude::*;
 use rayon::prelude::*;
 use std::sync::OnceLock;
 
+use crate::csc::validate_i64_parts;
+
+enum SimulationFactor {
+    Diagonal(Vec<f64>),
+    Correlated(Mat<f64>),
+}
+
 struct SimulationBlock {
     n_levels: usize,
-    factor: Mat<f64>,
+    factor: SimulationFactor,
 }
 
 const ZIG_NORM_R: f64 = 3.654_152_885_361_009;
@@ -164,20 +171,23 @@ fn build_simulation_blocks(
     let mut theta_idx = 0;
 
     for ((&levels, &q), &is_correlated) in n_levels.iter().zip(n_terms).zip(correlated) {
-        let mut factor = Mat::zeros(q, q);
-        if is_correlated {
+        let factor = if is_correlated {
+            let mut factor = Mat::zeros(q, q);
             for i in 0..q {
                 for j in 0..=i {
                     factor[(i, j)] = theta[theta_idx] * sigma;
                     theta_idx += 1;
                 }
             }
+            SimulationFactor::Correlated(factor)
         } else {
-            for i in 0..q {
-                factor[(i, i)] = theta[theta_idx] * sigma;
-                theta_idx += 1;
-            }
-        }
+            let factor = theta[theta_idx..theta_idx + q]
+                .iter()
+                .map(|value| value * sigma)
+                .collect();
+            theta_idx += q;
+            SimulationFactor::Diagonal(factor)
+        };
         blocks.push(SimulationBlock {
             n_levels: levels,
             factor,
@@ -192,21 +202,36 @@ fn simulate_re_single(blocks: &[SimulationBlock], rng: &mut impl Rng, u: &mut [f
     let mut standard_normal = StandardNormalSampler::default();
 
     for block in blocks {
-        let q = block.factor.nrows();
-        let mut z = vec![0.0; q];
-        for _ in 0..block.n_levels {
-            for value in &mut z {
-                *value = standard_normal.sample(rng);
-            }
-
-            for i in 0..q {
-                let mut sum = 0.0;
-                for (j, value) in z.iter().take(i + 1).enumerate() {
-                    sum += block.factor[(i, j)] * value;
+        match &block.factor {
+            SimulationFactor::Diagonal(factor) => {
+                // Independent coefficients require one multiply per draw and
+                // no dense covariance factor or temporary normal vector.
+                for _ in 0..block.n_levels {
+                    for &scale in factor {
+                        u[u_idx] = scale * standard_normal.sample(rng);
+                        u_idx += 1;
+                    }
                 }
-                u[u_idx + i] = sum;
             }
-            u_idx += q;
+            SimulationFactor::Correlated(factor) => {
+                let q = factor.nrows();
+                for _ in 0..block.n_levels {
+                    let values = &mut u[u_idx..u_idx + q];
+                    for value in values.iter_mut() {
+                        *value = standard_normal.sample(rng);
+                    }
+                    // Descending rows retain the original normals needed by
+                    // each lower-triangular product, so the output is scratch.
+                    for i in (0..q).rev() {
+                        let mut sum = 0.0;
+                        for j in 0..=i {
+                            sum += factor[(i, j)] * values[j];
+                        }
+                        values[i] = sum;
+                    }
+                    u_idx += q;
+                }
+            }
         }
     }
 }
@@ -327,7 +352,7 @@ pub fn simulate_re_batch<'py>(
         .ok_or_else(|| PyValueError::new_err("simulation output is too large"))?;
 
     let blocks = build_simulation_blocks(theta, sigma, &n_levels, &n_terms, &correlated);
-    let results = simulate_re_batch_impl(&blocks, total_dim, n_sim, seed);
+    let results = py.detach(|| simulate_re_batch_impl(&blocks, total_dim, n_sim, seed));
     let array = Array2::from_shape_vec((n_sim, total_dim), results)
         .map_err(|error| PyValueError::new_err(error.to_string()))?;
 
@@ -356,19 +381,36 @@ pub fn compute_zu<'py>(
     let z_data_slice = z_data.as_slice()?;
     let z_indices_slice = z_indices.as_slice()?;
     let z_indptr_slice = z_indptr.as_slice()?;
-    let (_nrows, ncols) = z_shape;
-
-    let mut result = vec![0.0; n_obs];
-
-    for j in 0..ncols {
-        let col_start = z_indptr_slice[j] as usize;
-        let col_end = z_indptr_slice[j + 1] as usize;
-
-        for idx in col_start..col_end {
-            let i = z_indices_slice[idx] as usize;
-            result[i] += z_data_slice[idx] * u_slice[j];
-        }
+    if n_obs != z_shape.0 {
+        return Err(PyValueError::new_err(format!(
+            "n_obs must equal the design row count {}, got {n_obs}",
+            z_shape.0
+        )));
     }
+    if u_slice.len() != z_shape.1 {
+        return Err(PyValueError::new_err(format!(
+            "u must contain exactly {} values, got {}",
+            z_shape.1,
+            u_slice.len()
+        )));
+    }
+    let (row_indices, col_offsets, _) =
+        validate_i64_parts(z_data_slice.len(), z_indices_slice, z_indptr_slice, z_shape)?;
+    // Detached computation must not borrow a Python array that another thread
+    // can mutate while the GIL is released.
+    let coefficients = u_slice.to_vec();
+    let values = z_data_slice.to_vec();
+    let result = py.detach(|| {
+        let mut result = vec![0.0; n_obs];
+        for (column, &coefficient) in coefficients.iter().enumerate() {
+            // Multiply before accumulating duplicate entries, in the original
+            // CSC order. Canonicalizing first can overflow or change cancellation.
+            for index in col_offsets[column]..col_offsets[column + 1] {
+                result[row_indices[index]] += values[index] * coefficient;
+            }
+        }
+        result
+    });
 
     Ok(PyArray1::from_vec(py, result).into())
 }
