@@ -82,8 +82,6 @@ def test_detached_singular_system_preserves_failure_value(reml, method, expected
 @pytest.mark.parametrize("change_layout", [False, True])
 @pytest.mark.parametrize("method", ["deviance", "evaluate"])
 def test_evaluation_releases_interpreter_lock_and_snapshots_parameters(change_layout, method):
-    if not getattr(sys, "_is_gil_enabled", lambda: True)():
-        pytest.skip("Interpreter lock is already disabled")
     # Isolate the long switch interval from the test runner. A large random-
     # intercept problem gives the waiting thread time to run during one solve.
     script = textwrap.dedent("""
@@ -94,6 +92,7 @@ def test_evaluation_releases_interpreter_lock_and_snapshots_parameters(change_la
         from scipy import sparse
         from mixedlm import _rust
 
+        assert getattr(sys, "_is_gil_enabled", lambda: True)(), "This test requires the GIL"
         rng = np.random.default_rng(713)
         n = 3_000_000
         z = sparse.csc_matrix((np.ones(n), np.arange(n), np.array([0, n])), shape=(n, 1))
@@ -132,7 +131,14 @@ def test_evaluation_releases_interpreter_lock_and_snapshots_parameters(change_la
     """)
     if change_layout:
         script = script.replace("theta[:] = 2", "theta[:] = 2; theta.shape = ()")
-    env = dict(os.environ, OPENBLAS_NUM_THREADS="1", OMP_NUM_THREADS="1", RAYON_NUM_THREADS="1")
+    # Test GIL release explicitly, regardless of the parent's current GIL state.
+    env = dict(
+        os.environ,
+        PYTHON_GIL="1",
+        OPENBLAS_NUM_THREADS="1",
+        OMP_NUM_THREADS="1",
+        RAYON_NUM_THREADS="1",
+    )
     result = subprocess.run(
         [sys.executable, "-c", script, method], env=env, text=True, capture_output=True, timeout=50
     )

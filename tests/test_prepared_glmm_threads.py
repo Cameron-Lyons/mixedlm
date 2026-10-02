@@ -75,8 +75,6 @@ def test_detached_errors_do_not_damage_shared_problem():
 
 @pytest.mark.parametrize("change_layout", [False, True])
 def test_evaluation_releases_interpreter_lock_and_snapshots_parameters(change_layout):
-    if not getattr(sys, "_is_gil_enabled", lambda: True)():
-        pytest.skip("Interpreter lock is already disabled")
     # Isolate the long switch interval from the test runner and other tests.
     script = textwrap.dedent("""
         import json
@@ -86,6 +84,7 @@ def test_evaluation_releases_interpreter_lock_and_snapshots_parameters(change_la
         from mixedlm.estimation.laplace import _prepare_native_glmm
         from tests.test_glmm_final_state import mode_problem
 
+        assert getattr(sys, "_is_gil_enabled", lambda: True)(), "This test requires the GIL"
         matrices, family, theta = mode_problem('poisson', 'mode_only', n_obs=65536, n_groups=64)
         problem = _prepare_native_glmm(matrices, family)
         backing = np.zeros(2 * matrices.n_obs)
@@ -119,7 +118,14 @@ def test_evaluation_releases_interpreter_lock_and_snapshots_parameters(change_la
     """)
     if change_layout:
         script = script.replace("theta[:] = 2", "theta[:] = 2; theta.shape = ()")
-    env = dict(os.environ, OPENBLAS_NUM_THREADS="1", OMP_NUM_THREADS="1", RAYON_NUM_THREADS="1")
+    # Test GIL release explicitly, regardless of the parent's current GIL state.
+    env = dict(
+        os.environ,
+        PYTHON_GIL="1",
+        OPENBLAS_NUM_THREADS="1",
+        OMP_NUM_THREADS="1",
+        RAYON_NUM_THREADS="1",
+    )
     result = subprocess.run(
         [sys.executable, "-c", script], env=env, text=True, capture_output=True, timeout=40
     )

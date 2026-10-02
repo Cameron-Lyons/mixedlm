@@ -26,7 +26,9 @@ def nlmm_model():
         asym = 200.0 + rng.normal(0.0, 12.0)
         r0 = 175.0 + rng.normal(0.0, 6.0)
         lrc = -2.8 + rng.normal(0.0, 0.1)
-        for time in np.linspace(0.0, 10.0, 10):
+        # Observe the approach to the asymptote so all three fixed parameters
+        # are identified before testing their reported uncertainty.
+        for time in np.linspace(0.0, 60.0, 15):
             response = asym - (asym - r0) * np.exp(-np.exp(lrc) * time)
             rows.append(
                 {
@@ -36,13 +38,18 @@ def nlmm_model():
                 }
             )
     data = pd.DataFrame(rows)
-    return nlmer(
+    result = nlmer(
         nlme.SSasymp(),
         data,
         x_var="time",
         y_var="response",
         group_var="subject",
+        start={"Asym": 200.0, "R0": 175.0, "lrc": -2.8},
     )
+    assert result.converged and result.pnls_converged
+    variances = np.diag(result.vcov())
+    assert np.all(np.isfinite(variances)) and np.all(variances > 0)
+    return result
 
 
 class TestTidyFixedEffects:
