@@ -287,6 +287,27 @@ class Family(ABC):
         weights = np.ones_like(y, dtype=np.float64) if wt is None else wt
         return self.deviance_resids(y, mu, weights)
 
+    def log_likelihood(
+        self,
+        y: NDArray[np.floating],
+        mu: NDArray[np.floating],
+        wt: NDArray[np.floating],
+        *,
+        trials: NDArray[np.floating] | None = None,
+    ) -> float:
+        """Return the conditional log likelihood including response constants.
+
+        Custom distributions can implement this optional hook to enable GLMM
+        likelihood reporting. Its difference from the saturated value at
+        ``mu=y`` must equal minus half the weighted deviance contributions.
+        ``wt`` contains effective fitting weights; grouped binomial ``trials``
+        retains the original trial counts before prior weights are applied.
+        """
+        raise NotImplementedError(
+            f"Normalized likelihood is not available for {type(self).__name__}; "
+            "implement Family.log_likelihood() to report logLik, AIC, and BIC"
+        )
+
     def _mean_bounds(self) -> tuple[float | None, float | None]:
         family_lower, family_upper = self.mean_bounds
         lower_bounds = (family_lower, self.link.mu_lower_bound)

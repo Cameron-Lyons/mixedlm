@@ -95,7 +95,7 @@ def test_response_covariance_matches_fitted_model(kind, cov_type, method):
     if kind == "lmer":
         expected = result.sigma**2 * (expected + np.diag(1 / np.array([1.0, 4.0, 9.0])))
     else:
-        expected += np.eye(3)
+        expected += np.diag(1 / np.array([1.0, 4.0, 9.0]))
 
     assert_allclose(draws.mean(axis=0), 0.0, atol=0.035)
     assert_allclose(np.cov(draws, rowvar=False), expected, atol=0.06, rtol=0.03)

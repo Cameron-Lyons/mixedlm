@@ -146,6 +146,7 @@ def test_non_pairwise_tukey_requests_fail_before_covariance_work(monkeypatch, co
         ([[1.0, -1.0]], ValueError, "expected 4"),
         (np.empty((0, 3)), ValueError, "expected 4"),
         ([[1.0, -1.0], [1.0]], ValueError, "rectangular"),
+        (np.array([[1.0, -1.0], [1.0]], dtype=object), ValueError, "rectangular"),
         ([[1.0, np.nan, 0.0, 0.0]], ValueError, "finite"),
         ([[1.0, np.inf, 0.0, 0.0]], ValueError, "finite"),
         ([[1.0, -np.inf, 0.0, 0.0]], ValueError, "finite"),

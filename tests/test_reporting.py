@@ -15,7 +15,7 @@ def lmm_model():
 
 @pytest.fixture(scope="module")
 def glmm_model():
-    return glmer("y ~ period + (1 | herd)", CBPP, family=families.Binomial())
+    return glmer("incidence / size ~ period + (1 | herd)", CBPP, family=families.Binomial())
 
 
 @pytest.fixture(scope="module")

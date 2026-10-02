@@ -2181,3 +2181,21 @@ def test_benchmark_constant_weight_glmm(benchmark, width, fixed, prepared):
     for value, reference in zip(actual, expected, strict=True):
         np.testing.assert_array_equal(value, reference)
     assert actual[3]
+
+
+@pytest.mark.benchmark(group="native-blocked-cholesky")
+@pytest.mark.parametrize("layout", ["independent", "crossed"])
+@pytest.mark.parametrize("operation", ["deviance", "deviance_with_gradient"])
+def test_benchmark_blocked_structure_likelihood(benchmark, layout, operation):
+    from mixedlm import _rust
+
+    from benchmarks.benchmark_blocked_cholesky import workload
+
+    response, theta = workload(_rust, layout)
+    evaluate = getattr(response, operation)
+    expected = response.deviance(theta, True)
+    result = evaluate(theta, True)
+    value = result[0] if operation.endswith("gradient") else result
+    assert np.isfinite(value)
+    assert value == pytest.approx(expected, abs=1e-10)
+    benchmark(evaluate, theta, True)

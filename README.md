@@ -162,13 +162,13 @@ result.allFit(data)
 from mixedlm import powerSim, powerCurve, extend
 
 # Simulate power for detecting an effect
-power = powerSim(fitted_model, data, nsim=100, test="fixed")
+power = powerSim(fitted_model, test="x", nsim=100, seed=42)
 
 # Power curve across sample sizes
-curve = powerCurve(fitted_model, data, along="n", breaks=[50, 100, 200])
+curve = powerCurve(fitted_model, test="x", along="n_groups", values=[10, 20, 30])
 
 # Extend dataset for larger sample size simulations
-extended_data = extend(fitted_model, data, along="n", n=200)
+extended_data = extend(fitted_model, along="within", n=20)
 ```
 
 ### Profile Likelihood
@@ -309,24 +309,23 @@ pip install mixedlm[optimizers]  # nlopt
 ```bash
 git clone https://github.com/cameronlyons/mixedlm.git
 cd mixedlm
-uv venv && uv pip install -e ".[dev]"
-maturin develop --release
+uv sync --locked --extra plots --extra optimizers --extra docs
 ```
 
 ### Testing
 
 ```bash
-# Run all tests
-pytest tests/
+# Run correctness and property tests
+uv run --no-sync pytest tests/ --ignore=tests/test_benchmark.py --strict-config --strict-markers
 
 # Run with coverage
-pytest tests/ --cov=mixedlm
+uv run --no-sync pytest tests/ --ignore=tests/test_benchmark.py --cov=mixedlm --cov-branch
 
 # Run benchmarks
-pytest tests/ --benchmark-only
+uv run --no-sync pytest tests/test_benchmark.py --benchmark-only
 
 # Run property-based tests
-pytest tests/test_property.py
+uv run --no-sync pytest tests/test_property.py
 ```
 
 ### Code Quality
@@ -359,20 +358,31 @@ The project uses GitHub Actions for continuous integration:
 Pull-request checks run for every target branch, including feature branches used
 for stacked changes. Push-triggered checks run on `main`.
 
-- **Linting**: ruff, clippy, rustfmt
+- **Linting**: ruff, clippy, rustfmt, and actionlint for workflow definitions
 - **Type checking**: mypy
-- **Testing**: pytest across Python 3.10-3.13, plus free-threaded 3.14t
-- **Coverage**: codecov for both Python and Rust
+- **Testing**: pytest across Python 3.10-3.13, plus free-threaded 3.14t; the 3.12 run includes plotting and nlopt, and free-threaded tests include plotting and Polars
+- **Dependencies**: test, quality, and documentation environments use `uv.lock`; test commands preserve the explicitly built native backend
+- **Compatibility**: a Python 3.10 job installs the modern abi3 wheel with NumPy 1.23.5, SciPy 1.14.0, and pandas 1.4.0, then runs the core suite against these supported lower bounds
+- **Coverage**: branch coverage for Python and native Rust coverage, uploaded to codecov; the complete Python 3.12 feature run enforces 87% combined line/branch coverage
 - **Security**: cargo-audit, pip-audit
 - **Docs**: mkdocs build verification
-- **Benchmarks**: pytest-benchmark
+- **Benchmarks**: pytest-benchmark with saved timing statistics
 - **Property testing**: hypothesis
 - **Memory safety**: Miri
 - **Fuzz testing**: cargo-fuzz (weekly)
+- **Distributions**: installed wheels run model fits, packaged-dataset checks, independent native numerical checks, and concurrent solves on every target platform before upload or publication; free-threaded wheels also verify that imports and fits preserve execution without the GIL
+- **Source packages**: the source distribution is rebuilt and installed in a fresh environment, then runs the same native and model checks before upload or publication
+
+Pull-request updates cancel superseded CI runs. Builds use the same CPU baseline
+as published wheels, and Linux ARM wheels are built and tested on native ARM runners.
+The `Required CI checks` job succeeds only after every CI job succeeds, providing
+a single stable check name for branch protection.
 
 ## License
 
-MIT License - see [LICENSE](LICENSE) for details.
+The mixedlm code uses the MIT License; see [LICENSE](LICENSE). The bundled lme4
+datasets retain their upstream GPL (>= 2) license, with attribution and license
+text in [datasets/data](python/mixedlm/datasets/data/README.md).
 
 ## Acknowledgments
 

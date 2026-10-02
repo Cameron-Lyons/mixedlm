@@ -282,6 +282,17 @@ def apply_contrasts_array(
                 .fillna(-1)
                 .to_numpy(dtype=np.intp)
             )
+            # Older pandas index engines distinguish boolean and numeric keys,
+            # although Python dictionaries consider False == 0 and True == 1.
+            # Resolve misses against the original dictionary to preserve that
+            # equality while retaining vectorized lookup for successful matches.
+            missing = level_indices < 0
+            if np.any(missing):
+                level_indices[missing] = np.fromiter(
+                    (level_to_idx.get(value, -1) for value in col_values[missing]),
+                    dtype=np.intp,
+                    count=int(np.count_nonzero(missing)),
+                )
 
     if level_indices is None:
         # Avoid pandas setup for small inputs and preserve missing-key identity semantics.

@@ -4,6 +4,11 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -14,6 +19,15 @@ env:
   CARGO_NET_RETRY: "10"
 
 jobs:
+  workflows:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Validate GitHub Actions workflows
+        uses: docker://rhysd/actionlint:1.7.12
+
   rust-test:
     runs-on: ubuntu-latest
     steps:
@@ -68,16 +82,14 @@ jobs:
       - name: Set up Python
         run: uv python install 3.12
 
-      - name: Create venv and install dependencies
-        run: |
-          uv venv
-          uv pip install ruff
+      - name: Install locked quality dependencies
+        run: uv sync --locked --no-install-project --python 3.12
 
       - name: Run ruff check
-        run: uv run ruff check python/ tests/ tools/
+        run: uv run --no-sync ruff check python/ tests/ tools/
 
       - name: Run ruff format check
-        run: uv run ruff format --check python/ tests/ tools/
+        run: uv run --no-sync ruff format --check python/ tests/ tools/
 
   typecheck:
     runs-on: ubuntu-latest
@@ -90,17 +102,17 @@ jobs:
       - name: Set up Python
         run: uv python install 3.12
 
-      - name: Create venv and install dependencies
-        run: |
-          uv venv
-          uv pip install mypy numpy pandas scipy
+      - name: Install locked quality dependencies
+        run: uv sync --locked --no-install-project --python 3.12
 
       - name: Run mypy type check
-        run: uv run mypy python/ tools/ --ignore-missing-imports
+        run: uv run --no-sync mypy python/ tools/ --ignore-missing-imports
 
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     strategy:
+      fail-fast: false
       matrix:
         python-version: ["3.10", "3.11", "3.12", "3.13"]
     steps:
@@ -118,22 +130,27 @@ jobs:
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
 
-      - name: Create venv and build
-        run: |
-          uv venv
-          uv pip install maturin pytest pytest-cov pandas polars
+      - name: Install locked test dependencies
+        run: uv sync --locked --no-install-project --python "${{ matrix.python-version }}" ${{ matrix.python-version == '3.12' && '--extra plots --extra optimizers' || '' }}
+
+      - name: Require optional dependencies in the complete feature test run
+        if: matrix.python-version == '3.12'
+        run: uv run --no-sync python -c "import matplotlib, nlopt, polars"
 
       - name: Build package
         uses: PyO3/maturin-action@v1
         with:
           command: develop
-          args: --release
+          args: --release --locked --uv
           sccache: true
         env:
           VIRTUAL_ENV: ${{ github.workspace }}/.venv
 
+      - name: Require source-matched native backend
+        run: uv run --no-sync python -m tools.native_build
+
       - name: Run tests with coverage
-        run: uv run pytest tests/ -v --cov=mixedlm --cov-report=xml --ignore=tests/test_property.py --ignore=tests/test_benchmark.py
+        run: uv run --no-sync pytest tests/ --strict-config --strict-markers -ra --cov=mixedlm --cov-branch --cov-report=xml ${{ matrix.python-version == '3.12' && '--cov-fail-under=87' || '' }} --ignore=tests/test_property.py --ignore=tests/test_benchmark.py
 
       - name: Upload coverage
         uses: codecov/codecov-action@v7
@@ -144,6 +161,7 @@ jobs:
 
   test-free-threaded:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
 
@@ -158,22 +176,65 @@ jobs:
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
 
-      - name: Create venv and install dependencies
-        run: |
-          python -m venv .venv
-          .venv/bin/pip install --upgrade pip
-          .venv/bin/pip install maturin pytest pandas
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Install locked test dependencies
+        run: uv sync --locked --no-install-project --python python --extra plots
 
       - name: Build package (free-threaded)
         uses: PyO3/maturin-action@v1
         with:
           command: develop
-          args: --release
+          args: --release --locked --uv
         env:
           VIRTUAL_ENV: ${{ github.workspace }}/.venv
 
+      - name: Require source-matched native backend
+        run: uv run --no-sync python -m tools.native_build
+
+      - name: Require imports to preserve free-threaded execution
+        run: uv run --no-sync python -c "import sys, sysconfig, mixedlm._rust; assert sysconfig.get_config_var('Py_GIL_DISABLED') == 1; assert not sys._is_gil_enabled()"
+
       - name: Run tests
-        run: .venv/bin/python -m pytest tests/ -v --ignore=tests/test_property.py --ignore=tests/test_benchmark.py
+        run: uv run --no-sync pytest tests/ --strict-config --strict-markers -ra --ignore=tests/test_property.py --ignore=tests/test_benchmark.py
+
+  test-minimum:
+    name: Minimum runtime dependencies (Python 3.10)
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.10"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Download the modern abi3 wheel
+        uses: actions/download-artifact@v8
+        with:
+          name: wheels-x86_64-unknown-linux-gnu
+          path: dist
+
+      - name: Install locked test tools and minimum runtime dependencies
+        run: |
+          uv export --locked --only-group dev --no-emit-project --no-hashes --format requirements-txt --output-file test-tools.txt
+          uv venv --python python .venv-minimum
+          uv pip install --python .venv-minimum/bin/python --requirements test-tools.txt numpy==1.23.5 scipy==1.14.0 pandas==1.4.0
+          uv pip install --python .venv-minimum/bin/python --no-deps dist/*.whl
+
+      - name: Verify installed wheel with minimum runtime dependencies
+        run: |
+          .venv-minimum/bin/python -I tools/native_build.py
+          .venv-minimum/bin/python -I tools/check_wheel.py
+
+      - name: Run the minimum-dependency core suite from the installed wheel
+        run: .venv-minimum/bin/python -I -m pytest tests/ --strict-config --strict-markers -ra --ignore=tests/test_property.py --ignore=tests/test_benchmark.py
 
   rust-coverage:
     runs-on: ubuntu-latest
@@ -211,16 +272,15 @@ jobs:
       - name: Set up Python
         run: uv python install 3.12
 
-      - name: Install docs dependencies
-        run: |
-          uv venv
-          uv pip install mkdocs mkdocs-material pymdown-extensions
+      - name: Install locked docs dependencies
+        run: uv sync --locked --no-install-project --python 3.12 --extra docs
 
       - name: Build docs
-        run: uv run mkdocs build --strict
+        run: uv run --no-sync mkdocs build --strict
 
   benchmark:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
 
@@ -236,28 +296,30 @@ jobs:
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
 
-      - name: Install dependencies
-        run: |
-          uv venv
-          uv pip install maturin pytest pytest-benchmark pandas
+      - name: Install locked benchmark dependencies
+        run: uv sync --locked --no-install-project --python 3.12
 
       - name: Build package
         uses: PyO3/maturin-action@v1
         with:
           command: develop
-          args: --release
+          args: --release --locked --uv
           sccache: true
         env:
           VIRTUAL_ENV: ${{ github.workspace }}/.venv
 
+      - name: Require source-matched native backend
+        run: uv run --no-sync python -m tools.native_build
+
       - name: Run benchmarks
-        run: uv run pytest tests/ -v --benchmark-only --benchmark-json=benchmark.json
+        run: uv run --no-sync pytest tests/test_benchmark.py --strict-config --strict-markers --benchmark-only --benchmark-save=ci --benchmark-storage=benchmark-results
 
       - name: Upload benchmark results
         uses: actions/upload-artifact@v7
         with:
           name: benchmark-results
-          path: benchmark.json
+          path: benchmark-results/**/*.json
+          include-hidden-files: true
         if: always()
 
   msrv:
@@ -294,6 +356,7 @@ jobs:
 
   property-tests:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
 
@@ -309,22 +372,23 @@ jobs:
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
 
-      - name: Install dependencies
-        run: |
-          uv venv
-          uv pip install maturin pytest hypothesis pandas numpy
+      - name: Install locked property test dependencies
+        run: uv sync --locked --no-install-project --python 3.12
 
       - name: Build package
         uses: PyO3/maturin-action@v1
         with:
           command: develop
-          args: --release
+          args: --release --locked --uv
           sccache: true
         env:
           VIRTUAL_ENV: ${{ github.workspace }}/.venv
 
+      - name: Require source-matched native backend
+        run: uv run --no-sync python -m tools.native_build
+
       - name: Run property-based tests
-        run: uv run pytest tests/test_property.py -v
+        run: uv run --no-sync pytest tests/test_property.py --strict-config --strict-markers
 
   build:
     runs-on: ${{ matrix.os }}
@@ -335,8 +399,8 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             manylinux: "2_28"
-            rustflags: "-C target-cpu=x86-64-v3"
-          - os: ubuntu-latest
+            rustflags: "-C target-cpu=x86-64-v2"
+          - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             manylinux: "2_28"
             rustflags: ""
@@ -345,10 +409,10 @@ jobs:
             rustflags: ""
           - os: macos-15-intel
             target: x86_64-apple-darwin
-            rustflags: "-C target-cpu=x86-64-v3"
+            rustflags: "-C target-cpu=x86-64-v2"
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            rustflags: "-C target-cpu=x86-64-v3"
+            rustflags: "-C target-cpu=x86-64-v2"
     steps:
       - uses: actions/checkout@v7
 
@@ -364,17 +428,18 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
-          args: --release --out dist
+          args: --release --locked --out dist
           manylinux: ${{ matrix.manylinux || 'auto' }}
           sccache: true
         env:
           RUSTFLAGS: ${{ matrix.rustflags }}
 
-      - name: Verify macOS wheel imports
-        if: runner.os == 'macOS'
+      - name: Verify installed wheel on the target platform
+        shell: bash
         run: |
           python -m pip install --force-reinstall dist/*.whl
-          python -I -c "from mixedlm._rust import SparseCholeskySymbolic"
+          python -I tools/native_build.py
+          python -I tools/check_wheel.py
 
       - name: Upload wheels
         uses: actions/upload-artifact@v7
@@ -407,9 +472,16 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
-          args: --release --out dist -i python3.14t
+          args: --release --locked --out dist -i python3.14t
           manylinux: ${{ matrix.manylinux || 'auto' }}
           sccache: true
+
+      - name: Verify installed free-threaded wheel on the target platform
+        shell: bash
+        run: |
+          python -m pip install --force-reinstall dist/*.whl
+          python -I tools/native_build.py
+          python -I tools/check_wheel.py --expect-free-threaded
 
       - name: Upload wheels
         uses: actions/upload-artifact@v7
@@ -419,8 +491,23 @@ jobs:
 
   sdist:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
 
       - name: Build sdist
         uses: PyO3/maturin-action@v1
@@ -428,8 +515,53 @@ jobs:
           command: sdist
           args: --out dist
 
+      - name: Rebuild and verify the source distribution
+        run: |
+          uv venv --python python .venv-sdist
+          uv pip install --python .venv-sdist/bin/python --config-setting=build-args=--locked dist/*.tar.gz
+          mkdir sdist-source
+          tar -xzf dist/*.tar.gz -C sdist-source
+          .venv-sdist/bin/python -I tools/native_build.py --source-root sdist-source/*
+          .venv-sdist/bin/python -I tools/check_wheel.py
+
       - name: Upload sdist
         uses: actions/upload-artifact@v7
         with:
           name: sdist
           path: dist/*.tar.gz
+
+  required:
+    name: Required CI checks
+    if: always()
+    needs:
+      - workflows
+      - rust-test
+      - clippy
+      - rust-fmt
+      - lint
+      - typecheck
+      - test
+      - test-free-threaded
+      - test-minimum
+      - rust-coverage
+      - docs
+      - benchmark
+      - msrv
+      - miri
+      - property-tests
+      - build
+      - build-free-threaded
+      - sdist
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every CI job to succeed
+        env:
+          JOB_RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          for result in $JOB_RESULTS; do
+            if [ "$result" != success ]; then
+              echo "A required CI job failed or did not complete: $JOB_RESULTS"
+              exit 1
+            fi
+          done

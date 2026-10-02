@@ -6,8 +6,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import pytest
-from mixedlm import ModelSelectionResult, lmer, model_selection
-from mixedlm.families import NegativeBinomial, Poisson
+from mixedlm import ModelSelectionResult, glmer, glmerControl, lmer, model_selection
+from mixedlm.families import Binomial, NegativeBinomial, Poisson
 from mixedlm.families.custom import QuasiFamily
 
 
@@ -337,6 +337,53 @@ class TestModelSelectionValidation:
 
 
 class TestModelSelectionIntegration:
+    def test_grouped_binomial_trials_are_required_for_comparable_likelihoods(self) -> None:
+        rng = np.random.default_rng(219)
+        x = rng.normal(size=60)
+        data = pd.DataFrame(
+            {
+                "y": rng.binomial(2, 1.0 / (1.0 + np.exp(-x))),
+                "size": np.full(60, 2),
+                "x": x,
+                "group": np.repeat(np.arange(10), 6),
+            }
+        )
+        control = glmerControl(check_conv=False, check_singular=False)
+        small = glmer(
+            "y / size ~ x + (1 | group)",
+            data,
+            family=Binomial(),
+            weights=np.full(60, 5.0),
+            nAGQ=0,
+            control=control,
+        )
+        larger_data = data.assign(y=5 * data["y"], size=5 * data["size"])
+        large = glmer(
+            "y / size ~ x + (1 | group)",
+            larger_data,
+            family=Binomial(),
+            nAGQ=0,
+            control=control,
+        )
+        np.testing.assert_array_equal(small.matrices.y, large.matrices.y)
+        np.testing.assert_array_equal(small.matrices.weights, large.matrices.weights)
+        assert small.deviance == pytest.approx(large.deviance)
+        with pytest.raises(ValueError, match="binomial trial counts"):
+            model_selection(small, large)
+
+        # Explicit grouped counts and trial-weighted proportions represent the
+        # same distribution and remain valid comparison candidates.
+        proportions = glmer(
+            "y ~ x + (1 | group)",
+            larger_data.assign(y=larger_data["y"] / larger_data["size"]),
+            family=Binomial(),
+            weights=larger_data["size"].to_numpy(),
+            nAGQ=0,
+            control=control,
+        )
+        comparable = model_selection(large, proportions)
+        np.testing.assert_allclose(comparable.delta, 0.0, atol=1e-8)
+
     def test_ranks_fitted_linear_models(self) -> None:
         rng = np.random.default_rng(620)
         groups = np.repeat(np.arange(10), 8)

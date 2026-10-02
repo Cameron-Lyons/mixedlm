@@ -1,325 +1,127 @@
 # Power Analysis
 
-This tutorial covers power analysis for mixed models using simulation-based methods.
+Power analysis uses a fitted pilot model to simulate new studies, refit them, and
+count significant tests. It can estimate power at the current study size or show
+how power changes with group counts, observations per group, and effect sizes.
 
-## Overview
-
-Power analysis helps you determine:
-
-- Whether your study has sufficient power to detect an effect
-- What sample size you need to achieve target power
-- How power changes with different design choices
-
-mixedlm provides simulation-based power analysis, similar to R's simr package.
-
-## Basic Workflow
-
-1. Fit a model to pilot data (or specify parameters)
-2. Use `powerSim()` to estimate power
-3. Use `powerCurve()` to see how power changes with sample size
-4. Use `extend()` to simulate larger datasets
-
-## Power Simulation
-
-### Example: Sleep Study
+## Fit a pilot model
 
 ```python
 import mixedlm as mlm
 
-# Fit model to existing data
 data = mlm.load_sleepstudy()
 model = mlm.lmer("Reaction ~ Days + (Days | Subject)", data)
-
-# Simulate power for the Days effect
-power = mlm.powerSim(model, data, nsim=100, test="fixed")
-print(power)
+print(model.fixef())
 ```
 
-Output:
+The fitted coefficients, covariance parameters, and residual scale define the
+simulation alternative. Pilot estimates can be optimistic, so examine smaller
+plausible effects as well as the fitted effect.
 
-```
-Power for fixed effect 'Days': 99.0% (95% CI: 94.6%, 100.0%)
-Based on 100 simulations
-Effect size: 10.47
-```
-
-### What powerSim Does
-
-1. Simulates new response data from the fitted model
-2. Refits the model to each simulated dataset
-3. Tests the specified effect
-4. Reports the proportion of significant results (power)
-
-### Testing Different Effects
+## Estimate current power
 
 ```python
-# Test a specific fixed effect
-power = mlm.powerSim(model, data, nsim=100, test="fixed", term="Days")
-
-# Test random effects structure
-power = mlm.powerSim(model, data, nsim=100, test="random")
+power = mlm.powerSim(model, test="Days", nsim=200, seed=42)
+print(f"Power: {power.power:.1%}")
+print(f"95% CI: [{power.ci_lower:.1%}, {power.ci_upper:.1%}]")
+print(f"Completed fits: {power.n_simulations}; failed: {power.n_failed}")
 ```
 
-## Power Curves
-
-See how power changes with sample size:
+Named coefficient tests use a two-sided normal Wald test. To use a different
+procedure, provide a callable that returns `True` when its test is significant.
+For example, a joint linear-hypothesis test can select multiple coefficients:
 
 ```python
-# Power curve varying number of subjects
+def days_test(fitted):
+    hypothesis = mlm.linear_hypothesis(fitted, {"Days": 1.0}, test="F")
+    return bool(hypothesis.p_value < 0.05)
+
+power = mlm.powerSim(model, test=days_test, nsim=100, seed=42)
+```
+
+For this LMM, the F test above uses residual denominator degrees of freedom.
+The simulation confidence interval always has 95% coverage, independently of the
+significance threshold chosen for each test.
+
+## Vary the number of subjects
+
+```python
 curve = mlm.powerCurve(
-    model, data,
-    along="Subject",  # Vary this grouping factor
-    breaks=[10, 15, 20, 25, 30],  # Sample sizes to test
-    nsim=100
+    model,
+    test="Days",
+    along="Subject",
+    values=[10, 15, 18, 24, 30],
+    nsim=100,
+    seed=42,
 )
-print(curve)
+for size, result in zip(curve.values, curve.results):
+    print(f"Subjects={size}: power={result.power:.1%}, failed={result.n_failed}")
 curve.plot()
 ```
 
-### Varying Observations per Subject
+Every point changes the actual simulated design while retaining the pilot
+parameters. Smaller studies select the first observed subjects; larger studies
+cycle the pilot subjects' covariate templates under new group labels. This changes
+the number of independent random-effect draws, rather than re-estimating the
+alternative from repeated pilot responses.
+
+In crossed designs, specify the factor to vary; the other factor labels remain
+as supplied by the pilot templates.
+
+## Vary observations per subject
 
 ```python
-# Power curve varying observations per subject
-curve = mlm.powerCurve(
-    model, data,
-    along="n",  # Vary within-group sample size
-    breaks=[5, 10, 15, 20],
-    nsim=100
+within = mlm.powerCurve(
+    model, test="Days", along="within", values=[5, 10, 15, 20], nsim=100, seed=42
 )
 ```
 
-## Extending Datasets
+Each subject has exactly the requested number of observations. Smaller designs
+retain each subject's first rows; larger designs cycle their rows. The existing
+weights, offsets, and covariate values accompany those rows. If new measurement
+times or covariate distributions are part of the proposed study, prepare an
+appropriate pilot design instead of treating replicated rows as new covariates.
 
-Create larger simulated datasets:
+## Examine smaller effects
 
-```python
-# Double the number of subjects
-extended = mlm.extend(model, data, along="Subject", n=36)
-print(f"Original: {data['Subject'].nunique()} subjects")
-print(f"Extended: {extended['Subject'].nunique()} subjects")
-```
-
-### Extension Methods
+Use multipliers of the pilot effect:
 
 ```python
-# Add more subjects
-extended = mlm.extend(model, data, along="Subject", n=50)
-
-# Add more observations per subject
-extended = mlm.extend(model, data, along="n", n=20)
-
-# Both: more subjects with more observations
-extended = mlm.extend(model, data, along="Subject", n=50)
-extended = mlm.extend(model, extended, along="n", n=20)
-```
-
-## Setting Effect Sizes
-
-### Using Fitted Values
-
-By default, power is calculated for the effect size in the fitted model:
-
-```python
-print(f"Effect size from model: {model.fixef()['Days']}")
-power = mlm.powerSim(model, data, nsim=100)
-```
-
-### Specifying Target Effect Size
-
-Modify the model to test a different effect size:
-
-```python
-import copy
-
-# Create model with different effect size
-model_modified = copy.deepcopy(model)
-model_modified._fixef['Days'] = 5.0  # Smaller effect
-
-power = mlm.powerSim(model_modified, data, nsim=100)
-```
-
-### Minimum Detectable Effect
-
-Find the smallest effect detectable with 80% power:
-
-```python
-effect_sizes = [2, 4, 6, 8, 10]
-powers = []
-
-for effect in effect_sizes:
-    model_mod = copy.deepcopy(model)
-    model_mod._fixef['Days'] = effect
-    p = mlm.powerSim(model_mod, data, nsim=100)
-    powers.append(p.power)
-
-# Find where power crosses 80%
-import numpy as np
-mde_idx = np.searchsorted(powers, 0.80)
-print(f"MDE for 80% power: ~{effect_sizes[mde_idx]}")
-```
-
-## Designing a New Study
-
-When you don't have pilot data:
-
-```python
-import pandas as pd
-import numpy as np
-
-# Create hypothetical data structure
-n_subjects = 20
-n_obs_per_subject = 10
-
-data = pd.DataFrame({
-    'Subject': np.repeat(range(n_subjects), n_obs_per_subject),
-    'Days': np.tile(range(n_obs_per_subject), n_subjects),
-    'Reaction': np.random.normal(250, 50, n_subjects * n_obs_per_subject)
-})
-
-# Fit model to get structure
-model = mlm.lmer("Reaction ~ Days + (Days | Subject)", data)
-
-# Modify parameters to expected values
-model._fixef['(Intercept)'] = 250
-model._fixef['Days'] = 10  # Expected effect
-# Set variance components...
-
-# Now run power analysis
-power = mlm.powerSim(model, data, nsim=100)
-```
-
-## Sample Size Determination
-
-### Target Power Approach
-
-```python
-target_power = 0.80
-
-# Test different sample sizes
-for n_subj in [10, 15, 20, 25, 30, 35, 40]:
-    extended = mlm.extend(model, data, along="Subject", n=n_subj)
-    power = mlm.powerSim(model, extended, nsim=100)
-    print(f"n={n_subj}: power={power.power:.1%}")
-    if power.power >= target_power:
-        print(f"  -> Minimum n = {n_subj} for {target_power:.0%} power")
-        break
-```
-
-### Using Power Curve
-
-```python
-curve = mlm.powerCurve(
-    model, data,
-    along="Subject",
-    breaks=list(range(10, 50, 5)),
-    nsim=100
-)
-
-# Find sample size for target power
-target = 0.80
-for n, p in zip(curve.breaks, curve.powers):
-    if p >= target:
-        print(f"Need n={n} subjects for {target:.0%} power")
-        break
-```
-
-## Parallel Simulation
-
-For faster computation with many simulations:
-
-```python
-power = mlm.powerSim(
-    model, data,
-    nsim=1000,
-    n_jobs=-1  # Use all cores
+effects = mlm.powerCurve(
+    model, test="Days", along="effect_size", values=[0.25, 0.5, 0.75, 1.0], nsim=100, seed=42
 )
 ```
 
-## Interpreting Results
-
-### Power Estimate
+Or set absolute coefficient values:
 
 ```python
-power = mlm.powerSim(model, data, nsim=500)
-print(f"Power: {power.power:.1%}")
-print(f"95% CI: [{power.ci_lower:.1%}, {power.ci_upper:.1%}]")
+effects = mlm.powerCurve(model, along="Days", values=[2, 4, 6, 8, 10], nsim=100, seed=42)
 ```
 
-The confidence interval reflects uncertainty from the simulation.
+When `along` names a coefficient and `test` is omitted, that coefficient is tested.
+The original model remains unchanged.
 
-### Number of Simulations
-
-More simulations = narrower CI:
-
-| nsim | Typical CI width |
-|------|-----------------|
-| 100 | ±10% |
-| 500 | ±4% |
-| 1000 | ±3% |
-
-Use 100-200 for exploration, 500-1000 for final estimates.
-
-## Common Pitfalls
-
-### Overly Optimistic Power
-
-Power estimates based on pilot data can be optimistic if:
-
-- Effect size in pilot is overestimated
-- Variance is underestimated
-- Model is too simple
-
-### Convergence Failures
-
-Some simulations may fail to converge:
+## Inspect and extend data
 
 ```python
-power = mlm.powerSim(model, data, nsim=100)
-print(f"Successful fits: {power.n_success} / {power.nsim}")
+extended = mlm.extend(model, along="Subject", n=30)
+print(extended.groupby("Subject", observed=True).size())
 ```
 
-High failure rates suggest model issues.
+`extend` returns a pandas DataFrame and leaves the fitted model unchanged.
+`powerCurve` handles study resizing and power calculation together, retaining the
+pilot parameters. See the [API reference](../api/power.md) for result fields and
+GLMM examples.
 
-## Complete Example
+## Interpret uncertainty and failures
 
-```python
-import mixedlm as mlm
-import numpy as np
+The confidence interval describes Monte Carlo uncertainty conditional on valid
+refits. More simulations narrow it: use smaller runs while exploring designs and
+increase `nsim` for a final estimate. Unconverged or invalid fits are excluded and
+reported, so inspect `n_failed` at every curve point. If every fit fails, the power
+estimate and interval are `NaN`.
 
-# Load pilot data
-data = mlm.load_sleepstudy()
-
-# Fit model
-model = mlm.lmer("Reaction ~ Days + (Days | Subject)", data)
-print(f"Effect of Days: {model.fixef()['Days']:.2f}")
-
-# Current power
-print("\n=== Current Power ===")
-power = mlm.powerSim(model, data, nsim=200)
-print(f"Power: {power.power:.1%} ({power.ci_lower:.1%}, {power.ci_upper:.1%})")
-
-# Power curve
-print("\n=== Power Curve ===")
-curve = mlm.powerCurve(
-    model, data,
-    along="Subject",
-    breaks=[10, 15, 18, 20, 25, 30],
-    nsim=100
-)
-for n, p in zip(curve.breaks, curve.powers):
-    marker = " <-- current" if n == 18 else ""
-    print(f"  n={n:2d}: {p:.1%}{marker}")
-
-# Sample size for smaller effect
-print("\n=== Sample Size for Effect=5 ===")
-import copy
-model_small = copy.deepcopy(model)
-model_small._fixef['Days'] = 5.0
-
-for n in [20, 30, 40, 50, 60]:
-    extended = mlm.extend(model_small, data, along="Subject", n=n)
-    p = mlm.powerSim(model_small, extended, nsim=100)
-    print(f"  n={n}: {p.power:.1%}")
-    if p.power >= 0.80:
-        break
-```
+The confidence interval does not include uncertainty in the pilot effect sizes or
+variance components. Sensitivity curves help assess that uncertainty. Power need
+not increase at every sampled point because both the simulation outcomes and the
+pilot templates vary; compare the estimates together with their intervals.

@@ -26,11 +26,20 @@ python -m venv .venv
 source .venv/bin/activate  # On Windows: .venv\Scripts\activate
 ```
 
-3. Install in development mode with dev dependencies:
+3. Install in development mode with test and optional-feature dependencies:
 
 ```bash
-pip install -e ".[dev]"
+pip install -e ".[dev,plots,optimizers,docs]"
 ```
+
+To reproduce the locked CI dependency versions with uv, use:
+
+```bash
+uv sync --locked --extra plots --extra optimizers --extra docs
+```
+
+The plotting and optimizer extras make their behavioral tests run instead of
+skipping because an optional package is absent.
 
 4. Install pre-commit hooks (optional but recommended):
 
@@ -44,20 +53,20 @@ pre-commit install
 Run the test suite with pytest:
 
 ```bash
-pytest
+pytest --ignore=tests/test_benchmark.py --strict-config --strict-markers
 ```
 
 Run with coverage:
 
 ```bash
-pytest --cov=mixedlm --cov-report=html
+pytest --ignore=tests/test_benchmark.py --cov=mixedlm --cov-branch --cov-report=html
 ```
 
 Run specific tests:
 
 ```bash
-pytest tests/test_lmer.py
-pytest tests/test_lmer.py::test_random_intercept
+pytest tests/test_lmer_fits.py
+pytest tests/test_lmer_fits.py::TestLmer::test_random_intercept_model
 ```
 
 ### Performance Benchmarks
@@ -65,7 +74,8 @@ pytest tests/test_lmer.py::test_random_intercept
 Run performance measurements with the benchmark fixture and save the results:
 
 ```bash
-pytest tests/test_benchmark.py --benchmark-only --benchmark-json=benchmark.json
+pytest tests/test_benchmark.py --benchmark-only \
+  --benchmark-save=local --benchmark-storage=benchmark-results
 ```
 
 The symbolic Cholesky cache has paired cached and uncached benchmarks for repeated
@@ -74,7 +84,8 @@ right-hand sides:
 
 ```bash
 pytest tests/test_benchmark.py -k sparse_symbolic_repeated \
-  --benchmark-only --benchmark-json=symbolic-cache-benchmark.json
+  --benchmark-only --benchmark-save=symbolic-cache \
+  --benchmark-storage=benchmark-results
 ```
 
 Both cases use the same matrix values and solve work; the uncached case also
@@ -83,6 +94,10 @@ outside the timed region. Compare repeated timing statistics on the same machine
 under similar load. Correctness tests check solutions and log-determinants
 independently of elapsed time, including reuse of earlier numeric factors after
 later factorizations.
+
+Saved results contain summary statistics. Add `--benchmark-save-data` only when
+individual timing samples are needed; collecting every sample across the full
+benchmark suite can produce very large artifacts.
 
 ### Rebuilding the Native Backend
 
@@ -114,6 +129,52 @@ target directory between worktrees can reuse an older library even when Cargo
 reports a successful build. Cleaning just the `mixedlm` package keeps dependency
 artifacts available. The embedded checksum identifies source contents; it is
 not a cryptographic signature or a record of compiler flags.
+
+### CI and Distribution Checks
+
+CI uses `uv sync --locked --no-install-project` to install dependencies, builds
+the native backend explicitly, and runs tools with `uv run --no-sync`. This
+prevents a test command from quietly rebuilding or switching the backend under
+test. The native-source check is required before the Python suites execute.
+Python 3.12 exercises plotting and nlopt alongside the core suite. Free-threaded
+3.14t also checks plotting and Polars and verifies that native imports keep the
+GIL disabled. Property tests and benchmarks run in dedicated jobs.
+The Python 3.12 job enforces 87% combined line/branch coverage, based on the
+measured complete feature suite. Other Python jobs report coverage without this
+floor because they exercise different optional-feature combinations.
+
+A separate Python 3.10 job runs the core suite with NumPy 1.23.5, SciPy 1.14.0,
+and pandas 1.4.0. NumPy 1.23.5 is SciPy 1.14's effective lower bound. This job
+downloads the normal abi3 wheel and installs it in an isolated environment, so
+it checks an artifact built for modern Python against older NumPy and pandas
+without an editable installation hiding compatibility issues. Test tools and
+Polars retain their locked versions; plotting and nlopt are checked separately
+by the complete feature run.
+
+Each wheel is installed and exercised on its target operating system and CPU,
+including Linux ARM. The source distribution is rebuilt and installed in a
+fresh environment as well. `tools/check_wheel.py` verifies installed-package locations,
+metadata, packaged datasets, LMM and grouped-binomial fits, sparse solves and
+log-determinants against NumPy, and concurrent use of a shared native factor.
+Before those numerical checks, `tools/native_build.py` compares each installed
+wheel against its build inputs. Source-built wheels use the checkout; rebuilt
+source distributions use the extracted archive, including maturin's normalized
+Cargo manifest.
+Run the same check after installing a wheel into a fresh virtual environment:
+
+```bash
+python -I tools/native_build.py
+python -I tools/check_wheel.py
+# For a free-threaded interpreter and its matching wheel:
+python -I tools/check_wheel.py --expect-free-threaded
+```
+
+The isolated interpreter excludes checkout imports, and the script rejects
+editable installations. Release jobs require these checks before uploading
+artifacts for publication. Actionlint validates workflow structure and
+expressions on every pull request.
+The `Required CI checks` job aggregates every CI job and fails if any failed,
+was cancelled, or was skipped, so branch protection can require one stable check.
 
 ## Code Style
 

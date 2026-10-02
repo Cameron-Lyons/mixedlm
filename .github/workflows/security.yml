@@ -10,8 +10,14 @@ permissions:
 
 jobs:
   python-security:
-    name: Python Security Scan
+    name: Python Security Scan (${{ matrix.python-version }})
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        # uv.lock selects separate NumPy/SciPy versions for Python 3.10.
+        python-version: ["3.10", "3.12"]
     steps:
       - uses: actions/checkout@v7
 
@@ -19,20 +25,20 @@ jobs:
         uses: astral-sh/setup-uv@v7
 
       - name: Set up Python
-        run: uv python install 3.12
+        run: uv python install "${{ matrix.python-version }}"
 
       - name: Create venv and install dependencies
         run: |
-          uv venv
+          uv venv --python "${{ matrix.python-version }}"
           uv pip install bandit pip-audit
 
       - name: Run bandit security scan
-        run: uv run bandit -r python/ -ll -ii -x "**/tests/**"
+        run: uv run --no-sync bandit -r python/ -ll -ii -x "**/tests/**"
 
       - name: Run pip-audit for dependency vulnerabilities
         run: |
-          uv pip compile pyproject.toml -o requirements.txt
-          uv run pip-audit --progress-spinner off -r requirements.txt
+          uv export --locked --no-dev --no-emit-project --no-hashes --format requirements-txt --output-file requirements.txt
+          uv run --no-sync pip-audit --progress-spinner off -r requirements.txt
 
   rust-security:
     name: Rust Security Audit

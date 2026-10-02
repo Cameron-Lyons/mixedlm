@@ -1,10 +1,18 @@
 # Datasets
 
-This page documents the built-in datasets from lme4.
+These loaders return the original lme4 tables bundled with mixedlm. They work
+offline and preserve every original observation, numeric value, factor label,
+and row order. The immutable [source commit](https://github.com/lme4/lme4/tree/67d71b0e264bda95f22bdc3ec52261c5fc993d4a/data),
+source file checksums, and CSV checksums are recorded in the bundled
+`mixedlm/datasets/data/provenance.json`. Upstream dataset attribution and license
+information accompany the assets in `data/README.md` and `data/LICENSE`.
 
 ## Dataset Loaders
 
-All loaders return pandas DataFrames by default.
+All loaders return independent pandas DataFrames. Modifying a loaded table does
+not affect later calls. R factor labels are represented as ordinary Python
+strings; numeric columns retain their original values. The only supplemental
+columns are the documented `total_fruits` and `cTICKS` compatibility aliases.
 
 ### load_sleepstudy
 
@@ -15,14 +23,17 @@ import mixedlm as mlm
 data = mlm.load_sleepstudy()
 ```
 
-**Description:** Reaction times in a sleep deprivation study. 18 subjects were restricted to 3 hours of sleep per night for 10 days. Reaction times were measured each day.
+**Description:** Reaction times for 18 participants in the group restricted to
+3 hours in bed. Days 0–1 are adaptation and training, day 2 is baseline, and sleep
+restriction starts after day 2. The table contains the first ten study days.
+[lme4 study documentation](https://lme4.github.io/lme4/reference/sleepstudy.html)
 
 **Variables:**
 
 | Variable | Description |
 |----------|-------------|
 | Reaction | Average reaction time (ms) |
-| Days | Days of sleep deprivation (0-9) |
+| Days | Study day (0-9) |
 | Subject | Subject identifier |
 
 **Size:** 180 observations, 18 subjects
@@ -72,7 +83,10 @@ Cake baking experiment data.
 data = mlm.load_cake()
 ```
 
-**Description:** Data from a cake baking experiment. Three recipes and six baking temperatures.
+**Description:** A split-plot experiment with three recipes and six baking
+temperatures. Recipes are whole units, and temperatures are subunits within
+replicates. The table includes both string temperature labels and numeric
+temperatures.
 
 **Variables:**
 
@@ -82,13 +96,14 @@ data = mlm.load_cake()
 | recipe | Recipe (A, B, C) |
 | temperature | Baking temperature |
 | angle | Angle at which cake broke |
+| temp | Numeric baking temperature in degrees Fahrenheit |
 
 **Size:** 270 observations
 
 **Example usage:**
 
 ```python
-model = mlm.lmer("angle ~ recipe * temperature + (1 | replicate)", data)
+model = mlm.lmer("angle ~ recipe * temperature + (1 | recipe:replicate)", data)
 ```
 
 ### load_dyestuff
@@ -162,7 +177,8 @@ Paste strength data.
 data = mlm.load_pastes()
 ```
 
-**Description:** Strength of a chemical paste from a balanced incomplete block design.
+**Description:** Two strength assays for each of three casks within ten delivery
+batches. `sample` identifies each batch/cask combination uniquely.
 
 **Variables:**
 
@@ -170,14 +186,15 @@ data = mlm.load_pastes()
 |----------|-------------|
 | strength | Paste strength |
 | batch | Batch identifier |
-| sample | Sample within batch |
+| cask | Cask within batch (a, b, c) |
+| sample | Unique batch/cask identifier (A:a through J:c) |
 
 **Size:** 60 observations
 
 **Example usage:**
 
 ```python
-model = mlm.lmer("strength ~ 1 + (1 | batch/sample)", data)
+model = mlm.lmer("strength ~ 1 + (1 | batch/cask)", data)
 ```
 
 ### load_insteval
@@ -202,7 +219,10 @@ data = mlm.load_insteval()
 | studage | Student age category |
 | y | Evaluation score |
 
-**Size:** 73,421 observations
+**Size:** 73,421 original observations, 2,972 students and 1,128 instructors.
+For a smaller example, select rows explicitly with `mlm.load_insteval().head(1000)`.
+Student age labels are semesters 2, 4, 6, and 8; lecture age labels are semesters
+1–6. [lme4 dataset documentation](https://lme4.github.io/lme4/reference/InstEval.html)
 
 **Example usage:**
 
@@ -228,19 +248,22 @@ data = mlm.load_arabidopsis()
 | Variable | Description |
 |----------|-------------|
 | reg | Region |
-| poession | Position |
+| popu | Population within region |
 | gen | Genotype |
 | rack | Rack |
 | nutrient | Nutrient treatment |
-| aession | Assessment |
-| status | Status |
+| amd | Clipping treatment (clipped/unclipped) |
+| status | Germination method (Normal/Petri.Plate/Transplant) |
 | total.fruits | Total number of fruits |
+| total_fruits | Identical compatibility alias of total.fruits |
+
+**Size:** 625 original observations.
 
 **Example usage:**
 
 ```python
 model = mlm.glmer(
-    "total.fruits ~ nutrient * gen + (1 | reg) + (1 | rack)",
+    "total_fruits ~ nutrient * amd + (1 | gen) + (1 | rack)",
     data,
     family=mlm.families.Poisson()
 )
@@ -262,15 +285,20 @@ data = mlm.load_grouseticks()
 |----------|-------------|
 | TICKS | Number of ticks |
 | BROOD | Brood identifier |
-| ALTITUDE | Altitude |
+| INDEX | Chick identifier |
 | YEAR | Year |
-| HEIGHT | Chick height |
+| HEIGHT | Height above sea level in meters |
+| LOCATION | Geographic location |
+| cHEIGHT | Centered height |
+| cTICKS | Identical compatibility alias of TICKS |
+
+**Size:** 403 original observations in 118 broods.
 
 **Example usage:**
 
 ```python
 model = mlm.glmer(
-    "TICKS ~ ALTITUDE + HEIGHT + (1 | BROOD) + (1 | YEAR)",
+    "TICKS ~ YEAR + HEIGHT + (1 | BROOD) + (1 | LOCATION)",
     data,
     family=mlm.families.Poisson()
 )
@@ -290,7 +318,8 @@ data = mlm.load_verbagg()
 
 | Variable | Description |
 |----------|-------------|
-| r2 | Binary response |
+| r2 | Dichotomous response labels N/Y |
+| resp | Response labels no/perhaps/yes |
 | Anger | Anger score |
 | Gender | Gender |
 | btype | Behavior type |
@@ -298,6 +327,9 @@ data = mlm.load_verbagg()
 | mode | Mode |
 | item | Item identifier |
 | id | Subject identifier |
+
+**Size:** 7,584 original responses, 316 subjects and 24 items. The binomial
+response `r2` preserves its N/Y labels; Y is the success level.
 
 **Example usage:**
 

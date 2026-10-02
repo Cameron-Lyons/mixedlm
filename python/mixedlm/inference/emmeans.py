@@ -542,7 +542,8 @@ def _validate_custom_contrasts(C: ArrayLike, n_means: int) -> tuple[NDArray, int
         raise ValueError("Custom contrast coefficients must form a rectangular 2-D matrix") from exc
     if coefficients.ndim != 2:
         raise ValueError(
-            "Custom contrast coefficients must be a 2-D matrix; use [[...]] for a single contrast"
+            "Custom contrast coefficients must form a rectangular 2-D matrix; "
+            "use [[...]] for a single contrast"
         )
     if coefficients.shape[1] != n_means:
         raise ValueError(

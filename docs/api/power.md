@@ -1,254 +1,117 @@
 # Power Analysis
 
-This page documents functions for simulation-based power analysis.
+Simulation-based power analysis uses a fitted LMM or GLMM as the generating model.
+The pilot coefficients and variance components define the alternative hypothesis.
 
-## Power Simulation
-
-### powerSim
-
-Simulate power for detecting an effect.
+## powerSim
 
 ```python
 import mixedlm as mlm
 
-power = mlm.powerSim(model, data, nsim=100, test="fixed")
-```
-
-**Parameters:**
-
-- `model`: Fitted mixed model
-- `data`: Original data frame
-- `nsim`: Number of simulations
-- `test`: What to test. Options: `"fixed"` (fixed effects), `"random"` (random effects)
-
-**Returns:** PowerResult object with:
-
-- `power`: Estimated power (proportion significant)
-- `ci_lower`, `ci_upper`: Confidence interval for power
-- `nsim`: Number of simulations run
-- `n_success`: Number of successful model fits
-
-**Example:**
-
-```python
-data = mlm.load_sleepstudy()
-model = mlm.lmer("Reaction ~ Days + (Days | Subject)", data)
-
-power = mlm.powerSim(model, data, nsim=200)
-print(power)
-# Power for fixed effect 'Days': 99.5% (95% CI: 97.2%, 100.0%)
-```
-
-### powerCurve
-
-Compute power across a range of sample sizes.
-
-```python
-curve = mlm.powerCurve(model, data, along, breaks, nsim=100)
-```
-
-**Parameters:**
-
-- `model`: Fitted model
-- `data`: Original data frame
-- `along`: What to vary. Options: grouping factor name (e.g., `"Subject"`) or `"n"` for observations per group
-- `breaks`: List of sample sizes to test
-- `nsim`: Simulations per sample size
-
-**Returns:** PowerCurveResult with:
-
-- `breaks`: Sample sizes tested
-- `powers`: Power at each sample size
-- `plot()`: Method to visualize the curve
-
-**Example:**
-
-```python
-curve = mlm.powerCurve(
-    model, data,
-    along="Subject",
-    breaks=[10, 15, 20, 25, 30],
-    nsim=100
-)
-print(curve)
-curve.plot()
-```
-
-## Data Extension
-
-### extend
-
-Extend a dataset for power analysis.
-
-```python
-extended = mlm.extend(model, data, along, n)
-```
-
-**Parameters:**
-
-- `model`: Fitted model (used to generate new observations)
-- `data`: Original data frame
-- `along`: What to extend. Options: grouping factor name or `"n"`
-- `n`: Target sample size
-
-**Returns:** Extended DataFrame
-
-**Example:**
-
-```python
-# Original: 18 subjects
-print(f"Original: {data['Subject'].nunique()} subjects")
-
-# Extend to 30 subjects
-extended = mlm.extend(model, data, along="Subject", n=30)
-print(f"Extended: {extended['Subject'].nunique()} subjects")
-```
-
-## Result Classes
-
-### PowerResult
-
-Result from `powerSim()`.
-
-**Attributes:**
-
-- `power`: Estimated power (0 to 1)
-- `ci_lower`: Lower bound of 95% CI
-- `ci_upper`: Upper bound of 95% CI
-- `nsim`: Total simulations
-- `n_success`: Successful model fits
-- `effect_size`: Effect size tested
-
-### PowerCurveResult
-
-Result from `powerCurve()`.
-
-**Attributes:**
-
-- `breaks`: Sample sizes tested
-- `powers`: Power at each size
-
-**Methods:**
-
-- `plot()`: Plot the power curve
-
-## Usage Examples
-
-### Basic Power Analysis
-
-```python
-import mixedlm as mlm
-
-# Fit model to pilot data
-data = mlm.load_sleepstudy()
-model = mlm.lmer("Reaction ~ Days + (Days | Subject)", data)
-
-# Simulate power
-power = mlm.powerSim(model, data, nsim=200)
+model = mlm.lmer("Reaction ~ Days + (Days | Subject)", mlm.load_sleepstudy())
+power = mlm.powerSim(model, test="Days", nsim=200, seed=42)
 print(power)
 ```
 
-### Power Curve
+`powerSim(model, test=None, nsim=1000, alpha=0.05, seed=None, verbose=False)`
+simulates a new response, refits the model, and tests each valid fit.
+
+- `test`: A coefficient name or a callable returning a Boolean significance decision.
+  The default tests the first non-intercept coefficient, or the intercept in an
+  intercept-only model. Named tests use a two-sided normal Wald test. A callable
+  can specify another inferential procedure or test a model without fixed effects.
+- `nsim`: Positive integer number of attempted simulations.
+- `alpha`: Significance level strictly between zero and one for the named Wald test.
+  Callable tests choose their own significance threshold.
+- `seed`: Integer seed for reproducibility. NumPy's global random state is preserved.
+- `verbose`: Print progress during long runs.
+
+`PowerResult` exposes:
+
+| Attribute | Meaning |
+|-----------|---------|
+| `power` | Significant tests divided by valid completed simulations |
+| `ci_lower`, `ci_upper` | 95% Wilson score confidence limits for that proportion |
+| `n_successes` | Number of significant tests |
+| `n_simulations` | Number of valid completed simulations |
+| `n_failed` | Number of excluded simulations |
+| `effect_size` | Generating coefficient for a named test; `None` for a callable |
+| `n_obs`, `n_groups` | Study size; group count for the first grouping factor |
+
+Unconverged fits, invalid estimates, exceptions, and non-Boolean test results are
+excluded and reported in a warning. If every simulation fails, power and its
+confidence limits are `NaN`. A high failure rate makes the conditional-on-success
+power estimate less representative of the intended study.
+
+## powerCurve
 
 ```python
-# See how power changes with number of subjects
 curve = mlm.powerCurve(
-    model, data,
-    along="Subject",
-    breaks=[10, 15, 18, 20, 25, 30],
-    nsim=100
+    model, test="Days", along="Subject", values=[10, 18, 24, 30], nsim=100, seed=42
 )
-
 print(curve)
-curve.plot()
+curve.plot()  # requires the plots extra
 ```
 
-### Finding Required Sample Size
+`powerCurve(model, test=None, along="n_groups", values=None, nsim=500,
+alpha=0.05, seed=None, verbose=False)` changes the generating study for each point.
+
+| `along` | Values control |
+|---------|----------------|
+| `"n_groups"` | Group count for the first grouping factor |
+| A grouping factor name | Group count for that factor |
+| `"within"` | Observations per group for the first grouping factor |
+| `"effect_size"` | Multipliers of the tested coefficient, or first non-intercept coefficient |
+| A fixed coefficient name | Absolute values of that coefficient; by default tests that coefficient |
+
+Sample sizes must be positive integers; effect values must be finite real numbers.
+Smaller designs retain the first observed groups or rows within groups. Larger
+designs cycle the pilot group or row templates. Group-size differences and the
+other grouping factors in a crossed design are retained when varying one factor.
+This deterministic template scheme does not generate new covariate distributions.
+
+Each study keeps the pilot coefficients, covariance parameters, residual scale,
+prior weights, offsets, contrast coding, and grouped-binomial trial counts.
+Sample-size curves require a stored model frame. The input model remains unchanged. Extending a group that is also a fixed
+categorical predictor requires coefficients for new levels; such unknown levels
+are rejected rather than assigned arbitrary effects.
+
+`PowerCurveResult` exposes `values`, `powers`, `ci_lowers`, `ci_uppers`, `along`,
+and `n_simulations` (attempts per point). Its `results` tuple contains a
+`PowerResult` for each point, including the actual observation count, the varied
+factor's group count, and successful/failed simulation counts. `plot(ax=None,
+show_ci=True)` returns a Matplotlib figure.
+
+## extend
 
 ```python
-# Find minimum sample size for 80% power
-target = 0.80
-
-for n in [10, 15, 20, 25, 30, 35, 40]:
-    extended = mlm.extend(model, data, along="Subject", n=n)
-    p = mlm.powerSim(model, extended, nsim=100)
-    print(f"n={n}: power={p.power:.1%}")
-    if p.power >= target:
-        print(f"Minimum n = {n}")
-        break
+extended = mlm.extend(model, along="Subject", n=30)
+within = mlm.extend(model, along="within", n=15, data=extended)
 ```
 
-### Extending Data
+`extend(model, along, n, data=None)` returns a pandas DataFrame with additional
+groups or observations per group. Supply a grouping factor name or `"within"`.
+The original model frame is used unless `data` is provided. Targets smaller than
+the existing design leave its rows intact. Numeric and categorical group labels
+are retained when adding groups. Polars categorical and Enum columns retain their
+category order in the returned pandas frame, including the fitted binomial
+response's success level.
+
+`extend` only returns data. Use `powerCurve` to calculate power for the resized
+study while retaining the pilot parameters.
+
+## GLMM example
 
 ```python
-# Original: 18 subjects
-print(f"Original subjects: {data['Subject'].nunique()}")
-
-# Extend to 30 subjects
-extended = mlm.extend(model, data, along="Subject", n=30)
-print(f"Extended subjects: {extended['Subject'].nunique()}")
-
-# Extend observations per subject
-extended2 = mlm.extend(model, data, along="n", n=20)
-```
-
-### Testing Different Effect Sizes
-
-```python
-import copy
-
-effect_sizes = [5, 7.5, 10, 12.5, 15]
-results = []
-
-for effect in effect_sizes:
-    # Modify effect size
-    model_mod = copy.deepcopy(model)
-    model_mod._fixef['Days'] = effect
-
-    # Simulate power
-    p = mlm.powerSim(model_mod, data, nsim=100)
-    results.append({'effect': effect, 'power': p.power})
-    print(f"Effect={effect}: power={p.power:.1%}")
-```
-
-### Power for GLMM
-
-```python
-# Binomial GLMM
 cbpp = mlm.load_cbpp()
-glmm = mlm.glmer(
-    "incidence / size ~ period + (1 | herd)",
-    cbpp,
-    family=mlm.families.Binomial()
+model = mlm.glmer(
+    "incidence / size ~ period + (1 | herd)", cbpp, family=mlm.families.Binomial()
 )
-
-# Power analysis
-power = mlm.powerSim(glmm, cbpp, nsim=100, test="fixed")
-print(power)
+curve = mlm.powerCurve(
+    model, test=model.matrices.fixed_names[1], along="herd", values=[10, 15, 20], nsim=100
+)
 ```
 
-## Interpreting Results
-
-### Power Estimate Precision
-
-The confidence interval depends on the number of simulations:
-
-| nsim | Approximate CI width |
-|------|---------------------|
-| 100 | ±10% |
-| 200 | ±7% |
-| 500 | ±4% |
-| 1000 | ±3% |
-
-Use more simulations for final estimates.
-
-### Convergence Failures
-
-Some simulations may fail to converge:
-
-```python
-power = mlm.powerSim(model, data, nsim=100)
-print(f"Successful fits: {power.n_success}/{power.nsim}")
-```
-
-High failure rates (>10%) suggest model issues.
+Use `model.matrices.fixed_names` to inspect the encoded coefficient names before
+choosing a named test. Grouped-binomial simulation draws success counts using
+retained trial counts; refits use those same trials.

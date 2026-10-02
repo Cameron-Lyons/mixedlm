@@ -311,7 +311,13 @@ def allfit_glmer(
     if optimizers is None:
         optimizers = _get_available_optimizers()
 
-    weights = model.matrices.weights if np.any(model.matrices.weights != 1.0) else None
+    # Count-response formulas apply trial counts when rebuilding the matrices.
+    prior_weights = (
+        model.matrices.weights
+        if model.matrices.trials is None
+        else model.matrices.weights / model.matrices.trials
+    )
+    weights = prior_weights if np.any(prior_weights != 1.0) else None
     offset = model.matrices.offset if np.any(model.matrices.offset != 0.0) else None
 
     fits: dict[str, LmerResult | GlmerResult | None] = {}

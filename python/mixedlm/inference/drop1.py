@@ -367,7 +367,14 @@ def drop1_glmer(
     full_n_params = model.matrices.n_fixed + n_theta
     full_aic = model.AIC()
     full_loglik = model.logLik().value
-    weights = model.matrices.weights if np.any(model.matrices.weights != 1.0) else None
+    # Rebuilding a count-response formula multiplies prior weights by trials.
+    # Recover those priors so the reduced model applies trial counts once.
+    prior_weights = (
+        model.matrices.weights
+        if model.matrices.trials is None
+        else model.matrices.weights / model.matrices.trials
+    )
+    weights = prior_weights if np.any(prior_weights != 1.0) else None
     offset = model.matrices.offset if np.any(model.matrices.offset != 0.0) else None
 
     tasks = [

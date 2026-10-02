@@ -12,8 +12,11 @@ from mixedlm.formula.terms import Formula
 from mixedlm.matrices.design import (
     ModelMatrices,
     RandomEffectStructure,
+    _encode_binomial_factor,
     _normalize_grouped_binomial_response,
+    _numeric_response,
     _random_term_columns,
+    _restore_binomial_factor,
 )
 from mixedlm.models.lmer_types import ModelTerms, RanefResult, RePCA, RePCAGroup, VarCorrGroup
 from mixedlm.utils.dataframe import (
@@ -523,11 +526,15 @@ class MerResultMixin:
 
         return contrib
 
-    def _coerce_new_response(self, newresp: NDArray[np.floating] | None) -> NDArray[np.floating]:
+    def _coerce_new_response(self, newresp: ArrayLike | None) -> NDArray[np.floating]:
         if newresp is None:
             return self.matrices.y
 
-        arr = np.asarray(newresp, dtype=np.float64)
+        response = np.asarray(newresp)
+        if self.matrices.response_levels is not None and not _numeric_response(newresp):
+            arr = _encode_binomial_factor(response, self.matrices.response_levels)
+        else:
+            arr = np.asarray(newresp, dtype=np.float64)
         if len(arr) != self.matrices.n_obs:
             raise ValueError(f"newresp has length {len(arr)}, expected {self.matrices.n_obs}")
         if self.matrices.trials is not None:
@@ -535,7 +542,30 @@ class MerResultMixin:
         return arr
 
     def _clone_matrices_with_response_base(self, y: NDArray[np.floating]) -> ModelMatrices:
-        return replace(self.matrices, y=y)
+        frame = self.matrices.frame
+        levels = self.matrices.response_levels
+        if frame is not None:
+            # Keep the stored frame aligned with refitted responses
+            # so subsequent updates and cross-validation reuse the current data.
+            values = y if self.matrices.trials is None else np.rint(y * self.matrices.trials)
+            binary_factor = levels is not None and bool(np.all((y == 0) | (y == 1)))
+            if binary_factor:
+                values = np.asarray(levels, dtype=object)[y.astype(np.intp)]
+            if type(frame).__module__.startswith("pandas"):
+                import pandas as pd
+
+                frame = frame.copy()
+                frame[self.formula.response] = (
+                    pd.Categorical(values, categories=list(levels))
+                    if binary_factor and levels is not None
+                    else values
+                )
+            else:
+                import polars as pl
+
+                frame = frame.with_columns(pl.Series(self.formula.response, values.tolist()))
+            frame = _restore_binomial_factor(frame, self.formula.response, levels)
+        return replace(self.matrices, y=y, frame=frame)
 
     def coef(self) -> dict[str, dict[str, NDArray[np.floating]]]:
         ranef_result = self.ranef()
