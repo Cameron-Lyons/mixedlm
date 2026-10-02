@@ -175,7 +175,7 @@ class TestNlmerUpdate:
 
     def test_update_with_start(self, request) -> None:
         result = request.getfixturevalue("nlmm_model")
-        start = {"Asym": 200.0, "R0": 180.0, "lrc": -3.0}
+        start = {"Asym": 11.0, "R0": 3.0, "lrc": -0.8}
         updated = result.update(start=start)
         assert updated.converged and updated.pnls_converged
         direct = nlmer(

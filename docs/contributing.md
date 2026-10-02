@@ -153,7 +153,9 @@ downloads the normal abi3 wheel and installs it in an isolated environment, so
 it checks an artifact built for modern Python against older NumPy and pandas
 without an editable installation hiding compatibility issues. Test tools and
 Polars retain their locked versions; plotting and nlopt are checked separately
-by the complete feature run.
+by the complete feature run. The minimum job sets `OPENBLAS_CORETYPE=Nehalem`
+to avoid a [known CPU-dispatch bug in NumPy 1.23.5's bundled OpenBLAS](https://github.com/numpy/numpy/issues/24903)
+on newer x86 CPUs while retaining a kernel supported by the wheel's CPU baseline.
 
 Each wheel is installed and exercised on its target operating system and CPU,
 including Linux ARM. The source distribution is rebuilt and installed in a

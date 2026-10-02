@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from itertools import product
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -21,20 +23,25 @@ def glmm_model():
 @pytest.fixture(scope="module")
 def nlmm_model():
     rng = np.random.default_rng(814)
+    times = np.array([0.0, 0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0, 12.0])
+    # Balanced contrasts give all three random parameters independent variation
+    # while preserving a nonzero Asym/R0 covariance across enough groups.
+    contrasts = np.tile(np.array(list(product([-1.0, 1.0], repeat=3))), (3, 1))
+    effects = contrasts @ np.array([[0.8, 0.1, 0.02], [0.0, 0.3, 0.01], [0.0, 0.0, 0.08]])
     rows = []
-    for group_index in range(6):
-        asym = 200.0 + rng.normal(0.0, 12.0)
-        r0 = 175.0 + rng.normal(0.0, 6.0)
-        lrc = -2.8 + rng.normal(0.0, 0.1)
-        # Observe the approach to the asymptote so all three fixed parameters
-        # are identified before testing their reported uncertainty.
-        for time in np.linspace(0.0, 60.0, 15):
+    for group_index, (asym_effect, r0_effect, lrc_effect) in enumerate(effects):
+        asym = 12.0 + asym_effect
+        r0 = 2.0 + r0_effect
+        lrc = -1.0 + lrc_effect
+        # Observe both the transition and plateau with a strong parameter
+        # contrast so rate and asymptote uncertainty remain identifiable.
+        for time in times:
             response = asym - (asym - r0) * np.exp(-np.exp(lrc) * time)
             rows.append(
                 {
                     "subject": f"S{group_index + 1}",
                     "time": time,
-                    "response": response + rng.normal(0.0, 3.0),
+                    "response": response + rng.normal(0.0, 0.2),
                 }
             )
     data = pd.DataFrame(rows)
@@ -44,9 +51,10 @@ def nlmm_model():
         x_var="time",
         y_var="response",
         group_var="subject",
-        start={"Asym": 200.0, "R0": 175.0, "lrc": -2.8},
+        start={"Asym": 12.0, "R0": 2.0, "lrc": -1.0},
     )
     assert result.converged and result.pnls_converged
+    np.testing.assert_allclose(result.phi, [12.0, 2.0, -1.0], atol=0.1, rtol=0)
     variances = np.diag(result.vcov())
     assert np.all(np.isfinite(variances)) and np.all(variances > 0)
     return result
