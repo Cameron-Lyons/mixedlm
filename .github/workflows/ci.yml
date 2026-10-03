@@ -206,8 +206,8 @@ jobs:
       - name: Require source-matched native backend
         run: uv run --no-sync python -m tools.native_build
 
-      - name: Require imports to preserve free-threaded execution
-        run: uv run --no-sync python -c "import sys, sysconfig, mixedlm._rust; assert sysconfig.get_config_var('Py_GIL_DISABLED') == 1; assert not sys._is_gil_enabled()"
+      - name: Require installed-wheel checks to preserve free-threaded execution
+        run: uv run --no-sync python -I tools/check_wheel.py --expect-free-threaded
 
       - name: Run tests
         run: uv run --no-sync pytest tests/ --strict-config --strict-markers -ra --ignore=tests/test_property.py --ignore=tests/test_benchmark.py
@@ -494,6 +494,7 @@ jobs:
         uses: astral-sh/setup-uv@v7
 
       - name: Set up Python
+        id: python
         uses: actions/setup-python@v7
         with:
           python-version: "3.12"
@@ -514,6 +515,16 @@ jobs:
           python -m pip install --force-reinstall dist/*.whl
           python -I tools/native_build.py
           python -I tools/check_wheel.py
+
+      - name: Run installed-wheel numerical and thread regressions
+        shell: bash
+        env:
+          CI_PYTHON_EXECUTABLE: ${{ steps.python.outputs.python-path }}
+        run: |
+          uv sync --locked --no-install-project --python "$CI_PYTHON_EXECUTABLE"
+          uv pip install --no-deps dist/*.whl
+          uv run --no-sync python -I tools/check_wheel.py
+          uv run --no-sync python -I -m pytest tests/test_statistical_golden.py tests/test_joint_pnls.py tests/test_lmm_prepared_threads.py tests/test_prepared_glmm_threads.py tests/test_random_effect_simulation.py tests/test_glmm_prediction_uncertainty.py tests/test_cross_validation_scores.py --strict-config --strict-markers -ra
 
       - name: Upload wheels
         uses: actions/upload-artifact@v7
@@ -538,7 +549,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
       - name: Set up Python 3.14t
+        id: python
         uses: actions/setup-python@v7
         with:
           python-version: "3.14t"
@@ -557,6 +572,17 @@ jobs:
           python -m pip install --force-reinstall dist/*.whl
           python -I tools/native_build.py
           python -I tools/check_wheel.py --expect-free-threaded
+
+      - name: Run installed-wheel numerical and thread regressions
+        shell: bash
+        env:
+          CI_PYTHON_EXECUTABLE: ${{ steps.python.outputs.python-path }}
+        run: |
+          # Polars has no free-threaded wheels; this suite uses core dependencies.
+          uv sync --locked --no-install-project --python "$CI_PYTHON_EXECUTABLE" --no-install-package polars --no-install-package polars-runtime-32
+          uv pip install --no-deps dist/*.whl
+          uv run --no-sync python -I tools/check_wheel.py --expect-free-threaded
+          uv run --no-sync python -I -m pytest tests/test_statistical_golden.py tests/test_joint_pnls.py tests/test_lmm_prepared_threads.py tests/test_prepared_glmm_threads.py tests/test_random_effect_simulation.py tests/test_glmm_prediction_uncertainty.py tests/test_cross_validation_scores.py --strict-config --strict-markers -ra
 
       - name: Upload wheels
         uses: actions/upload-artifact@v7

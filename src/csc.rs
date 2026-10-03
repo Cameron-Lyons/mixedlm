@@ -26,9 +26,15 @@ impl CscMatrix {
         indptr: &[i64],
         shape: (usize, usize),
     ) -> Result<Self, LinalgError> {
-        let row_indices = checked_indices(indices, "indices")?;
-        let col_offsets = checked_indices(indptr, "indptr")?;
-        Self::try_from_parts(data, row_indices.into(), col_offsets.into(), shape)
+        let (row_indices, col_offsets, is_canonical) =
+            validate_i64_parts(data.len(), indices, indptr, shape)?;
+        Ok(Self::from_validated_parts(
+            data,
+            row_indices.into(),
+            col_offsets.into(),
+            shape,
+            is_canonical,
+        ))
     }
 
     pub fn try_from_usize(
@@ -46,61 +52,26 @@ impl CscMatrix {
         indptr: Cow<'_, [usize]>,
         shape: (usize, usize),
     ) -> Result<Self, LinalgError> {
+        let is_canonical = validate_parts(data.len(), &indices, &indptr, shape)?;
+        Ok(Self::from_validated_parts(
+            data,
+            indices,
+            indptr,
+            shape,
+            is_canonical,
+        ))
+    }
+
+    fn from_validated_parts(
+        data: &[f64],
+        indices: Cow<'_, [usize]>,
+        indptr: Cow<'_, [usize]>,
+        shape: (usize, usize),
+        is_canonical: bool,
+    ) -> Self {
         let (nrows, ncols) = shape;
-        let expected_offsets = ncols.checked_add(1).ok_or_else(|| {
-            LinalgError::InvalidSparseFormat("matrix column count overflows indptr length".into())
-        })?;
-        if indptr.len() != expected_offsets {
-            return Err(LinalgError::InvalidSparseFormat(format!(
-                "indptr has length {}, expected {expected_offsets}",
-                indptr.len(),
-            )));
-        }
-        if indptr.first().copied() != Some(0) {
-            return Err(LinalgError::InvalidSparseFormat(
-                "indptr must start at zero".to_string(),
-            ));
-        }
-        if data.len() != indices.len() {
-            return Err(LinalgError::InvalidSparseFormat(format!(
-                "data has length {}, but indices has length {}",
-                data.len(),
-                indices.len()
-            )));
-        }
-        if indptr.last().copied() != Some(indices.len()) {
-            return Err(LinalgError::InvalidSparseFormat(format!(
-                "indptr ends at {}, expected {}",
-                indptr.last().copied().unwrap_or(0),
-                indices.len()
-            )));
-        }
-
-        let mut is_canonical = true;
-        for column in 0..ncols {
-            let start = indptr[column];
-            let end = indptr[column + 1];
-            if start > end || end > indices.len() {
-                return Err(LinalgError::InvalidSparseFormat(format!(
-                    "invalid range {start}..{end} for column {column}"
-                )));
-            }
-            let mut previous = None;
-            for &row in &indices[start..end] {
-                if row >= nrows {
-                    return Err(LinalgError::InvalidSparseFormat(format!(
-                        "row index {row} in column {column} exceeds matrix row count {nrows}"
-                    )));
-                }
-                if previous.is_some_and(|prior| prior >= row) {
-                    is_canonical = false;
-                }
-                previous = Some(row);
-            }
-        }
-
         if is_canonical {
-            return Ok(Self {
+            return Self {
                 nrows,
                 ncols,
                 // Signed inputs already own their converted index buffers.
@@ -108,7 +79,7 @@ impl CscMatrix {
                 row_indices: indices.into_owned(),
                 values: data.to_vec(),
                 rows: OnceLock::new(),
-            });
+            };
         }
 
         let mut col_offsets = Vec::with_capacity(ncols + 1);
@@ -142,14 +113,14 @@ impl CscMatrix {
             col_offsets.push(row_indices.len());
         }
 
-        Ok(Self {
+        Self {
             nrows,
             ncols,
             col_offsets,
             row_indices,
             values,
             rows: OnceLock::new(),
-        })
+        }
     }
 
     pub fn nrows(&self) -> usize {
@@ -490,6 +461,82 @@ impl RowStorage {
     }
 }
 
+/// Validate signed Python CSC buffers without reordering or merging their entries.
+/// Returns owned index storage so callers can safely release the Python GIL.
+pub(crate) fn validate_i64_parts(
+    data_len: usize,
+    indices: &[i64],
+    indptr: &[i64],
+    shape: (usize, usize),
+) -> Result<(Vec<usize>, Vec<usize>, bool), LinalgError> {
+    let row_indices = checked_indices(indices, "indices")?;
+    let col_offsets = checked_indices(indptr, "indptr")?;
+    let is_canonical = validate_parts(data_len, &row_indices, &col_offsets, shape)?;
+    Ok((row_indices, col_offsets, is_canonical))
+}
+
+/// Check CSC structure and report whether the entries are already canonical.
+fn validate_parts(
+    data_len: usize,
+    indices: &[usize],
+    indptr: &[usize],
+    shape: (usize, usize),
+) -> Result<bool, LinalgError> {
+    let (nrows, ncols) = shape;
+    let expected_offsets = ncols.checked_add(1).ok_or_else(|| {
+        LinalgError::InvalidSparseFormat("matrix column count overflows indptr length".into())
+    })?;
+    if indptr.len() != expected_offsets {
+        return Err(LinalgError::InvalidSparseFormat(format!(
+            "indptr has length {}, expected {expected_offsets}",
+            indptr.len(),
+        )));
+    }
+    if indptr.first().copied() != Some(0) {
+        return Err(LinalgError::InvalidSparseFormat(
+            "indptr must start at zero".to_string(),
+        ));
+    }
+    if data_len != indices.len() {
+        return Err(LinalgError::InvalidSparseFormat(format!(
+            "data has length {}, but indices has length {}",
+            data_len,
+            indices.len()
+        )));
+    }
+    if indptr.last().copied() != Some(indices.len()) {
+        return Err(LinalgError::InvalidSparseFormat(format!(
+            "indptr ends at {}, expected {}",
+            indptr.last().copied().unwrap_or(0),
+            indices.len()
+        )));
+    }
+
+    let mut is_canonical = true;
+    for column in 0..ncols {
+        let start = indptr[column];
+        let end = indptr[column + 1];
+        if start > end || end > indices.len() {
+            return Err(LinalgError::InvalidSparseFormat(format!(
+                "invalid range {start}..{end} for column {column}"
+            )));
+        }
+        let mut previous = None;
+        for &row in &indices[start..end] {
+            if row >= nrows {
+                return Err(LinalgError::InvalidSparseFormat(format!(
+                    "row index {row} in column {column} exceeds matrix row count {nrows}"
+                )));
+            }
+            if previous.is_some_and(|prior| prior >= row) {
+                is_canonical = false;
+            }
+            previous = Some(row);
+        }
+    }
+    Ok(is_canonical)
+}
+
 fn checked_indices(values: &[i64], field_name: &str) -> Result<Vec<usize>, LinalgError> {
     let mut converted = Vec::with_capacity(values.len());
     for (index, &value) in values.iter().enumerate() {
@@ -703,6 +750,22 @@ mod tests {
         assert_eq!(matrix.col_offsets().as_ptr(), indptr_ptr);
         data.fill(100.0);
         assert_eq!(matrix.values(), &[2.0, 0.0, -1.0]);
+    }
+
+    #[test]
+    fn raw_signed_validation_preserves_duplicates_and_original_entry_order() {
+        let indices = [2, 0, 2, 1, 0, 2];
+        let indptr = [0, 3, 3, 6];
+        let (rows, offsets, is_canonical) =
+            super::validate_i64_parts(6, &indices, &indptr, (4, 3)).unwrap();
+        assert_eq!(rows, indices.map(|value| value as usize));
+        assert_eq!(offsets, indptr.map(|value| value as usize));
+        assert!(!is_canonical);
+        assert!(
+            super::validate_i64_parts(3, &[0, 2, 1], &[0, 2, 2, 3], (3, 3))
+                .unwrap()
+                .2
+        );
     }
 
     #[test]

@@ -5,7 +5,7 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
-from mixedlm.estimation.reml import _build_lambda_blocks
+from mixedlm.estimation.reml import _build_lambda_blocks, _count_theta
 from mixedlm.families.base import Family
 from mixedlm.families.gamma import Gamma
 from mixedlm.families.gaussian import Gaussian
@@ -52,14 +52,28 @@ def simulate_random_effects(
     rng: Any | None = None,
 ) -> NDArray[np.float64]:
     """Draw one set of random effects using the fitted covariance factors."""
+    expected = _count_theta(structures)
+    if theta.ndim != 1 or theta.size != expected:
+        raise ValueError(f"theta must be a one-dimensional array of exactly {expected} values")
     rng = np.random if rng is None else rng
     result = np.empty(sum(s.n_levels * s.n_terms for s in structures), dtype=np.float64)
     start = 0
-    for structure, factor in zip(structures, _build_lambda_blocks(theta, structures), strict=True):
+    theta_start = 0
+    for structure in structures:
+        theta_stop = theta_start + _count_theta([structure])
+        parameters = theta[theta_start:theta_stop]
         size = structure.n_levels * structure.n_terms
         standard = rng.standard_normal((structure.n_levels, structure.n_terms))
-        result[start : start + size] = (standard @ factor.T).ravel()
+        if not structure.correlated and structure.cov_type == "us":
+            # Independent effects need a scale vector, even for wide designs.
+            # This also avoids dense matrix products in serial bootstrap draws.
+            standard *= parameters
+            result[start : start + size] = standard.ravel()
+        else:
+            factor = _build_lambda_blocks(parameters, [structure])[0]
+            result[start : start + size] = (standard @ factor.T).ravel()
         start += size
+        theta_start = theta_stop
     result *= sigma
     return result
 

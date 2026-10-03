@@ -30,6 +30,8 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+    # pandas 2.3.3 free-threaded wheels enable the GIL when importing CSV parsers.
+    "pandas>=3.0; python_version >= '3.14'",
     "pytest>=7.0",
     "pytest-cov>=4.0",
     "pytest-benchmark>=4.0",
@@ -84,6 +86,8 @@ pythonpath = ["."]
 # Mirror the `dev` extra so both `uv sync` and `pip install .[dev]`
 # create an environment with the documented test and quality tools.
 dev = [
+    # pandas 2.3.3 free-threaded wheels enable the GIL when importing CSV parsers.
+    "pandas>=3.0; python_version >= '3.14'",
     "pytest>=7.0",
     "pytest-cov>=4.0",
     "pytest-benchmark>=4.0",

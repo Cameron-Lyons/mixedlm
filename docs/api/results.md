@@ -210,6 +210,7 @@ interactions, powers, categorical slopes, and custom contrasts. Supply all rando
 predictors and grouping columns in `newdata`, or use `re_form="NA"` for fixed effects only.
 `allow_new_levels=True` accepts unseen grouping levels with zero random effects; unseen
 categories of a random-effect predictor still require a fitted encoding and are rejected.
+Conditional predictions require nonmissing grouping values, including when new levels are allowed.
 
 **Parameters:**
 
@@ -242,8 +243,7 @@ GLMM predictions validate `type` and `interval` before building prediction
 matrices or calculating covariance. Confidence intervals use the link's
 `inverse_interval()` transformation: decreasing inverse links have ordered
 response bounds, and a square-root inverse includes zero when the link-scale
-interval crosses zero. GLMM standard errors still use fixed-coefficient
-uncertainty and the delta method on the response scale.
+interval crosses zero. GLMM response-scale standard errors use the delta method.
 
 Fixed-coefficient covariance projections are evaluated in batches for both model
 types, bounding each temporary projection to one million elements (or one row
@@ -263,11 +263,12 @@ positions distinguish them during prediction and refitting. Older or manually co
 results without that position information raise an error when a reduced schema is
 ambiguous; refit those models before predicting new data.
 
-For conditional LMM predictions, uncertainty is evaluated from the joint fixed- and
+For conditional LMM and GLMM predictions, uncertainty is evaluated from the joint fixed- and
 random-effect covariance. This includes covariance between fixed and random estimates,
 covariance among correlated random slopes, and covariance across crossed structures. For an
 unseen group accepted with `allow_new_levels=True`, the fitted prior covariance is added while
-the predicted random effect remains zero. Prediction intervals add residual variance to the
+the predicted random effect remains zero. GLMMs use the final PIRLS working approximation
+and hold fitted covariance parameters fixed. LMM prediction intervals add residual variance to the
 mean-prediction variance; `se_fit` continues to report the standard error of the mean.
 The covariance calculation uses the fitted prior weights. In-sample prediction intervals
 add residual variance `sigma**2 / weight`. New-data prediction intervals add

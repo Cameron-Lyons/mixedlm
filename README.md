@@ -23,6 +23,7 @@ A Python implementation of mixed-effects models inspired by R's [lme4](https://g
 - **Model comparison** - ANOVA (including Type III), drop1, allFit
 - **Model selection** - AIC/AICc/BIC rankings, normalized weights, and evidence sets
 - **Model validation** - Case-level and whole-group cross-validation with weighted scoring
+- **Prediction uncertainty** - Conditional LMM and GLMM mean intervals with joint fixed/random-effect covariance and prior variance for new groups
 - **Power analysis** - powerSim, powerCurve for sample size planning
 - **Diagnostics** - Dispersion and zero-inflation checks, influence measures, Cook's distance, leverage, VIF/GVIF, condition indices
 - **Fast startup** - Public objects are loaded on demand, so lightweight imports avoid the modeling stack
@@ -370,7 +371,7 @@ for stacked changes. Push-triggered checks run on `main`.
 - **Property testing**: hypothesis
 - **Memory safety**: Miri
 - **Fuzz testing**: cargo-fuzz (weekly)
-- **Distributions**: installed wheels run model fits, packaged-dataset checks, independent native numerical checks, and concurrent solves on every target platform before upload or publication; free-threaded wheels also verify that imports and fits preserve execution without the GIL
+- **Distributions**: installed wheels run model fits, packaged-dataset checks, independent native numerical checks, and concurrent solves on every target platform before upload or publication. Each target also runs independent statistical, nonlinear, and prepared-model threading regressions; free-threaded wheels verify that imports and fits preserve execution without the GIL
 - **Source packages**: the source distribution is rebuilt and installed in a fresh environment, then runs the same native and model checks before upload or publication
 
 Pull-request updates cancel superseded CI runs. Builds use the same CPU baseline

@@ -79,12 +79,13 @@ class CrossValidationResult:
         rows: list[dict[str, float | str]] = []
         for metric in self.metric_names:
             values = self.fold_scores[metric].to_numpy(dtype=np.float64)
+            mean, standard_deviation = _fold_score_moments(values)
             rows.append(
                 {
                     "metric": metric,
                     "overall": self.scores[metric],
-                    "fold_mean": float(np.mean(values)),
-                    "fold_std": float(np.std(values, ddof=1)) if len(values) > 1 else 0.0,
+                    "fold_mean": mean,
+                    "fold_std": standard_deviation,
                     "fold_min": float(np.min(values)),
                     "fold_max": float(np.max(values)),
                 }
@@ -117,6 +118,11 @@ def _validate_score_inputs(
     y_pred: NDArray[np.floating],
     weights: NDArray[np.floating] | None,
 ) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
+    for values in (y_true, y_pred, weights):
+        if values is not None and (np.iscomplexobj(values) or np.ma.is_masked(values)):
+            raise ValueError(
+                "observed values, predictions, and weights must be unmasked real values"
+            )
     observed = np.asarray(y_true, dtype=np.float64)
     predicted = np.asarray(y_pred, dtype=np.float64)
     if weights is None:
@@ -139,14 +145,132 @@ def _validate_score_inputs(
     return observed, predicted, score_weights
 
 
+def _difference_parts(
+    observed: NDArray[np.float64], predicted: NDArray[np.float64]
+) -> tuple[NDArray[np.float64], NDArray[np.int32]]:
+    """Retain finite differences even when subtraction exceeds float64 range."""
+    with np.errstate(over="ignore"):
+        difference = observed - predicted
+    overflow = np.isinf(difference)
+    if np.any(overflow):
+        difference[overflow] = np.ldexp(observed[overflow], -1) - np.ldexp(predicted[overflow], -1)
+    mantissa, exponent = np.frexp(difference)
+    exponent[overflow] += 1
+    return mantissa, exponent
+
+
+def _sum_parts(values: NDArray[np.float64], exponents: NDArray[np.int32]) -> tuple[float, int]:
+    """Sum binary-scaled terms without restoring their potentially extreme units."""
+    active = values != 0.0
+    if not np.any(active):
+        return 0.0, 0
+    exponent = int(np.max(exponents[active]))
+    with np.errstate(under="ignore"):
+        scaled = np.ldexp(values, exponents - exponent)
+    return float(np.sum(scaled)), exponent
+
+
+def _weighted_power_sum(
+    values: tuple[NDArray[np.float64], NDArray[np.int32]],
+    weights: tuple[NDArray[np.float64], NDArray[np.int32]],
+    power: int,
+) -> tuple[float, int]:
+    mantissa, exponent = values
+    weight_mantissa, weight_exponent = weights
+    return _sum_parts(
+        np.abs(mantissa) ** power * weight_mantissa, power * exponent + weight_exponent
+    )
+
+
+def _parts_ratio(
+    numerator: tuple[float, int], denominator: tuple[float, int], *, root: bool = False
+) -> float:
+    value, shift = np.frexp(numerator[0] / denominator[0])
+    exponent = int(shift) + numerator[1] - denominator[1]
+    if root:
+        value = np.sqrt(np.ldexp(value, exponent % 2))
+        exponent //= 2
+    with np.errstate(over="ignore", under="ignore"):
+        return float(np.ldexp(value, exponent))
+
+
+def _fold_score_moments(values: NDArray[np.float64]) -> tuple[float, float]:
+    """Summarize finite fold scores without squaring or summing their units."""
+    if len(values) == 1:
+        return float(values[0]), 0.0
+    scale = float(np.max(np.abs(values)))
+    if scale == 0.0:
+        return 0.0, 0.0
+    with np.errstate(under="ignore"):
+        mean = float(np.mean(values / scale)) * scale
+    if np.all(values == values[0]):
+        return mean, 0.0
+
+    # Center before scaling to retain nearby values at large baselines.
+    centered, exponents = _difference_parts(values, np.broadcast_to(values[0], values.shape))
+    exponent = int(np.max(exponents[centered != 0.0]))
+    with np.errstate(under="ignore"):
+        scaled_centered = np.ldexp(centered, exponents - exponent)
+    standard_deviation = float(np.std(scaled_centered, ddof=1))
+    with np.errstate(over="ignore", under="ignore"):
+        return mean, float(np.ldexp(standard_deviation, exponent))
+
+
+def _weighted_error_scores(
+    observed: NDArray[np.float64],
+    predicted: NDArray[np.float64],
+    weights: NDArray[np.float64],
+    names: Sequence[str],
+) -> dict[str, float]:
+    # Ordinary-sized inputs can use NumPy's direct reduction. These bounds
+    # leave ample exponent headroom for squared errors, weighted sums, and
+    # their ratio, even for arrays far larger than can fit in memory.
+    with np.errstate(over="ignore"):
+        difference = observed - predicted
+    largest_error = np.max(np.abs(difference))
+    if largest_error == 0.0:
+        return dict.fromkeys(names, 0.0)
+    squared = "mse" in names or "rmse" in names
+    scores = {}
+    if 1e-60 <= largest_error <= 1e60 and np.min(weights) >= 1e-60 and np.max(weights) <= 1e60:
+        weight_sum = float(np.sum(weights))
+        with np.errstate(under="ignore"):
+            if squared:
+                value = float(np.sum(np.square(difference) * weights)) / weight_sum
+                if "mse" in names:
+                    scores["mse"] = value
+                if "rmse" in names:
+                    scores["rmse"] = float(np.sqrt(value))
+            if "mae" in names:
+                scores["mae"] = float(np.sum(np.abs(difference) * weights)) / weight_sum
+        return scores
+    weight_parts = np.frexp(weights)
+    weight_sum_parts = _sum_parts(*weight_parts)
+    error_parts = _difference_parts(observed, predicted)
+    if squared:
+        total = _weighted_power_sum(error_parts, weight_parts, 2)
+        if "mse" in names:
+            scores["mse"] = _parts_ratio(total, weight_sum_parts)
+        if "rmse" in names:
+            scores["rmse"] = _parts_ratio(total, weight_sum_parts, root=True)
+    if "mae" in names:
+        total = _weighted_power_sum(error_parts, weight_parts, 1)
+        scores["mae"] = _parts_ratio(total, weight_sum_parts)
+    return scores
+
+
 def weighted_mse(
     y_true: NDArray[np.floating],
     y_pred: NDArray[np.floating],
     weights: NDArray[np.floating] | None = None,
 ) -> float:
-    """Compute mean-squared error with optional positive weights."""
+    """Compute mean-squared error with optional positive weights.
+
+    Intermediate products are scaled to avoid overflow and underflow. An
+    unrepresentable final score returns infinity or zero, respectively.
+    """
     observed, predicted, score_weights = _validate_score_inputs(y_true, y_pred, weights)
-    return float(np.average(np.square(observed - predicted), weights=score_weights))
+    return _weighted_error_scores(observed, predicted, score_weights, ("mse",))["mse"]
 
 
 def weighted_rmse(
@@ -154,8 +278,9 @@ def weighted_rmse(
     y_pred: NDArray[np.floating],
     weights: NDArray[np.floating] | None = None,
 ) -> float:
-    """Compute root-mean-squared error with optional positive weights."""
-    return float(np.sqrt(weighted_mse(y_true, y_pred, weights)))
+    """Compute root-mean-squared error without first forming the squared score."""
+    observed, predicted, score_weights = _validate_score_inputs(y_true, y_pred, weights)
+    return _weighted_error_scores(observed, predicted, score_weights, ("rmse",))["rmse"]
 
 
 def weighted_mae(
@@ -165,7 +290,7 @@ def weighted_mae(
 ) -> float:
     """Compute mean absolute error with optional positive weights."""
     observed, predicted, score_weights = _validate_score_inputs(y_true, y_pred, weights)
-    return float(np.average(np.abs(observed - predicted), weights=score_weights))
+    return _weighted_error_scores(observed, predicted, score_weights, ("mae",))["mae"]
 
 
 def weighted_r2(
@@ -181,30 +306,49 @@ def weighted_r2(
     if np.all(observed == observed[0]):
         return 1.0 if np.array_equal(observed, predicted) else 0.0
 
-    # Remove the baseline before scaling so nearby values retain their exact
-    # representable differences. Fall back to scaling first only when finite
-    # inputs have an unrepresentable range (for example, -1e308 to 1e308).
+    # Center at a heavily weighted observation before finding the mean, so
+    # large baselines do not erase nearby representable differences. Keep
+    # products in binary parts: normalizing weights alone can drop a tiny
+    # weight whose large residual contributes substantially to the score.
+    anchor = observed[int(np.argmax(score_weights))]
     with np.errstate(over="ignore"):
-        centered = observed - observed[0]
-        residuals = observed - predicted
-    if not np.all(np.isfinite(centered)) or not np.all(np.isfinite(residuals)):
-        input_scale = max(float(np.max(np.abs(observed))), float(np.max(np.abs(predicted))))
-        observed = observed / input_scale
-        predicted = predicted / input_scale
-        centered = observed - observed[0]
-        residuals = observed - predicted
-    # R2 is dimensionless. Scale differences and weights before squaring to
-    # avoid overflow or underflow from response units and large prior weights.
-    scale = max(float(np.max(np.abs(centered))), float(np.max(np.abs(residuals))))
-    centered = centered / scale
-    residuals = residuals / scale
-    score_weights = score_weights / np.max(score_weights)
-    mean = float(np.average(centered, weights=score_weights))
-    residual_sum = float(np.sum(score_weights * np.square(residuals)))
-    total_sum = float(np.sum(score_weights * np.square(centered - mean)))
-    if total_sum == 0.0:
-        return 1.0 if residual_sum == 0.0 else float("-inf")
-    return 1 - residual_sum / total_sum
+        centered_values = observed - anchor
+        residual_values = observed - predicted
+    largest_center = np.max(np.abs(centered_values))
+    if (
+        1e-60 <= largest_center <= 1e60
+        and np.max(np.abs(residual_values)) <= 1e60
+        and np.min(score_weights) >= 1e-60
+        and np.max(score_weights) <= 1e60
+    ):
+        with np.errstate(under="ignore"):
+            mean_value = np.average(centered_values, weights=score_weights)
+            total_value = float(np.sum(score_weights * np.square(centered_values - mean_value)))
+            residual_value = float(np.sum(score_weights * np.square(residual_values)))
+        return 1 - residual_value / total_value
+    centered, centered_exponent = _difference_parts(
+        observed, np.broadcast_to(anchor, observed.shape)
+    )
+    weight_parts = np.frexp(score_weights)
+    mean_sum, mean_power = _sum_parts(
+        centered * weight_parts[0], centered_exponent + weight_parts[1]
+    )
+    weight_sum, weight_power = _sum_parts(*weight_parts)
+    mean = mean_sum / weight_sum
+    mean_exponent = mean_power - weight_power
+    common_exponent = centered_exponent
+    if mean != 0.0:
+        common_exponent = np.maximum(centered_exponent, mean_exponent)
+    with np.errstate(under="ignore"):
+        deviations = np.ldexp(centered, centered_exponent - common_exponent) - np.ldexp(
+            mean, mean_exponent - common_exponent
+        )
+    deviations, deviation_shift = np.frexp(deviations)
+    total = _weighted_power_sum((deviations, common_exponent + deviation_shift), weight_parts, 2)
+    residual = _weighted_power_sum(_difference_parts(observed, predicted), weight_parts, 2)
+    if total[0] == 0.0:
+        return 1.0 if residual[0] == 0.0 else float("-inf")
+    return 1 - _parts_ratio(residual, total)
 
 
 def _random_generator(random_state: int | np.random.Generator | None) -> np.random.Generator:
@@ -369,14 +513,20 @@ def _score_metrics(
     weights: NDArray[np.float64],
     family: Family | None,
 ) -> dict[str, float]:
+    error_names = [
+        name
+        for name, scorer in resolved
+        if isinstance(scorer, str) and scorer in {"mse", "rmse", "mae"}
+    ]
+    error_scores = (
+        _weighted_error_scores(*_validate_score_inputs(y_true, y_pred, weights), error_names)
+        if error_names
+        else {}
+    )
     scores: dict[str, float] = {}
     for name, scorer in resolved:
-        if scorer == "rmse":
-            value = weighted_rmse(y_true, y_pred, weights)
-        elif scorer == "mse":
-            value = weighted_mse(y_true, y_pred, weights)
-        elif scorer == "mae":
-            value = weighted_mae(y_true, y_pred, weights)
+        if name in error_scores:
+            value = error_scores[name]
         elif scorer == "r2":
             value = weighted_r2(y_true, y_pred, weights)
         elif scorer == "deviance":

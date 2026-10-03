@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- GLMM conditional prediction standard errors include joint fixed/random-effect uncertainty. Predictions for allowed new grouping levels include the fitted prior random-effect variance; response-scale intervals transform the link-scale limits.
+
 - Binomial GLMMs accept two-level factor responses, preserve the success level through refits, updates, and cross-validation, and return numeric simulations using the fitted encoding.
 
 - Power curves now support actual group-count and within-group sample-size changes, absolute coefficient values, and per-point simulation diagnostics. Power results expose `n_failed` for excluded simulations.
@@ -28,6 +30,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Nonlinear new-data predictions accept scalar, array, or column-based response offsets.
 
 ### Changed
+
+- Native and Python random-effect simulations use compact scale vectors for independent coefficients. Native correlated draws reuse output storage, and native simulation releases the GIL while drawing batches.
+
+- Every standard and free-threaded wheel target runs independent statistical, nonlinear, and native-threading regressions from its installed artifact before upload or publication.
 
 - Standard Python 3.14 joins the test matrix. Property tests compare generated weighted and crossed designs against independent Gaussian likelihoods. Required CI runs locked, sanitized fuzz targets against the production sparse routines, with mathematical solve and input-validation oracles.
 
@@ -58,6 +64,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   behavior, including per-unit rates from models fitted with log-exposure offsets.
 
 ### Fixed
+
+- Weighted cross-validation MSE, RMSE, MAE, and R² retain contributions across extreme response and weight scales without overflowing intermediate products. Scoring rejects complex and masked inputs.
+
+- Native sparse random-effect products validate dimensions and CSC buffers before accessing them, returning informative errors for malformed inputs.
+
+- Conditional prediction matrices preserve positional identity when random-effect column names coincide and are reused for means and uncertainty. New-level prior variances use bounded sparse projection buffers.
 
 - Nested random effects expand to every parent factor, and explicit `:` grouping is supported. Joint levels escape separators within labels. Formula parsing rejects malformed or unsupported trailing expressions instead of silently fitting a truncated model. Nested fits can change because earlier versions omitted parent factors.
 
