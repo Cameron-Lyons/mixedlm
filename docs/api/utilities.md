@@ -195,6 +195,43 @@ upper-triangular row order: `(0, 1), (0, 2), ..., (1, 2), ...`. Independent term
 have empty off-diagonal lists. Returning `theta` preserves the fitted parameter
 layout and does not apply `sigma`.
 
+## Sparse Cholesky
+
+The native `SparseCholeskySymbolic` class reuses symbolic analysis when a
+positive definite matrix changes values while keeping its CSC sparsity pattern.
+It uses approximate minimum degree (`ordering="amd"`) to reduce factor fill.
+Choose `ordering="natural"` to retain the original variable order during
+factorization. Solutions always follow the original row order.
+
+```python
+from mixedlm import SparseCholeskySymbolic
+
+# A is a square scipy.sparse CSC matrix; rhs has shape (A.shape[0], n_rhs).
+symbolic = SparseCholeskySymbolic(
+    A.indices.astype("int64"), A.indptr.astype("int64"), A.shape[0],
+    ordering="amd",
+)
+numeric = symbolic.factor(A.data.astype("float64"))
+solution = numeric.solve(rhs)
+logdet = numeric.logdet()
+factor_entries = symbolic.factor_nonzeros()  # Includes diagonal and fill.
+```
+
+The matrix's lower triangle defines the symmetric system. Full symmetric
+matrices and stored lower triangles are both accepted, including valid CSC
+columns with unsorted or duplicate entries. Numeric factorization reports a
+`ValueError` when the matrix is not positive definite.
+
+Symbolic analysis, factorization, solves, and determinant calculation release
+the Python interpreter lock. Factors can be reused across threads. Each call
+copies its array inputs before releasing the lock, so subsequent changes to
+those arrays do not affect work already in progress. `solve` accepts strided
+right-hand sides and returns an independent C-contiguous `float64` array.
+
+`python benchmarks/benchmark_sparse_ordering.py` compares both orderings on a
+hub system, reports factor storage and median run times, and checks solutions
+and determinants against its closed-form Schur complement.
+
 ## EM-REML Initialization
 
 ### em_reml_simple

@@ -1,4 +1,3 @@
-use numpy::ndarray::ArrayView2;
 use pyo3::PyResult;
 use pyo3::exceptions::PyValueError;
 
@@ -53,43 +52,36 @@ fn csc_from_scipy(
     CscMatrix::try_from_i64(data, indices, indptr, shape)
 }
 
+pub(crate) fn square_csc_from_scipy(
+    data: &[f64],
+    indices: &[i64],
+    indptr: &[i64],
+    shape: (usize, usize),
+) -> Result<CscMatrix, LinalgError> {
+    validate_square(shape)?;
+    csc_from_scipy(data, indices, indptr, shape)
+}
+
 pub fn sparse_cholesky_solve(
-    a_data: &[f64],
-    a_indices: &[i64],
-    a_indptr: &[i64],
-    a_shape: (usize, usize),
-    b: ArrayView2<'_, f64>,
-) -> PyResult<(Vec<f64>, usize, usize)> {
-    validate_square(a_shape)?;
-    if b.nrows() != a_shape.0 {
+    a: &CscMatrix,
+    rhs: Vec<f64>,
+    shape: (usize, usize),
+) -> PyResult<Vec<f64>> {
+    if shape.0 != a.nrows() {
         return Err(LinalgError::DimensionMismatch(format!(
             "right-hand side has {} rows, expected {}",
-            b.nrows(),
-            a_shape.0
+            shape.0,
+            a.nrows()
         ))
         .into());
     }
-
-    let a = csc_from_scipy(a_data, a_indices, a_indptr, a_shape)?;
-
-    let (n, m) = (b.nrows(), b.ncols());
-    let cache = SymbolicCholeskyCache::new(a.row_indices(), a.col_offsets(), n)?;
+    let cache = SymbolicCholeskyCache::new_amd(a.row_indices(), a.col_offsets(), a.nrows())?;
     let factor = cache.factor(a.values(), a.row_indices(), a.col_offsets())?;
-    let result = factor.solve(b)?;
-
-    Ok((result, n, m))
+    Ok(factor.solve_owned(rhs, shape)?)
 }
 
-pub fn sparse_cholesky_logdet(
-    a_data: &[f64],
-    a_indices: &[i64],
-    a_indptr: &[i64],
-    a_shape: (usize, usize),
-) -> PyResult<f64> {
-    validate_square(a_shape)?;
-    let a = csc_from_scipy(a_data, a_indices, a_indptr, a_shape)?;
-
-    let cache = SymbolicCholeskyCache::new(a.row_indices(), a.col_offsets(), a.nrows())?;
+pub fn sparse_cholesky_logdet(a: &CscMatrix) -> PyResult<f64> {
+    let cache = SymbolicCholeskyCache::new_amd(a.row_indices(), a.col_offsets(), a.nrows())?;
     let factor = cache.factor(a.values(), a.row_indices(), a.col_offsets())?;
     Ok(factor.logdet())
 }

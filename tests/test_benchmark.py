@@ -764,6 +764,30 @@ def test_benchmark_sparse_cholesky_logdet(benchmark, sparse_spd_system):
     assert np.isfinite(result)
 
 
+@pytest.mark.benchmark(group="rust-sparse-ordering")
+@pytest.mark.parametrize("ordering", ["natural", "amd"])
+@pytest.mark.parametrize("size", [128, 512])
+def test_benchmark_sparse_hub_ordering(benchmark, ordering, size):
+    from tests.test_sparse_ordering import arrowhead_system, sparse_arguments
+
+    matrix, rhs, expected, logdet = arrowhead_system(size)
+    data, indices, offsets = sparse_arguments(matrix, "full")
+
+    def factor_and_solve():
+        symbolic = SparseCholeskySymbolic(indices, offsets, size, ordering=ordering)
+        numeric = symbolic.factor(data)
+        return numeric.solve(rhs), numeric.logdet(), symbolic.factor_nonzeros()
+
+    solution, actual_logdet, factor_nonzeros = benchmark(factor_and_solve)
+    np.testing.assert_allclose(solution, expected, rtol=2e-12, atol=2e-12)
+    np.testing.assert_allclose(matrix @ solution, rhs, rtol=2e-12, atol=2e-12)
+    assert actual_logdet == pytest.approx(logdet, rel=2e-12)
+    if ordering == "amd":
+        assert factor_nonzeros <= 2 * size
+    else:
+        assert factor_nonzeros == size * (size + 1) // 2
+
+
 @pytest.mark.benchmark(group="rust-sparse-symbolic-cache")
 def test_benchmark_sparse_symbolic_refactor(benchmark, sparse_spd_system):
     data, indices, indptr, shape, rhs = sparse_spd_system

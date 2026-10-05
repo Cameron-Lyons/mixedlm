@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from dataclasses import dataclass
@@ -10,14 +10,16 @@ from typing import TYPE_CHECKING, Any, TypeAlias
 
 import numpy as np
 import pandas as pd
-from numpy.typing import NDArray
+from numpy.typing import ArrayLike, NDArray
 
 from mixedlm.matrices.design import _build_response, _restore_binomial_factor
 from mixedlm.utils.dataframe import (
     dataframe_length,
     ensure_dataframe,
+    get_categories,
     get_column_numpy,
     get_columns,
+    is_categorical_or_string,
 )
 
 if TYPE_CHECKING:
@@ -42,6 +44,9 @@ class CrossValidationFold:
     fold: int
     train_indices: NDArray[np.intp]
     test_indices: NDArray[np.intp]
+
+
+FoldSpec: TypeAlias = CrossValidationFold | tuple[ArrayLike, ArrayLike]
 
 
 @dataclass
@@ -440,6 +445,118 @@ def _take_rows(data: Any, indices: NDArray[np.intp]) -> Any:
     return data[indices.tolist()]
 
 
+def _fold_indices(values: ArrayLike, n_samples: int, fold: int, kind: str) -> NDArray[np.intp]:
+    """Validate positional indices before any potentially lossy integer cast."""
+    if np.ma.is_masked(values):
+        raise ValueError(f"fold {fold} {kind} indices must not contain masked values")
+    indices = np.asarray(values)
+    if indices.ndim != 1 or indices.size == 0:
+        raise ValueError(f"fold {fold} {kind} indices must be a nonempty 1D array")
+    if not np.issubdtype(indices.dtype, np.integer):
+        raise TypeError(f"fold {fold} {kind} indices must be integer row positions")
+    if np.any(indices < 0) or np.any(indices >= n_samples):
+        raise ValueError(f"fold {fold} {kind} indices are outside the observation range")
+    if len(np.unique(indices)) != len(indices):
+        raise ValueError(f"fold {fold} {kind} indices must not contain duplicate rows")
+    result = np.array(indices, dtype=np.intp, copy=True)
+    result.setflags(write=False)
+    return result
+
+
+def _explicit_folds(
+    cv: Iterable[FoldSpec], n_samples: int, groups: Any | None
+) -> tuple[CrossValidationFold, ...]:
+    """Require one honest held-out prediction per observation before fitting."""
+    if isinstance(cv, (str, bytes)):
+        raise TypeError("cv must be an integer or an iterable of train/test splits")
+    try:
+        supplied = iter(cv)
+    except TypeError:
+        raise TypeError("cv must be an integer or an iterable of train/test splits") from None
+
+    group_codes = None
+    if groups is not None:
+        group_values = np.asarray(groups)
+        if group_values.ndim != 1 or len(group_values) != n_samples:
+            raise ValueError("groups must be a 1D array with one value per observation")
+        if bool(np.asarray(pd.isna(group_values)).any()):
+            raise ValueError("groups cannot contain missing values")
+        group_codes, _ = pd.factorize(group_values, sort=False)
+
+    membership = np.full(n_samples, -1, dtype=np.int64)
+    folds: list[CrossValidationFold] = []
+    for fold_number, split in enumerate(supplied):
+        train: ArrayLike
+        test: ArrayLike
+        if isinstance(split, CrossValidationFold):
+            train, test = split.train_indices, split.test_indices
+        else:
+            try:
+                train, test = split
+            except (TypeError, ValueError):
+                raise ValueError("each cv split must contain train and test row indices") from None
+        train_indices = _fold_indices(train, n_samples, fold_number, "train")
+        test_indices = _fold_indices(test, n_samples, fold_number, "test")
+        if np.intersect1d(train_indices, test_indices).size:
+            raise ValueError(f"fold {fold_number} train and test rows must be disjoint")
+        if np.any(membership[test_indices] >= 0):
+            raise ValueError("cv test splits must not overlap; each observation is held out once")
+        if (
+            group_codes is not None
+            and np.intersect1d(group_codes[train_indices], group_codes[test_indices]).size
+        ):
+            raise ValueError(f"fold {fold_number} train and test groups must be disjoint")
+        membership[test_indices] = fold_number
+        folds.append(CrossValidationFold(fold_number, train_indices, test_indices))
+
+    if len(folds) < 2:
+        raise ValueError("cv must contain at least two train/test splits")
+    if np.any(membership < 0):
+        raise ValueError("cv test splits must cover every observation exactly once")
+    if group_codes is not None:
+        first_fold = np.full(int(group_codes.max()) + 1, len(folds), dtype=np.int64)
+        last_fold = np.full_like(first_fold, -1)
+        np.minimum.at(first_fold, group_codes, membership)
+        np.maximum.at(last_fold, group_codes, membership)
+        if np.any(first_fold != last_fold):
+            raise ValueError("cv test splits must hold out each whole group in a single fold")
+    return tuple(folds)
+
+
+def _validate_predictor_alignment(model: LmerResult | GlmerResult, frame: Any) -> None:
+    """Prevent response ties from hiding changes to positional fit inputs."""
+    predictors = model.formula.fixed_variables | model.formula.random_variables
+    required = predictors | model.formula.grouping_factors
+    columns = set(get_columns(frame))
+    missing = sorted(required - columns)
+    if missing:
+        raise ValueError(f"cross-validation data is missing modeled columns: {missing}")
+
+    stored = model.matrices.frame
+    if stored is None:
+        # Serialized or manually constructed results can lack their source frame.
+        # In that case the fitted designs still establish observation alignment.
+        if not np.array_equal(model._prediction_fixed_matrix(frame), model.matrices.X):
+            raise ValueError("data fixed-effect values are not aligned with the fitted model")
+        random_design, _ = model._prediction_random_matrix(frame, allow_new_levels=False)
+        if (random_design != model.matrices.Z).nnz:
+            raise ValueError("data random-effect values are not aligned with the fitted model")
+    else:
+        for name in sorted(required):
+            if not np.array_equal(get_column_numpy(frame, name), get_column_numpy(stored, name)):
+                raise ValueError(f"data column '{name}' is not aligned with the fitted model")
+
+    for name in sorted(predictors):
+        fitted_levels = model.matrices.category_levels.get(name)
+        categorical = is_categorical_or_string(frame, name)
+        if categorical != (fitted_levels is not None) or (
+            fitted_levels is not None and get_categories(frame, name) != fitted_levels
+        ):
+            raise ValueError(
+                f"data categorical encoding for '{name}' differs from the fitted model"
+            )
+
+
 def _stored_model_frame(model: LmerResult | GlmerResult) -> Any:
     frame = model.matrices.frame
     if frame is None:
@@ -588,7 +705,7 @@ def cross_validate(
     model: LmerResult | GlmerResult,
     data: Any | None = None,
     *,
-    cv: int = 5,
+    cv: int | Iterable[FoldSpec] = 5,
     group: str | None = None,
     metrics: MetricSpec | Sequence[MetricSpec] | None = None,
     shuffle: bool = True,
@@ -610,6 +727,15 @@ def cross_validate(
     predictions. Set ``n_jobs`` above one to fit independent folds concurrently
     with threads. Categorical contrast coding and grouped binomial trial counts
     are retained from the fitted model.
+
+    ``cv`` accepts a fold count or an iterable of ``(train_indices,
+    test_indices)`` pairs or :class:`CrossValidationFold` objects. Explicit
+    indices are zero-based row positions. Their test sets must partition all
+    fitted observations; train sets may exclude additional rows, for example
+    a buffer around a held-out time block. Train/test overlap and group leakage
+    are rejected before fitting. ``shuffle`` and ``random_state`` apply only
+    to generated folds. Supplied data must preserve modeled columns, row order,
+    and categorical encoding so the original weights and offsets stay aligned.
     """
     from mixedlm.models.glmer import GlmerResult
     from mixedlm.models.lmer import LmerResult
@@ -650,6 +776,8 @@ def cross_validate(
         model.matrices.trials is None or not np.array_equal(trials, model.matrices.trials)
     ):
         raise ValueError("data binomial trial counts are not aligned with the fitted model")
+    if data is not None:
+        _validate_predictor_alignment(model, frame)
 
     fit_options = {} if fit_kwargs is None else dict(fit_kwargs)
     conflicts = sorted(_RESERVED_FIT_ARGUMENTS.intersection(fit_options))
@@ -658,13 +786,16 @@ def cross_validate(
 
     resolved_metrics = _resolve_metrics(metrics, is_glmm=is_glmm)
     group_values = None if group is None else get_column_numpy(frame, group)
-    folds = make_folds(
-        n_samples,
-        cv,
-        groups=group_values,
-        shuffle=shuffle,
-        random_state=random_state,
-    )
+    if isinstance(cv, (int, np.integer)):
+        folds = make_folds(
+            n_samples,
+            cv,
+            groups=group_values,
+            shuffle=shuffle,
+            random_state=random_state,
+        )
+    else:
+        folds = _explicit_folds(cv, n_samples, group_values)
 
     weights: NDArray[np.float64] = np.asarray(model.weights(), dtype=np.float64)
     # Grouped binomial matrices store prior weights multiplied by trial counts.

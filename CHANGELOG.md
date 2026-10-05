@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Cross-validation accepts reusable train/test partitions and buffered holdouts, validating row coverage and group leakage before refitting.
+- Native sparse Cholesky exposes `ordering="amd"` or `"natural"` and `factor_nonzeros()` to inspect fill-in.
+
 - GLMM conditional prediction standard errors include joint fixed/random-effect uncertainty. Predictions for allowed new grouping levels include the fitted prior random-effect variance; response-scale intervals transform the link-scale limits.
 
 - Binomial GLMMs accept two-level factor responses, preserve the success level through refits, updates, and cross-validation, and return numeric simulations using the fitted encoding.
@@ -30,6 +33,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Nonlinear new-data predictions accept scalar, array, or column-based response offsets.
 
 ### Changed
+
+- Public sparse Cholesky uses AMD ordering by default and releases the GIL during analysis, factorization, solves, and log determinants. Detached operations snapshot Python inputs and reuse the final solve buffer.
+- Random-slope R² and ICC use bounded sparse covariance projections instead of full dense observation designs.
+- Security scans are included in the single required CI gate, audit optional Python runtime dependencies and both Rust lockfiles, and use the complete hashed dependency graph.
+- The native RNG dependency uses the non-yanked chacha20 0.10.2 patch release.
 
 - Native and Python random-effect simulations use compact scale vectors for independent coefficients. Native correlated draws reuse output storage, and native simulation releases the GIL while drawing batches.
 
@@ -64,6 +72,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   behavior, including per-unit rates from models fitted with log-exposure offsets.
 
 ### Fixed
+
+- R² and ICC average Gaussian residual variance over fitted precision weights, retain nonlinear offsets, and avoid overflowing finite variance sums. Built-in log-link residual approximations evaluate in log space, preserving extreme fitted means.
+- Cross-validation checks supplied predictor, grouping, and categorical values against fitted observations, preventing tied responses from concealing row misalignment.
 
 - Weighted cross-validation MSE, RMSE, MAE, and R² retain contributions across extreme response and weight scales without overflowing intermediate products. Scoring rejects complex and masked inputs.
 

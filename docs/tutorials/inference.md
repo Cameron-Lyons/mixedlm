@@ -53,6 +53,23 @@ fold. This preserves groups while balancing the number of held-out observations.
 Use the same `random_state` when comparing models so they receive identical
 fold assignments.
 
+You can also construct the folds once and reuse them, or supply your own
+`(train_indices, test_indices)` pairs. Positions refer to the rows used for
+fitting, even if the dataframe has other index labels:
+
+```python
+folds = mlm.make_folds(len(data), cv=5, groups=data["Subject"], random_state=123)
+subject_cv = mlm.cross_validate(model, cv=folds, group="Subject")
+```
+
+Explicit test sets must cover every fitted row exactly once, and each train/test
+pair must be disjoint. Training sets can exclude additional rows for buffered
+holdouts. With `group`, the partitions must hold out whole clusters and exclude
+their observations from training. All partition checks happen before refitting.
+If you provide `data`, keep its modeled values and categorical encoding in the
+original row order so fitted weights and offsets remain aligned. Extra columns
+can supply an external holdout grouping.
+
 For GLMMs, the default metrics are weighted RMSE and mean unit deviance:
 
 ```python

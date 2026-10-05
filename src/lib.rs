@@ -49,10 +49,13 @@ pub struct SparseCholeskySymbolic {
 #[pymethods]
 impl SparseCholeskySymbolic {
     #[new]
+    #[pyo3(signature = (indices, indptr, n, *, ordering = "amd"))]
     fn new(
+        py: Python<'_>,
         indices: PyArrayLike1<'_, i64>,
         indptr: PyArrayLike1<'_, i64>,
         n: usize,
+        ordering: &str,
     ) -> PyResult<Self> {
         let indices_slice = indices.as_slice()?;
         let indptr_slice = indptr.as_slice()?;
@@ -60,7 +63,22 @@ impl SparseCholeskySymbolic {
         let indices_usize = checked_i64_vec_to_usize(indices_slice, "indices")?;
         let indptr_usize = checked_i64_vec_to_usize(indptr_slice, "indptr")?;
 
-        let cache = sparse_chol::SymbolicCholeskyCache::new(&indices_usize, &indptr_usize, n)?;
+        let use_amd = match ordering {
+            "amd" => true,
+            "natural" => false,
+            _ => {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "ordering must be 'amd' or 'natural'",
+                ));
+            }
+        };
+        let cache = py.detach(|| {
+            if use_amd {
+                sparse_chol::SymbolicCholeskyCache::new_amd(&indices_usize, &indptr_usize, n)
+            } else {
+                sparse_chol::SymbolicCholeskyCache::new(&indices_usize, &indptr_usize, n)
+            }
+        })?;
         Ok(Self {
             inner: cache,
             indices: indices_usize,
@@ -68,14 +86,24 @@ impl SparseCholeskySymbolic {
         })
     }
 
-    fn factor(&self, data: PyArrayLike1<'_, f64>) -> PyResult<SparseCholeskyNumeric> {
-        let data_slice = data.as_slice()?;
-        let numeric = self.inner.factor(data_slice, &self.indices, &self.indptr)?;
+    fn factor(
+        &self,
+        py: Python<'_>,
+        data: PyArrayLike1<'_, f64>,
+    ) -> PyResult<SparseCholeskyNumeric> {
+        // Detached numerical work must own every Python-backed input buffer.
+        let data = data.as_slice()?.to_vec();
+        let numeric = py.detach(|| self.inner.factor(&data, &self.indices, &self.indptr))?;
         Ok(SparseCholeskyNumeric { inner: numeric })
     }
 
     fn n(&self) -> usize {
         self.inner.n()
+    }
+
+    /// Number of entries in the factor, including its diagonal and fill.
+    fn factor_nonzeros(&self) -> usize {
+        self.inner.factor_nonzeros()
     }
 }
 
@@ -91,14 +119,16 @@ impl SparseCholeskyNumeric {
         py: Python<'py>,
         b: PyArrayLike2<'py, f64>,
     ) -> PyResult<Py<PyArray2<f64>>> {
-        let b_array = b.as_array();
-        let (n, m) = (b_array.nrows(), b_array.ncols());
-        let result = self.inner.solve(b_array)?;
-        owned_array2(py, result, (n, m))
+        let shape = (b.as_array().nrows(), b.as_array().ncols());
+        // Logical iteration handles strided views and snapshots both values and
+        // shape before another Python thread can alter the original array.
+        let rhs = b.as_array().iter().copied().collect();
+        let result = py.detach(|| self.inner.solve_owned(rhs, shape))?;
+        owned_array2(py, result, shape)
     }
 
-    fn logdet(&self) -> f64 {
-        self.inner.logdet()
+    fn logdet(&self, py: Python<'_>) -> f64 {
+        py.detach(|| self.inner.logdet())
     }
 }
 
@@ -111,29 +141,33 @@ fn sparse_cholesky_solve<'py>(
     a_shape: (usize, usize),
     b: PyArrayLike2<'py, f64>,
 ) -> PyResult<Py<PyArray2<f64>>> {
-    let (result, n, m) = linalg::sparse_cholesky_solve(
+    let matrix = linalg::square_csc_from_scipy(
         a_data.as_slice()?,
         a_indices.as_slice()?,
         a_indptr.as_slice()?,
         a_shape,
-        b.as_array(),
     )?;
-    owned_array2(py, result, (n, m))
+    let shape = (b.as_array().nrows(), b.as_array().ncols());
+    let rhs = b.as_array().iter().copied().collect();
+    let result = py.detach(|| linalg::sparse_cholesky_solve(&matrix, rhs, shape))?;
+    owned_array2(py, result, shape)
 }
 
 #[pyfunction]
 fn sparse_cholesky_logdet<'py>(
+    py: Python<'py>,
     a_data: PyArrayLike1<'py, f64>,
     a_indices: PyArrayLike1<'py, i64>,
     a_indptr: PyArrayLike1<'py, i64>,
     a_shape: (usize, usize),
 ) -> PyResult<f64> {
-    linalg::sparse_cholesky_logdet(
+    let matrix = linalg::square_csc_from_scipy(
         a_data.as_slice()?,
         a_indices.as_slice()?,
         a_indptr.as_slice()?,
         a_shape,
-    )
+    )?;
+    py.detach(|| linalg::sparse_cholesky_logdet(&matrix))
 }
 
 #[pyfunction]

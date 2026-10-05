@@ -108,8 +108,11 @@ print(group_cv.fold_scores)
 **Parameters:**
 
 - `model`: Fitted `LmerResult` or `GlmerResult`
-- `data`: Optional aligned data; the stored clean model frame is used by default
-- `cv`: Number of folds, default 5
+- `data`: Optional aligned data; the stored clean model frame is used by default.
+  Modeled predictor and grouping values, row order, and categorical encoding must
+  match the fit. Additional columns can define external holdout groups.
+- `cv`: Number of folds (default 5), or an iterable of `(train_indices, test_indices)`
+  pairs or `CrossValidationFold` objects
 - `group`: Optional column defining whole clusters to hold out
 - `metrics`: Metric name, callable, or sequence; defaults are selected by model type
 - `shuffle`, `random_state`: Reproducible fold assignment controls
@@ -121,6 +124,26 @@ Built-in metrics are weighted `"mse"`, `"rmse"`, `"mae"`, `"r2"`, and GLMM
 `"deviance"`. A custom metric receives `(y_true, y_pred, weights)` and returns
 one finite scalar. Original model weights and offsets are automatically subset
 and preserved in every fold.
+
+Explicit folds use zero-based row positions, independent of dataframe index labels.
+Their test sets must cover every fitted observation exactly once. Train and test
+sets must be nonempty, contain unique integer positions, and be disjoint. Training
+sets can omit additional observations to create buffers around held-out blocks.
+With `group`, each whole group must occur in one test fold, and no train/test pair
+can share a group. Invalid partitions are rejected before any model is refitted.
+`shuffle` and `random_state` affect generated folds only.
+
+Reuse a partition to compare model specifications on identical held-out observations:
+
+```python
+folds = mlm.make_folds(len(data), cv=5, groups=data["subject"], random_state=42)
+first_cv = mlm.cross_validate(first_model, cv=folds, group="subject")
+second_cv = mlm.cross_validate(second_model, cv=folds, group="subject")
+```
+
+Train/test iterables produced by external splitters work directly when their test
+sets form an exhaustive partition. Splits with overlapping or incomplete test
+coverage are rejected: this API returns one out-of-fold prediction per fitted row.
 
 The result exposes:
 

@@ -68,6 +68,12 @@ class _FakeNonlinearModel:
     random_params: list[int]
     group_var: str = "subject"
 
+    def weights(self, copy: bool = True) -> np.ndarray:
+        return np.ones(len(self.x))
+
+    def offset(self, copy: bool = True) -> np.ndarray:
+        return np.zeros(len(self.x))
+
     def isLMM(self) -> bool:
         return False
 

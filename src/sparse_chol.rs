@@ -13,7 +13,6 @@ use faer::sparse::linalg::cholesky::{
 use faer::sparse::linalg::{SupernodalThreshold, amd};
 use faer::sparse::{SparseColMatRef, SymbolicSparseColMatRef};
 use faer::{Conj, MatMut, Par, Side};
-use numpy::ndarray::ArrayView2;
 
 use crate::csc::CscMatrix;
 use crate::linalg::LinalgError;
@@ -291,18 +290,25 @@ impl NumericFactorization {
         }
     }
 
-    pub fn solve(&self, b: ArrayView2<'_, f64>) -> Result<Vec<f64>, LinalgError> {
-        if b.nrows() != self.n {
+    /// Solve in a caller-owned row-major buffer without another input copy.
+    pub fn solve_owned(
+        &self,
+        mut result: Vec<f64>,
+        shape: (usize, usize),
+    ) -> Result<Vec<f64>, LinalgError> {
+        if shape.0 != self.n {
             return Err(LinalgError::DimensionMismatch(format!(
                 "right-hand side has {} rows, expected {}",
-                b.nrows(),
-                self.n
+                shape.0, self.n
             )));
         }
-        // ndarray iteration follows logical row-major order even for strided inputs.
-        // Solve all columns directly in the owned Python result buffer.
-        let mut result: Vec<f64> = b.iter().copied().collect();
-        let mut rhs = MatMut::from_row_major_slice_mut(&mut result, self.n, b.ncols());
+        if shape.0.checked_mul(shape.1) != Some(result.len()) {
+            return Err(LinalgError::DimensionMismatch(
+                "right-hand side data does not match its shape".to_string(),
+            ));
+        }
+        // Solve directly in the final Python result buffer.
+        let mut rhs = MatMut::from_row_major_slice_mut(&mut result, self.n, shape.1);
         if self.ordering.is_some() {
             self.solve_lower_in_place(rhs.as_mut());
             self.solve_upper_in_place(rhs);
@@ -316,7 +322,7 @@ impl NumericFactorization {
         // own scratch requirement is empty, independent of the number of columns.
         let par = Par::Seq;
         let factor = SimplicialLdltRef::new(symbolic, &self.values);
-        let mut memory = MemBuffer::new(symbolic.solve_in_place_scratch::<f64>(b.ncols()));
+        let mut memory = MemBuffer::new(symbolic.solve_in_place_scratch::<f64>(shape.1));
         let stack = MemStack::new(&mut memory);
         factor.solve_in_place_with_conj(Conj::No, rhs, par, stack);
         Ok(result)
@@ -372,6 +378,34 @@ mod tests {
     use numpy::ndarray::{Array2, array};
 
     #[test]
+    fn owned_solves_reuse_the_result_buffer_and_validate_shapes() {
+        let indices = [0, 1, 2, 1, 2, 2];
+        let offsets = [0, 3, 5, 6];
+        let data = [4.0, 1.0, -0.5, 3.0, 0.25, 2.0];
+        for cache in [
+            SymbolicCholeskyCache::new(&indices, &offsets, 3).unwrap(),
+            SymbolicCholeskyCache::new_amd(&indices, &offsets, 3).unwrap(),
+        ] {
+            let factor = cache.factor(&data, &indices, &offsets).unwrap();
+            let rhs = vec![1.0, -2.0, 3.0, 4.0, -5.0, 6.0];
+            let pointer = rhs.as_ptr();
+            let result = factor.solve_owned(rhs, (3, 2)).unwrap();
+            assert_eq!(result.as_ptr(), pointer);
+            assert!(matches!(
+                factor.solve_owned(vec![0.0; 5], (3, 2)),
+                Err(LinalgError::DimensionMismatch(_))
+            ));
+            assert!(matches!(
+                factor.solve_owned(vec![], (3, usize::MAX)),
+                Err(LinalgError::DimensionMismatch(_))
+            ));
+        }
+        let empty = SymbolicCholeskyCache::new_amd(&[], &[0], 0).unwrap();
+        let factor = empty.factor(&[], &[], &[0]).unwrap();
+        assert!(factor.solve_owned(vec![], (0, 5)).unwrap().is_empty());
+    }
+
+    #[test]
     fn sparse_whitening_and_backsolve_match_dense_cholesky() {
         let data = vec![4.0, 1.0, -0.5, 3.0, 0.25, 2.0];
         let indices = vec![0, 1, 2, 1, 2, 2];
@@ -411,7 +445,9 @@ mod tests {
         for diagonal in [5.0, 7.0] {
             let data = [diagonal, 1.0, 1.0, 1.0, diagonal, diagonal, diagonal];
             let factor = symbolic.factor(&data, &indices, &offsets).unwrap();
-            let solution = factor.solve(rhs.view()).unwrap();
+            let solution = factor
+                .solve_owned(rhs.iter().copied().collect(), rhs.dim())
+                .unwrap();
             for column in 0..2 {
                 for row in 0..4 {
                     let cross = if row == 0 {
@@ -439,7 +475,9 @@ mod tests {
         let numeric = cache.factor(&data, &indices, &indptr).unwrap();
 
         let b = array![[1.0], [2.0], [3.0]];
-        let x = numeric.solve(b.view()).unwrap();
+        let x = numeric
+            .solve_owned(b.iter().copied().collect(), b.dim())
+            .unwrap();
 
         let reconstructed = [
             4.0 * x[0] + x[1],
@@ -461,7 +499,9 @@ mod tests {
         let transposed_rhs =
             Array2::from_shape_fn((5, 3), |(column, row)| (1 + column + 2 * row) as f64);
         let rhs = transposed_rhs.t();
-        let result = numeric.solve(rhs).unwrap();
+        let result = numeric
+            .solve_owned(rhs.iter().copied().collect(), rhs.dim())
+            .unwrap();
         for column in 0..5 {
             let x = [result[column], result[5 + column], result[10 + column]];
             let reconstructed = [
@@ -473,14 +513,9 @@ mod tests {
                 assert!((reconstructed[row] - rhs[(row, column)]).abs() < 1e-12);
             }
         }
-        assert!(
-            numeric
-                .solve(Array2::zeros((3, 0)).view())
-                .unwrap()
-                .is_empty()
-        );
+        assert!(numeric.solve_owned(vec![], (3, 0)).unwrap().is_empty());
         assert!(matches!(
-            numeric.solve(Array2::zeros((4, 2)).view()),
+            numeric.solve_owned(vec![0.0; 8], (4, 2)),
             Err(LinalgError::DimensionMismatch(_))
         ));
     }

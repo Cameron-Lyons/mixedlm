@@ -25,9 +25,17 @@ print(r2.random_by_group)
 ```
 
 Random-slope variance is evaluated at every observation, retaining covariance and predictor
-values. Linear and nonlinear Gaussian models use the fitted residual variance. Generalized
+values. Linear and nonlinear Gaussian models average the observation-specific residual
+variance `sigma**2 / weights`; fixed and random contributions also give each fitted row
+equal representation. A common precision-weight rescaling, compensated by residual scale
+and relative covariance, preserves the diagnostic. Random-slope calculations use bounded
+sparse projections rather than a dense observation-by-coefficient matrix. Generalized
 models use a link-scale residual approximation: lognormal for log links, link-specific
 theoretical variance for binomial models, or the delta method when requested.
+Known offsets contribute to fixed prediction variance for every model type.
+Built-in log-link families compute residual approximations in log space, retaining
+finite results when directly squaring fitted means or evaluating family variances
+would overflow. Nonfinite fixed predictions raise an error instead of being omitted.
 
 ### icc
 

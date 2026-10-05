@@ -22,7 +22,7 @@ A Python implementation of mixed-effects models inspired by R's [lme4](https://g
 - **Inference tools** - Linear hypotheses, profile likelihood, bootstrap, confidence intervals, Satterthwaite/Kenward-Roger degrees of freedom
 - **Model comparison** - ANOVA (including Type III), drop1, allFit
 - **Model selection** - AIC/AICc/BIC rankings, normalized weights, and evidence sets
-- **Model validation** - Case-level and whole-group cross-validation with weighted scoring
+- **Model validation** - Case-level, whole-group, and custom-partition cross-validation with weighted scoring and leakage checks
 - **Prediction uncertainty** - Conditional LMM and GLMM mean intervals with joint fixed/random-effect covariance and prior variance for new groups
 - **Power analysis** - powerSim, powerCurve for sample size planning
 - **Diagnostics** - Dispersion and zero-inflation checks, influence measures, Cook's distance, leverage, VIF/GVIF, condition indices
@@ -365,7 +365,7 @@ for stacked changes. Push-triggered checks run on `main`.
 - **Dependencies**: test, quality, and documentation environments use `uv.lock`; test commands preserve the explicitly built native backend
 - **Compatibility**: a Python 3.10 job installs the modern abi3 wheel with NumPy 1.23.5, SciPy 1.14.0, and pandas 1.4.0, then runs the core suite against these supported lower bounds
 - **Coverage**: branch coverage for Python and native Rust coverage, uploaded to codecov; the complete Python 3.12 feature run enforces 87% combined line/branch coverage
-- **Security**: cargo-audit, pip-audit
+- **Security**: required Bandit, cargo-audit for both Rust lockfiles, and pip-audit for core and optional runtime dependencies
 - **Docs**: mkdocs build verification
 - **Benchmarks**: pytest-benchmark with saved timing statistics
 - **Property testing**: hypothesis

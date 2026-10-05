@@ -19,6 +19,9 @@ env:
   CARGO_NET_RETRY: "10"
 
 jobs:
+  security:
+    uses: ./.github/workflows/security.yml
+
   workflows:
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -524,7 +527,14 @@ jobs:
           uv sync --locked --no-install-project --python "$CI_PYTHON_EXECUTABLE"
           uv pip install --no-deps dist/*.whl
           uv run --no-sync python -I tools/check_wheel.py
-          uv run --no-sync python -I -m pytest tests/test_statistical_golden.py tests/test_joint_pnls.py tests/test_lmm_prepared_threads.py tests/test_prepared_glmm_threads.py tests/test_random_effect_simulation.py tests/test_glmm_prediction_uncertainty.py tests/test_cross_validation_scores.py --strict-config --strict-markers -ra
+          uv run --no-sync python -I -m pytest \
+            tests/test_statistical_golden.py tests/test_joint_pnls.py \
+            tests/test_lmm_prepared_threads.py tests/test_prepared_glmm_threads.py \
+            tests/test_random_effect_simulation.py tests/test_glmm_prediction_uncertainty.py \
+            tests/test_cross_validation_scores.py tests/test_cross_validation_splits.py \
+            tests/test_sparse_ordering.py tests/test_sparse_native_threads.py \
+            tests/test_fit_metrics_weighted.py tests/test_fit_metrics_logscale.py \
+            --strict-config --strict-markers -ra
 
       - name: Upload wheels
         uses: actions/upload-artifact@v7
@@ -582,7 +592,14 @@ jobs:
           uv sync --locked --no-install-project --python "$CI_PYTHON_EXECUTABLE" --no-install-package polars --no-install-package polars-runtime-32
           uv pip install --no-deps dist/*.whl
           uv run --no-sync python -I tools/check_wheel.py --expect-free-threaded
-          uv run --no-sync python -I -m pytest tests/test_statistical_golden.py tests/test_joint_pnls.py tests/test_lmm_prepared_threads.py tests/test_prepared_glmm_threads.py tests/test_random_effect_simulation.py tests/test_glmm_prediction_uncertainty.py tests/test_cross_validation_scores.py --strict-config --strict-markers -ra
+          uv run --no-sync python -I -m pytest \
+            tests/test_statistical_golden.py tests/test_joint_pnls.py \
+            tests/test_lmm_prepared_threads.py tests/test_prepared_glmm_threads.py \
+            tests/test_random_effect_simulation.py tests/test_glmm_prediction_uncertainty.py \
+            tests/test_cross_validation_scores.py tests/test_cross_validation_splits.py \
+            tests/test_sparse_ordering.py tests/test_sparse_native_threads.py \
+            tests/test_fit_metrics_weighted.py tests/test_fit_metrics_logscale.py \
+            --strict-config --strict-markers -ra
 
       - name: Upload wheels
         uses: actions/upload-artifact@v7
@@ -638,6 +655,7 @@ jobs:
     name: Required CI checks
     if: always()
     needs:
+      - security
       - workflows
       - rust-test
       - clippy

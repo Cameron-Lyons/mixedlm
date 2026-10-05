@@ -211,6 +211,25 @@ def sparse_covariance_factor_diagonal(
     return result
 
 
+def sparse_covariance_quadratic_form_diagonal(
+    design: sparse.spmatrix, covariance: NDArray[np.floating]
+) -> NDArray[np.float64]:
+    """Compute diag(A C A.T) with bounded dense buffers and sparse row products."""
+    design = design.tocsr()
+    n_rows, width = design.shape
+    if width == 0:
+        return np.zeros(n_rows, dtype=np.float64)
+    result = np.empty(n_rows, dtype=np.float64)
+    chunk_size = max(1, _MAX_QUADRATIC_FORM_ELEMENTS // width)
+    for start in range(0, n_rows, chunk_size):
+        stop = min(start + chunk_size, n_rows)
+        chunk = design[start:stop]
+        projected = np.asarray(chunk @ covariance)
+        result[start:stop] = np.asarray(chunk.multiply(projected).sum(axis=1)).ravel()
+        del projected
+    return result
+
+
 def symmetric_inverse(matrix: NDArray[np.floating]) -> NDArray[np.float64]:
     """Invert a symmetric matrix with a positive-definite fast path."""
     try:

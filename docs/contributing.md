@@ -183,7 +183,11 @@ on newer x86 CPUs while retaining a kernel supported by the wheel's CPU baseline
 
 Each wheel is installed and exercised on its target operating system and CPU,
 including Linux ARM. The source distribution is rebuilt and installed in a
-fresh environment as well. `tools/check_wheel.py` verifies installed-package locations,
+fresh environment as well. Target-platform regression suites cover sparse
+ordering with analytical Schur-complement solutions, native thread progress and
+input snapshots, prescribed cross-validation folds against independent refits,
+weighted response covariance, and extreme GLMM variance against decimal
+distribution formulas. `tools/check_wheel.py` verifies installed-package locations,
 metadata, packaged datasets, LMM and grouped-binomial fits, sparse solves and
 log-determinants against NumPy, and concurrent use of a shared native factor.
 Before those numerical checks, `tools/native_build.py` compares each installed
@@ -205,6 +209,10 @@ artifacts for publication. Actionlint validates workflow structure and
 expressions on every pull request.
 The `Required CI checks` job aggregates every CI job and fails if any failed,
 was cancelled, or was skipped, so branch protection can require one stable check.
+This includes the reusable security workflow: Python source scanning, dependency
+audits for the core and optional runtime features, both Rust lockfiles, and
+dependency review on pull requests. The same security workflow runs weekly so
+new advisories can be detected without a code change.
 
 ## Code Style
 
