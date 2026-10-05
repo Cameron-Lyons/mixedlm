@@ -4,62 +4,8 @@ from unittest.mock import patch
 import numpy as np
 import pytest
 from mixedlm.inference.bootstrap import bootMer, bootstrap_nlmer
-from mixedlm.models.nlmer import NlmerResult
-from mixedlm.nlme.models import SSasymp
 
-
-def make_result(random_params=(0, 1), n_groups=4, per_group=9):
-    n = n_groups * per_group
-    order = np.random.default_rng(13).permutation(n)
-    q = len(random_params)
-    factor = np.tril(np.full((q, q), 0.15))
-    np.fill_diagonal(factor, 0.6)
-    return NlmerResult(
-        model=SSasymp(),
-        group_var="subject",
-        phi=np.array([10.0, 3.0, -1.0]),
-        theta=factor[np.tril_indices(q)],
-        sigma=0.3,
-        b=np.full((n_groups, q), 0.5),
-        random_params=list(random_params),
-        deviance=0.0,
-        converged=True,
-        n_iter=1,
-        x=np.tile(np.linspace(0, 8, per_group), n_groups)[order],
-        y=np.zeros(n),
-        groups=np.repeat(np.arange(n_groups), per_group)[order],
-        group_levels=[f"g{i}" for i in range(n_groups)],
-        _weights=np.linspace(0.5, 3.0, n),
-        _offset=np.linspace(-2.0, 2.0, n),
-    )
-
-
-def legacy_draws(result, count, seed, include_re=True):
-    """Independent reference for the previous seeded nonlinear simulation."""
-    rng = np.random.RandomState(seed)
-    q = len(result.random_params)
-    factor = np.zeros((q, q))
-    factor[np.tril_indices(q)] = result.theta
-    covariance = factor @ factor.T * result.sigma**2 + 1e-8 * np.eye(q)
-    draws = np.zeros((len(result.y), count))
-    for draw in range(count):
-        effects = (
-            rng.multivariate_normal(np.zeros(q), covariance, size=len(result.group_levels))
-            if include_re and q
-            else np.zeros_like(result.b)
-        )
-        mean = np.zeros(len(result.y))
-        for group in range(len(result.group_levels)):
-            rows = result.groups == group
-            params = result.phi.copy()
-            for column, parameter in enumerate(result.random_params):
-                params[parameter] += effects[group, column]
-            mean[rows] = result.model.predict(params, result.x[rows])
-        mean += result.offset(copy=False)
-        draws[:, draw] = mean + rng.standard_normal(len(mean)) * (
-            result.sigma / np.sqrt(result.weights(copy=False))
-        )
-    return draws[:, 0] if count == 1 else draws
+from tests._nlmm_models import legacy_draws, make_result
 
 
 @pytest.mark.parametrize("random_params", [(), (0,), (1, 0), (2, 0, 1)])

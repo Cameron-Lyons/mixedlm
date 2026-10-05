@@ -183,7 +183,9 @@ def concat_columns_as_string(
         if escape
         else str
     )
-    string_values = np.frompyfunc(stringify, 1, 1)(values)
+    # Object loops still check float error flags, which NaN values set spuriously.
+    with np.errstate(invalid="ignore"):
+        string_values = np.frompyfunc(stringify, 1, 1)(values)
     combine = np.frompyfunc(lambda left, right: left + separator + right, 2, 1)
     combined = string_values[:, 0]
     for column_index in range(1, string_values.shape[1]):

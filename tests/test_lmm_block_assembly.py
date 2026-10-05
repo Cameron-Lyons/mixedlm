@@ -10,9 +10,12 @@ from mixedlm.matrices.design import RandomEffectStructure
 from numpy.testing import assert_allclose
 from scipy import sparse
 
-from tests.test_lmm_covariance_transforms import wide_problem
-from tests.test_lmm_gradient_contractions import observation_gradient
-from tests.test_lmm_prepared_design import native_arguments, observation_likelihood
+from tests._lmm_oracles import (
+    native_arguments,
+    observation_gradient,
+    observation_likelihood,
+    wide_problem,
+)
 
 
 @pytest.mark.parametrize("widths", [(1, 3), (3, 1), (15, 3), (16, 3), (17, 16)])

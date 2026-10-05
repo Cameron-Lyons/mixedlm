@@ -11,7 +11,7 @@ from mixedlm.estimation import optimizers
 from mixedlm.models.modular import LmerDevfun
 from numpy.testing import assert_allclose, assert_array_equal
 
-from tests.test_variance_boundary_restarts import linear_data
+from tests._lmm_oracles import linear_data
 
 
 def deviance_function(*, reml=False, **kwargs):

@@ -10,7 +10,7 @@ from mixedlm.inference.bootstrap import _simulate_glmer, bootMer
 from mixedlm.power import powerSim
 from scipy import special
 
-from tests._lmer_data import CBPP
+from tests._datasets import CBPP, CBPP_FORMULA
 
 
 class _VarianceOnlyPoisson(families.CustomFamily):
@@ -100,9 +100,8 @@ def test_builtin_families_draw_from_their_weighted_distributions() -> None:
 
 
 def test_binomial_subclass_keeps_grouped_trial_counts() -> None:
-    formula = "incidence / size ~ period + (1 | herd)"
-    plain = glmer(formula, CBPP, family=families.Binomial())
-    subclassed = glmer(formula, CBPP, family=_SubclassedBinomial())
+    plain = glmer(CBPP_FORMULA, CBPP, family=families.Binomial())
+    subclassed = glmer(CBPP_FORMULA, CBPP, family=_SubclassedBinomial())
 
     expected = plain.simulate(nsim=4, seed=11)
     simulated = subclassed.simulate(nsim=4, seed=11)

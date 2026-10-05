@@ -16,7 +16,7 @@ from mixedlm.matrices.design import build_model_matrices
 from mixedlm.models.control import LmerControl
 from numpy.testing import assert_allclose
 
-from tests.test_lmm_prepared_design import native_arguments, observation_likelihood
+from tests._lmm_oracles import native_arguments, observation_likelihood
 
 
 def matrices(formula, data):

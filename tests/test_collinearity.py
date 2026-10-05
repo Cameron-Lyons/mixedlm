@@ -347,7 +347,7 @@ class TestCollinearityIntegration:
         groups = np.repeat(np.arange(10), 10)
         x = rng.normal(size=len(groups))
         z = 0.7 * x + rng.normal(scale=0.5, size=len(groups))
-        eta = -0.5 + 0.6 * x - 0.2 * z + rng.normal(scale=0.2, size=10)[groups]
+        eta = -0.5 + 0.6 * x - 0.2 * z + rng.normal(scale=1.0, size=10)[groups]
         y = rng.binomial(1, 1.0 / (1.0 + np.exp(-eta)))
         data = pd.DataFrame({"y": y, "x": x, "z": z, "group": groups.astype(str)})
         model = glmer("y ~ x + z + (1 | group)", data, family=families.Binomial())

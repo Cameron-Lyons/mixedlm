@@ -1,51 +1,12 @@
 """Likelihood corrections use the same final mode as the returned estimates."""
 
 import numpy as np
-import pandas as pd
 import pytest
-from mixedlm import families
 from mixedlm.estimation.laplace import _native_deviance_with_status
-from mixedlm.estimation.reml import _build_lambda, _count_theta
-from mixedlm.formula.parser import parse_formula
-from mixedlm.matrices.design import build_model_matrices
+from mixedlm.estimation.reml import _build_lambda
 from numpy.testing import assert_allclose
-from scipy import special
 
-
-def mode_problem(kind, layout, *, n_obs=48, n_groups=4):
-    rng = np.random.default_rng(3402)
-    x = rng.uniform(-1, 1, n_obs)
-    groups = np.arange(n_obs) % n_groups
-    offset = 0.2 * np.cos(np.arange(n_obs))
-    eta = 0.2 + 0.3 * x + 0.4 * np.sin(groups) + offset
-    if kind == "binomial":
-        trials = np.arange(n_obs) % 4 + 2
-        y = rng.binomial(trials, special.expit(eta)) / trials
-    elif kind == "poisson":
-        y = rng.poisson(np.exp(eta))
-    else:
-        y = eta + rng.normal(scale=0.5, size=n_obs)
-    data = pd.DataFrame(dict(y=y, x=x, g=groups, h=np.arange(n_obs) % 3))
-    formulas = {
-        "intercept": "y ~ x + (1 | g)",
-        "slope": "y ~ x + (x | g)",
-        "crossed": "y ~ x + (1 | g) + (1 | h)",
-        "fixed_only": "y ~ x",
-        "mode_only": "y ~ 0 + (1 | g)",
-    }
-    weights = np.geomspace(0.5, 2.0, n_obs)
-    if kind == "binomial":
-        weights *= trials
-    matrices = build_model_matrices(
-        parse_formula(formulas[layout]), data, weights=weights, offset=offset
-    )
-    family = {
-        "gaussian": families.Gaussian,
-        "binomial": families.Binomial,
-        "poisson": families.Poisson,
-    }[kind]()
-    theta = np.full(_count_theta(matrices.random_structures), 0.4)
-    return matrices, family, theta
+from tests._glmm_oracles import mode_problem
 
 
 @pytest.mark.parametrize("kind", ["gaussian", "binomial", "poisson"])

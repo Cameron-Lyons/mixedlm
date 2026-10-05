@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 from unittest.mock import patch
 
 import numpy as np
@@ -51,7 +52,9 @@ def test_modular_quadrature_matches_direct_fit_and_likelihood(data, native, kind
         devfun = mkGlmerDevfun(parsed, nAGQ=n_agq)
         opt = optimizeGlmer(devfun)
         result = mkGlmerMod(devfun, opt)
-        direct = glmer(formula, data, nAGQ=n_agq, method="L-BFGS-B", **kwargs)
+        # The binary response carries too little group information for a positive variance.
+        with pytest.warns(UserWarning, match="singular") if kind == "binomial" else nullcontext():
+            direct = glmer(formula, data, nAGQ=n_agq, method="L-BFGS-B", **kwargs)
         expected = JointGLMMObjective(
             parsed.matrices, family, n_agq, pirls_tol=result.pirls_tol
         ).evaluate(np.r_[result.theta, result.beta])

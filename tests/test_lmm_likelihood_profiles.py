@@ -1,5 +1,6 @@
 """LMM profiles optimize the full ML likelihood under coefficient constraints."""
 
+from contextlib import nullcontext
 from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -11,23 +12,12 @@ from mixedlm import lmer, slice2D
 from mixedlm.estimation import reml
 from mixedlm.formula.parser import set_cov_type
 from mixedlm.inference import lmm_profile
+from mixedlm.inference import profile as profile_module
 from mixedlm.inference.profile import profile_lmer
 from numpy.testing import assert_allclose, assert_array_equal
 from scipy import linalg, optimize, stats
 
-
-def data_fixture():
-    rng = np.random.default_rng(672)
-    group = np.repeat(np.arange(7), [4, 6, 5, 7, 3, 8, 5])
-    x = rng.normal(size=len(group)) + 0.15 * group
-    z = rng.normal(size=len(group))
-    offset = 0.2 * np.cos(np.arange(len(group)))
-    weights = np.geomspace(0.5, 2.0, len(group))
-    effects = rng.normal(scale=[0.8, 0.3, 0.25], size=(7, 3))
-    y = 1.1 + 0.5 * x - 0.3 * z + offset
-    y += effects[group, 0] + effects[group, 1] * x + effects[group, 2] * z
-    y += rng.normal(scale=0.4 / np.sqrt(weights))
-    return pd.DataFrame(dict(y=y, x=x, z=z, g=group)), weights, offset
+from tests._lmm_oracles import data_fixture
 
 
 def fitted_model(kind="intercept", reml=False):
@@ -134,7 +124,8 @@ def test_fixed_only_profile_matches_exact_weighted_gaussian_likelihood(reml, lev
 def test_random_intercept_limits_match_independent_marginal_optimization(reml):
     result = fitted_model(reml=reml)
     before = result.theta.copy(), result.beta.copy(), result.sigma, result.matrices.offset.copy()
-    profile = profile_lmer(result, "x", n_points=5)["x"]
+    with pytest.warns(UserWarning, match="ML refit") if reml else nullcontext():
+        profile = profile_lmer(result, "x", n_points=5)["x"]
     minimum = intercept_reference(result, {})
     index = result.matrices.fixed_names.index("x")
     cutoff = stats.chi2.isf(0.05, 1)
@@ -152,7 +143,9 @@ def test_random_intercept_limits_match_independent_marginal_optimization(reml):
 @pytest.mark.parametrize("kind", ["correlated", "cs", "ar1"])
 @pytest.mark.parametrize("indices", [(1,), (0, 1)])
 def test_constrained_covariance_fits_match_dense_marginal_likelihood(kind, indices):
-    result = fitted_model(kind)
+    # The correlated slope of these data is estimated on the boundary.
+    with pytest.warns(UserWarning, match="singular") if kind == "correlated" else nullcontext():
+        result = fitted_model(kind)
     likelihood = lmm_profile._LMMProfileLikelihood(result.matrices)
     optimum = likelihood.fit(result.theta)
     values = tuple(float(result.beta[i] + 0.5) for i in indices)
@@ -185,6 +178,34 @@ def test_two_parameter_profile_matches_independent_constrained_likelihood(jobs):
     assert surface.values1[1] == surface.mle1
     assert surface.values2[1] == surface.mle2
     assert not slice2D(result, "(Intercept)", "x", n_points=3).profile_covariance
+
+
+def test_conditional_slice_matches_marginal_likelihood_at_fitted_covariance():
+    result = fitted_model()
+    surface = slice2D(result, "x", "z", n_points=3)
+    se = np.sqrt(np.diag(result.vcov()))
+    offsets = np.array([-3.0, 0.0, 3.0])
+    assert_allclose(surface.values1, result.beta[1] + offsets * se[1], rtol=1e-14)
+    assert_allclose(surface.values2, result.beta[2] + offsets * se[2], rtol=1e-14)
+    minimum = marginal_deviance(result, result.theta, {1: result.beta[1], 2: result.beta[2]})
+    for i, first in enumerate(surface.values1):
+        for j, second in enumerate(surface.values2):
+            change = marginal_deviance(result, result.theta, {1: first, 2: second}) - minimum
+            assert_allclose(surface.zeta[i, j], np.sign(change) * np.sqrt(abs(change)), atol=1e-9)
+    assert surface.zeta[1, 1] == 0
+
+
+def test_fast_conditional_slice_does_not_start_workers(monkeypatch):
+    result = fitted_model()
+    expected = slice2D(result, "x", "z", n_points=20)
+
+    def unexpected_pool(*args, **kwargs):
+        raise AssertionError("starting workers would take longer than this whole slice")
+
+    monkeypatch.setattr(profile_module, "process_pool", unexpected_pool)
+    actual = slice2D(result, "x", "z", n_points=20, n_jobs=2)
+
+    assert_array_equal(actual.zeta, expected.zeta)
 
 
 @pytest.mark.parametrize("kind", ["intercept", "ar1"])
@@ -378,10 +399,11 @@ def test_ml_and_reml_inputs_have_the_same_profile_reference():
     assert_allclose(first.zeta, second.zeta, atol=2e-6)
 
 
+@pytest.mark.parametrize("profile_covariance", [False, True])
 @pytest.mark.parametrize("first,second", [("x", "x"), ("missing", "x")])
-def test_joint_surface_requires_two_known_distinct_parameters(first, second):
+def test_surfaces_require_two_known_distinct_parameters(first, second, profile_covariance):
     with pytest.raises(ValueError, match="distinct|not found"):
-        slice2D(fitted_model(), first, second, profile_covariance=True)
+        slice2D(fitted_model(), first, second, profile_covariance=profile_covariance)
 
 
 @pytest.mark.parametrize("value", [0, 1, "yes", None])

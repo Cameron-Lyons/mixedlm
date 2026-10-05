@@ -585,14 +585,15 @@ class TestFittedModelIntegration:
         rng = np.random.default_rng(511)
         groups = np.repeat(np.arange(10), 10)
         x = rng.normal(size=len(groups))
-        eta = -0.6 + 0.5 * x + rng.normal(scale=0.3, size=10)[groups]
+        eta = -0.6 + 0.5 * x + rng.normal(scale=1.0, size=10)[groups]
         y = rng.binomial(1, 1.0 / (1.0 + np.exp(-eta)))
         data = pd.DataFrame({"y": y, "x": x, "group": groups.astype(str)})
         model = glmer("y ~ x + (1 | group)", data, family=families.Binomial())
+        assert not model.isSingular()
 
         r2 = r2_nakagawa(model)
         correlation = icc(model)
 
         assert r2.approximation == "theoretical"
-        assert 0.0 <= r2.marginal <= r2.conditional <= 1.0
-        assert 0.0 <= correlation.unadjusted <= correlation.adjusted <= 1.0
+        assert 0.0 < r2.marginal < r2.conditional < 1.0
+        assert 0.0 < correlation.unadjusted < correlation.adjusted < 1.0

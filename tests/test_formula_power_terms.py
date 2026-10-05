@@ -1,4 +1,3 @@
-import warnings
 from types import SimpleNamespace
 
 import numpy as np
@@ -16,7 +15,7 @@ from mixedlm.formula.terms import InteractionTerm, PowerTerm
 from mixedlm.inference.drop1 import _droppable_fixed_terms
 from mixedlm.matrices import build_model_matrices
 
-from tests._lmer_data import SLEEPSTUDY
+from tests._datasets import SLEEPSTUDY
 
 
 @pytest.fixture
@@ -87,10 +86,8 @@ def test_power_term_fit_matches_precomputed_predictor() -> None:
     data = SLEEPSTUDY.copy()
     data["DaysSquared"] = data["Days"] ** 2
 
-    with warnings.catch_warnings():
-        warnings.filterwarnings("ignore", message="Model is singular")
-        power_fit = lmer("Reaction ~ Days + I(Days**2) + (1 | Subject)", data)
-        manual_fit = lmer("Reaction ~ Days + DaysSquared + (1 | Subject)", data)
+    power_fit = lmer("Reaction ~ Days + I(Days**2) + (1 | Subject)", data)
+    manual_fit = lmer("Reaction ~ Days + DaysSquared + (1 | Subject)", data)
 
     assert np.allclose(power_fit.beta, manual_fit.beta)
     assert power_fit.logLik().value == pytest.approx(manual_fit.logLik().value)

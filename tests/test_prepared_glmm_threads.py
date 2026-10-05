@@ -14,7 +14,7 @@ import pytest
 from mixedlm.estimation.laplace import _native_glmm_args, _prepare_native_glmm
 from numpy.testing import assert_array_equal
 
-from tests.test_glmm_final_state import mode_problem
+from tests._glmm_oracles import mode_problem
 
 native = pytest.importorskip("mixedlm._rust")
 
@@ -92,7 +92,7 @@ def test_evaluation_releases_interpreter_lock_and_snapshots_parameters(entry, ch
         import numpy as np
         from mixedlm import _rust
         from mixedlm.estimation.laplace import _native_glmm_args, _prepare_native_glmm
-        from tests.test_glmm_final_state import mode_problem
+        from tests._glmm_oracles import mode_problem
 
         assert getattr(sys, "_is_gil_enabled", lambda: True)(), "This test requires the GIL"
         matrices, family, theta = mode_problem('poisson', 'mode_only', n_obs=65536, n_groups=64)

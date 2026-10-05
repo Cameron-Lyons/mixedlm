@@ -242,7 +242,9 @@ def test_fitted_gamma_inverse_predictions_have_ordered_response_intervals():
     frame = pd.DataFrame(
         {"x": x, "g": np.repeat(np.arange(10), 12), "y": rng.gamma(30.0, 1 / (30 * eta))}
     )
-    model = glmer("y ~ x + (1 | g)", frame, family=families.Gamma(link="inverse"))
+    # The groups share one mean, so the variance estimate is on the boundary.
+    with pytest.warns(UserWarning, match="singular"):
+        model = glmer("y ~ x + (1 | g)", frame, family=families.Gamma(link="inverse"))
 
     result = model.predict(re_form="NA", interval="confidence")
 

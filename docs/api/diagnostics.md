@@ -249,7 +249,10 @@ Compute Cook's distance for each observation.
 cd = diagnostics.cooks_distance(model)
 ```
 
-**Returns:** Array of Cook's distance values.
+**Returns:** Array of Cook's distance values. Models without fixed effects
+return NaN, because Cook's distance measures changes in the fixed coefficients.
+For models fitted with `na_action="exclude"`, influence values cover the fitted
+observations.
 
 **Interpretation:**
 

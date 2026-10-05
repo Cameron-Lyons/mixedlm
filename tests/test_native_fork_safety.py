@@ -5,7 +5,7 @@ import textwrap
 
 import pytest
 
-from tests.test_process_parallel_safety import run_isolated
+from tests._subprocess import run_isolated
 
 # The correlated-slope LMM factors a dense 300 x 300 Schur complement on faer's
 # global pool, and the nAGQ > 1 GLMM and batched random-effect simulation run on

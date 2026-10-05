@@ -129,7 +129,7 @@ def _ordering_system(layout, size):
         offdiag = np.full(size - 1, -1.0)
         matrix = sparse.diags((offdiag, np.full(size, 4.0), offdiag), (-1, 0, 1), format="csc")
     else:
-        from tests.test_sparse_ordering import arrowhead_system
+        from tests._sparse_systems import arrowhead_system
 
         matrix = arrowhead_system(size)[0].tocsc()
     return matrix, matrix.data, matrix.indices.astype(np.int64), matrix.indptr.astype(np.int64)
@@ -139,7 +139,7 @@ class TestSparseCholeskyOrdering:
     @pytest.mark.parametrize("ordering", ["amd", "natural"])
     @pytest.mark.parametrize("hub", [0, 27])
     def test_one_shot_functions_accept_either_ordering(self, ordering, hub):
-        from tests.test_sparse_ordering import arrowhead_system
+        from tests._sparse_systems import arrowhead_system
 
         matrix, rhs, expected, logdet = arrowhead_system(61, hub)
         csc = matrix.tocsc()

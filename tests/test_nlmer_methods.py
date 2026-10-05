@@ -10,53 +10,12 @@ from mixedlm import coef, fixef, getME, nlme, nlmer, ranef
 from mixedlm.inference.bootstrap import bootstrap_nlmer
 from mixedlm.models.nlmer import NlmerResult
 
-from tests.test_reporting import nlmm_model as nlmm_model
+from tests._nlmm_models import NLME_DATA, create_offset_nlme_data, fit_asymptotic_nlmm, fit_nlme
 
 
-def create_nlme_data(n_groups: int = 8, n_per_group: int = 10, seed: int = 42) -> pd.DataFrame:
-    rng = np.random.RandomState(seed)
-    data_rows = []
-    for subj in range(n_groups):
-        asym = 200 + rng.standard_normal() * 20
-        r0 = 180 + rng.standard_normal() * 10
-        lrc = -3 + rng.standard_normal() * 0.2
-        for t in np.linspace(0, 10, n_per_group):
-            y = asym + (r0 - asym) * np.exp(-np.exp(lrc) * t) + rng.standard_normal() * 5
-            data_rows.append({"subject": f"S{subj + 1}", "time": t, "y": y})
-    return pd.DataFrame(data_rows)
-
-
-def create_offset_nlme_data(seed: int = 20260803) -> pd.DataFrame:
-    rng = np.random.default_rng(seed)
-    data_rows = []
-    for subject in range(8):
-        asym = 200 + rng.normal(0, 12)
-        r0 = 180 + rng.normal(0, 6)
-        lrc = -3 + rng.normal(0, 0.1)
-        for time in np.linspace(0, 10, 10):
-            y = asym + (r0 - asym) * np.exp(-np.exp(lrc) * time) + rng.normal(0, 2)
-            data_rows.append({"subject": f"S{subject + 1}", "time": time, "y": y})
-    return pd.DataFrame(data_rows)
-
-
-NLME_DATA = create_nlme_data()
-
-
-def fit_nlme(**kwargs) -> NlmerResult:
-    """Fit a random asymptote, which NLME_DATA identifies well.
-
-    With all three parameters random this data is ill-conditioned: one-ulp
-    changes to the response decide whether the fit converges.
-    """
-    return nlmer(
-        nlme.SSasymp(),
-        NLME_DATA,
-        x_var="time",
-        y_var="y",
-        group_var="subject",
-        random_params=["Asym"],
-        **kwargs,
-    )
+@pytest.fixture(scope="module")
+def nlmm_model():
+    return fit_asymptotic_nlmm()
 
 
 def create_logistic_growth_data(seed: int = 7) -> pd.DataFrame:
@@ -514,7 +473,7 @@ class TestNlmerWeightsOffset:
         assert np.allclose(w, 1.0)
 
     def test_weights_specified(self) -> None:
-        weights = np.random.uniform(0.5, 1.5, len(NLME_DATA))
+        weights = np.random.default_rng(475).uniform(0.5, 1.5, len(NLME_DATA))
         result = fit_nlme(weights=weights)
 
         w = result.weights()
@@ -531,7 +490,7 @@ class TestNlmerWeightsOffset:
         assert np.allclose(off, 0.0)
 
     def test_offset_specified(self) -> None:
-        offset = np.random.randn(len(NLME_DATA)) * 0.1
+        offset = np.random.default_rng(492).normal(scale=0.1, size=len(NLME_DATA))
         result = fit_nlme(offset=offset)
 
         off = result.offset()

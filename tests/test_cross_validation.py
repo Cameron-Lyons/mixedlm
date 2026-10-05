@@ -17,7 +17,7 @@ from mixedlm.inference.cross_validation import (
 from numpy.testing import assert_allclose, assert_array_equal
 from scipy.special import expit, xlogy
 
-from tests._lmer_data import CBPP, SLEEPSTUDY
+from tests._datasets import CBPP, SLEEPSTUDY
 
 
 def test_case_folds_are_exhaustive_balanced_and_reproducible() -> None:

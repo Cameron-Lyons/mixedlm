@@ -10,9 +10,8 @@ from mixedlm.inference import bootstrap
 from mixedlm.models.nlmer import NlmerResult, _NlmerSimulation
 from numpy.testing import assert_array_equal
 
-from tests.test_bootstrap_workers import ImmediateExecutor
-from tests.test_nonlinear_bootstrap_workers import summarize_response
-from tests.test_nonlinear_simulation_streams import legacy_draws, make_result
+from tests._bootstrap_helpers import ImmediateExecutor, summarize_response
+from tests._nlmm_models import legacy_draws, make_result
 
 
 @pytest.mark.parametrize(

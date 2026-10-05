@@ -5,43 +5,12 @@ import multiprocessing
 import pickle
 from concurrent.futures import ProcessPoolExecutor
 
-import numpy as np
 import pytest
 from mixedlm.estimation import laplace
 from mixedlm.estimation.joint_glmm import JointGLMMObjective
-from mixedlm.families import Poisson
-from mixedlm.formula.parser import parse_formula
-from mixedlm.models.control import GlmerControl
-from mixedlm.models.modular import GlmerParsedFormula, mkGlmerDevfun
 from numpy.testing import assert_allclose, assert_array_equal
 
-from tests.test_glmm_final_state import mode_problem
-
-
-class CustomPoisson(Poisson):
-    """A serializable custom family that intentionally uses Python evaluation."""
-
-
-def make_object(target, kind="poisson", order=1, layout="intercept", maxiter=100, family=None):
-    matrices, default_family, theta = mode_problem(kind, layout)
-    family = default_family if family is None else family
-    if target == "optimizer":
-        obj = laplace.GLMMOptimizer(
-            matrices, family, nAGQ=order, pirls_maxiter=maxiter, pirls_tol=1e-10
-        )
-    elif target == "joint":
-        obj = JointGLMMObjective(
-            matrices, family, nAGQ=order, pirls_maxiter=maxiter, pirls_tol=1e-10
-        )
-    else:
-        parsed = GlmerParsedFormula(parse_formula("y ~ x + (1 | g)"), matrices, family)
-        obj = mkGlmerDevfun(
-            parsed,
-            nAGQ=order,
-            control=GlmerControl(pirls_maxiter=maxiter, tolPwrss=1e-10, nAGQ0initStep=False),
-        )
-    parameters = np.r_[theta, np.full(matrices.n_fixed, 0.2)] if "joint" in target else theta
-    return obj, parameters
+from tests._glmm_oracles import CustomPoisson, make_glmm_objective
 
 
 def evaluate(obj, parameters):
@@ -74,7 +43,7 @@ def assert_same(actual, expected):
 @pytest.mark.parametrize("order", [0, 1, 7])
 @pytest.mark.parametrize("method", ["deepcopy", 4, 5])
 def test_glmm_copy_and_pickle_preserve_evaluations_and_controls(target, kind, order, method):
-    obj, parameters = make_object(target, kind, order)
+    obj, parameters = make_glmm_objective(target, kind, order)
     obj.user_metadata = {"labels": ["fit"]}
     expected = evaluate(obj, parameters)
     original_native = owner(obj)._native_problem
@@ -108,7 +77,7 @@ def test_glmm_copy_and_pickle_preserve_evaluations_and_controls(target, kind, or
 @pytest.mark.parametrize("layout", ["slope", "crossed", "fixed_only", "mode_only"])
 @pytest.mark.parametrize("maxiter", [1, 100])
 def test_round_trip_preserves_other_layouts_and_limited_solves(target, layout, maxiter):
-    obj, parameters = make_object(target, layout=layout, maxiter=maxiter)
+    obj, parameters = make_glmm_objective(target, layout=layout, maxiter=maxiter)
     restored = round_trip(obj, 5)
     assert_same(evaluate(restored, parameters), evaluate(obj, parameters))
     assert owner(restored).pirls_maxiter == maxiter
@@ -116,7 +85,7 @@ def test_round_trip_preserves_other_layouts_and_limited_solves(target, layout, m
 
 @pytest.mark.parametrize("target", ["optimizer", "joint"])
 def test_shallow_copy_keeps_shared_python_inputs(target):
-    obj, parameters = make_object(target)
+    obj, parameters = make_glmm_objective(target)
     restored = copy.copy(obj)
     assert restored is not obj
     assert restored.matrices is obj.matrices
@@ -127,7 +96,7 @@ def test_shallow_copy_keeps_shared_python_inputs(target):
 @pytest.mark.parametrize("target", ["optimizer", "joint", "modular_joint"])
 @pytest.mark.parametrize("method", ["deepcopy", 5])
 def test_custom_family_keeps_python_route_after_round_trip(target, method):
-    obj, parameters = make_object(target, order=7, family=CustomPoisson())
+    obj, parameters = make_glmm_objective(target, order=7, family=CustomPoisson())
     restored = round_trip(obj, method)
     assert type(owner(restored).family) is CustomPoisson
     assert owner(restored)._native_problem is None
@@ -139,7 +108,7 @@ def test_custom_family_keeps_python_route_after_round_trip(target, method):
 def test_restore_uses_available_backend(target, native_on_restore, monkeypatch):
     pytest.importorskip("mixedlm._rust")
     monkeypatch.setattr(laplace, "_HAS_RUST", not native_on_restore)
-    obj, parameters = make_object(target, order=7)
+    obj, parameters = make_glmm_objective(target, order=7)
     expected = evaluate(obj, parameters)
     serialized = pickle.dumps(obj)
     monkeypatch.setattr(laplace, "_HAS_RUST", native_on_restore)
@@ -151,7 +120,7 @@ def test_restore_uses_available_backend(target, native_on_restore, monkeypatch):
 
 @pytest.mark.parametrize("target", ["optimizer", "joint"])
 def test_legacy_state_without_native_cache_can_be_restored(target):
-    obj, parameters = make_object(target)
+    obj, parameters = make_glmm_objective(target)
     expected = evaluate(obj, parameters)
     del obj._native_problem
     restored = round_trip(obj, 5)
@@ -159,7 +128,7 @@ def test_legacy_state_without_native_cache_can_be_restored(target):
 
 
 def test_restored_optimizer_can_complete_a_fit():
-    obj, theta = make_object("optimizer", order=7)
+    obj, theta = make_glmm_objective("optimizer", order=7)
     original = obj.optimize(start=theta)
     restored = round_trip(obj, 5).optimize(start=theta)
     assert original.converged and restored.converged
@@ -173,7 +142,7 @@ def test_objectives_and_modular_devfun_work_in_spawned_processes(monkeypatch):
         monkeypatch.setenv(name, "1")
     jobs = []
     for target in ["optimizer", "joint", "modular", "modular_joint"]:
-        obj, parameters = make_object(target, order=7)
+        obj, parameters = make_glmm_objective(target, order=7)
         function = obj.objective if target == "optimizer" else obj
         jobs.append((function, parameters, function(parameters)))
     with ProcessPoolExecutor(

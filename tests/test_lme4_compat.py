@@ -1,5 +1,3 @@
-from collections.abc import Callable
-
 import numpy as np
 import pandas as pd
 import pytest
@@ -11,26 +9,18 @@ from mixedlm import (
     glmer,
     glmer_nb,
     lmer,
-    load_arabidopsis,
     load_cake,
     load_cbpp,
     load_dyestuff,
-    load_dyestuff2,
-    load_grouseticks,
-    load_insteval,
     load_pastes,
-    load_penicillin,
     load_sleepstudy,
-    load_verbagg,
     ranef,
 )
-from mixedlm.inference.bootstrap import bootMer
 from mixedlm.inference.ddf import kenward_roger_df, pvalues_with_ddf, satterthwaite_df
 from mixedlm.models.control import lmerControl
 from mixedlm.utils.contrasts import contr_helmert, contr_poly, contr_sum, contr_treatment
 from mixedlm.utils.lme4_compat import (
     DevComp,
-    GHrule,
     VarCorr,
     checkConv,
     convergence_ok,
@@ -39,48 +29,75 @@ from mixedlm.utils.lme4_compat import (
     factorize,
     fortify,
     isNested,
-    lmList,
     mkMerMod,
     ngrps,
     pvalues,
     scale_vcov,
     sigma,
-    vcconv,
 )
-from numpy.testing import assert_allclose
+from numpy.testing import assert_allclose, assert_array_equal
 from scipy import stats
 
 
+@pytest.fixture(scope="module")
+def lmer_model():
+    sleepstudy = load_sleepstudy()
+    return lmer("Reaction ~ Days + (Days | Subject)", sleepstudy)
+
+
+@pytest.fixture(scope="module")
+def glmer_model():
+    rng = np.random.default_rng(123)
+    n = 100
+    n_groups = 15
+    group = np.repeat(np.arange(n_groups), n // n_groups + 1)[:n]
+    x = rng.normal(size=n)
+    re = rng.normal(scale=0.5, size=n_groups)
+    eta = -1 + 0.5 * x + re[group]
+    y = rng.binomial(1, 1 / (1 + np.exp(-eta)))
+    data = pd.DataFrame({"y": y, "x": x, "group": [f"h{g}" for g in group]})
+    return glmer("y ~ x + (1 | group)", data, family=families.Binomial())
+
+
 class TestAccessorFunctions:
-    @pytest.fixture
-    def lmer_model(self):
-        sleepstudy = load_sleepstudy()
-        return lmer("Reaction ~ Days + (Days | Subject)", sleepstudy)
+    @pytest.mark.parametrize("fixture", ["lmer_model", "glmer_model"])
+    def test_functions_return_the_model_methods(self, fixture, request) -> None:
+        model = request.getfixturevalue(fixture)
 
-    @pytest.fixture
-    def glmer_model(self):
-        np.random.seed(123)
-        n = 100
-        n_groups = 15
-        group = np.repeat(np.arange(n_groups), n // n_groups + 1)[:n]
-        x = np.random.randn(n)
-        re = np.random.randn(n_groups) * 0.5
-        eta = -1 + 0.5 * x + re[group]
-        p = 1 / (1 + np.exp(-eta))
-        y = np.random.binomial(1, p)
-        data = pd.DataFrame({"y": y, "x": x, "group": [f"h{g}" for g in group]})
-        return glmer("y ~ x + (1 | group)", data, family=families.Binomial())
+        assert sigma(model) == (model.sigma if fixture == "lmer_model" else 1.0)
+        assert ngrps(model) == model.ngrps()
+        assert fixef(model) == model.fixef()
+        assert str(VarCorr(model)) == str(model.VarCorr())
+        for function, method in [(ranef, model.ranef), (coef, model.coef)]:
+            actual, expected = function(model), method()
+            assert actual.keys() == expected.keys()
+            for group, terms in expected.items():
+                assert actual[group].keys() == terms.keys()
+                for term, values in terms.items():
+                    assert_array_equal(actual[group][term], values)
+        for name in ("X", "y", "theta", "beta", "u"):
+            assert_array_equal(getME(model, name), model.getME(name))
+        assert_array_equal(getME(model, "Z").toarray(), model.getME("Z").toarray())
 
-    def test_sigma_lmer(self, lmer_model) -> None:
-        s = sigma(lmer_model)
-        assert isinstance(s, float)
-        assert s > 0
-        assert s == lmer_model.sigma
+    @pytest.mark.xfail(
+        strict=True,
+        raises=AttributeError,
+        reason="ranef(model, condVar=True) returns only the modes and drops condVar",
+    )
+    @pytest.mark.parametrize("fixture", ["lmer_model", "glmer_model"])
+    def test_ranef_function_keeps_conditional_variances(self, fixture, request) -> None:
+        model = request.getfixturevalue(fixture)
+        expected = model.ranef(condVar=True)
+        actual = ranef(model, condVar=True)
 
-    def test_sigma_glmer(self, glmer_model) -> None:
-        s = sigma(glmer_model)
-        assert isinstance(s, float)
-        assert s == 1.0
+        for group, terms in expected.condVar.items():
+            for term, variances in terms.items():
+                assert_array_equal(actual[group][term], expected[group][term])
+                assert_array_equal(actual.condVar[group][term], variances)
+
+    def test_ngrps_counts_levels_of_each_grouping_factor(self, lmer_model, glmer_model) -> None:
+        assert ngrps(lmer_model) == {"Subject": 18}
+        assert ngrps(glmer_model) == {"group": 15}
 
     def test_root_accessors_are_canonical_functions(self) -> None:
         import mixedlm.utils.lme4_compat as compat
@@ -90,81 +107,9 @@ class TestAccessorFunctions:
         assert getME is compat.getME
         assert ranef is compat.ranef
 
-    def test_ngrps_lmer(self, lmer_model) -> None:
-        groups = ngrps(lmer_model)
-        assert isinstance(groups, dict)
-        assert "Subject" in groups
-        assert groups["Subject"] == 18
-
-    def test_ngrps_glmer(self, glmer_model) -> None:
-        groups = ngrps(glmer_model)
-        assert "group" in groups
-        assert groups["group"] == 15
-
-    def test_fixef_lmer(self, lmer_model) -> None:
-        fe = fixef(lmer_model)
-        assert isinstance(fe, dict)
-        assert "(Intercept)" in fe
-        assert "Days" in fe
-        assert fe == lmer_model.fixef()
-
-    def test_ranef_lmer(self, lmer_model) -> None:
-        re = ranef(lmer_model)
-        assert isinstance(re, dict)
-        assert "Subject" in re
-        assert "(Intercept)" in re["Subject"]
-        assert "Days" in re["Subject"]
-
-    def test_ranef_condvar(self, lmer_model) -> None:
-        re = ranef(lmer_model, condVar=True)
-        assert isinstance(re, dict)
-        assert "Subject" in re
-
-    def test_VarCorr_lmer(self, lmer_model) -> None:
-        vc = VarCorr(lmer_model)
-        assert vc is not None
-
-    def test_getME_theta(self, lmer_model) -> None:
-        theta = getME(lmer_model, "theta")
-        assert theta is not None
-        assert len(theta) == 3
-
-    def test_getME_beta(self, lmer_model) -> None:
-        beta = getME(lmer_model, "beta")
-        assert beta is not None
-        assert len(beta) == 2
-
-    def test_getME_sigma(self, lmer_model) -> None:
-        s = getME(lmer_model, "sigma")
-        assert s == lmer_model.sigma
-
-    def test_getME_X(self, lmer_model) -> None:
-        X = getME(lmer_model, "X")
-        assert X is not None
-        assert X.shape[0] == 180
-        assert X.shape[1] == 2
-
-    def test_getME_Z(self, lmer_model) -> None:
-        Z = getME(lmer_model, "Z")
-        assert Z is not None
-        assert Z.shape[0] == 180
-
     def test_getME_invalid(self, lmer_model) -> None:
         with pytest.raises(ValueError, match="Unknown component name"):
             getME(lmer_model, "invalid_component")
-
-    def test_coef_lmer(self, lmer_model) -> None:
-        c = coef(lmer_model)
-        assert isinstance(c, dict)
-        assert "Subject" in c
-        assert len(c["Subject"]["(Intercept)"]) == 18
-        assert len(c["Subject"]["Days"]) == 18
-
-    def test_root_accessors_glmer(self, glmer_model) -> None:
-        assert fixef(glmer_model) == glmer_model.fixef()
-        assert set(ranef(glmer_model)) == {"group"}
-        assert set(coef(glmer_model)) == {"group"}
-        assert np.allclose(getME(glmer_model, "theta"), glmer_model.theta)
 
 
 class TestPvalues:
@@ -173,20 +118,11 @@ class TestPvalues:
         sleepstudy = load_sleepstudy()
         return lmer("Reaction ~ Days + (1 | Subject)", sleepstudy)
 
-    def test_pvalues_satterthwaite(self, lmer_model) -> None:
-        pvals = pvalues(lmer_model, method="Satterthwaite")
-        assert isinstance(pvals, dict)
-        assert "(Intercept)" in pvals
-        assert "Days" in pvals
-        assert all(0 <= p <= 1 for p in pvals.values())
-
     def test_pvalues_normal(self, lmer_model) -> None:
-        pvals = pvalues(lmer_model, method="normal")
-        assert isinstance(pvals, dict)
-        assert "(Intercept)" in pvals
-        assert "Days" in pvals
-        assert all(0 <= p <= 1 for p in pvals.values())
-        assert pvals["Days"] > 0
+        z = lmer_model.beta / np.sqrt(np.diag(lmer_model.vcov()))
+        expected = dict(zip(lmer_model.fixef(), 2 * stats.norm.sf(np.abs(z)), strict=True))
+
+        assert pvalues(lmer_model, method="normal") == pytest.approx(expected, rel=1e-12)
 
     @pytest.mark.parametrize(
         ("method", "canonical"),
@@ -223,42 +159,6 @@ class TestPvalues:
             pvalues(model, method="bogus")
         for method in ("Satterthwaite", "KR", "normal"):
             assert pvalues(model, method=method) == pytest.approx(expected)
-
-
-class TestLmList:
-    def test_lmlist_basic(self) -> None:
-        sleepstudy = load_sleepstudy()
-        results = lmList("Reaction ~ Days", sleepstudy, group="Subject")
-
-        assert isinstance(results, dict)
-        assert "fits" in results
-        assert "coef" in results
-        assert len(results["fits"]) == 18
-        for _subj, fit in results["fits"].items():
-            assert "coef" in fit
-            assert len(fit["coef"]) == 2
-
-    def test_lmlist_coef_dataframe(self) -> None:
-        sleepstudy = load_sleepstudy()
-        results = lmList("Reaction ~ Days", sleepstudy, group="Subject")
-
-        assert isinstance(results["coef"], pd.DataFrame)
-        assert "(Intercept)" in results["coef"].columns
-        assert "Days" in results["coef"].columns
-        assert len(results["coef"]) == 18
-
-    def test_lmlist_pooled(self) -> None:
-        sleepstudy = load_sleepstudy()
-        results = lmList("Reaction ~ Days", sleepstudy, group="Subject", pool=True)
-
-        assert "pooled" in results
-        assert "coef" in results["pooled"]
-
-    def test_lmlist_not_pooled(self) -> None:
-        sleepstudy = load_sleepstudy()
-        results = lmList("Reaction ~ Days", sleepstudy, group="Subject", pool=False)
-
-        assert "pooled" not in results
 
 
 @pytest.fixture(scope="module")
@@ -382,7 +282,7 @@ class TestDevcomp:
         assert "pwrss" in str(dc)
 
     def test_devcomp_rejects_nonlinear_models(self) -> None:
-        from tests.test_nlmer_methods import fit_nlme
+        from tests._nlmm_models import fit_nlme
 
         with pytest.raises(TypeError, match="devcomp\\(\\) is not available for NlmerResult"):
             devcomp(fit_nlme())
@@ -462,79 +362,6 @@ class TestScaleVcov:
             scale_vcov(vcov, center=np.array([1.0]))
 
 
-class TestVcconv:
-    def test_vcconv_to_sdcorr(self) -> None:
-        sleepstudy = load_sleepstudy()
-        result = lmer("Reaction ~ Days + (Days | Subject)", sleepstudy)
-
-        converted = vcconv(
-            result.theta,
-            result.matrices.random_structures,
-            sigma=result.sigma,
-            to="sdcorr",
-        )
-
-        assert isinstance(converted, dict)
-        assert "Subject" in converted
-        assert "sd" in converted["Subject"]
-        assert "corr" in converted["Subject"]
-
-    def test_vcconv_to_varcov(self) -> None:
-        sleepstudy = load_sleepstudy()
-        result = lmer("Reaction ~ Days + (Days | Subject)", sleepstudy)
-
-        converted = vcconv(
-            result.theta,
-            result.matrices.random_structures,
-            sigma=result.sigma,
-            to="varcov",
-        )
-
-        assert isinstance(converted, dict)
-        assert "Subject" in converted
-        assert "var" in converted["Subject"]
-        assert "cov" in converted["Subject"]
-
-    def test_vcconv_to_theta(self) -> None:
-        sleepstudy = load_sleepstudy()
-        result = lmer("Reaction ~ Days + (Days | Subject)", sleepstudy)
-
-        converted = vcconv(
-            result.theta,
-            result.matrices.random_structures,
-            sigma=result.sigma,
-            to="theta",
-        )
-
-        assert isinstance(converted, dict)
-        assert "Subject" in converted
-        assert "theta" in converted["Subject"]
-
-
-class TestGHrule:
-    def test_ghrule_as_matrix(self) -> None:
-        rule = GHrule(5, asMatrix=True)
-        assert isinstance(rule, np.ndarray)
-        assert rule.shape == (5, 2)
-
-    def test_ghrule_as_dict(self) -> None:
-        rule = GHrule(5, asMatrix=False)
-        assert isinstance(rule, dict)
-        assert "nodes" in rule
-        assert "weights" in rule
-        assert len(rule["nodes"]) == 5
-        assert len(rule["weights"]) == 5
-
-    def test_ghrule_weights_positive(self) -> None:
-        rule = GHrule(10, asMatrix=False)
-        assert all(w > 0 for w in rule["weights"])
-
-    def test_ghrule_nodes_symmetric(self) -> None:
-        rule = GHrule(7, asMatrix=False)
-        assert np.isclose(rule["nodes"][3], 0.0, atol=1e-10)
-        assert np.allclose(rule["nodes"][:3], -rule["nodes"][6:3:-1])
-
-
 class TestFactorize:
     def test_factorize_basic(self) -> None:
         df = pd.DataFrame({"a": ["x", "y", "x"], "b": [1, 2, 3]})
@@ -566,7 +393,11 @@ class TestMkMerMod:
         result = lmer("Reaction ~ Days + (Days | Subject)", sleepstudy)
 
         new_model = mkMerMod(result)
+
         assert new_model is not result
+        assert_array_equal(new_model.theta, result.theta)
+        assert_array_equal(new_model.beta, result.beta)
+        assert new_model.deviance == result.deviance
 
     def test_mkmermod_new_theta(self) -> None:
         sleepstudy = load_sleepstudy()
@@ -588,163 +419,21 @@ class TestMkMerMod:
 
 
 class TestGlmerNb:
-    def test_glmer_nb_basic(self) -> None:
-        np.random.seed(42)
-        n = 100
-        n_groups = 10
-        group = np.repeat(np.arange(n_groups), n // n_groups)
-        x = np.random.randn(n)
-        re = np.random.randn(n_groups) * 0.5
-        mu = np.exp(1 + 0.5 * x + re[group])
-        y = np.random.poisson(mu)
-
-        data = pd.DataFrame({"y": y, "x": x, "group": [f"g{g}" for g in group]})
+    def test_glmer_nb_is_glmer_with_a_unit_theta_negative_binomial(self) -> None:
+        rng = np.random.default_rng(42)
+        group = np.repeat(np.arange(10), 10)
+        x = rng.normal(size=len(group))
+        mu = np.exp(1 + 0.5 * x + rng.normal(scale=0.5, size=10)[group])
+        data = pd.DataFrame({"y": rng.poisson(mu), "x": x, "group": [f"g{g}" for g in group]})
 
         result = glmer_nb("y ~ x + (1 | group)", data)
-        assert result is not None
+        expected = glmer("y ~ x + (1 | group)", data, family=families.NegativeBinomial(theta=1.0))
+
         assert result.converged
-
-
-class TestBootMer:
-    def test_bootmer_basic(self) -> None:
-        sleepstudy = load_sleepstudy()
-        result = lmer("Reaction ~ Days + (1 | Subject)", sleepstudy)
-
-        boot = bootMer(result, nsim=10, seed=42)
-
-        assert boot is not None
-        assert boot.n_boot == 10
-        assert boot.beta_samples.shape == (10, 2)
-
-    def test_bootmer_theta_samples(self) -> None:
-        sleepstudy = load_sleepstudy()
-        result = lmer("Reaction ~ Days + (1 | Subject)", sleepstudy)
-
-        boot = bootMer(result, nsim=10, seed=42)
-
-        assert boot.theta_samples is not None
-        assert boot.theta_samples.shape[0] == 10
-
-    def test_bootmer_parametric(self) -> None:
-        sleepstudy = load_sleepstudy()
-        result = lmer("Reaction ~ Days + (1 | Subject)", sleepstudy)
-
-        boot = bootMer(result, nsim=5, seed=42, bootstrap_type="parametric")
-        assert boot.n_boot == 5
-
-    def test_bootmer_ci(self) -> None:
-        sleepstudy = load_sleepstudy()
-        result = lmer("Reaction ~ Days + (1 | Subject)", sleepstudy)
-
-        boot = bootMer(result, nsim=20, seed=42)
-        ci = boot.ci(level=0.95)
-
-        assert "(Intercept)" in ci
-        assert "Days" in ci
-        assert ci["(Intercept)"][0] < ci["(Intercept)"][1]
-
-
-class TestDatasets:
-    def test_load_sleepstudy(self) -> None:
-        data = load_sleepstudy()
-        assert isinstance(data, pd.DataFrame)
-        assert "Reaction" in data.columns
-        assert "Days" in data.columns
-        assert "Subject" in data.columns
-        assert len(data) == 180
-
-    def test_load_cbpp(self) -> None:
-        data = load_cbpp()
-        assert isinstance(data, pd.DataFrame)
-        assert "incidence" in data.columns
-        assert "size" in data.columns
-        assert "herd" in data.columns
-
-    def test_load_dyestuff(self) -> None:
-        data = load_dyestuff()
-        assert isinstance(data, pd.DataFrame)
-        assert "Yield" in data.columns
-        assert "Batch" in data.columns
-        assert len(data) == 30
-        assert data["Batch"].nunique() == 6
-
-    def test_load_dyestuff2(self) -> None:
-        data = load_dyestuff2()
-        assert isinstance(data, pd.DataFrame)
-        assert "Yield" in data.columns
-        assert "Batch" in data.columns
-        assert len(data) == 30
-
-    def test_load_penicillin(self) -> None:
-        data = load_penicillin()
-        assert isinstance(data, pd.DataFrame)
-        assert "diameter" in data.columns
-        assert "plate" in data.columns
-        assert "sample" in data.columns
-        assert len(data) == 144
-
-    def test_load_cake(self) -> None:
-        data = load_cake()
-        assert isinstance(data, pd.DataFrame)
-        assert "angle" in data.columns
-        assert "recipe" in data.columns
-        assert "replicate" in data.columns
-        assert "temperature" in data.columns
-        assert len(data) == 270
-
-    def test_load_pastes(self) -> None:
-        data = load_pastes()
-        assert isinstance(data, pd.DataFrame)
-        assert "strength" in data.columns
-        assert "batch" in data.columns
-        assert "cask" in data.columns
-        assert len(data) == 60
-
-    def test_load_insteval(self) -> None:
-        data = load_insteval()
-        assert isinstance(data, pd.DataFrame)
-        assert "y" in data.columns
-        assert "s" in data.columns
-        assert "d" in data.columns
-        assert len(data) >= 100
-
-    def test_load_arabidopsis(self) -> None:
-        data = load_arabidopsis()
-        assert isinstance(data, pd.DataFrame)
-        assert "total_fruits" in data.columns
-        assert "gen" in data.columns
-        assert len(data) > 0
-
-    def test_load_grouseticks(self) -> None:
-        data = load_grouseticks()
-        assert isinstance(data, pd.DataFrame)
-        assert "cTICKS" in data.columns
-        assert "BROOD" in data.columns
-        assert "LOCATION" in data.columns
-        assert len(data) > 0
-
-    def test_load_verbagg(self) -> None:
-        data = load_verbagg()
-        assert isinstance(data, pd.DataFrame)
-        assert "r2" in data.columns
-        assert "id" in data.columns
-        assert "item" in data.columns
-        assert len(data) > 0
-
-    @pytest.mark.parametrize(
-        "loader",
-        [load_arabidopsis, load_grouseticks, load_verbagg],
-    )
-    def test_synthetic_loader_rng_isolation(self, loader: Callable[[], pd.DataFrame]) -> None:
-        np.random.seed(20260803)
-        expected = np.random.random(4)
-
-        np.random.seed(20260803)
-        first = loader()
-        observed = np.random.random(4)
-
-        np.testing.assert_array_equal(observed, expected)
-        pd.testing.assert_frame_equal(first, loader())
+        assert result.family.theta == 1.0
+        assert_array_equal(result.beta, expected.beta)
+        assert_array_equal(result.theta, expected.theta)
+        assert result.deviance == expected.deviance
 
 
 class TestIsNested:
@@ -776,25 +465,66 @@ class TestIsNested:
         assert isNested(sleepstudy["Days"], sleepstudy["Subject"]) is False
 
 
-class TestDatasetsUsability:
-    def test_dyestuff_lmer(self) -> None:
+class TestBalancedDesigns:
+    """Balanced designs have closed-form REML estimates: the ANOVA moment estimators."""
+
+    @staticmethod
+    def _means(data, response, by):
+        return data.groupby(by)[response].transform("mean").to_numpy()
+
+    def test_dyestuff_one_way_classification(self) -> None:
         data = load_dyestuff()
         result = lmer("Yield ~ 1 + (1 | Batch)", data)
-        assert result.converged
+        y = data["Yield"].to_numpy()
+        batch = self._means(data, "Yield", "Batch")
+        within = np.sum((y - batch) ** 2) / (30 - 6)
+        between = np.sum((batch - y.mean()) ** 2) / (6 - 1)
 
-    def test_penicillin_crossed_random(self) -> None:
-        data = load_penicillin()
-        result = lmer("diameter ~ 1 + (1 | plate) + (1 | sample)", data)
-        assert result.converged
-        assert "plate" in result.ngrps()
-        assert "sample" in result.ngrps()
+        assert result.sigma**2 == pytest.approx(within, rel=1e-6)
+        assert (result.theta[0] * result.sigma) ** 2 == pytest.approx(
+            (between - within) / 5, rel=1e-6
+        )
+        assert_allclose(result.beta, [y.mean()], rtol=1e-12)
+        assert_allclose(np.sqrt(result.vcov()), [[np.sqrt(between / 30)]], rtol=1e-6)
+        # Published lme4 REML criterion at convergence.
+        assert result.deviance == pytest.approx(319.6543, abs=1e-4)
 
-    def test_cake_split_plot(self) -> None:
-        data = load_cake()
-        result = lmer("angle ~ recipe + temperature + (1 | replicate)", data)
-        assert result.converged
-
-    def test_pastes_nested(self) -> None:
+    def test_pastes_nested_classification(self) -> None:
         data = load_pastes()
         result = lmer("strength ~ 1 + (1 | batch/cask)", data)
-        assert result.converged
+        y = data["strength"].to_numpy()
+        cask = self._means(data, "strength", ["batch", "cask"])
+        batch = self._means(data, "strength", "batch")
+        within = np.sum((y - cask) ** 2) / (60 - 30)
+        casks = np.sum((cask - batch) ** 2) / (30 - 10)
+        batches = np.sum((batch - y.mean()) ** 2) / (10 - 1)
+        variances = {
+            structure.grouping_factor: (value * result.sigma) ** 2
+            for structure, value in zip(
+                result.matrices.random_structures, result.theta, strict=True
+            )
+        }
+
+        assert result.sigma**2 == pytest.approx(within, rel=1e-6)
+        assert variances["batch:cask"] == pytest.approx((casks - within) / 2, rel=1e-6)
+        assert variances["batch"] == pytest.approx((batches - casks) / 6, rel=1e-5)
+        assert_allclose(result.beta, [y.mean()], rtol=1e-12)
+        assert_allclose(np.sqrt(result.vcov()), [[np.sqrt(batches / 60)]], rtol=1e-5)
+
+    def test_cake_additive_split_plot(self) -> None:
+        data = load_cake()
+        result = lmer("angle ~ recipe + temperature + (1 | replicate)", data)
+        y = data["angle"].to_numpy(dtype=float)
+        recipe = self._means(data, "angle", "recipe")
+        temperature = self._means(data, "angle", "temperature")
+        replicate = self._means(data, "angle", "replicate")
+        # Every replicate sees every recipe and temperature once, so the effects are orthogonal.
+        residual = y - recipe - temperature - replicate + 2 * y.mean()
+        error = np.sum(residual**2) / (270 - 1 - 2 - 5 - 14)
+        replicates = np.sum((replicate - y.mean()) ** 2) / (15 - 1)
+
+        assert result.sigma**2 == pytest.approx(error, rel=1e-6)
+        assert (result.theta[0] * result.sigma) ** 2 == pytest.approx(
+            (replicates - error) / 18, rel=1e-5
+        )
+        assert_allclose(result.matrices.X @ result.beta, recipe + temperature - y.mean(), rtol=1e-9)

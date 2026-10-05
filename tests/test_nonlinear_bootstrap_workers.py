@@ -6,16 +6,14 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
-import pandas as pd
 import pytest
-from mixedlm import _parallel, bootMer, nlmer
+from mixedlm import _parallel, bootMer
 from mixedlm.inference import bootstrap
 from mixedlm.models.nlmer import NlmerResult
-from mixedlm.nlme.models import SSasymp
 from numpy.testing import assert_array_equal
 
-from tests.test_bootstrap_workers import ImmediateExecutor, PendingExecutor
-from tests.test_nonlinear_simulation_streams import legacy_draws, make_result
+from tests._bootstrap_helpers import ImmediateExecutor, PendingExecutor, summarize_response
+from tests._nlmm_models import fitted_model, legacy_draws, make_result
 
 
 def run(result, entry, count=3, seed=42, jobs=2):
@@ -24,15 +22,6 @@ def run(result, entry, count=3, seed=42, jobs=2):
     if entry == "confint":
         return result.confint(n_boot=count, seed=seed, n_jobs=jobs)
     return bootstrap.bootstrap_nlmer(result, n_boot=count, seed=seed, n_jobs=jobs)
-
-
-def summarize_response(result, response, *, index=0):
-    return bootstrap._BootstrapOutcome(
-        index,
-        np.array([np.mean(response), np.std(response), response[0]]),
-        np.full_like(result.theta, np.var(response)),
-        float(np.std(response)),
-    )
 
 
 def assert_samples_equal(first, second):
@@ -236,32 +225,6 @@ def test_public_interrupt_closes_pool_with_retained_traceback():
     pool = ImmediateExecutor.instances[-1]
     assert pool.closed and pool.submitted <= 104
     assert simulate.call_count <= 104
-
-
-class PythonAsymptotic(SSasymp):
-    """Importable custom model using the Python estimator in worker processes."""
-
-
-def fitted_model(custom=False):
-    rng = np.random.default_rng(17)
-    n = 40
-    x = np.tile(np.linspace(0, 10, 10), 4)
-    weights = np.linspace(1.0, 4.0, n)
-    offsets = np.linspace(-2.0, 2.0, n)
-    y = 10.0 + (3.0 - 10.0) * np.exp(-np.exp(-1.0) * x)
-    y += np.repeat(rng.normal(0, 0.5, 4), 10) + offsets + rng.normal(0, 0.2, n)
-    data = pd.DataFrame({"x": x, "y": y, "subject": np.repeat(list("abcd"), 10)})
-    return nlmer(
-        PythonAsymptotic() if custom else SSasymp(),
-        data,
-        x_var="x",
-        y_var="y",
-        group_var="subject",
-        weights=weights,
-        offset=offsets,
-        random_params=["Asym"],
-        pnls_maxiter=2000,
-    )
 
 
 @pytest.mark.parametrize("custom", [False, True])

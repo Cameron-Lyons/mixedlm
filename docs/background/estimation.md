@@ -118,7 +118,14 @@ independent fits and evaluate shared or separate responses concurrently.
 Complete-fit throughput also depends on the optimizer: SciPy's COBYQA wrapper
 serializes optimizer calls with its own lock.
 
-To fit with prepared analytic covariance gradients, enable them in the control:
+The native evaluator also returns exact gradients of the profiled deviance with
+respect to the covariance parameters, at a small multiple of the cost of a
+deviance evaluation, including for nested and crossed designs. The default
+`lmer()` optimizer, `"auto"`, runs L-BFGS-B on these gradients and falls back to
+COBYQA when that fit does not settle (see [Default Optimizers](#default-optimizers)).
+
+Explicitly chosen gradient-based optimizers use finite differences unless the
+control enables exact gradients:
 
 ```python
 from mixedlm import lmer, lmerControl
@@ -132,18 +139,13 @@ fit = lmer(
 
 This option supports native LMM fitting with L-BFGS-B, BFGS, TNC, SLSQP, and
 trust-constr. Value and gradient requests at the same parameters share an
-evaluation within each fit. It is disabled by default because the benefit
-depends on the model and optimizer. Python backends and structured covariance
-types retain the solver's numerical derivatives; derivative-free solvers
-continue to use the scalar objective.
-
-Analytic gradients are cheapest when the random-effect levels are independent,
-as in nested or single-factor designs. Crossed or otherwise coupled designs need
-a full inverse and can make analytic gradients more expensive than numerical
-derivatives.
+evaluation within each fit. Python backends and structured covariance types
+retain the solver's numerical derivatives; derivative-free solvers continue to
+use the scalar objective.
 
 `LMMOptimizer.optimize(use_analytic_gradient=True)` enables the same path for
-prepared fits and response refits. `optimizeLmer()` inherits this setting from
+prepared fits and response refits, and `LMMOptimizer.optimize(method="auto")`
+applies the default policy. `optimizeLmer()` inherits the gradient setting from
 the control passed to `mkLmerDevfun()` and accepts an explicit override.
 Custom modular deviance callables retain numerical derivatives for their full objective.
 Analytic derivatives can change the optimization path; convergence checks and
@@ -440,7 +442,8 @@ The low-level `pnls_step()` and `nlmm_deviance()` functions, and
 `NLMMOptimizer`, accept integer grouping labels with gaps or negative values.
 Rows of the random-effect matrix `b` correspond to sorted unique labels in
 both the Python and native implementations; observations within each group
-keep their input order.
+keep their input order. The native evaluation checks that its inputs have
+consistent shapes and releases the interpreter lock while it solves.
 
 The inner penalized nonlinear least-squares loop checks changes in both the
 fixed parameters and every group-specific random effect. Each change is
@@ -530,8 +533,28 @@ mixedlm supports multiple optimization algorithms:
 - `nloptwrap_SBPLX` - Subplex algorithm
 - `nloptwrap_COBYLA` and `nloptwrap_NELDERMEAD`
 
-`mlm.LmerControl().optimizer` shows the default, and
+NLopt optimizers stop on an absolute change in deviance (the control's `ftol`),
+like lme4's `nloptwrap`, and report non-convergence when they reach their
+evaluation or time limit. Their `optCtrl` options are described with
+[LmerControl](../api/models.md#lmercontrol). Results from these algorithms are
+best confirmed with `allFit()`.
+
 `mixedlm.estimation.available_optimizers()` lists the installed choices.
+
+### Default Optimizers
+
+`lmer()` uses `"auto"` by default. It runs L-BFGS-B on the exact native
+gradient with tight tolerances. When that fit does not converge, ends with a
+large gradient, or leaves the variance of a correlated random-effect term near
+zero, where a rank-deficient covariance can have several boundary optima,
+COBYQA refits from the same start and the lower deviance is kept. Scalar and
+uncorrelated variances at zero are checked by the `restart_edge` probes instead.
+Most fits therefore need only the fast gradient stage, and a fit that falls back
+is never worse than COBYQA alone. Without native gradients (`use_rust=False`,
+no native extension, or compound-symmetry and AR(1) covariances), `"auto"` runs
+COBYQA alone. `result.optimizer` records which method produced the estimates.
+
+`glmer()` uses COBYQA, and `"auto"` is not available for generalized models.
 
 ### Choosing an Optimizer
 
@@ -592,4 +615,7 @@ This enables fitting models with thousands of groups.
 
 The Python ML/REML evaluator also keeps large random-effect systems sparse and
 supports observation weights, offsets, and unstructured, independent,
-compound-symmetry, and AR(1) random effects.
+compound-symmetry, and AR(1) random effects. Post-fit calculations, including
+`vcov()`, `hatvalues()`, prediction intervals, conditional variances, and
+denominator degrees of freedom, factor systems with many random effects using
+the native sparse Cholesky with a fill-reducing ordering.

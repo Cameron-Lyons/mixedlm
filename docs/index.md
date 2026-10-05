@@ -75,7 +75,7 @@ Complete documentation of all functions and classes:
 
 - [Models](api/models.md) - `lmer`, `glmer`, `nlmer`, control classes
 - [Results](api/results.md) - Result objects and their methods
-- [Inference](api/inference.md) - Linear hypotheses, cross-validation, `anova`, `emmeans`, `bootMer`, profile likelihood
+- [Inference](api/inference.md) - Parallel execution, linear hypotheses, cross-validation, `anova`, `allFit`, `emmeans`, `bootMer`, profile likelihood
 - [Families](api/families.md) - Distribution families for GLMMs
 - [Diagnostics](api/diagnostics.md) - Dispersion, zero-inflation, influence measures, and plots
 - [Power](api/power.md) - `powerSim`, `powerCurve`, `extend`

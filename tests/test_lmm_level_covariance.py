@@ -8,10 +8,8 @@ from mixedlm import _rust
 from mixedlm.estimation.reml import LMMOptimizer, _profiled_deviance_core
 from numpy.testing import assert_allclose
 
-from tests.test_glmm_final_state import mode_problem
-from tests.test_lmm_prepared_design import native_arguments, parameters
-from tests.test_native_covariance_transforms import _problem
-from tests.test_reml_profiled_deviance import _direct_profiled_likelihood
+from tests._glmm_oracles import covariance_problem, mode_problem
+from tests._lmm_oracles import direct_profiled_likelihood, native_arguments, parameters
 
 
 @pytest.mark.parametrize(
@@ -21,11 +19,11 @@ from tests.test_reml_profiled_deviance import _direct_profiled_likelihood
 @pytest.mark.parametrize("weighted", [False, True])
 @pytest.mark.parametrize("reml", [False, True])
 def test_overlapping_levels_match_observation_covariance(layout, variance, weighted, reml):
-    matrices, theta, _ = _problem(layout, variance, weighted, overlap=True)
+    matrices, theta, _ = covariance_problem(layout, variance, weighted, overlap=True)
     prepared = LMMOptimizer(matrices, REML=reml, use_rust=True)
     for y in [matrices.y, matrices.y[::-1] + 0.3 * matrices.weights]:
         response = prepared.with_response(y)
-        expected = _direct_profiled_likelihood(theta, replace(matrices, y=y), reml)
+        expected = direct_profiled_likelihood(theta, replace(matrices, y=y), reml)
         assert_allclose(response.objective(theta), expected["deviance"], rtol=1e-12, atol=1e-11)
         actual = response._final_evaluation(theta)
         for field, value in expected.items():
@@ -39,13 +37,13 @@ def test_overlapping_levels_match_observation_covariance(layout, variance, weigh
 @pytest.mark.parametrize("variance", ["regular", "singular", "zero"])
 @pytest.mark.parametrize("reml", [False, True])
 def test_overlapping_level_gradients_match_independent_likelihood(layout, variance, reml):
-    matrices, theta, _ = _problem(layout, variance, True, overlap=True)
+    matrices, theta, _ = covariance_problem(layout, variance, True, overlap=True)
     value, gradient = (
         _rust.LmmDesign(**native_arguments(matrices))
         .with_response(matrices.y)
         .deviance_with_gradient(theta, reml)
     )
-    expected = _direct_profiled_likelihood(theta, matrices, reml)["deviance"]
+    expected = direct_profiled_likelihood(theta, matrices, reml)["deviance"]
     assert_allclose(value, expected, rtol=1e-12, atol=1e-11)
     step = 2e-5
     difference = []
@@ -55,8 +53,8 @@ def test_overlapping_level_gradients_match_independent_likelihood(layout, varian
         lower[index] -= step
         difference.append(
             (
-                _direct_profiled_likelihood(upper, matrices, reml)["deviance"]
-                - _direct_profiled_likelihood(lower, matrices, reml)["deviance"]
+                direct_profiled_likelihood(upper, matrices, reml)["deviance"]
+                - direct_profiled_likelihood(lower, matrices, reml)["deviance"]
             )
             / (2 * step)
         )

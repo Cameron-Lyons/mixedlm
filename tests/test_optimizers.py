@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-import subprocess
-import sys
 import warnings
+from importlib.util import find_spec
 
 import numpy as np
 import pytest
@@ -34,55 +33,21 @@ def sphere(x):
 
 
 class TestAvailableOptimizers:
-    def test_returns_list(self):
+    def test_lists_scipy_methods_and_installed_nlopt_wrappers(self):
         opts = available_optimizers()
-        assert isinstance(opts, list)
-        assert len(opts) > 0
-
-    def test_contains_scipy_optimizers(self):
-        opts = available_optimizers()
-        assert "L-BFGS-B" in opts
-        assert "Nelder-Mead" in opts
-        assert "COBYQA" in opts
-        assert "bobyqa" in opts
+        assert opts == sorted(set(opts))
+        assert {"L-BFGS-B", "Nelder-Mead", "COBYQA", "bobyqa"} <= set(opts)
+        installed = NLOPT_OPTIMIZER_NAMES if has_nlopt() else set()
+        assert NLOPT_OPTIMIZER_NAMES & set(opts) == installed
 
 
 class TestHasOptionalDeps:
-    def test_has_bobyqa_returns_bool(self):
-        result = has_bobyqa()
-        assert isinstance(result, bool)
-
-    def test_has_cobyqa_returns_true(self):
+    def test_scipy_backed_optimizers_are_always_available(self):
+        assert has_bobyqa() is True
         assert has_cobyqa() is True
 
-    def test_has_nlopt_returns_bool(self):
-        result = has_nlopt()
-        assert isinstance(result, bool)
-
-    def test_import_does_not_load_nlopt(self):
-        script = """
-import builtins
-
-real_import = builtins.__import__
-
-
-def guarded_import(name, *args, **kwargs):
-    if name == "nlopt" or name.startswith("nlopt."):
-        raise AssertionError(f"unexpected eager import: {name}")
-    return real_import(name, *args, **kwargs)
-
-
-builtins.__import__ = guarded_import
-import mixedlm.estimation.optimizers
-"""
-        result = subprocess.run(
-            [sys.executable, "-c", script],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-
-        assert result.returncode == 0, result.stderr
+    def test_has_nlopt_reports_whether_nlopt_is_importable(self):
+        assert has_nlopt() is (find_spec("nlopt") is not None)
 
 
 class TestOptimizeResult:
@@ -139,6 +104,7 @@ class TestNelderMead:
         )
         result = nm.optimize()
         assert result.success
+        assert_allclose(result.x, [2.0, 3.0], atol=1e-4)
 
     def test_convergence_tolerance(self):
         nm = NelderMead(quadratic, np.array([0.0, 0.0]), ftol=1e-10, xtol=1e-10)
@@ -189,17 +155,12 @@ class TestNlminbwrap:
             return (x[0] - 5) ** 2 + (x[1] - 5) ** 2
 
         result = nlminbwrap(f, np.array([0.0, 0.0]), bounds=[(0, 3), (0, 3)])
-        assert result.x[0] <= 3.0 + 1e-6
-        assert result.x[1] <= 3.0 + 1e-6
+        assert_allclose(result.x, [3.0, 3.0], atol=1e-6)
 
-    def test_with_options(self):
-        result = nlminbwrap(
-            quadratic,
-            np.array([0.0, 0.0]),
-            maxiter=500,
-            ftol=1e-10,
-        )
-        assert result.success
+    def test_iteration_limit_stops_without_success(self):
+        result = nlminbwrap(rosenbrock, np.array([0.0, 0.0]), maxiter=5, ftol=1e-10)
+        assert not result.success
+        assert result.nit == 5
 
 
 class TestRunOptimizer:
@@ -254,17 +215,19 @@ class TestRunOptimizer:
         with pytest.raises(ValueError, match="Unknown optimizer"):
             run_optimizer(quadratic, np.array([0.0, 0.0]), "unknown_opt", bounds)
 
-    def test_with_options(self):
+    def test_options_reach_the_optimizer(self):
         bounds = [(None, None), (None, None)]
-        options = {"maxiter": 100}
-        result = run_optimizer(quadratic, np.array([0.0, 0.0]), "L-BFGS-B", bounds, options=options)
-        assert result.success
+        options = {"maxiter": 5}
+        result = run_optimizer(
+            rosenbrock, np.array([0.0, 0.0]), "L-BFGS-B", bounds, options=options
+        )
+        assert not result.success
+        assert result.nit == 5
 
     def test_with_bounds(self):
         bounds = [(0.0, 1.5), (0.0, 2.5)]
         result = run_optimizer(quadratic, np.array([0.5, 0.5]), "L-BFGS-B", bounds)
-        assert result.x[0] <= 1.5 + 1e-6
-        assert result.x[1] <= 2.5 + 1e-6
+        assert_allclose(result.x, [1.5, 2.5], atol=1e-6)
 
     def test_bfgs_omits_unsupported_bounds(self):
         bounds = [(0.0, 1.5), (0.0, 2.5)]

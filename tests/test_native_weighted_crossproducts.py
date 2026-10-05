@@ -15,21 +15,8 @@ from mixedlm.families import Binomial, Gaussian, Poisson
 from mixedlm.formula.parser import parse_formula
 from mixedlm.matrices.design import build_model_matrices
 from numpy.testing import assert_allclose
-from scipy import sparse
 
-
-def _noncanonical(z):
-    """Split each value between duplicates, reverse rows, and store explicit zeros."""
-    values, rows, offsets = [], [], [0]
-    for column in range(z.shape[1]):
-        for index in range(z.indptr[column + 1] - 1, z.indptr[column] - 1, -1):
-            values.extend([0.25 * z.data[index], 0.75 * z.data[index]])
-            rows.extend([z.indices[index], z.indices[index]])
-        if z.shape[0]:
-            values.append(0.0)
-            rows.append(column % z.shape[0])
-        offsets.append(len(values))
-    return sparse.csc_matrix((values, rows, offsets), shape=z.shape)
+from tests._sparse_systems import noncanonical_csc
 
 
 def _matrices(layout, weighted, noncanonical, family="gaussian"):
@@ -62,7 +49,7 @@ def _matrices(layout, weighted, noncanonical, family="gaussian"):
         offset=offset,
     )
     if noncanonical:
-        matrices = replace(matrices, Z=_noncanonical(matrices.Z.tocsc()))
+        matrices = replace(matrices, Z=noncanonical_csc(matrices.Z.tocsc()))
     theta = np.array(
         {
             "intercept": [0.6],

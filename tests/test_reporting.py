@@ -1,88 +1,41 @@
 from __future__ import annotations
 
-from itertools import product
-
 import numpy as np
 import pandas as pd
 import pytest
-from mixedlm import families, glance, glmer, lmer, nlme, nlmer, tidy
+from mixedlm import glance, tidy
 
-from tests._lmer_data import CBPP, SLEEPSTUDY
-
-
-@pytest.fixture(scope="module")
-def lmm_model():
-    return lmer("Reaction ~ Days + (Days | Subject)", SLEEPSTUDY)
-
-
-@pytest.fixture(scope="module")
-def glmm_model():
-    return glmer("incidence / size ~ period + (1 | herd)", CBPP, family=families.Binomial())
+from tests._nlmm_models import fit_asymptotic_nlmm
 
 
 @pytest.fixture(scope="module")
 def nlmm_model():
-    rng = np.random.default_rng(814)
-    times = np.array([0.0, 0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0, 12.0])
-    # Balanced contrasts give all three random parameters independent variation
-    # while preserving a nonzero Asym/R0 covariance across enough groups.
-    contrasts = np.tile(np.array(list(product([-1.0, 1.0], repeat=3))), (3, 1))
-    effects = contrasts @ np.array([[0.8, 0.1, 0.02], [0.0, 0.3, 0.01], [0.0, 0.0, 0.08]])
-    rows = []
-    for group_index, (asym_effect, r0_effect, lrc_effect) in enumerate(effects):
-        asym = 12.0 + asym_effect
-        r0 = 2.0 + r0_effect
-        lrc = -1.0 + lrc_effect
-        # Observe both the transition and plateau with a strong parameter
-        # contrast so rate and asymptote uncertainty remain identifiable.
-        for time in times:
-            response = asym - (asym - r0) * np.exp(-np.exp(lrc) * time)
-            rows.append(
-                {
-                    "subject": f"S{group_index + 1}",
-                    "time": time,
-                    "response": response + rng.normal(0.0, 0.2),
-                }
-            )
-    data = pd.DataFrame(rows)
-    result = nlmer(
-        nlme.SSasymp(),
-        data,
-        x_var="time",
-        y_var="response",
-        group_var="subject",
-        start={"Asym": 12.0, "R0": 2.0, "lrc": -1.0},
-    )
-    assert result.converged and result.pnls_converged
-    np.testing.assert_allclose(result.phi, [12.0, 2.0, -1.0], atol=0.1, rtol=0)
-    variances = np.diag(result.vcov())
-    assert np.all(np.isfinite(variances)) and np.all(variances > 0)
-    return result
+    return fit_asymptotic_nlmm()
 
 
 class TestTidyFixedEffects:
-    def test_lmm_fixed_effect_table(self, lmm_model) -> None:
-        table = tidy(lmm_model, ddf_method="normal")
+    def test_lmm_fixed_effect_table(self, sleepstudy_slopes_lmm) -> None:
+        table = tidy(sleepstudy_slopes_lmm, ddf_method="normal")
 
         assert table["effect"].tolist() == ["fixed", "fixed"]
         assert table["term"].tolist() == ["(Intercept)", "Days"]
-        assert np.allclose(table["estimate"], lmm_model.beta)
+        assert np.allclose(table["estimate"], sleepstudy_slopes_lmm.beta)
         assert np.all(table["std.error"] > 0)
         assert np.all(table["p.value"].between(0, 1))
         assert table["df"].isna().all()
 
-    def test_lmm_denominator_df_and_confidence_intervals(self, lmm_model) -> None:
-        table = lmm_model.tidy(conf_int=True, ddf_method="Satterthwaite")
+    def test_lmm_denominator_df_and_confidence_intervals(self, sleepstudy_slopes_lmm) -> None:
+        table = sleepstudy_slopes_lmm.tidy(conf_int=True, ddf_method="Satterthwaite")
 
         assert np.all(np.isfinite(table["df"]))
         assert np.all(table["df"] > 0)
         assert np.all(table["conf.low"] < table["estimate"])
         assert np.all(table["conf.high"] > table["estimate"])
 
-    def test_glmm_uses_wald_z_statistics(self, glmm_model) -> None:
-        table = tidy(glmm_model, conf_int=True)
+    def test_glmm_uses_wald_z_statistics(self, cbpp_glmm) -> None:
+        table = tidy(cbpp_glmm, conf_int=True)
 
-        assert set(table["term"]) == set(glmm_model.matrices.fixed_names)
+        assert set(table["term"]) == set(cbpp_glmm.matrices.fixed_names)
         assert table["df"].isna().all()
         assert np.all(table["p.value"].between(0, 1))
         assert np.all(table["conf.low"] <= table["estimate"])
@@ -97,26 +50,28 @@ class TestTidyFixedEffects:
 
 
 class TestTidyRandomEffects:
-    def test_random_parameters_include_sd_correlation_and_residual(self, lmm_model) -> None:
-        table = tidy(lmm_model, effects="ran_pars")
+    def test_random_parameters_include_sd_correlation_and_residual(
+        self, sleepstudy_slopes_lmm
+    ) -> None:
+        table = tidy(sleepstudy_slopes_lmm, effects="ran_pars")
 
         assert set(table["effect"]) == {"ran_pars"}
         assert "sd__(Intercept)" in table["term"].tolist()
         assert "sd__Days" in table["term"].tolist()
         assert "cor__(Intercept).Days" in table["term"].tolist()
         residual = table.loc[table["group"] == "Residual", "estimate"]
-        assert residual.iloc[0] == pytest.approx(lmm_model.sigma)
+        assert residual.iloc[0] == pytest.approx(sleepstudy_slopes_lmm.sigma)
 
-    def test_random_values_include_levels_and_conditional_se(self, lmm_model) -> None:
-        table = tidy(lmm_model, effects="ran_vals")
+    def test_random_values_include_levels_and_conditional_se(self, sleepstudy_slopes_lmm) -> None:
+        table = tidy(sleepstudy_slopes_lmm, effects="ran_vals")
 
         assert len(table) == 18 * 2
         assert set(table["term"]) == {"(Intercept)", "Days"}
         assert table["level"].nunique() == 18
         assert np.all(table["std.error"] >= 0)
 
-    def test_all_effects_have_stable_schema(self, lmm_model) -> None:
-        table = tidy(lmm_model, effects="all", conf_int=True, ddf_method="normal")
+    def test_all_effects_have_stable_schema(self, sleepstudy_slopes_lmm) -> None:
+        table = tidy(sleepstudy_slopes_lmm, effects="all", conf_int=True, ddf_method="normal")
 
         assert table.columns.tolist() == [
             "effect",
@@ -148,8 +103,8 @@ class TestGlance:
     @pytest.mark.parametrize(
         ("fixture_name", "model_type", "family"),
         [
-            ("lmm_model", "lmer", "Gaussian"),
-            ("glmm_model", "glmer", "Binomial"),
+            ("sleepstudy_slopes_lmm", "lmer", "Gaussian"),
+            ("cbpp_glmm", "glmer", "Binomial"),
             ("nlmm_model", "nlmer", "Gaussian"),
         ],
     )
@@ -172,22 +127,22 @@ class TestGlance:
         assert table.loc[0, "BIC"] == pytest.approx(model.BIC())
         assert bool(table.loc[0, "converged"]) is model.converged
 
-    def test_method_matches_top_level_function(self, lmm_model) -> None:
-        pd.testing.assert_frame_equal(lmm_model.glance(), glance(lmm_model))
+    def test_method_matches_top_level_function(self, sleepstudy_slopes_lmm) -> None:
+        pd.testing.assert_frame_equal(sleepstudy_slopes_lmm.glance(), glance(sleepstudy_slopes_lmm))
 
 
 class TestReportingValidation:
-    def test_rejects_unknown_effect(self, lmm_model) -> None:
+    def test_rejects_unknown_effect(self, sleepstudy_slopes_lmm) -> None:
         with pytest.raises(ValueError, match="Unknown effect"):
-            tidy(lmm_model, effects="mystery")
+            tidy(sleepstudy_slopes_lmm, effects="mystery")
 
-    def test_rejects_invalid_confidence_level(self, lmm_model) -> None:
+    def test_rejects_invalid_confidence_level(self, sleepstudy_slopes_lmm) -> None:
         with pytest.raises(ValueError, match="between 0 and 1"):
-            tidy(lmm_model, conf_int=True, conf_level=1.0)
+            tidy(sleepstudy_slopes_lmm, conf_int=True, conf_level=1.0)
 
-    def test_rejects_unknown_ddf_method(self, lmm_model) -> None:
+    def test_rejects_unknown_ddf_method(self, sleepstudy_slopes_lmm) -> None:
         with pytest.raises(ValueError, match="Unknown ddf_method"):
-            tidy(lmm_model, ddf_method="mystery")
+            tidy(sleepstudy_slopes_lmm, ddf_method="mystery")
 
     def test_rejects_non_model(self) -> None:
         with pytest.raises(TypeError, match="fitted mixed-model"):

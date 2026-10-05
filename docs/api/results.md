@@ -58,6 +58,14 @@ Fixed-effect covariance (`vcov()`), prediction standard errors, and leverage
 (`hatvalues()`) share one factored random-effect precision system, so requesting
 several of them does not refactor the model. GLMMs use the final working weights.
 
+Besides the estimates (`beta`, `theta`, and `sigma`), a result records
+`optimizer`, the method whose estimates were kept, and `control`, the
+`LmerControl` used for fitting. `update()`, `drop1()`, and `allFit()` refit with
+that control; `refit()` and `refitML()` keep its `use_rust` setting and use the
+`"auto"` optimizer unless `method=` is given. The statsmodels-style aliases
+`fe_params`, `re_params`, `fittedvalues`, and `resid` are deprecated; use `beta`,
+`theta`, `fitted()`, and `residuals()`.
+
 ### Methods
 
 #### summary
@@ -332,8 +340,13 @@ next_batch = result.simulate(nsim=10, seed=rng)
 An integer seed preserves the previous draw sequence for the same backend and
 call shape. Batch sizes and native-backend availability can affect the sequence.
 Calling `np.random.seed()` separately no longer controls these simulations; pass
-`seed` explicitly instead. Custom family `simulate(mu, rng=...)` methods should
-use the supplied stream for their response draws.
+`seed` explicitly instead.
+
+GLMM responses are drawn by the family's
+`simulate(mu, rng=None, *, weights=None, trials=None)` method, which should use
+the supplied stream. Families without a response distribution, such as quasi
+families and custom families that do not implement `simulate()`, raise
+`NotImplementedError`; see [custom families](families.md#customfamily).
 
 Grouped-binomial GLMM simulations return success counts.
 
@@ -377,7 +390,7 @@ Compute information criteria.
 #### profile
 
 ```py
-result.profile(which=None, n_points=20, level=0.95)
+result.profile(which=None, n_points=20, level=0.95, n_jobs=1)
 ```
 
 Compute fixed-effect likelihood profiles; `which=None` profiles every fixed
@@ -389,8 +402,10 @@ inner solver controls. The refined profile center can differ from the fitted
 coefficient, particularly for `nAGQ=0` fits, which are profiled using the joint
 Laplace likelihood. Default joint fits usually retain their center within
 optimization tolerance; the original result is unchanged. `n_points` must be at least
-3 and affects the plotted curve, not the interval endpoint accuracy. See
-[profile likelihood](inference.md#profile-likelihood) for convergence behavior.
+3 and affects the plotted curve, not the interval endpoint accuracy. LMM profiles
+accept `n_jobs` to profile coefficients in worker processes; GLMM profiles run
+serially. See [profile likelihood](inference.md#profile-likelihood) for
+convergence behavior.
 
 **Returns:** Dictionary mapping parameter names to `ProfileResult` objects.
 
@@ -405,22 +420,28 @@ For `joint_fit=False`, the callable retains the theta-only PIRLS objective.
 #### drop1
 
 ```python
-result.drop1(data)
+result.drop1(data, test="Chisq", n_jobs=1)
 ```
 
-Test single term deletions.
+Test single term deletions. LMM refits reuse the fitted control.
+`n_jobs` refits the reduced models in worker processes; see
+[parallel execution](inference.md#parallel-execution).
 
 **Returns:** Drop1Result with test statistics.
 
 #### allFit
 
 ```python
-result.allFit(data)
+result.allFit(data, optimizers=None, verbose=False, n_jobs=1)
 ```
 
-Fit model with multiple optimizers.
+Refit the model with each optimizer, keeping the other control settings. The
+default list is every solver from `mixedlm.estimation.available_optimizers()`.
+`n_jobs` runs the refits in worker processes.
 
-**Returns:** AllFitResult comparing optimizer results.
+**Returns:** AllFitResult comparing optimizer results. `summary` tabulates
+each fit, `best_fit()` returns the lowest-deviance fit, and `is_consistent()`
+checks whether the converged fits reach the same deviance.
 
 #### getME
 
@@ -432,9 +453,11 @@ Extract model components.
 
 **Parameters:**
 
-- `name`: Component name. Options include `"X"`, `"Z"`, `"theta"`, `"Lambda"`, `"Zt"`, `"beta"`, `"b"`, `"u"`, etc.
+- `name`: Component name. Options include `"X"`, `"Z"`, `"theta"`, `"Lambda"`, `"Zt"`, `"beta"`, `"b"`, `"u"`, `"devcomp"`, etc.
 
-**Returns:** The requested component.
+**Returns:** The requested component. As in lme4, `"b"` holds the conditional
+modes of the random effects and `"u"` the spherical random effects, with
+`b = Lambda @ u`; for singular fits `u` is the minimum-norm solution.
 
 Requesting `"RZX"` materializes a dense random-effect Cholesky factor on demand.
 It retains the original coefficient order and is cached for subsequent calls.

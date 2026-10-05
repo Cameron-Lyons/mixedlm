@@ -162,11 +162,14 @@ def test_sparse_profiles_and_parallel_slices_match_dense_profiles(monkeypatch):
     monkeypatch.setattr(shared_utils, "_SPARSE_PROJECTION_MIN_RANDOM", np.inf)
     # Each profiled coefficient costs seconds of nuisance fits and takes the
     # same sparse path; test_profile.py covers profiles in worker processes.
-    expected_profile = profile_lmer(replace(result), which="z", n_points=7)["z"]
+    # Profiles of the REML fit refit it by ML, and say so.
+    with pytest.warns(UserWarning, match="ML refit"):
+        expected_profile = profile_lmer(replace(result), which="z", n_points=7)["z"]
     expected_slice = slice2D(replace(result), "(Intercept)", "x", n_points=5)
     monkeypatch.setattr(shared_utils, "_SPARSE_PROJECTION_MIN_RANDOM", 0)
 
-    actual = profile_lmer(replace(result), which="z", n_points=7)["z"]
+    with pytest.warns(UserWarning, match="ML refit"):
+        actual = profile_lmer(replace(result), which="z", n_points=7)["z"]
     # Nuisance fits and interval roots have optimization tolerance;
     # the conditional slices below still agree to linear-solve precision.
     assert_allclose(actual.values, expected_profile.values, rtol=1e-8, atol=1e-8)

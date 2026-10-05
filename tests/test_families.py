@@ -23,7 +23,7 @@ from mixedlm.formula.parser import parse_formula
 from mixedlm.matrices import build_model_matrices
 from scipy import special
 
-from tests._lmer_data import CBPP
+from tests._datasets import CBPP, CBPP_FORMULA
 
 
 def test_binomial_deviance_handles_boundary_outcomes_without_warnings() -> None:
@@ -137,12 +137,15 @@ def test_gamma_fit_recovers_finite_coefficients_and_deviance() -> None:
     y = rng.gamma(12.0, mu / 12.0)
     data = pd.DataFrame({"y": y, "x": x, "group": group.astype(str)})
 
-    result = glmer("y ~ x + (1 | group)", data, family=Gamma())
+    # GLMM dispersion is fixed at one, so prior weights carry the gamma shape.
+    result = glmer("y ~ x + (1 | group)", data, family=Gamma(), weights=np.full(n, 12.0))
 
     assert result.converged
     assert np.isfinite(result.deviance)
     assert result.deviance >= 0
     np.testing.assert_allclose(result.beta, np.array([0.7, 0.35]), atol=0.06)
+    # About two standard errors of an SD estimated from 12 groups.
+    assert result.theta[0] == pytest.approx(random_intercepts.std(ddof=1), abs=0.08)
     assert np.all((result.fitted() > 0) & (result.fitted() < 10))
 
 
@@ -290,17 +293,13 @@ def test_documented_family_helpers() -> None:
 
 @pytest.mark.parametrize("link", ["probit", "cloglog", "cauchit"])
 def test_binomial_alternative_links_fit_end_to_end(link: str) -> None:
-    result = glmer(
-        "y ~ period + (1 | herd)",
-        CBPP,
-        family=families.Binomial(link=link),
-        weights=CBPP["size"].to_numpy(),
-    )
+    result = glmer(CBPP_FORMULA, CBPP, family=families.Binomial(link=link))
 
     assert result.converged
     assert result.family.link.name == link
     assert np.isfinite(result.deviance)
-    assert np.all((result.fitted() > 0) & (result.fitted() < 1))
+    eta = result.getME("X") @ result.beta + result.getME("Z") @ result.getME("b")
+    np.testing.assert_allclose(result.fitted(), result.family.link.inverse(eta))
 
 
 def test_positive_family_canonical_links_fit_end_to_end() -> None:
@@ -319,7 +318,9 @@ def test_positive_family_canonical_links_fit_end_to_end() -> None:
 
     for family, y in cases:
         data = pd.DataFrame({"y": y, "x": x, "group": group})
-        result = glmer("y ~ x + (1 | group)", data, family=family)
+        # The simulated means have no group effect.
+        with pytest.warns(UserWarning, match="Model is singular"):
+            result = glmer("y ~ x + (1 | group)", data, family=family)
 
         assert result.converged
         assert np.isfinite(result.deviance)
@@ -335,7 +336,9 @@ def test_poisson_alternative_links_fit_end_to_end(link: str) -> None:
         }
     )
 
-    result = glmer("y ~ 1 + (1 | group)", data, family=Poisson(link=link))
+    # A constant response has no between-group variation.
+    with pytest.warns(UserWarning, match="Model is singular"):
+        result = glmer("y ~ 1 + (1 | group)", data, family=Poisson(link=link))
 
     assert result.converged
     np.testing.assert_allclose(result.fitted(), 5.0, rtol=1e-6)

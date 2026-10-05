@@ -8,27 +8,12 @@ import pytest
 from mixedlm import _rust
 from numpy.testing import assert_allclose, assert_array_equal
 
-from tests.test_lmm_gradient_contractions import observation_gradient
-from tests.test_lmm_level_gradients import separate_structures
-from tests.test_lmm_prepared_design import native_arguments, observation_likelihood
-
-
-def fixed_effect_problem(widths, fixed, coupled, diagonal, variance):
-    matrices, theta = separate_structures(widths, diagonal, variance, False)
-    x = np.random.default_rng(714).normal(size=(matrices.n_obs, fixed))
-    if fixed:
-        x[:, 0] = 1
-    z = matrices.Z
-    if coupled:
-        columns = np.roll(np.arange(matrices.n_random), widths[0])
-        z = (z + 0.15 * z[:, columns]).tocsc()
-    return replace(
-        matrices,
-        X=x,
-        Z=z,
-        n_fixed=fixed,
-        fixed_names=[f"x{i}" for i in range(fixed)],
-    ), theta
+from tests._lmm_oracles import (
+    fixed_effect_problem,
+    native_arguments,
+    observation_gradient,
+    observation_likelihood,
+)
 
 
 @pytest.mark.parametrize("widths", [(3, 2), (8, 5)])

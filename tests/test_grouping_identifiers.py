@@ -32,6 +32,8 @@ def _data():
     )
 
 
+# The three-level literal factor is the point of the test, not a modelling choice.
+@pytest.mark.filterwarnings("ignore:Grouping factor .* has only 3 levels:UserWarning")
 @pytest.mark.parametrize("frame_type", ["pandas", "polars"])
 def test_literal_and_joint_factors_remain_distinct_in_fit_prediction_and_reporting(frame_type):
     frame = _data()

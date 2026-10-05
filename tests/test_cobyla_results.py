@@ -7,9 +7,8 @@ from mixedlm.estimation import optimizers
 from mixedlm.estimation.optimizers import run_optimizer
 from numpy.testing import assert_allclose
 
-from tests.test_joint_glmm_optimization import independent_deviance, model_data
-from tests.test_statistical_golden import observation_space_reference
-from tests.test_variance_boundary_restarts import linear_data
+from tests._glmm_oracles import independent_deviance, model_data
+from tests._lmm_oracles import linear_data, observation_space_reference
 
 
 @pytest.mark.parametrize("limit", [3, 4])

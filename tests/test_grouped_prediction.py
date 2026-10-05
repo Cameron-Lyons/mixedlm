@@ -31,6 +31,15 @@ def _nested_data() -> pd.DataFrame:
     return pd.DataFrame({"y": y, "x": x, "school": schools, "classroom": classrooms})
 
 
+def _fit_nested(data: pd.DataFrame):
+    # Three schools without a school effect: the school variance is on the boundary.
+    with (
+        pytest.warns(UserWarning, match="singular"),
+        pytest.warns(UserWarning, match="'school' has only 3 levels"),
+    ):
+        return lmer("y ~ x + (1 | school/classroom)", data)
+
+
 def _binomial_data() -> pd.DataFrame:
     rng = np.random.default_rng(9753)
     n_groups = 10
@@ -85,7 +94,7 @@ def test_predict_accepts_polars_newdata() -> None:
 
 def test_predict_preserves_nested_random_effects() -> None:
     data = _nested_data()
-    result = lmer("y ~ x + (1 | school/classroom)", data)
+    result = _fit_nested(data)
 
     predicted = result.predict(newdata=data)
     fixed_only = result.matrices.X @ result.beta + result.matrices.offset
@@ -97,7 +106,7 @@ def test_predict_preserves_nested_random_effects() -> None:
 
 def test_predict_rejects_unknown_nested_group_level() -> None:
     data = _nested_data()
-    result = lmer("y ~ x + (1 | school/classroom)", data)
+    result = _fit_nested(data)
     newdata = data.iloc[[0]].copy()
     newdata["classroom"] = "new"
 

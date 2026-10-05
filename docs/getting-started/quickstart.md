@@ -99,8 +99,8 @@ result.confint(method="Wald")
 # Profile likelihood intervals (more accurate)
 result.confint(method="profile")
 
-# Bootstrap intervals (most robust; use more replicates for reported results)
-result.confint(method="boot", n_boot=200, seed=42)
+# Bootstrap intervals (most robust; use 1000 or more replicates for reported results)
+result.confint(method="boot", n_boot=50, seed=42)
 ```
 
 ### Model Comparison

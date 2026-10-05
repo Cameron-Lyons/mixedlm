@@ -3,7 +3,6 @@
 from unittest.mock import patch
 
 import numpy as np
-import pandas as pd
 import pytest
 from mixedlm import (
     GlmerControl,
@@ -17,74 +16,10 @@ from mixedlm import (
 from mixedlm.estimation import laplace
 from mixedlm.estimation.joint_glmm import JointGLMMObjective
 from numpy.testing import assert_allclose, assert_array_equal
-from scipy import optimize, special
+from scipy import optimize
 
-
-def model_data(kind):
-    rng = np.random.default_rng(318)
-    group = np.repeat(np.arange(8), 8)
-    x = rng.normal(scale=0.4, size=len(group))
-    offset = 0.15 * np.sin(np.arange(len(group)))
-    weights = np.linspace(0.8, 1.3, len(group))
-    eta = 0.4 + 0.5 * x + np.repeat(np.linspace(-1, 1, 8), 8) + offset
-    if kind == "poisson":
-        y = rng.poisson(np.exp(eta))
-        data = pd.DataFrame(dict(y=y, x=x, g=group))
-        formula = "y ~ x + (1 | g)"
-        family = families.Poisson()
-    else:
-        trials = np.arange(len(group)) % 5 + 3
-        successes = rng.binomial(trials, special.expit(eta))
-        data = pd.DataFrame(dict(successes=successes, trials=trials, x=x, g=group))
-        formula = "successes / trials ~ x + (1 | g)"
-        family = families.Binomial()
-    return formula, data, family, weights, offset, group
-
-
-def independent_deviance(fitted, group, kind, order):
-    y, weights, offset, x = (
-        fitted.matrices.y,
-        fitted.matrices.weights,
-        fitted.matrices.offset,
-        fitted.matrices.X,
-    )
-    if kind == "poisson":
-        constant = 2 * np.sum(weights * (special.xlogy(y, y) - y))
-    else:
-        constant = 2 * np.sum(weights * (special.xlogy(y, y) + special.xlogy(1 - y, 1 - y)))
-    nodes, node_weights = np.polynomial.hermite.hermgauss(240)
-    nodes = np.sqrt(2) * nodes
-    log_weights = np.log(node_weights) - np.log(np.pi) / 2
-
-    def objective(parameters):
-        theta, beta = parameters[0], parameters[1:]
-        total = constant
-        for index in np.unique(group):
-            keep = group == index
-            eta = x[keep] @ beta + offset[keep]
-            yy, ww = y[keep], weights[keep]
-            if order > 1:
-                linear = eta + theta * nodes[:, None]
-                cumulant = np.exp(linear) if kind == "poisson" else np.logaddexp(0, linear)
-                log_likelihood = np.sum(ww * (yy * linear - cumulant), axis=1)
-                total -= 2 * special.logsumexp(log_weights + log_likelihood)
-            else:
-                inverse = np.exp if kind == "poisson" else special.expit
-                mode = optimize.brentq(
-                    lambda u, w=ww, y=yy, e=eta, inv=inverse: u
-                    - theta * (w @ (y - inv(e + theta * u))),
-                    -30,
-                    30,
-                )
-                linear = eta + theta * mode
-                mu = inverse(linear)
-                variance = mu if kind == "poisson" else mu * (1 - mu)
-                cumulant = mu if kind == "poisson" else np.logaddexp(0, linear)
-                total += 2 * np.sum(ww * (cumulant - yy * linear))
-                total += mode**2 + np.log1p(theta**2 * (ww @ variance))
-        return total
-
-    return objective
+from tests._datasets import CBPP
+from tests._glmm_oracles import independent_deviance, model_data
 
 
 @pytest.mark.parametrize("kind", ["poisson", "binomial"])
@@ -270,15 +205,8 @@ def test_profile_refinement_warns_for_explicit_fast_approximation():
     assert abs(profile.mle - fitted.beta[0]) > 1e-3
 
 
-def test_cbpp_joint_fit_matches_independent_laplace_optimization():
-    from tests._lmer_data import CBPP
-
-    fitted = glmer(
-        "y ~ period + (1 | herd)",
-        CBPP,
-        family=families.Binomial(),
-        weights=CBPP["size"].to_numpy(dtype=float),
-    )
+def test_cbpp_joint_fit_matches_independent_laplace_optimization(cbpp_glmm):
+    fitted = cbpp_glmm
     objective = independent_deviance(fitted, CBPP["herd"].to_numpy(), "binomial", 1)
     point = np.r_[fitted.theta, fitted.beta]
     reference = optimize.minimize(

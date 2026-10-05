@@ -17,14 +17,15 @@ from mixedlm.estimation.reml import _build_theta_bounds
 from numpy.testing import assert_allclose, assert_array_equal
 from scipy.optimize import minimize
 
-from tests.test_lmm_prepared_design import (
+from tests._glmm_oracles import covariance_problem
+from tests._lmm_oracles import (
+    dominant_random_effects,
+    groupwise_likelihood,
     matrices_fixture,
     native_arguments,
     observation_likelihood,
     parameters,
 )
-from tests.test_lmm_stability import dominant_random_effects, groupwise_likelihood
-from tests.test_native_covariance_transforms import _problem
 
 
 @pytest.mark.parametrize(
@@ -37,7 +38,7 @@ from tests.test_native_covariance_transforms import _problem
 def test_prepared_gradients_match_fresh_designs_and_independent_likelihood(
     layout, variance, overlap, reml
 ):
-    matrices, theta, _ = _problem(layout, variance, True, overlap=overlap)
+    matrices, theta, _ = covariance_problem(layout, variance, True, overlap=overlap)
     arguments = native_arguments(matrices)
     design = _rust.LmmDesign(**arguments)
     for y in [matrices.y, matrices.y[::-1] + 0.2 * matrices.weights]:

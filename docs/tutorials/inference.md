@@ -41,12 +41,16 @@ subject_cv = mlm.cross_validate(
     group="Subject",
     metrics=["rmse", "mae", "r2"],
     random_state=123,
-    n_jobs=2,
 )
 
 print(subject_cv)
 print(subject_cv.fold_scores)
 ```
+
+Pass `n_jobs=-1` (or a worker count) to refit the folds in parallel worker
+processes. Results match a serial run. Scripts that do this must call
+`cross_validate()` under an `if __name__ == "__main__":` guard; see
+[parallel execution](../api/inference.md#parallel-execution).
 
 The grouped splitter assigns larger clusters first to the smallest available
 fold. This preserves groups while balancing the number of held-out observations.
@@ -219,10 +223,11 @@ Profile CIs are based on the likelihood function shape and don't assume symmetry
 
 ### Bootstrap Intervals
 
-Most robust but computationally intensive:
+Most robust but computationally intensive. This quick example uses 50
+replicates; use 1000 or more for reported intervals:
 
 ```python
-ci = model.confint(method="boot", n_boot=200, seed=42)
+ci = model.confint(method="boot", n_boot=50, seed=42)
 print(ci)
 ```
 
@@ -328,8 +333,9 @@ Unknown adjustment names raise an error; names are case-insensitive.
 
 ### Computing Profiles
 
-Compute profiles for the fixed-effect coefficients. For LMMs, these hold
-`theta` fixed and recompute the other fixed effects and residual scale:
+Compute likelihood profiles for the fixed-effect coefficients. For LMMs, each
+constrained value re-optimizes the covariance parameters, the other fixed
+effects, and the residual scale by maximum likelihood:
 
 ```python
 profiles = model.profile()
@@ -373,8 +379,8 @@ print(ci)
 ```python
 from mixedlm import bootCI, bootMer
 
-# Bootstrap the model; use more replicates for reported intervals
-boot = bootMer(model, nsim=200, seed=42)
+# Bootstrap the model; use 1000 or more replicates for reported intervals
+boot = bootMer(model, nsim=50, seed=42)
 
 # Access bootstrap samples
 boot.beta_samples   # Fixed-effect estimates
@@ -383,6 +389,12 @@ boot.theta_samples  # Variance-parameter estimates
 # Bootstrap confidence intervals
 bootCI(boot, component="all")
 ```
+
+Large bootstraps can refit in parallel with `n_jobs`, for example
+`bootMer(model, nsim=1000, seed=42, n_jobs=-1)`. A fixed seed gives the same
+samples for every worker count. Run parallel work under an
+`if __name__ == "__main__":` guard, as described in
+[parallel execution](../api/inference.md#parallel-execution).
 
 ### Bootstrap for Specific Statistics
 
@@ -440,9 +452,14 @@ Check if results are sensitive to optimizer choice:
 ```python
 all_results = model.allFit(data)
 print(all_results.summary)
+print(all_results.is_consistent())
 ```
 
-If different optimizers give very different results, the model may be problematic.
+The default list contains every installed solver from
+`mixedlm.estimation.available_optimizers()`, and the refits keep the model's other
+control settings. `is_consistent()` checks whether the converged fits reach the
+same deviance. If different optimizers give very different results, the model may
+be problematic. Pass `n_jobs` to run the refits in worker processes.
 
 ## Checking Convergence
 
@@ -482,9 +499,9 @@ m_simple = mlm.lmer("Reaction ~ Days + (1 | Subject)", data, REML=False)
 m_full = mlm.lmer("Reaction ~ Days + (Days | Subject)", data, REML=False)
 print(mlm.anova(m_simple, m_full))
 
-# 4. Bootstrap CI for the Days effect
+# 4. Bootstrap CI for the Days effect (use 1000 or more replicates in practice)
 print("\n=== Bootstrap CI for Days Effect ===")
-boot = mlm.bootMer(model, nsim=200, seed=42)
+boot = mlm.bootMer(model, nsim=50, seed=42)
 boot_ci = mlm.bootCI(boot, parameters="Days")
 print(boot_ci[["parameter", "conf.low", "conf.high"]])
 

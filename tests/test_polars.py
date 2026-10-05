@@ -2,6 +2,7 @@
 
 import mixedlm as mlm
 import numpy as np
+import pandas as pd
 import pytest
 
 pl = pytest.importorskip("polars")
@@ -193,54 +194,49 @@ class TestPolarsGlmer:
 
 
 # Conversion fixtures need residual variation: y == x can give a nonfinite likelihood.
+SMALL = {
+    "y": [1.2, 1.8, 3.4, 3.7, 5.3, 5.8],
+    "x": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+    "group": ["A", "A", "B", "B", "C", "C"],
+}
+# Three groups of two rows test data conversion, not variance estimation.
+SMALL_DATA_WARNINGS = [
+    pytest.mark.filterwarnings("ignore:Grouping factor 'group' has only 3 levels:UserWarning"),
+    pytest.mark.filterwarnings("ignore:Model is singular:UserWarning"),
+]
+
+
+@pytest.mark.parametrize(
+    "columns",
+    [
+        {"x": pl.Series([1, 2, 3, 4, 5, 6])},
+        {"group": pl.Series(SMALL["group"]).cast(pl.Categorical)},
+        {},
+    ],
+    ids=["integer", "categorical", "string"],
+)
 class TestPolarsDataTypes:
-    def test_numeric_columns(self):
-        """Test with various numeric dtypes."""
-        data = pl.DataFrame(
-            {
-                "y": [1.2, 1.8, 3.4, 3.7, 5.3, 5.8],
-                "x": [1, 2, 3, 4, 5, 6],
-                "group": ["A", "A", "B", "B", "C", "C"],
-            }
-        )
+    pytestmark = SMALL_DATA_WARNINGS
+
+    def test_columns_fit_like_pandas(self, columns):
+        data = pl.DataFrame(SMALL).with_columns(**columns)
 
         result = mlm.lmer("y ~ x + (1 | group)", data)
-        assert result.converged
-        assert np.isfinite(result.deviance)
-        assert result.sigma > 0
+        expected = mlm.lmer("y ~ x + (1 | group)", pd.DataFrame(SMALL))
 
-    def test_categorical_column(self):
-        """Test with polars Categorical dtype."""
-        data = pl.DataFrame(
-            {
-                "y": [1.2, 1.8, 3.4, 3.7, 5.3, 5.8],
-                "x": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
-                "group": pl.Series(["A", "A", "B", "B", "C", "C"]).cast(pl.Categorical),
-            }
-        )
+        np.testing.assert_allclose(result.beta, expected.beta, rtol=1e-10)
+        np.testing.assert_allclose(result.theta, expected.theta, rtol=1e-8, atol=1e-10)
+        assert result.deviance == pytest.approx(expected.deviance, rel=1e-10)
 
-        result = mlm.lmer("y ~ x + (1 | group)", data)
-        assert result.converged
-        assert np.isfinite(result.deviance)
-        assert result.sigma > 0
 
-    def test_string_grouping(self):
-        """Test with string grouping variable."""
-        data = pl.DataFrame(
-            {
-                "y": [1.2, 1.8, 3.4, 3.7, 5.3, 5.8],
-                "x": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
-                "group": ["A", "A", "B", "B", "C", "C"],
-            }
-        )
-
-        result = mlm.lmer("y ~ x + (1 | group)", data)
-        assert result.converged
-        assert np.isfinite(result.deviance)
-        assert result.sigma > 0
+def complete_case_fit():
+    """The pandas fit without the third row, which the NA tests make missing."""
+    return mlm.lmer("y ~ x + (1 | group)", pd.DataFrame(SMALL).drop(index=2))
 
 
 class TestPolarsNAHandling:
+    pytestmark = SMALL_DATA_WARNINGS
+
     @pytest.fixture(params=[pl.Float32, pl.Float64], ids=["float32", "float64"])
     def nan_data(self, request):
         return pl.DataFrame(
@@ -265,8 +261,8 @@ class TestPolarsNAHandling:
         )
 
         result = mlm.lmer("y ~ x + (1 | group)", data, na_action="omit")
-        assert result.converged
         assert result.matrices.n_obs == 5
+        assert result.deviance == pytest.approx(complete_case_fit().deviance, rel=1e-10)
 
     def test_na_fail(self):
         """Test NA fail action with polars."""
@@ -285,8 +281,9 @@ class TestPolarsNAHandling:
         """Floating-point NaN values are omitted like pandas missing values."""
         result = mlm.lmer("y ~ x + (1 | group)", nan_data, na_action="omit")
 
-        assert result.converged
         assert result.matrices.n_obs == 5
+        expected = complete_case_fit()
+        np.testing.assert_allclose(result.beta, expected.beta, rtol=1e-6)
 
     def test_nan_exclude(self, nan_data):
         """Excluded NaN rows are restored in observation-aligned outputs."""

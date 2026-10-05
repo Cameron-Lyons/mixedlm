@@ -186,3 +186,15 @@ def test_noncanonical_python_design_is_combined_without_mutation():
         np.testing.assert_array_equal(current, previous)
     for value, reference in zip(actual, expected, strict=True):
         np.testing.assert_allclose(value, reference, rtol=1e-10, atol=1e-10)
+
+
+@pytest.mark.parametrize("kind", ["gaussian", "poisson", "binomial"])
+def test_first_order_quadrature_is_the_laplace_approximation(kind):
+    matrices, family = make_matrices(kind)
+    theta = np.array([0.7])
+
+    actual = laplace.adaptive_gh_deviance(theta, matrices, family, nAGQ=1)
+    expected = laplace.laplace_deviance(theta, matrices, family)
+
+    for value, reference in zip(actual, expected, strict=True):
+        np.testing.assert_allclose(value, reference, rtol=1e-12, atol=1e-12)

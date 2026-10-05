@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 import pytest
 from mixedlm import lmer, load_sleepstudy
+from mixedlm.inference.anova import anova_type3
 from mixedlm.inference.ddf import (
     DenomDFResult,
     _vcov_derivatives,
@@ -17,8 +18,9 @@ from mixedlm.inference.ddf import (
     satterthwaite_df,
 )
 from mixedlm.models.control import LmerControl
-from numpy.testing import assert_allclose
-from scipy import linalg
+from mixedlm.utils import _format_pvalue
+from numpy.testing import assert_allclose, assert_array_equal
+from scipy import linalg, stats
 
 
 def create_ddf_data(n_groups: int = 10, n_per_group: int = 5, seed: int = 42) -> pd.DataFrame:
@@ -121,7 +123,7 @@ class TestSatterthwaiteDF:
 
     def test_satterthwaite_df_multiple_fixed(self) -> None:
         data = DDF_DATA.copy()
-        data["z"] = np.random.randn(len(data))
+        data["z"] = np.random.default_rng(126).normal(size=len(data))
         model = lmer("y ~ x + z + (1|group)", data)
         result = satterthwaite_df(model)
 
@@ -211,31 +213,19 @@ class TestKenwardRogerDF:
 
 
 class TestPvaluesWithDDF:
-    def test_pvalues_satterthwaite(self) -> None:
+    @pytest.mark.parametrize(
+        ("method", "ddf"),
+        [("Satterthwaite", satterthwaite_df), ("Kenward-Roger", kenward_roger_df)],
+    )
+    def test_pvalues_are_two_sided_t_tests_on_the_ddf(self, method, ddf) -> None:
         model = lmer("y ~ x + (1|group)", DDF_DATA)
-        results = pvalues_with_ddf(model, method="Satterthwaite")
+        df = ddf(model).df
 
-        assert "(Intercept)" in results
-        assert "x" in results
+        results = pvalues_with_ddf(model, method=method)
 
-        for _name, (estimate, t_val, p_val) in results.items():
-            assert isinstance(estimate, float)
-            assert isinstance(t_val, float)
-            assert isinstance(p_val, float)
-            assert 0.0 <= p_val <= 1.0
-
-    def test_pvalues_kenward_roger(self) -> None:
-        model = lmer("y ~ x + (1|group)", DDF_DATA)
-        results = pvalues_with_ddf(model, method="Kenward-Roger")
-
-        assert "(Intercept)" in results
-        assert "x" in results
-
-        for _name, (estimate, t_val, p_val) in results.items():
-            assert isinstance(estimate, float)
-            assert isinstance(t_val, float)
-            assert isinstance(p_val, float)
-            assert 0.0 <= p_val <= 1.0
+        assert list(results) == ["(Intercept)", "x"]
+        for i, (_, t_value, p_value) in enumerate(results.values()):
+            assert p_value == pytest.approx(2 * stats.t.sf(abs(t_value), df[i]), rel=1e-12)
 
     def test_pvalues_estimates_match_model(self) -> None:
         model = lmer("y ~ x + (1|group)", DDF_DATA)
@@ -288,7 +278,9 @@ class TestDDFCache:
 
 class TestDDFWithDifferentModels:
     def test_ddf_random_slope(self) -> None:
-        model = lmer("y ~ x + (x|group)", DDF_DATA)
+        # DDF_DATA has no slope variation, so the slope variance is on the boundary.
+        with pytest.warns(UserWarning, match="singular"):
+            model = lmer("y ~ x + (x|group)", DDF_DATA)
         satt = satterthwaite_df(model)
         kr = kenward_roger_df(model)
 
@@ -408,3 +400,55 @@ class TestWeightedDDF:
         assert not np.allclose(first_gradients[0], fresh_second_gradients[0])
         assert_allclose(cached_second_gradients[0], fresh_second_gradients[0], atol=1e-12)
         assert_allclose(cached_second_covariance, fresh_second_covariance, atol=1e-12)
+
+
+class TestSummaryPValues:
+    @pytest.mark.parametrize("method", ["Satterthwaite", "Kenward-Roger"])
+    def test_summary_rows_report_ddf_t_tests(self, method: str) -> None:
+        model = lmer("y ~ x + (1|group)", DDF_DATA)
+        df = (satterthwaite_df if method == "Satterthwaite" else kenward_roger_df)(model).df
+        tests = pvalues_with_ddf(model, method=method)
+
+        lines = model.summary(ddf_method=method).splitlines()
+
+        for i, name in enumerate(model.matrices.fixed_names):
+            (row,) = [line for line in lines if line.startswith(f"{name} ")]
+            _, t_value, p_value = tests[name]
+            assert p_value == pytest.approx(2 * stats.t.sf(abs(t_value), df[i]), rel=1e-12)
+            assert f"{df[i]:8.2f}  {t_value:8.3f}  {_format_pvalue(p_value):>10}" in row
+
+    def test_summary_without_ddf_reports_only_t_values(self) -> None:
+        model = lmer("y ~ x + (1|group)", DDF_DATA)
+        t_values = model.beta / np.sqrt(np.diag(model.vcov()))
+
+        summary = model.summary(ddf_method=None)
+
+        assert "Pr(>|t|)" not in summary
+        for name, t_value in zip(model.matrices.fixed_names, t_values, strict=True):
+            (row,) = [line for line in summary.splitlines() if line.startswith(f"{name} ")]
+            assert row.endswith(f"{t_value:7.3f}")
+
+    def test_summary_rejects_unknown_ddf_method(self) -> None:
+        model = lmer("y ~ x + (1|group)", DDF_DATA)
+
+        with pytest.raises(ValueError, match="Unknown ddf_method"):
+            model.summary(ddf_method="invalid")
+
+
+class TestAnovaType3:
+    @pytest.mark.parametrize("method", ["Satterthwaite", "Kenward-Roger"])
+    def test_single_df_f_test_is_the_squared_t_test(self, method: str) -> None:
+        model = lmer("y ~ x + (1|group)", DDF_DATA)
+        df = (satterthwaite_df if method == "Satterthwaite" else kenward_roger_df)(model).df
+        _, t_value, p_value = pvalues_with_ddf(model, method=method)["x"]
+
+        table = anova_type3(model, ddf_method=method)
+
+        assert table.terms == ["x"]
+        assert table.ddf_method == method
+        assert_array_equal(table.num_df, [1])
+        assert_allclose(table.f_value, [t_value**2], rtol=1e-10)
+        assert_allclose(table.den_df, [df[1]], rtol=1e-12)
+        assert_allclose(table.p_value, [p_value], rtol=1e-8)
+        assert_allclose(table.sum_sq, table.f_value * model.sigma**2, rtol=1e-10)
+        assert f"Type III Analysis of Variance Table with {method} DF" in str(table)

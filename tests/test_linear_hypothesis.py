@@ -3,45 +3,21 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import pytest
-from mixedlm import families, glmer, lmer
 from mixedlm.inference import LinearHypothesisResult, linear_hypothesis
 from numpy.testing import assert_allclose
 from scipy import stats
 
+from tests._inference_results import fit_random_intercept_glmm, fit_random_intercept_lmm
+
 
 @pytest.fixture(scope="module")
 def lmm_result():
-    rng = np.random.default_rng(20260803)
-    n_groups = 16
-    observations_per_group = 12
-    group_index = np.repeat(np.arange(n_groups), observations_per_group)
-    x = rng.normal(size=len(group_index))
-    z = rng.normal(size=len(group_index))
-    random_intercept = rng.normal(scale=2.0, size=n_groups)
-    y = (
-        1.5
-        + 0.8 * x
-        - 0.35 * z
-        + random_intercept[group_index]
-        + rng.normal(scale=0.3, size=len(group_index))
-    )
-    data = pd.DataFrame({"y": y, "x": x, "z": z, "group": [f"G{value}" for value in group_index]})
-    return lmer("y ~ x + z + (1 | group)", data)
+    return fit_random_intercept_lmm()
 
 
 @pytest.fixture(scope="module")
 def glmm_result():
-    rng = np.random.default_rng(20260804)
-    n_groups = 20
-    observations_per_group = 12
-    group_index = np.repeat(np.arange(n_groups), observations_per_group)
-    x = rng.normal(size=len(group_index))
-    random_intercept = rng.normal(scale=0.55, size=n_groups)
-    eta = -0.4 + 0.75 * x + random_intercept[group_index]
-    probability = 1 / (1 + np.exp(-eta))
-    y = rng.binomial(1, probability)
-    data = pd.DataFrame({"y": y, "x": x, "group": [f"G{value}" for value in group_index]})
-    return glmer("y ~ x + (1 | group)", data, family=families.Binomial())
+    return fit_random_intercept_glmm()
 
 
 def _coefficient_index(model, name: str) -> int:

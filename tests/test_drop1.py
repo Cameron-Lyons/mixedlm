@@ -10,6 +10,7 @@ from mixedlm.families import Binomial
 from mixedlm.inference.drop1 import Drop1Result, _likelihood_ratio, drop1_glmer, drop1_lmer
 from mixedlm.models.control import lmerControl
 from mixedlm.models.lmer import LmerMod
+from scipy import stats
 
 
 @pytest.fixture
@@ -31,20 +32,31 @@ def multi_predictor_data():
 
 @pytest.fixture
 def binomial_data():
-    np.random.seed(42)
+    rng = np.random.default_rng(42)
     n_groups = 8
     n_per_group = 25
     n = n_groups * n_per_group
 
     groups = np.repeat([f"G{i}" for i in range(n_groups)], n_per_group)
-    x1 = np.random.randn(n)
-    x2 = np.random.randn(n)
-    group_effects = np.repeat(np.random.randn(n_groups) * 0.3, n_per_group)
+    x1 = rng.normal(size=n)
+    x2 = rng.normal(size=n)
+    group_effects = np.repeat(rng.normal(size=n_groups), n_per_group)
     eta = -0.5 + 0.5 * x1 + 0.3 * x2 + group_effects
-    prob = 1 / (1 + np.exp(-eta))
-    y = np.random.binomial(1, prob)
+    y = rng.binomial(1, 1 / (1 + np.exp(-eta)))
 
     return pd.DataFrame({"y": y, "x1": x1, "x2": x2, "group": groups})
+
+
+def assert_matches_explicit_refits(model, result, refit, terms):
+    """Each deletion is an ML refit without that term, compared by AIC and LRT."""
+    assert result.terms == terms
+    assert result.full_model_aic == pytest.approx(model.AIC(), rel=1e-10)
+    for term, aic, lrt, p_value in zip(terms, result.aic, result.lrt, result.p_value, strict=True):
+        reduced = refit(" + ".join(other for other in terms if other != term))
+        statistic = 2 * (model.logLik().value - reduced.logLik().value)
+        assert aic == pytest.approx(reduced.AIC(), abs=1e-4)
+        assert lrt == pytest.approx(statistic, abs=1e-4)
+        assert p_value == pytest.approx(stats.chi2.sf(lrt, 1), rel=1e-10)
 
 
 class TestDrop1Result:
@@ -100,36 +112,18 @@ class TestDrop1Result:
 
 
 class TestDrop1Lmer:
-    def test_basic_drop1(self, multi_predictor_data):
-        model = lmer("y ~ x1 + x2 + x3 + (1|group)", multi_predictor_data)
-        result = drop1_lmer(model, multi_predictor_data)
+    def test_each_deletion_matches_an_explicit_ml_refit(self, multi_predictor_data):
+        data = multi_predictor_data
+        model = lmer("y ~ x1 + x2 + x3 + (1|group)", data, REML=False)
 
-        assert isinstance(result, Drop1Result)
-        assert len(result.terms) >= 1
-        assert all(aic > 0 for aic in result.aic)
+        result = drop1_lmer(model, data, test="Chisq")
 
-    def test_terms_are_predictors(self, multi_predictor_data):
-        model = lmer("y ~ x1 + x2 + x3 + (1|group)", multi_predictor_data)
-        result = drop1_lmer(model, multi_predictor_data)
-
-        for term in result.terms:
-            assert term in ["x1", "x2", "x3"]
-
-    def test_lrt_positive(self, multi_predictor_data):
-        model = lmer("y ~ x1 + x2 + x3 + (1|group)", multi_predictor_data)
-        result = drop1_lmer(model, multi_predictor_data, test="Chisq")
-
-        for lrt in result.lrt:
-            if lrt is not None:
-                assert lrt >= 0
-
-    def test_pvalue_valid(self, multi_predictor_data):
-        model = lmer("y ~ x1 + x2 + x3 + (1|group)", multi_predictor_data)
-        result = drop1_lmer(model, multi_predictor_data, test="Chisq")
-
-        for p in result.p_value:
-            if p is not None:
-                assert 0 <= p <= 1
+        assert_matches_explicit_refits(
+            model,
+            result,
+            lambda fixed: lmer(f"y ~ {fixed} + (1|group)", data, REML=False),
+            ["x1", "x2", "x3"],
+        )
 
     def test_no_test(self, multi_predictor_data):
         model = lmer("y ~ x1 + x2 + (1|group)", multi_predictor_data)
@@ -207,50 +201,32 @@ class TestDrop1Lmer:
 
 
 class TestDrop1Glmer:
-    def test_basic_drop1(self, binomial_data):
+    def test_each_deletion_matches_an_explicit_refit(self, binomial_data):
         model = glmer("y ~ x1 + x2 + (1|group)", binomial_data, family=Binomial())
-        result = drop1_glmer(model, binomial_data)
 
-        assert isinstance(result, Drop1Result)
-        assert len(result.terms) >= 1
-
-    def test_terms_are_predictors(self, binomial_data):
-        model = glmer("y ~ x1 + x2 + (1|group)", binomial_data, family=Binomial())
-        result = drop1_glmer(model, binomial_data)
-
-        for term in result.terms:
-            assert term in ["x1", "x2"]
-
-    def test_lrt_values(self, binomial_data):
-        model = glmer("y ~ x1 + x2 + (1|group)", binomial_data, family=Binomial())
         result = drop1_glmer(model, binomial_data, test="Chisq")
 
-        for lrt in result.lrt:
-            if lrt is not None:
-                assert lrt >= 0
+        assert_matches_explicit_refits(
+            model,
+            result,
+            lambda fixed: glmer(f"y ~ {fixed} + (1|group)", binomial_data, family=Binomial()),
+            ["x1", "x2"],
+        )
 
 
-class TestDrop1AIC:
-    def test_aic_ordering(self, multi_predictor_data):
-        model = lmer("y ~ x1 + x2 + x3 + (1|group)", multi_predictor_data)
-        result = drop1_lmer(model, multi_predictor_data)
-
-        for aic in result.aic:
-            assert aic > 0
-
-    def test_full_model_aic(self, multi_predictor_data):
-        model = lmer("y ~ x1 + x2 + (1|group)", multi_predictor_data)
-        result = drop1_lmer(model, multi_predictor_data)
-
-        assert result.full_model_aic > 0
-        assert result.full_model_df > 0
+def grouped_data(*predictors):
+    """Five groups with a clear group effect, so no fit is on the variance boundary."""
+    rng = np.random.default_rng(42)
+    groups = np.repeat([f"G{i}" for i in range(5)], 20)
+    data = pd.DataFrame({name: rng.normal(size=100) for name in predictors})
+    data["y"] = 5.0 + np.repeat(rng.normal(scale=2.0, size=5), 20) + rng.normal(size=100)
+    data["group"] = groups
+    return data
 
 
 class TestDrop1EdgeCases:
     def test_intercept_only_model_has_no_deletions(self):
-        np.random.seed(42)
-        groups = np.repeat([f"G{i}" for i in range(5)], 20)
-        data = pd.DataFrame({"y": np.random.randn(100), "group": groups})
+        data = grouped_data()
         model = lmer("y ~ 1 + (1|group)", data)
 
         result = drop1_lmer(model, data, n_jobs=2)
@@ -259,27 +235,17 @@ class TestDrop1EdgeCases:
         assert result.aic == []
 
     def test_single_predictor(self):
-        np.random.seed(42)
-        n = 100
-        groups = np.repeat([f"G{i}" for i in range(5)], 20)
-        x = np.random.randn(n)
-        y = 5.0 + 2.0 * x + np.random.randn(n)
-        data = pd.DataFrame({"y": y, "x": x, "group": groups})
+        data = grouped_data("x")
+        data["y"] += 2.0 * data["x"]
 
         model = lmer("y ~ x + (1|group)", data)
         result = drop1_lmer(model, data)
 
-        assert len(result.terms) == 1
-        assert "x" in result.terms
+        assert result.terms == ["x"]
 
     def test_with_interaction(self):
-        np.random.seed(42)
-        n = 100
-        groups = np.repeat([f"G{i}" for i in range(5)], 20)
-        x1 = np.random.randn(n)
-        x2 = np.random.randn(n)
-        y = 5.0 + x1 + x2 + 0.5 * x1 * x2 + np.random.randn(n)
-        data = pd.DataFrame({"y": y, "x1": x1, "x2": x2, "group": groups})
+        data = grouped_data("x1", "x2")
+        data["y"] += data["x1"] + data["x2"] + 0.5 * data["x1"] * data["x2"]
 
         model = lmer("y ~ x1 * x2 + (1|group)", data)
         result = drop1_lmer(model, data)
@@ -287,14 +253,8 @@ class TestDrop1EdgeCases:
         assert result.terms == ["x1:x2"]
 
     def test_marginality_keeps_unrelated_main_effect(self):
-        np.random.seed(42)
-        n = 100
-        groups = np.repeat([f"G{i}" for i in range(5)], 20)
-        x1 = np.random.randn(n)
-        x2 = np.random.randn(n)
-        x3 = np.random.randn(n)
-        y = 5.0 + x1 + x2 + x3 + x1 * x2 + np.random.randn(n)
-        data = pd.DataFrame({"y": y, "x1": x1, "x2": x2, "x3": x3, "group": groups})
+        data = grouped_data("x1", "x2", "x3")
+        data["y"] += data["x1"] + data["x2"] + data["x3"] + data["x1"] * data["x2"]
 
         model = lmer("y ~ x1 * x2 + x3 + (1|group)", data)
         result = drop1_lmer(model, data)

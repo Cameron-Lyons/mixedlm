@@ -98,7 +98,7 @@ This guide helps lme4 users transition to mixedlm. The API is designed to be as 
     ```python
     m.confint(method="profile")   # Profile
     m.confint(method="Wald")      # Wald
-    m.confint(method="boot", n_boot=200)  # Bootstrap
+    m.confint(method="boot", n_boot=50)   # Bootstrap; use 1000+ for reports
     ```
 
 ### P-values with lmerTest
@@ -234,8 +234,24 @@ Control arguments are similar:
 === "Python"
 
     ```python
-    mlm.LmerControl(optimizer="COBYQA", maxiter=10000)
+    mlm.LmerControl(optimizer="COBYQA", optCtrl={"maxfun": 10000})
     ```
+
+`lmer()` defaults to `optimizer="auto"`, which runs L-BFGS-B on exact gradients
+and falls back to COBYQA, a derivative-free trust-region method like BOBYQA,
+when needed. `glmer()` defaults to COBYQA. lme4's NLopt optimizers are available
+as `"nloptwrap_BOBYQA"`, `"nloptwrap_NELDERMEAD"`, and similar names with the
+`optimizers` extra; like lme4's `nloptwrap`, they stop on an absolute change in
+deviance. See [LmerControl](../api/models.md#lmercontrol).
+
+### Parallel Computation
+
+Where lme4 and its companions take `parallel=` or `ncpus=` arguments, mixedlm
+functions such as `bootMer()`, `drop1()`, `allFit()`, `profile()`, and
+`cross_validate()` take `n_jobs`, a number of worker processes or `-1` for all
+CPUs. Workers start without forking the Python process, so scripts must call
+these functions under an `if __name__ == "__main__":` guard. See
+[parallel execution](../api/inference.md#parallel-execution).
 
 ## Functions Not Yet Available
 

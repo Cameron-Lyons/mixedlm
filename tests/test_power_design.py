@@ -314,7 +314,12 @@ def test_named_coefficient_curve_defaults_to_testing_that_coefficient(pilot):
 
 def test_named_group_curve_reports_the_varied_crossed_factor(pilot):
     data = pilot.model_frame().assign(batch=np.tile(np.arange(4), 13)[:49])
-    model = lmer("y ~ x + (1 | group) + (1 | batch)", data)
+    # Four batches without a batch effect: the batch variance is on the boundary.
+    with (
+        pytest.warns(UserWarning, match="singular"),
+        pytest.warns(UserWarning, match="'batch' has only 4 levels"),
+    ):
+        model = lmer("y ~ x + (1 | group) + (1 | batch)", data)
     curve = powerCurve(
         model, test=lambda fitted: True, along="batch", values=[2, 6], nsim=1, seed=935
     )

@@ -9,7 +9,8 @@ The pilot coefficients and variance components define the alternative hypothesis
 import mixedlm as mlm
 
 model = mlm.lmer("Reaction ~ Days + (Days | Subject)", mlm.load_sleepstudy())
-power = mlm.powerSim(model, test="Days", nsim=100, seed=42)
+# A quick check; use several hundred simulations or more for a reported estimate.
+power = mlm.powerSim(model, test="Days", nsim=40, seed=42)
 print(power)
 ```
 
@@ -19,7 +20,8 @@ simulates a new response, refits the model, and tests each valid fit.
 - `test`: A coefficient name or a callable returning a Boolean significance decision.
   The default tests the first non-intercept coefficient, or the intercept in an
   intercept-only model. Named tests use a two-sided normal Wald test. A callable
-  can specify another inferential procedure or test a model without fixed effects.
+  can specify another inferential procedure or test a model without fixed effects;
+  it runs only on valid refits.
 - `nsim`: Positive integer number of attempted simulations.
 - `alpha`: Significance level strictly between zero and one for the named Wald test.
   Callable tests choose their own significance threshold.
@@ -38,16 +40,22 @@ simulates a new response, refits the model, and tests each valid fit.
 | `effect_size` | Generating coefficient for a named test; `None` for a callable |
 | `n_obs`, `n_groups` | Study size; group count for the first grouping factor |
 
-Unconverged fits, invalid estimates, exceptions, and non-Boolean test results are
-excluded and reported in a warning. If every simulation fails, power and its
+Refits that raise, do not converge, or return invalid estimates, and named Wald
+tests that a degenerate refit cannot support, are excluded, counted in
+`n_failed`, and reported in a warning. If every simulation fails, power and its
 confidence limits are `NaN`. A high failure rate makes the conditional-on-success
 power estimate less representative of the intended study.
+
+Errors raised by a callable `test` propagate, so a mistake in the test stops the
+run instead of being counted as failed simulations. A non-Boolean test result
+raises `TypeError`. Simulation errors also propagate; for example, a quasi family
+has no response distribution and raises `NotImplementedError`.
 
 ## powerCurve
 
 ```python
 curve = mlm.powerCurve(
-    model, test="Days", along="Subject", values=[10, 18, 24, 30], nsim=20, seed=42
+    model, test="Days", along="Subject", values=[10, 18, 24, 30], nsim=10, seed=42
 )
 print(curve)
 curve.plot()  # requires the plots extra
@@ -108,7 +116,7 @@ model = mlm.glmer(
     "incidence / size ~ period + (1 | herd)", cbpp, family=mlm.families.Binomial()
 )
 curve = mlm.powerCurve(
-    model, test=model.matrices.fixed_names[1], along="herd", values=[10, 15, 20], nsim=20, seed=42
+    model, test=model.matrices.fixed_names[1], along="herd", values=[10, 15, 20], nsim=10, seed=42
 )
 ```
 

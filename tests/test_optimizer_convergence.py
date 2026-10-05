@@ -22,7 +22,7 @@ from mixedlm.matrices.design import build_model_matrices
 from numpy.testing import assert_allclose
 from scipy import linalg, optimize
 
-from tests.test_statistical_golden import observation_space_reference
+from tests._lmm_oracles import observation_space_reference
 
 INTERCEPTS = "Reaction ~ Days + (1 | Subject)"
 SLOPES = "Reaction ~ Days + (Days | Subject)"
@@ -31,6 +31,13 @@ GROUSE = "TICKS ~ YEAR + HEIGHT + (1 | BROOD) + (1 | LOCATION)"
 pytestmark = [
     pytest.mark.filterwarnings("ignore:Model failed to converge:UserWarning"),
     pytest.mark.filterwarnings("ignore:The 'bobyqa' optimizer name:DeprecationWarning"),
+]
+# SciPy's quasi-Newton Hessian update warns once trust-constr steps vanish at the optimum.
+OPTIMIZERS = [
+    pytest.param(name, marks=pytest.mark.filterwarnings("ignore:delta_grad == 0.0:UserWarning"))
+    if name == "trust-constr"
+    else name
+    for name in available_optimizers()
 ]
 
 
@@ -101,7 +108,7 @@ def intercept_theta(data):
     return np.sqrt((between - within) / size / within)
 
 
-@pytest.mark.parametrize("name", available_optimizers())
+@pytest.mark.parametrize("name", OPTIMIZERS)
 def test_every_optimizer_reaches_the_optimum_or_reports_failure(name, sleepstudy, slopes_reference):
     slopes = lmer(SLOPES, sleepstudy, method=name)
     if slopes.converged:
@@ -115,7 +122,7 @@ def test_every_optimizer_reaches_the_optimum_or_reports_failure(name, sleepstudy
         assert np.abs(intercepts.theta) == pytest.approx([intercept_theta(sleepstudy)], abs=5e-3)
 
 
-@pytest.mark.parametrize("name", available_optimizers())
+@pytest.mark.parametrize("name", OPTIMIZERS)
 def test_every_optimizer_fits_a_structured_covariance_or_reports_failure(
     name, sleepstudy, equal_variance_reference
 ):

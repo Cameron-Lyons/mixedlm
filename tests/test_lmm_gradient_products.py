@@ -7,10 +7,14 @@ import pytest
 from mixedlm import _rust
 from numpy.testing import assert_allclose
 
-from tests.test_lmm_gradient_contractions import observation_gradient
-from tests.test_lmm_prepared_design import native_arguments, observation_likelihood
-from tests.test_lmm_reml_contractions import fixed_effect_problem
-from tests.test_lmm_stability import dominant_random_effects, groupwise_likelihood
+from tests._lmm_oracles import (
+    dominant_random_effects,
+    fixed_effect_problem,
+    groupwise_likelihood,
+    native_arguments,
+    observation_gradient,
+    observation_likelihood,
+)
 
 
 @pytest.mark.parametrize("widths", [(16, 15), (17, 16)])

@@ -15,7 +15,8 @@ def fitted(request):
     rng = np.random.default_rng(809)
     groups = np.repeat(np.arange(6), 12)
     x = rng.normal(size=len(groups))
-    effect = rng.normal(0, 0.4, 6)[groups]
+    # Large enough that neither fit is a boundary (singular) fit.
+    effect = rng.normal(0, 0.8, 6)[groups]
     eta = 0.2 + 0.5 * x + effect
     y = (
         eta + rng.normal(0, 0.3, len(x))

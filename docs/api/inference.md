@@ -10,6 +10,60 @@ cutoffs for valid levels close to one. A finite cutoff does not guarantee finite
 endpoints when the model itself has undefined uncertainty or a response
 transformation overflows.
 
+## Parallel Execution
+
+Bootstrap (`bootMer()`, `bootstrap_lmer()`, `bootstrap_glmer()`,
+`bootstrap_nlmer()`, and nonlinear `confint(method="boot")`), term deletion
+(`drop1()`), optimizer comparison (`allFit()`), LMM likelihood profiles
+(`profile()`), `slice2D()`, and `cross_validate()` accept `n_jobs`:
+
+- `n_jobs=1`, the default, runs everything in the calling process.
+- A positive integer sets the number of worker processes, and `-1` uses every
+  available CPU. The count is capped at the number of tasks, and a single task,
+  such as one profiled coefficient, runs in the calling process.
+- `0`, other negative values, booleans, and non-integers raise `TypeError` or
+  `ValueError`.
+
+Results match a serial run, and seeded bootstrap samples are the same for every
+worker count. Worker processes never fork the calling process: they start
+through forkserver on Linux and spawn on macOS and Windows. Scripts must
+therefore start parallel work under an `if __name__ == "__main__":` guard, and
+custom families, nonlinear models, and other arguments sent to workers must be
+importable and picklable:
+
+```py
+import mixedlm as mlm
+
+
+def main():
+    data = mlm.load_sleepstudy()
+    model = mlm.lmer("Reaction ~ Days + (Days | Subject)", data)
+    boot = mlm.bootMer(model, nsim=1000, seed=42, n_jobs=-1)
+    print(mlm.bootCI(boot))
+
+
+if __name__ == "__main__":
+    main()
+```
+
+Each worker starts with one BLAS and OpenMP thread, so parallelism comes from the
+number of workers rather than oversubscribed threads. Values you set yourself in
+`OPENBLAS_NUM_THREADS`, `OMP_NUM_THREADS`, `MKL_NUM_THREADS`, `BLIS_NUM_THREADS`,
+`VECLIB_MAXIMUM_THREADS`, or `RAYON_NUM_THREADS` are kept. On Linux, mixedlm sets
+the interpreter's forkserver preload list to `["mixedlm.inference"]`, replacing a
+list set with `multiprocessing.set_forkserver_preload()`. A forkserver started by
+mixedlm keeps these thread limits and preloaded modules for later forkserver
+pools in the same interpreter, including your own.
+
+Starting workers has a fixed cost that can outweigh the gain for small jobs.
+A conditional `slice2D()` stays serial unless its remaining rows would take
+about a second or more. GLMM profiles run serially and reject `n_jobs` other
+than 1.
+
+Native code is also safe in processes you fork yourself, for example with
+`os.fork()` or a multiprocessing `"fork"` pool: a forked child runs native
+kernels on a single thread instead of hanging.
+
 ## Linear Hypotheses
 
 ### linear_hypothesis
@@ -117,7 +171,11 @@ print(group_cv.fold_scores)
 - `metrics`: Metric name, callable, or sequence; defaults are selected by model type
 - `shuffle`, `random_state`: Reproducible fold assignment controls
 - `re_form`: Random-effect prediction mode; `"auto"` uses fixed effects for grouped folds
-- `n_jobs`: Number of folds to fit concurrently, default 1
+- `n_jobs`: Worker processes for the fold refits, or `-1` for all CPUs (default 1).
+  Results match a serial run. See [parallel execution](#parallel-execution) for
+  the `__main__` guard; custom families and `fit_kwargs` values must be importable
+  and picklable. Warnings from refits in workers are not repeated in the calling
+  process; the `converged` and `singular` fold columns record each refit.
 - `fit_kwargs`: Additional refit options such as optimizer controls
 
 Built-in metrics are weighted `"mse"`, `"rmse"`, `"mae"`, `"r2"`, and GLMM
@@ -257,6 +315,29 @@ result = mlm.anova_type3(model)
 model = mlm.lmer("y ~ a * b + (1 | g)", data)
 print(mlm.anova_type3(model))
 ```
+
+### allFit
+
+Fit a linear mixed model with several optimizers and compare the results.
+
+```py
+comparison = mlm.allFit(
+    "Reaction ~ Days + (Days | Subject)",
+    data,
+    optimizers=["COBYQA", "L-BFGS-B", "Nelder-Mead"],
+    control=mlm.LmerControl(maxiter=5000),
+    n_jobs=1,
+)
+print(comparison.summary)
+```
+
+`optimizers` defaults to `["COBYQA", "Nelder-Mead", "L-BFGS-B"]`. `control`
+applies to every fit, with only the optimizer replaced, and `n_jobs` runs the
+fits in worker processes. The `allFit()` method of a fitted LMM or GLMM refits
+that model with every installed solver instead; see
+[results](results.md#allfit). `AllFitResult.is_consistent()` checks whether the
+converged fits reach the same deviance, and `best_fit()` returns the fit with the
+lowest deviance.
 
 ## Degrees of Freedom
 
@@ -566,8 +647,8 @@ boot = mlm.bootMer(model, nsim=500, seed=42)
 - `model`: Fitted model
 - `nsim`: Number of bootstrap simulations
 - `seed`: Optional reproducibility seed
-- `n_jobs`: Positive worker count or `-1` for available CPUs for all model
-  types; default 1
+- `n_jobs`: Worker processes for the refits, or `-1` for all CPUs, for all
+  model types; default 1. See [parallel execution](#parallel-execution).
 
 **Returns:** `BootstrapResult`, or `NlmerBootstrapResult` for nonlinear models
 
@@ -668,9 +749,9 @@ not prevent later draws from being attempted.
 
 Custom nonlinear model classes must be importable and picklable, with
 deterministic prediction and gradient methods. Each worker refit receives a
-separate copy of the model. In scripts that use process spawning, start parallel
-bootstrap inside an `if __name__ == "__main__":` guard. Process startup can
-outweigh the gain for small bootstrap jobs; `n_jobs=1` remains the default.
+separate copy of the model. Start parallel bootstrap inside an
+`if __name__ == "__main__":` guard. Process startup can outweigh the gain for
+small bootstrap jobs; `n_jobs=1` remains the default.
 
 ### bootCI
 
@@ -706,9 +787,11 @@ likelihood, including an ML refit when the input used REML. The original result
 is unchanged. `ProfileResult.mle` records the ML center, which can differ from
 the input coefficient; a warning reports shifts above 0.001 ML standard errors.
 
-`n_jobs` supports parallel profiling of coefficients, with serial fallback if
-process workers cannot be created.
-Confidence limits use likelihood-ratio cutoffs and adaptive bracketing. A failed
+`n_jobs` profiles coefficients in parallel worker processes, falling back to
+serial execution with a warning if workers cannot be created.
+Confidence limits use likelihood-ratio cutoffs and adaptive bracketing. Nuisance
+fits use L-BFGS-B with exact native gradients; compound-symmetry and AR(1)
+covariances use finite differences of the Python likelihood. A failed
 gradient optimization retries the same likelihood with COBYQA. Fits starting at
 zero variance use COBYQA directly so constrained optima can leave that boundary.
 Gradient fits that reach zero variance are also checked with COBYQA.
@@ -778,8 +861,9 @@ joint_profile = mlm.slice2D(
   coefficients, and residual scale at every grid point using ML. Its grid spans
   the coordinate ranges of the requested joint likelihood-ratio region and
   includes the ML center. Use this mode for joint likelihood-ratio inference.
-- `n_jobs`: Positive worker count or `-1` for available CPUs. Full profiles can
-  evaluate grid rows in parallel.
+- `n_jobs`: Worker processes for grid rows, or `-1` for available CPUs. A
+  conditional slice stays serial when its remaining rows would finish in about a
+  second.
 
 **Returns:** `Profile2DResult` with a `plot()` method and `profile_covariance`
 metadata identifying the calculation used.
@@ -799,6 +883,13 @@ conv = mlm.checkConv(model)
 - `converged`: Boolean indicating successful convergence
 - `messages`: List of warning/error messages
 - `is_singular`, `gradient_norm`, `hessian_ok`, `iterations`, and `optimizer`
+
+The optimizer name and iteration count come from the fitted result, including
+modular fits. For a fit that did not converge, the message includes the
+optimizer's own reason. The gradient check (`check_gradient=True`) applies to
+gradient-based optimizers, which record a final gradient: it divides the gradient
+norm by the number of observations, compares it with `grad_tol` (default `1e-3`),
+and skips fits with a variance parameter on its boundary.
 
 ### convergence_ok
 
@@ -871,8 +962,8 @@ print(em.pairs())
 ```python
 model = mlm.lmer("Reaction ~ Days + (Days | Subject)", data)
 
-# Parametric bootstrap; use more replicates for reported intervals
-boot = mlm.bootMer(model, nsim=200, seed=42)
+# Parametric bootstrap; use 1000 or more replicates for reported intervals
+boot = mlm.bootMer(model, nsim=50, seed=42)
 
 # Get CIs
 ci = mlm.bootCI(boot, component="all")

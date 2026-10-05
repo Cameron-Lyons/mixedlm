@@ -3,9 +3,8 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 
 import numpy as np
-import pandas as pd
 import pytest
-from mixedlm import families, glmer, lmer
+from mixedlm import lmer
 from mixedlm.inference.profile import (
     Profile2DResult,
     ProfileResult,
@@ -16,235 +15,71 @@ from mixedlm.inference.profile import (
     sdProf,
     varianceProf,
 )
-from numpy.testing import assert_allclose
-from scipy import integrate
+from numpy.testing import assert_allclose, assert_array_equal
+from scipy import stats
 
-from tests._lmer_data import CBPP
-
-
-@pytest.fixture
-def sleepstudy_data():
-    np.random.seed(42)
-    n_subjects = 10
-    n_days = 10
-    n = n_subjects * n_days
-
-    subjects = np.repeat([f"S{i}" for i in range(n_subjects)], n_days)
-    days = np.tile(np.arange(n_days), n_subjects)
-
-    subject_intercepts = np.repeat(np.random.randn(n_subjects) * 25, n_days)
-    subject_slopes = np.repeat(np.random.randn(n_subjects) * 5, n_days)
-
-    y = 250 + 10 * days + subject_intercepts + subject_slopes * days + np.random.randn(n) * 30
-
-    return pd.DataFrame({"Reaction": y, "Days": days, "Subject": subjects})
+from tests._datasets import SLEEPSTUDY
 
 
-@pytest.fixture
-def lmer_result(sleepstudy_data):
-    return lmer("Reaction ~ Days + (1|Subject)", sleepstudy_data)
+def constrained_zeta(value, mle, full_deviance):
+    """Signed root ML deviance with the Days slope fixed through an offset."""
+    days = SLEEPSTUDY["Days"].to_numpy()
+    constrained = lmer("Reaction ~ 1 + (1 | Subject)", SLEEPSTUDY, offset=value * days, REML=False)
+    return np.sign(value - mle) * np.sqrt(max(constrained.deviance - full_deviance, 0.0))
 
 
-class TestProfileResult:
-    @staticmethod
-    def profile(
-        values=None,
-        zeta=None,
-        mle=2.0,
-        ci_lower=1.5,
-        ci_upper=2.5,
-    ) -> ProfileResult:
-        return ProfileResult(
-            parameter="test",
-            values=np.array([1.0, 2.0, 3.0]) if values is None else values,
-            zeta=np.array([-1.0, 0.0, 1.0]) if zeta is None else zeta,
-            mle=mle,
-            ci_lower=ci_lower,
-            ci_upper=ci_upper,
-            level=0.95,
-        )
-
-    def test_dataclass_fields(self):
-        result = ProfileResult(
-            parameter="test",
-            values=np.array([1.0, 2.0, 3.0]),
-            zeta=np.array([-1.0, 0.0, 1.0]),
-            mle=2.0,
-            ci_lower=1.5,
-            ci_upper=2.5,
-            level=0.95,
-        )
-        assert result.parameter == "test"
-        assert len(result.values) == 3
-        assert result.mle == 2.0
-
-    def test_plot_method(self):
-        matplotlib = pytest.importorskip("matplotlib")
-        result = ProfileResult(
-            parameter="test",
-            values=np.array([1.0, 2.0, 3.0]),
-            zeta=np.array([-1.0, 0.0, 1.0]),
-            mle=2.0,
-            ci_lower=1.5,
-            ci_upper=2.5,
-            level=0.95,
-        )
-        ax = result.plot()
-        assert ax is not None
-        matplotlib.pyplot.close("all")
-
-    def test_plot_allows_style_overrides(self):
-        matplotlib = pytest.importorskip("matplotlib")
-        result = self.profile()
-
-        ax = result.plot(color="black", linewidth=1)
-
-        assert ax.lines[0].get_color() == "black"
-        assert ax.lines[0].get_linewidth() == 1
-        matplotlib.pyplot.close("all")
-
-    def test_density_sorts_and_normalizes_profile_points(self):
-        matplotlib = pytest.importorskip("matplotlib")
-        result = self.profile(
-            values=np.array([3.0, np.nan, 1.0, 2.0]),
-            zeta=np.array([1.0, 0.0, -1.0, 0.0]),
-        )
-
-        ax = result.plot_density(color="purple", linewidth=1)
-        values = ax.lines[0].get_xdata()
-        density = ax.lines[0].get_ydata()
-
-        assert np.all(np.diff(values) >= 0.0)
-        assert np.all(density >= 0.0)
-        assert integrate.trapezoid(density, values) == pytest.approx(1.0)
-        assert ax.lines[0].get_color() == "purple"
-        matplotlib.pyplot.close("all")
-
-    def test_density_works_without_numpy_trapezoid(self, monkeypatch):
-        matplotlib = pytest.importorskip("matplotlib")
-        monkeypatch.delattr(np, "trapezoid", raising=False)
-        result = self.profile()
-
-        ax = result.plot_density()
-
-        assert np.all(ax.lines[0].get_ydata() >= 0.0)
-        matplotlib.pyplot.close("all")
-
-    def test_density_rejects_degenerate_profile(self):
-        matplotlib = pytest.importorskip("matplotlib")
-        result = self.profile(
-            values=np.array([1.0, 1.0]),
-            zeta=np.array([-1.0, 1.0]),
-            mle=1.0,
-            ci_lower=1.0,
-            ci_upper=1.0,
-        )
-
-        with pytest.raises(ValueError, match="distinct parameter values"):
-            result.plot_density()
-        matplotlib.pyplot.close("all")
-
-
-class TestProfile2DResult:
-    @staticmethod
-    def profile() -> Profile2DResult:
-        return Profile2DResult(
-            param1="a",
-            param2="b",
-            values1=np.array([0.0, 1.0, 2.0]),
-            values2=np.array([0.0, 1.0, 2.0, 3.0]),
-            zeta=np.array(
-                [
-                    [2.0, 1.5, 1.0, 1.5],
-                    [1.5, 0.5, 0.0, 1.0],
-                    [2.0, 1.5, 1.0, 1.5],
-                ]
-            ),
-            mle1=1.0,
-            mle2=2.0,
-            level=0.95,
-        )
-
-    def test_plot_filled_allows_contour_style_overrides(self):
-        matplotlib = pytest.importorskip("matplotlib")
-
-        ax = self.profile().plot_filled(levels=5, cmap="plasma")
-
-        assert ax is not None
-        assert len(ax.figure.axes) == 2
-        matplotlib.pyplot.close("all")
-
-    def test_plot_passes_1d_coordinates_to_contour(self, monkeypatch):
-        def unexpected_meshgrid(*args, **kwargs):
-            raise AssertionError("plotting should not materialize coordinate grids")
-
-        monkeypatch.setattr(np, "meshgrid", unexpected_meshgrid)
-        ax = MagicMock()
-
-        self.profile().plot(ax=ax, show_ci=False, show_mle=False)
-
-        x, y, z = ax.contour.call_args.args
-        assert x.ndim == 1
-        assert y.ndim == 1
-        assert z.shape == (3, 4)
-
-    def test_plot_rejects_mismatched_grid_shape(self):
-        matplotlib = pytest.importorskip("matplotlib")
-        profile = self.profile()
-        profile.zeta = np.zeros((4, 3))
-
-        with pytest.raises(ValueError, match=r"zeta must have shape \(3, 4\)"):
-            profile.plot()
-        matplotlib.pyplot.close("all")
+@pytest.fixture(scope="module")
+def ml_deviance():
+    return lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY, REML=False).deviance
 
 
 class TestProfileLmer:
-    def test_result_profile_method(self, lmer_result):
-        profiles = lmer_result.profile(which="Days", n_points=10)
+    def test_zeta_matches_constrained_ml_refits(self, sleepstudy_lmm, ml_deviance):
+        profile = profile_lmer(sleepstudy_lmm, which=["Days"], n_points=5)["Days"]
 
-        assert set(profiles) == {"Days"}
-        assert len(profiles["Days"].values) == 10
+        assert profile.mle == pytest.approx(sleepstudy_lmm.beta[1])
+        for value, zeta in zip(profile.values, profile.zeta, strict=True):
+            assert zeta == pytest.approx(
+                constrained_zeta(value, profile.mle, ml_deviance), abs=1e-6
+            )
 
-    def test_profile_single_param(self, lmer_result):
-        profiles = profile_lmer(lmer_result, which=["Days"], n_points=10)
-        assert "Days" in profiles
-        assert len(profiles["Days"].values) == 10
+    @pytest.mark.parametrize("level", [0.90, 0.95])
+    def test_interval_ends_at_the_critical_zeta(self, sleepstudy_lmm, ml_deviance, level):
+        profile = profile_lmer(sleepstudy_lmm, which=["Days"], level=level, n_points=15)["Days"]
+        critical = stats.norm.isf((1 - level) / 2)
 
-    def test_profile_all_params(self, lmer_result):
-        profiles = profile_lmer(lmer_result, n_points=10)
-        assert "(Intercept)" in profiles
-        assert "Days" in profiles
+        assert profile.level == level
+        for bound, sign in ((profile.ci_lower, -1), (profile.ci_upper, 1)):
+            assert constrained_zeta(bound, profile.mle, ml_deviance) == pytest.approx(
+                sign * critical, abs=1e-3
+            )
 
-    def test_profile_zeta_at_mle(self, lmer_result):
-        profiles = profile_lmer(lmer_result, which=["Days"], n_points=21)
-        profile = profiles["Days"]
-        closest_to_mle = np.argmin(np.abs(profile.values - profile.mle))
-        assert abs(profile.zeta[closest_to_mle]) < 0.5
+    def test_method_matches_function(self, sleepstudy_lmm):
+        method = sleepstudy_lmm.profile(which="Days", n_points=10)
+        function = profile_lmer(sleepstudy_lmm, which=["Days"], n_points=10)
 
-    def test_profile_ci_contains_mle(self, lmer_result):
-        profiles = profile_lmer(lmer_result, which=["Days"], n_points=15)
-        profile = profiles["Days"]
-        assert profile.ci_lower < profile.mle
-        assert profile.ci_upper > profile.mle
+        assert list(method) == ["Days"]
+        assert_allclose(method["Days"].values, function["Days"].values)
+        assert_allclose(method["Days"].zeta, function["Days"].zeta)
 
-    def test_profile_level(self, lmer_result):
-        profiles = profile_lmer(lmer_result, which=["Days"], level=0.90, n_points=10)
-        assert profiles["Days"].level == 0.90
+    def test_default_profiles_every_fixed_effect(self, sleepstudy_lmm):
+        profiles = profile_lmer(sleepstudy_lmm, n_points=10)
 
-    def test_glmer_result_profile_method(self):
-        result = glmer("y ~ period + (1 | herd)", CBPP, family=families.Binomial())
-        parameter = result.matrices.fixed_names[0]
+        assert list(profiles) == ["(Intercept)", "Days"]
+        assert [len(profile.values) for profile in profiles.values()] == [10, 10]
 
-        profiles = result.profile(which=parameter, n_points=8)
+    def test_glmer_result_profile_method(self, cbpp_glmm):
+        profiles = cbpp_glmm.profile(which="(Intercept)", n_points=8)
 
-        assert set(profiles) == {parameter}
-        assert len(profiles[parameter].values) == 8
+        profile = profiles["(Intercept)"]
+        assert set(profiles) == {"(Intercept)"}
+        assert len(profile.values) == 8
+        assert profile.mle == pytest.approx(cbpp_glmm.beta[0])
+        assert profile.ci_lower < profile.mle < profile.ci_upper
 
-    def test_glmer_result_profile_rejects_parallel_jobs(self):
-        result = glmer("y ~ period + (1 | herd)", CBPP, family=families.Binomial())
-
+    def test_glmer_result_profile_rejects_parallel_jobs(self, cbpp_glmm):
         with pytest.raises(ValueError, match="only for LmerResult"):
-            result.profile(n_jobs=2)
+            cbpp_glmm.profile(n_jobs=2)
 
 
 class TestLogProf:
@@ -419,14 +254,17 @@ class TestConfintProfile:
 
 
 class TestProfileIntegration:
-    def test_full_workflow(self, lmer_result):
-        profiles = profile_lmer(lmer_result, n_points=15)
+    def test_full_workflow(self, sleepstudy_lmm):
+        profiles = profile_lmer(sleepstudy_lmm, n_points=15)
         df = as_dataframe(profiles)
         ci = confint_profile(profiles)
 
-        assert len(profiles) > 0
-        assert len(df) > 0
-        assert len(ci) == len(profiles)
+        assert list(profiles) == ["(Intercept)", "Days"]
+        assert df["parameter"].value_counts().to_dict() == {"(Intercept)": 15, "Days": 15}
+        assert ci["parameter"].tolist() == list(profiles)
+        assert_allclose(ci["estimate"], sleepstudy_lmm.beta)
+        assert_allclose(ci["lower"], [profile.ci_lower for profile in profiles.values()])
+        assert_allclose(ci["upper"], [profile.ci_upper for profile in profiles.values()])
 
     @staticmethod
     def assert_profiles_match(actual, expected):
@@ -437,16 +275,16 @@ class TestProfileIntegration:
             assert actual[name].ci_lower == pytest.approx(reference.ci_lower)
             assert actual[name].ci_upper == pytest.approx(reference.ci_upper)
 
-    def test_parallel_profiling(self, lmer_result):
+    def test_parallel_profiling(self, sleepstudy_lmm):
         # One worker per profiled coefficient; a single coefficient runs serially.
         which = ["(Intercept)", "Days"]
-        profiles_serial = profile_lmer(lmer_result, which=which, n_points=10, n_jobs=1)
-        profiles_parallel = profile_lmer(lmer_result, which=which, n_points=10, n_jobs=2)
+        profiles_serial = profile_lmer(sleepstudy_lmm, which=which, n_points=10, n_jobs=1)
+        profiles_parallel = profile_lmer(sleepstudy_lmm, which=which, n_points=10, n_jobs=2)
 
         self.assert_profiles_match(profiles_parallel, profiles_serial)
 
     def test_parallel_profiling_falls_back_when_process_pool_is_unavailable(
-        self, lmer_result, monkeypatch
+        self, sleepstudy_lmm, monkeypatch
     ):
         from mixedlm.inference import lmm_profile
 
@@ -456,8 +294,35 @@ class TestProfileIntegration:
         monkeypatch.setattr(lmm_profile, "process_pool", unavailable)
 
         which = ["(Intercept)", "Days"]
-        expected = profile_lmer(lmer_result, which=which, n_points=10, n_jobs=1)
+        expected = profile_lmer(sleepstudy_lmm, which=which, n_points=10, n_jobs=1)
         with pytest.warns(RuntimeWarning, match="falling back to serial execution"):
-            actual = profile_lmer(lmer_result, which=which, n_points=10, n_jobs=2)
+            actual = profile_lmer(sleepstudy_lmm, which=which, n_points=10, n_jobs=2)
 
         self.assert_profiles_match(actual, expected)
+
+
+def test_profile_2d_plot_passes_1d_coordinates_to_contour(monkeypatch):
+    # A supplied axis keeps plotting independent of matplotlib.
+    def unexpected_meshgrid(*args, **kwargs):
+        raise AssertionError("plotting should not materialize coordinate grids")
+
+    monkeypatch.setattr(np, "meshgrid", unexpected_meshgrid)
+    ax = MagicMock()
+    profile = Profile2DResult(
+        param1="a",
+        param2="b",
+        values1=np.array([0.0, 1.0, 2.0]),
+        values2=np.array([0.0, 1.0, 2.0, 3.0]),
+        zeta=np.zeros((3, 4)),
+        mle1=1.0,
+        mle2=2.0,
+        level=0.95,
+    )
+
+    profile.plot(ax=ax, show_ci=False, show_mle=False)
+
+    # Rows of zeta follow param1, so param2 runs along the x axis.
+    x, y, z = ax.contour.call_args.args
+    assert_array_equal(x, [0.0, 1.0, 2.0, 3.0])
+    assert_array_equal(y, [0.0, 1.0, 2.0])
+    assert z.shape == (3, 4)

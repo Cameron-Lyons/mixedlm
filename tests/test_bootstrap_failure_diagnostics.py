@@ -12,9 +12,8 @@ from mixedlm import BootstrapFailure, bootMer
 from mixedlm.inference import bootstrap
 from mixedlm.models.nlmer import NlmerResult
 
-from tests.test_bootstrap_workers import ImmediateExecutor
-from tests.test_model_random_streams import make_result
-from tests.test_nonlinear_simulation_streams import make_result as make_nonlinear_result
+from tests._bootstrap_helpers import ImmediateExecutor, make_result
+from tests._nlmm_models import make_result as make_nonlinear_result
 
 
 @pytest.fixture(params=["lmer", "glmer", "nlmer"])

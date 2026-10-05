@@ -8,103 +8,19 @@ import numpy as np
 import pytest
 from mixedlm import _rust, lmer
 from mixedlm.estimation.reml import LMMOptimizer, _LMMCrossproducts, _RustMatrixCache
-from mixedlm.formula.parser import parse_formula, set_cov_type
+from mixedlm.formula.parser import parse_formula
 from mixedlm.inference import bootstrap
 from mixedlm.matrices.design import build_model_matrices
 from numpy.testing import assert_allclose, assert_array_equal
-from scipy import linalg, sparse
+from scipy import sparse
 
-from tests.test_lmm_likelihood_profiles import data_fixture
-
-
-def matrices_fixture(kind="intercept"):
-    data, weights, offset = data_fixture()
-    data["h"] = np.arange(len(data)) % 5
-    formula = {
-        "fixed": "y ~ x + z",
-        "no_fixed": "y ~ 0 + (1 | g)",
-        "intercept": "y ~ x + z + (1 | g)",
-        "correlated": "y ~ x + z + (x | g)",
-        "slope": "y ~ x + z + (0 + x | g)",
-        "crossed": "y ~ x + z + (x | g) + (1 | h)",
-        "cs": "y ~ x + z + (x + z | g)",
-        "ar1": "y ~ x + z + (x + z | g)",
-    }[kind]
-    parsed = set_cov_type(formula, kind) if kind in {"cs", "ar1"} else parse_formula(formula)
-    return build_model_matrices(parsed, data, weights=weights, offset=offset)
-
-
-def native_arguments(matrices):
-    z = matrices.Z.tocsc()
-    return dict(
-        x=matrices.X.copy(),
-        z_data=z.data.copy(),
-        z_indices=z.indices.astype(np.int64),
-        z_indptr=z.indptr.astype(np.int64),
-        z_shape=z.shape,
-        weights=matrices.weights.copy(),
-        offset=matrices.offset.copy(),
-        n_levels=[s.n_levels for s in matrices.random_structures],
-        n_terms=[s.n_terms for s in matrices.random_structures],
-        correlated=[s.correlated for s in matrices.random_structures],
-    )
-
-
-def parameters(matrices):
-    values = []
-    for structure in matrices.random_structures:
-        if structure.cov_type in {"cs", "ar1"}:
-            values.extend([0.8, 0.2])
-        elif structure.correlated:
-            values.extend(
-                0.8 if i == j else 0.1 for i in range(structure.n_terms) for j in range(i + 1)
-            )
-        else:
-            values.extend([0.8] * structure.n_terms)
-    return np.array(values)
-
-
-def observation_likelihood(matrices, theta, reml):
-    """Dense observation-space oracle, independent of the profiled solver."""
-    covariance = np.diag(1 / matrices.weights)
-    position = 0
-    blocks = []
-    for structure in matrices.random_structures:
-        width = structure.n_terms
-        if structure.cov_type in {"cs", "ar1"}:
-            scale, rho = theta[position : position + 2]
-            position += 2
-            correlation = (
-                (1 - rho) * np.eye(width) + rho
-                if structure.cov_type == "cs"
-                else rho ** np.abs(np.arange(width)[:, None] - np.arange(width))
-            )
-            block = scale**2 * correlation
-        else:
-            count = width * (width + 1) // 2 if structure.correlated else width
-            factor = np.zeros((width, width))
-            if structure.correlated:
-                factor[np.tril_indices(width)] = theta[position : position + count]
-            else:
-                np.fill_diagonal(factor, theta[position : position + count])
-            position += count
-            block = factor @ factor.T
-        blocks.extend([block] * structure.n_levels)
-    if blocks:
-        z = matrices.Z.toarray()
-        covariance += z @ linalg.block_diag(*blocks) @ z.T
-    inverse_x = np.linalg.solve(covariance, matrices.X)
-    information = matrices.X.T @ inverse_x
-    y = matrices.y - matrices.offset
-    beta = np.linalg.solve(information, inverse_x.T @ y)
-    residual = y - matrices.X @ beta
-    rss = residual @ np.linalg.solve(covariance, residual)
-    df = matrices.n_obs - matrices.n_fixed if reml else matrices.n_obs
-    return (
-        df * (1 + np.log(2 * np.pi * rss / df))
-        + np.linalg.slogdet(covariance)[1]
-        + (np.linalg.slogdet(information)[1] if reml else 0)
-    )
+from tests._lmm_oracles import (
+    data_fixture,
+    matrices_fixture,
+    native_arguments,
+    observation_likelihood,
+    parameters,
+)
 
 
 @pytest.mark.parametrize(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 from unittest.mock import MagicMock
 
 import numpy as np
@@ -14,10 +15,33 @@ from mixedlm.power import _binomial_score_interval
 from numpy.testing import assert_allclose
 from scipy import stats
 
-from tests.test_boot_ci import bootstrap_result as bootstrap_result
-from tests.test_linear_hypothesis import glmm_result as glmm_result
-from tests.test_linear_hypothesis import lmm_result as lmm_result
-from tests.test_reporting import nlmm_model as nlmm_model
+from tests._inference_results import (
+    bootstrap_with_failures,
+    fit_random_intercept_glmm,
+    fit_random_intercept_lmm,
+)
+from tests._nlmm_models import fit_asymptotic_nlmm
+
+
+@pytest.fixture(scope="module")
+def lmm_result():
+    return fit_random_intercept_lmm()
+
+
+@pytest.fixture(scope="module")
+def glmm_result():
+    return fit_random_intercept_glmm()
+
+
+@pytest.fixture
+def bootstrap_result():
+    return bootstrap_with_failures()
+
+
+@pytest.fixture(scope="module")
+def nlmm_model():
+    return fit_asymptotic_nlmm()
+
 
 LEVELS = [0.95, np.nextafter(1.0, 0.0), np.nextafter(np.float32(1), np.float32(0))]
 
@@ -129,7 +153,9 @@ def test_profile_builders_keep_extreme_confidence_endpoints_finite(request, kind
     model = request.getfixturevalue(f"{kind}_result")
     profile = profile_lmer if kind == "lmm" else profile_glmer
 
-    result = profile(model, which="x", n_points=7, level=np.nextafter(1.0, 0.0))["x"]
+    # Profiles of the REML linear fit refit it by ML, and say so.
+    with pytest.warns(UserWarning, match="ML refit") if kind == "lmm" else nullcontext():
+        result = profile(model, which="x", n_points=7, level=np.nextafter(1.0, 0.0))["x"]
 
     assert np.isfinite([result.ci_lower, result.ci_upper]).all()
     assert result.ci_lower < result.mle < result.ci_upper

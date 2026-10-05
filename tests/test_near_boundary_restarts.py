@@ -9,9 +9,8 @@ from mixedlm.estimation.optimizers import run_optimizer
 from mixedlm.estimation.reml import LMMOptimizer, _profiled_deviance_core
 from numpy.testing import assert_allclose, assert_array_equal
 
-from tests.test_glmm_final_state import mode_problem
-from tests.test_lmm_prepared_design import parameters
-from tests.test_variance_boundary_restarts import linear_data
+from tests._glmm_oracles import mode_problem
+from tests._lmm_oracles import linear_data, parameters
 
 
 @pytest.mark.parametrize("method", ["L-BFGS-B", "TNC", "SLSQP"])

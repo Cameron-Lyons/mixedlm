@@ -247,6 +247,21 @@ summaries display `NA` for these quantities. A quasi family defines a mean and
 variance relationship without a probability density, so its normalized
 likelihood and information criteria raise `ValueError`.
 
+To use `simulate()`, `bootMer()`, or `powerSim()`, also implement
+`simulate(self, mu, rng=None, *, weights=None, trials=None)`, returning one draw
+per mean from the supplied NumPy random stream. `weights` are prior weights
+(precisions for families with a dispersion parameter) and `trials` are binomial
+trial counts. The older `simulate(self, mu, rng=None)` signature still works.
+Without this method, those functions raise `NotImplementedError` instead of
+inventing a response distribution. For the Poisson example:
+
+```python
+def simulate(self, mu, rng=None, *, weights=None, trials=None):
+    return rng.poisson(mu).astype(float)
+
+MyFamily.simulate = simulate
+```
+
 ### QuasiFamily
 
 For quasi-likelihood models with custom variance functions.
@@ -265,6 +280,9 @@ quasi_binom = QuasiFamily(Binomial(), phi=2.0)
 
 - `base_family`: Family whose link, variance, and deviance are wrapped
 - `phi`: Positive dispersion multiplier
+
+Quasi families define no response distribution, so `simulate()`, `bootMer()`,
+and `powerSim()` raise `NotImplementedError` for them.
 
 ## Family Components
 

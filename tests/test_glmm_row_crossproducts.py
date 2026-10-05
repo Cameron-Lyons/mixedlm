@@ -11,9 +11,9 @@ from mixedlm.estimation.laplace import _laplace_deviance_with_status
 from mixedlm.families import Binomial, Poisson
 from numpy.testing import assert_allclose, assert_array_equal
 
-from tests.test_lmm_covariance_transforms import wide_problem
-from tests.test_native_covariance_transforms import _args
-from tests.test_native_weighted_crossproducts import _noncanonical
+from tests._glmm_oracles import glmm_deviance_args
+from tests._lmm_oracles import wide_problem
+from tests._sparse_systems import noncanonical_csc
 
 
 def wide_count_problem(width, fixed, variance, family_name, noncanonical=False):
@@ -31,7 +31,7 @@ def wide_count_problem(width, fixed, variance, family_name, noncanonical=False):
     )
     matrices = replace(matrices, y=y.astype(float))
     if noncanonical:
-        matrices = replace(matrices, Z=_noncanonical(matrices.Z.tocsc()))
+        matrices = replace(matrices, Z=noncanonical_csc(matrices.Z.tocsc()))
     if variance == "zero":
         theta[:] = 0.0
     return matrices, theta
@@ -45,7 +45,7 @@ def wide_count_problem(width, fixed, variance, family_name, noncanonical=False):
 def test_wide_changing_weights_match_python(width, fixed, variance, family_name, noncanonical):
     matrices, theta = wide_count_problem(width, fixed, variance, family_name, noncanonical)
     family = Poisson() if family_name == "poisson" else Binomial()
-    args = _args(matrices, theta, family_name)
+    args = glmm_deviance_args(matrices, theta, family_name)
     actual = _rust.glmm_deviance(*args, 1, maxiter=100, tol=1e-9)
     expected = _laplace_deviance_with_status(
         theta, matrices, family, pirls_maxiter=100, pirls_tol=1e-9
@@ -64,7 +64,7 @@ def test_wide_changing_weights_match_python(width, fixed, variance, family_name,
 @pytest.mark.parametrize("family_name", ["poisson", "binomial"])
 def test_first_row_layout_can_be_shared_across_threads(family_name):
     matrices, theta = wide_count_problem(32, True, "regular", family_name)
-    args = _args(matrices, theta, family_name)
+    args = glmm_deviance_args(matrices, theta, family_name)
     problem = _rust.GlmmProblem(*args[:8], *args[9:])
     cases = [(theta * scale, matrices.offset + scale / 10) for scale in [0, 0.7, 1.3, 2.0]]
     expected = [

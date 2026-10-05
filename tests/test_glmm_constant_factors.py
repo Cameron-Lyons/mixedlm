@@ -5,8 +5,8 @@ import pytest
 from mixedlm import _rust
 from numpy.testing import assert_allclose, assert_array_equal
 
-from tests.test_lmm_covariance_transforms import wide_problem
-from tests.test_native_covariance_transforms import _args
+from tests._glmm_oracles import glmm_deviance_args
+from tests._lmm_oracles import wide_problem
 
 
 @pytest.mark.parametrize("width", [2, 17, 32])
@@ -17,7 +17,7 @@ def test_constant_factors_match_joint_system_across_parameters_and_offsets(
     width, fixed, singular, maxiter
 ):
     matrices, theta, factor = wide_problem(width, False, singular, fixed=fixed)
-    arguments = _args(matrices, theta, "gaussian")
+    arguments = glmm_deviance_args(matrices, theta, "gaussian")
     problem = _rust.GlmmProblem(*arguments[:8], *arguments[9:])
     p, q = matrices.n_fixed, matrices.n_random
     for scale, change in [(1.0, 0.0), (0.0, 0.2), (1.7, -0.1), (1.0, 0.0)]:

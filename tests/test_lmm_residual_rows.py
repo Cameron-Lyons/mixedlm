@@ -7,22 +7,13 @@ import pytest
 from mixedlm import _rust
 from mixedlm.estimation.reml import LMMOptimizer, _profiled_deviance_core
 from numpy.testing import assert_allclose, assert_array_equal
-from scipy import sparse
 
-from tests.test_glmm_final_state import mode_problem
-from tests.test_lmm_prepared_design import native_arguments, parameters
-from tests.test_reml_profiled_deviance import _direct_profiled_likelihood
-
-
-def residual_problem(layout, size, pattern):
-    matrices, _, _ = mode_problem("gaussian", layout, n_obs=size, n_groups=16)
-    if pattern == "overlap":
-        columns = np.roll(np.arange(matrices.n_random), 2)
-        matrices = replace(matrices, Z=(matrices.Z + 0.15 * matrices.Z[:, columns]).tocsc())
-    elif pattern == "empty_rows":
-        mask = (np.arange(size) % 9 != 0).astype(float)
-        matrices = replace(matrices, Z=(sparse.diags(mask) @ matrices.Z).tocsc())
-    return matrices
+from tests._lmm_oracles import (
+    direct_profiled_likelihood,
+    native_arguments,
+    parameters,
+    residual_problem,
+)
 
 
 @pytest.mark.parametrize("layout", ["intercept", "slope", "crossed", "mode_only"])
@@ -43,7 +34,7 @@ def test_prepared_profiles_retain_residual_arithmetic(layout, size, pattern, rem
         assert_array_equal(fresh.deviance(theta, reml), actual.deviance)
         changed = replace(matrices, y=y)
         expected = (
-            _direct_profiled_likelihood(theta, changed, reml)
+            direct_profiled_likelihood(theta, changed, reml)
             if size == 64
             else vars(_profiled_deviance_core(theta, changed, reml))
         )

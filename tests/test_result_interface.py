@@ -5,10 +5,16 @@ from __future__ import annotations
 from dataclasses import replace
 
 import numpy as np
+import pandas as pd
 import pytest
 from mixedlm import devcomp, families, glmer, lmer, load_cbpp, load_sleepstudy
 from mixedlm.estimation.reml import _build_lambda
-from numpy.testing import assert_allclose
+from mixedlm.formula.parser import parse_formula
+from mixedlm.matrices.design import build_model_matrices
+from mixedlm.models.glmer import GlmerResult
+from mixedlm.models.lmer import LmerResult
+from numpy.testing import assert_allclose, assert_array_equal
+from scipy import linalg
 
 SLEEPSTUDY = load_sleepstudy()
 CBPP = load_cbpp()
@@ -116,6 +122,54 @@ class TestGetME:
         assert glmm.nAGQ == 1
         assert cmp["drsum"] + u @ u + cmp["ldL2"] == pytest.approx(glmm.deviance, rel=1e-10)
 
+    @pytest.mark.parametrize("kind", ["lmer", "glmer"])
+    def test_lind_indexes_theta_into_the_covariance_factor(self, kind) -> None:
+        n = 24
+        rows = np.arange(n)
+        data = pd.DataFrame(
+            {
+                "y": rows % 2,
+                "x": np.linspace(-1, 1, n),
+                "z": np.cos(rows),
+                "g": rows % 4,
+                "h": rows % 3,
+            }
+        )
+        formula = parse_formula("y ~ x + (x | g) + (z || h)")
+        matrices = build_model_matrices(formula, data)
+        theta = np.array([0.9, 0.2, 0.5, 0.7, 0.3])
+        common = dict(
+            formula=formula,
+            matrices=matrices,
+            theta=theta,
+            beta=np.zeros(matrices.n_fixed),
+            u=np.zeros(matrices.n_random),
+            deviance=0.0,
+            converged=True,
+            n_iter=0,
+        )
+        if kind == "lmer":
+            result = LmerResult(sigma=1.0, REML=True, **common)
+        else:
+            result = GlmerResult(family=families.Binomial(), nAGQ=1, **common)
+        correlated = np.array([[0.9, 0.0], [0.2, 0.5]])
+        expected = linalg.block_diag(*[correlated] * 4, *[np.diag([0.7, 0.3])] * 3)
+
+        assert_array_equal(result.getME("Lambda").toarray(), expected)
+        assert_array_equal(result.getME("Lambdat").toarray(), expected.T)
+        # lme4's contract: Lambdat's stored entries, column by column, are theta[Lind].
+        stored = result.getME("Lambdat").tocsc()
+        stored.sort_indices()
+        assert_array_equal(stored.data, theta[result.getME("Lind")])
+
+    def test_rx_is_the_triangular_factor_of_the_fixed_effect_precision(self, lmm) -> None:
+        RX = lmm.getME("RX")
+
+        assert_array_equal(RX, np.triu(RX))
+        assert np.all(np.diag(RX) > 0)
+        assert_allclose(lmm.sigma**2 * np.linalg.inv(RX.T @ RX), lmm.vcov(), rtol=1e-10)
+        assert lmm.getME("RZX").shape == (lmm.matrices.n_random, lmm.matrices.n_fixed)
+
 
 class TestDevcomp:
     def test_lmm_components_reproduce_the_reml_fit(self, lmm) -> None:
@@ -173,6 +227,21 @@ class TestDevcomp:
         assert cmp["ldL2"] > 0 and cmp["dev"] == glmm.deviance
         assert all(np.isnan(cmp[name]) for name in ("REML", "sigmaML", "sigmaREML"))
         assert (dims["useSc"], dims["REML"], dims["nAGQ"], dims["ngrps"]) == (0, 0, 1, 1)
+
+    def test_deviance_components_reassemble_the_reml_criterion(self, lmm) -> None:
+        parts = lmm.get_deviance_components()
+        cmp = lmm.getME("devcomp")["cmp"]
+        df = lmm.matrices.n_obs - lmm.matrices.n_fixed
+
+        assert parts.REML is True
+        assert parts.total == pytest.approx(lmm.deviance, rel=1e-10)
+        assert parts.sigma2 == pytest.approx(lmm.sigma**2, rel=1e-8)
+        for name in ("ldL2", "ldRX2", "wrss", "ussq", "pwrss"):
+            assert getattr(parts, name) == pytest.approx(cmp[name], rel=1e-8), name
+        assert parts.total == pytest.approx(
+            parts.ldL2 + parts.ldRX2 + df * (1 + np.log(2 * np.pi * parts.pwrss / df)), rel=1e-12
+        )
+        assert f"Total deviance:     {parts.total:.4f}" in str(parts)
 
     def test_split_terms_of_one_factor_count_one_grouping_factor(self) -> None:
         result = lmer("Reaction ~ Days + (1 | Subject) + (0 + Days | Subject)", SLEEPSTUDY)

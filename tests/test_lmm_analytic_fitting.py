@@ -12,9 +12,8 @@ from mixedlm.models.control import LmerControl
 from mixedlm.models.modular import LmerDevfun
 from numpy.testing import assert_allclose, assert_array_equal
 
-from tests._lmer_data import SLEEPSTUDY
-from tests.test_lmm_prepared_design import matrices_fixture, parameters
-from tests.test_variance_boundary_restarts import linear_data
+from tests._datasets import SLEEPSTUDY
+from tests._lmm_oracles import linear_data, matrices_fixture, parameters
 
 
 def sleep_matrices():

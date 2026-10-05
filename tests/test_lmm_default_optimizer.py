@@ -11,7 +11,7 @@ from mixedlm import lmer, lmerControl, load_dyestuff2, load_sleepstudy, set_cov_
 from mixedlm.estimation.reml import _HAS_RUST, LMMOptimizer
 from mixedlm.models.control import GlmerControl
 
-from tests.test_statistical_golden import observation_space_reference
+from tests._lmm_oracles import observation_space_reference
 
 pytestmark = pytest.mark.skipif(not _HAS_RUST, reason="native gradients unavailable")
 

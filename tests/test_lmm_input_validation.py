@@ -7,7 +7,7 @@ import pytest
 from mixedlm import _rust
 from numpy.testing import assert_allclose, assert_array_equal
 
-from tests.test_lmm_prepared_design import (
+from tests._lmm_oracles import (
     matrices_fixture,
     native_arguments,
     observation_likelihood,

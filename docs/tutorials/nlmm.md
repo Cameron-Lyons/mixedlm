@@ -249,8 +249,9 @@ Use several hundred or more replicates for reported intervals.
 `model.confint(n_boot=500, seed=42, n_jobs=2)` accept `n_jobs` for parallel refits.
 Simulation preserves the serial draw sequence, and failed refits are excluded
 in both modes. Use `n_jobs=1` for small jobs where process startup would dominate.
-In scripts using process spawning, run parallel bootstrap inside an
-`if __name__ == "__main__":` guard; custom model classes must be importable.
+Worker processes start without forking, so run parallel bootstrap inside an
+`if __name__ == "__main__":` guard; custom model classes must be importable. See
+[parallel execution](../api/inference.md#parallel-execution).
 
 ## Custom Nonlinear Functions
 

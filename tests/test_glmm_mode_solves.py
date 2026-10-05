@@ -8,7 +8,7 @@ from mixedlm.estimation.laplace import _native_glmm_args
 from mixedlm.estimation.reml import _build_lambda
 from numpy.testing import assert_allclose
 
-from tests.test_glmm_final_state import mode_problem
+from tests._glmm_oracles import mode_problem
 
 native = pytest.importorskip("mixedlm._rust")
 

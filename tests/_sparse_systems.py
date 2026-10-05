@@ -1,4 +1,4 @@
-"""Sparse SPD systems with closed-form oracles for native Cholesky tests."""
+"""Sparse systems with closed-form oracles and raw CSC storage variants for native tests."""
 
 import numpy as np
 from scipy import sparse
@@ -38,3 +38,17 @@ def sparse_arguments(matrix, storage):
             values.extend([0.25 * matrix.data[entry], 0.75 * matrix.data[entry]])
         offsets.append(len(values))
     return np.asarray(values), np.asarray(rows, dtype=np.int64), np.asarray(offsets, dtype=np.int64)
+
+
+def noncanonical_csc(z):
+    """Split each value between duplicates, reverse rows, and store explicit zeros."""
+    values, rows, offsets = [], [], [0]
+    for column in range(z.shape[1]):
+        for index in range(z.indptr[column + 1] - 1, z.indptr[column] - 1, -1):
+            values.extend([0.25 * z.data[index], 0.75 * z.data[index]])
+            rows.extend([z.indices[index], z.indices[index]])
+        if z.shape[0]:
+            values.append(0.0)
+            rows.append(column % z.shape[0])
+        offsets.append(len(values))
+    return sparse.csc_matrix((values, rows, offsets), shape=z.shape)

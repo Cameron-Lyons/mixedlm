@@ -2,17 +2,13 @@
 
 import json
 import os
-import signal
-import subprocess
-import sys
 import textwrap
 from pathlib import Path
 
-import mixedlm
 import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
-TIMEOUT = 120
+from tests._subprocess import run_isolated
+
 THREAD_VARIABLES = ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "RAYON_NUM_THREADS")
 
 # A correlated-slope fit and an nAGQ > 1 fit start the native thread pools that a
@@ -142,34 +138,6 @@ THREAD_PROBE = textwrap.dedent("""
             "restored": dict(os.environ) == environment,
         }}))
 """).format(variables=THREAD_VARIABLES)
-
-
-def run_isolated(
-    args: list[str], env: dict[str, str] | None = None
-) -> subprocess.CompletedProcess[str]:
-    """Run Python against this mixedlm, killing every worker if it times out."""
-    package_root = str(Path(mixedlm.__file__).resolve().parents[1])
-    env = dict(os.environ if env is None else env)
-    env["PYTHONPATH"] = os.pathsep.join(filter(None, [package_root, env.get("PYTHONPATH")]))
-    process = subprocess.Popen(
-        [sys.executable, *args],
-        cwd=ROOT,
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        start_new_session=True,
-    )
-    try:
-        stdout, stderr = process.communicate(timeout=TIMEOUT)
-    except subprocess.TimeoutExpired:
-        if hasattr(os, "killpg"):
-            os.killpg(process.pid, signal.SIGKILL)
-        else:
-            process.kill()
-        process.communicate()
-        pytest.fail(f"{args[-1]} did not finish within {TIMEOUT}s")
-    return subprocess.CompletedProcess(process.args, process.returncode, stdout, stderr)
 
 
 @pytest.mark.parametrize("scenario", ["bootMer", "drop1_lmer", "allfit", "bootstrap_glmer_nagq"])

@@ -1,5 +1,5 @@
 import pickle
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from threading import Barrier
 from unittest.mock import patch
@@ -9,41 +9,7 @@ import pytest
 from mixedlm.families import Poisson
 from mixedlm.inference import bootstrap
 
-from tests.test_model_random_streams import fake_refit, make_result
-
-
-class ImmediateExecutor:
-    instances = []
-
-    def __init__(self, max_workers, initializer=None, initargs=()):
-        self.workers = max_workers
-        self.submitted = self.consumed = self.peak_pending = 0
-        self.closed = False
-        self.tasks = []
-        self.instances.append(self)
-        if initializer is not None:
-            initializer(*initargs)
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *args):
-        self.closed = True
-
-    def submit(self, fn, *args):
-        executor = self
-
-        class ConsumedFuture(Future):
-            def result(self, *args, **kwargs):
-                executor.consumed += 1
-                return super().result(*args, **kwargs)
-
-        self.submitted += 1
-        self.peak_pending = max(self.peak_pending, self.submitted - self.consumed)
-        self.tasks.append(args)
-        future = ConsumedFuture()
-        future.set_result(fn(*args))
-        return future
+from tests._bootstrap_helpers import ImmediateExecutor, PendingExecutor, fake_refit, make_result
 
 
 def echo_task(args):
@@ -110,21 +76,6 @@ def test_parallel_submission_is_bounded_and_sends_only_index_and_seed(kind, coun
     np.testing.assert_array_equal(actual.beta_samples, serial.beta_samples)
     np.testing.assert_array_equal(actual.theta_samples, serial.theta_samples)
     assert actual.n_failed == serial.n_failed == 0
-
-
-class PendingExecutor(ImmediateExecutor):
-    failure = False
-
-    def submit(self, fn, *args):
-        self.submitted += 1
-        future = Future()
-        self.tasks.append(future)
-        if self.submitted == 1:
-            if self.failure:
-                future.set_exception(RuntimeError("pool task failed"))
-            else:
-                future.set_result(fn(*args))
-        return future
 
 
 @pytest.mark.parametrize("failure", [False, True])

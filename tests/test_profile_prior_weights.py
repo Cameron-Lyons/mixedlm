@@ -191,9 +191,11 @@ def test_weighted_profiles_preserve_offsets_and_scale() -> None:
     shifted_fit = _fit(formula, shifted, weights, offset=offset)
     scaled_fit = _fit(formula, shifted, scale * weights, offset=offset)
 
-    baseline_profile = profile_lmer(baseline, which="x", n_points=9)["x"]
-    shifted_profile = profile_lmer(shifted_fit, which="x", n_points=9)["x"]
-    scaled_profile = profile_lmer(scaled_fit, which="x", n_points=9)["x"]
+    # Profiles of the REML fits refit them by ML, and say so.
+    with pytest.warns(UserWarning, match="ML refit"):
+        baseline_profile = profile_lmer(baseline, which="x", n_points=9)["x"]
+        shifted_profile = profile_lmer(shifted_fit, which="x", n_points=9)["x"]
+        scaled_profile = profile_lmer(scaled_fit, which="x", n_points=9)["x"]
 
     for profile in (baseline_profile, shifted_profile, scaled_profile):
         assert profile.values[4] == profile.mle

@@ -19,6 +19,9 @@ from mixedlm.models import modular
 FORMULA = "y ~ x + (1 | g)"
 MODES = ["linear", "laplace_python", "laplace_native", "agq_python", "agq_native"]
 
+# Four groups keep these invalid-fit scenarios small; the level-count advice is not under test.
+pytestmark = pytest.mark.filterwarnings("ignore:Grouping factor 'g' has only 4 levels:UserWarning")
+
 
 @pytest.fixture
 def data():
@@ -243,7 +246,12 @@ def test_modular_glmm_reports_final_quadrature_deviance(data, n_agq):
 
 @pytest.mark.parametrize("kind", ["linear", "generalized"])
 def test_invalid_refits_raise_and_bootstrap_counts_failures(data, kind):
-    result = lmer(FORMULA, data) if kind == "linear" else glmer(FORMULA, data, family=Poisson())
+    if kind == "linear":
+        result = lmer(FORMULA, data)
+    else:
+        # These counts carry no extra-Poisson group variation.
+        with pytest.warns(UserWarning, match="singular"):
+            result = glmer(FORMULA, data, family=Poisson())
     target = (
         patch.object(reml.LMMOptimizer, "_evaluate_core", return_value=None)
         if kind == "linear"

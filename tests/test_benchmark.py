@@ -1492,7 +1492,7 @@ def test_benchmark_custom_contrast_validation(benchmark, kind):
 @pytest.mark.benchmark(group="custom-contrast-scaling")
 @pytest.mark.parametrize("scale", [1.0, 1e-200, 1e200])
 def test_benchmark_scaled_custom_contrasts(benchmark, scale):
-    from tests.test_emmeans import _synthetic_emmeans
+    from tests._inference_results import synthetic_emmeans as _synthetic_emmeans
 
     means = _synthetic_emmeans(n_levels=32, n_beta=16)
     coefficients = np.random.default_rng(423).normal(size=(512, 32))
@@ -1886,8 +1886,8 @@ def test_benchmark_lmm_design_preparation_threads(benchmark, layout, workers):
 
     from mixedlm import _rust
 
-    from tests.test_glmm_final_state import mode_problem
-    from tests.test_lmm_prepared_design import native_arguments
+    from tests._glmm_oracles import mode_problem
+    from tests._lmm_oracles import native_arguments
 
     matrices, _, theta = mode_problem("gaussian", layout, n_obs=16384, n_groups=16)
     arguments = native_arguments(matrices)
@@ -1915,7 +1915,7 @@ def test_benchmark_lmm_design_preparation_threads(benchmark, layout, workers):
 def test_benchmark_lmm_final_estimates(benchmark, layout, size, use_rust, warm):
     from copy import copy
 
-    from tests.test_glmm_final_state import mode_problem
+    from tests._glmm_oracles import mode_problem
 
     matrices, _, theta = mode_problem("gaussian", layout, n_obs=size, n_groups=16)
     optimizer = LMMOptimizer(matrices, use_rust=use_rust)
@@ -1942,9 +1942,9 @@ def test_benchmark_lmm_final_estimates(benchmark, layout, size, use_rust, warm):
 def test_benchmark_lmm_level_covariance(benchmark, layout, overlap, operation):
     from mixedlm import _rust
 
-    from tests.test_lmm_prepared_design import native_arguments
-    from tests.test_native_covariance_transforms import _problem
-    from tests.test_reml_profiled_deviance import _direct_profiled_likelihood
+    from tests._glmm_oracles import covariance_problem as _problem
+    from tests._lmm_oracles import direct_profiled_likelihood as _direct_profiled_likelihood
+    from tests._lmm_oracles import native_arguments
 
     matrices, theta, _ = _problem(layout, "regular", True, overlap=overlap)
     expected = _direct_profiled_likelihood(theta, matrices, True)["deviance"]
@@ -1967,8 +1967,7 @@ def test_benchmark_lmm_level_covariance(benchmark, layout, overlap, operation):
 def test_benchmark_lmm_large_variance(benchmark, theta_value, operation):
     from mixedlm import _rust
 
-    from tests.test_lmm_prepared_design import native_arguments
-    from tests.test_lmm_stability import dominant_random_effects, groupwise_likelihood
+    from tests._lmm_oracles import dominant_random_effects, groupwise_likelihood, native_arguments
 
     matrices, groups = dominant_random_effects(fixed=True)
     theta = np.array([theta_value])
@@ -1990,9 +1989,8 @@ def test_benchmark_lmm_large_variance(benchmark, theta_value, operation):
 def test_benchmark_lmm_covariance_transforms(benchmark, width, independent, operation):
     from mixedlm import _rust
 
-    from tests.test_lmm_covariance_transforms import wide_problem
-    from tests.test_lmm_prepared_design import native_arguments
-    from tests.test_reml_profiled_deviance import _direct_profiled_likelihood
+    from tests._lmm_oracles import direct_profiled_likelihood as _direct_profiled_likelihood
+    from tests._lmm_oracles import native_arguments, wide_problem
 
     matrices, theta, _ = wide_problem(width, independent, singular=False)
     expected = _direct_profiled_likelihood(theta, matrices, True)["deviance"]
@@ -2015,8 +2013,8 @@ def test_benchmark_prepared_lmm_gradients(benchmark, layout, size, workers):
 
     from mixedlm import _rust
 
-    from tests.test_glmm_final_state import mode_problem
-    from tests.test_lmm_prepared_design import native_arguments, parameters
+    from tests._glmm_oracles import mode_problem
+    from tests._lmm_oracles import native_arguments, parameters
 
     matrices, _, _ = mode_problem("gaussian", layout, n_obs=size, n_groups=16)
     arguments = native_arguments(matrices)
@@ -2037,8 +2035,8 @@ def test_benchmark_lmm_validated_gradient(benchmark, layout, size):
     from mixedlm import _rust
     from mixedlm.estimation.reml import _profiled_deviance_core
 
-    from tests.test_glmm_final_state import mode_problem
-    from tests.test_lmm_prepared_design import native_arguments, parameters
+    from tests._glmm_oracles import mode_problem
+    from tests._lmm_oracles import native_arguments, parameters
 
     matrices, _, _ = mode_problem("gaussian", layout, n_obs=size, n_groups=16)
     theta = parameters(matrices)
@@ -2057,8 +2055,8 @@ def test_benchmark_lmm_validated_gradient(benchmark, layout, size):
 def test_benchmark_lmm_analytic_fitting(benchmark, groups, reml, analytic):
     from mixedlm.estimation.reml import _profiled_deviance_core
 
-    from tests.test_glmm_final_state import mode_problem
-    from tests.test_lmm_prepared_design import parameters
+    from tests._glmm_oracles import mode_problem
+    from tests._lmm_oracles import parameters
 
     matrices, _, _ = mode_problem("gaussian", "slope", n_obs=8192, n_groups=groups)
     optimizer = LMMOptimizer(matrices, REML=reml, use_rust=True)
@@ -2081,9 +2079,12 @@ def test_benchmark_lmm_analytic_fitting(benchmark, groups, reml, analytic):
 def test_benchmark_wide_lmm_gradient_contractions(benchmark, width, independent, reml):
     from mixedlm import _rust
 
-    from tests.test_lmm_covariance_transforms import wide_problem
-    from tests.test_lmm_gradient_contractions import observation_gradient
-    from tests.test_lmm_prepared_design import native_arguments, observation_likelihood
+    from tests._lmm_oracles import (
+        native_arguments,
+        observation_gradient,
+        observation_likelihood,
+        wide_problem,
+    )
 
     matrices, theta, _ = wide_problem(width, independent, singular=False)
     response = _rust.LmmDesign(**native_arguments(matrices)).with_response(matrices.y)
@@ -2105,9 +2106,13 @@ def test_benchmark_multilevel_lmm_gradient_contractions(benchmark, groups, overl
 
     from mixedlm import _rust
 
-    from tests.test_glmm_final_state import mode_problem
-    from tests.test_lmm_gradient_contractions import observation_gradient
-    from tests.test_lmm_prepared_design import native_arguments, observation_likelihood, parameters
+    from tests._glmm_oracles import mode_problem
+    from tests._lmm_oracles import (
+        native_arguments,
+        observation_gradient,
+        observation_likelihood,
+        parameters,
+    )
 
     matrices, _, _ = mode_problem("gaussian", "slope", n_obs=256, n_groups=groups)
     if overlap:
@@ -2131,9 +2136,12 @@ def test_benchmark_multilevel_lmm_gradient_contractions(benchmark, groups, overl
 def test_benchmark_separate_lmm_level_gradients(benchmark, widths, independent, reml):
     from mixedlm import _rust
 
-    from tests.test_lmm_gradient_contractions import observation_gradient
-    from tests.test_lmm_level_gradients import separate_structures
-    from tests.test_lmm_prepared_design import native_arguments, observation_likelihood
+    from tests._lmm_oracles import (
+        native_arguments,
+        observation_gradient,
+        observation_likelihood,
+        separate_structures,
+    )
 
     matrices, theta = separate_structures(widths, independent, "regular", True)
     response = _rust.LmmDesign(**native_arguments(matrices)).with_response(matrices.y)
@@ -2154,9 +2162,12 @@ def test_benchmark_separate_lmm_level_gradients(benchmark, widths, independent, 
 def test_benchmark_wide_fixed_effect_lmm_gradients(benchmark, widths, fixed, coupled, reml):
     from mixedlm import _rust
 
-    from tests.test_lmm_gradient_contractions import observation_gradient
-    from tests.test_lmm_prepared_design import native_arguments, observation_likelihood
-    from tests.test_lmm_reml_contractions import fixed_effect_problem
+    from tests._lmm_oracles import (
+        fixed_effect_problem,
+        native_arguments,
+        observation_gradient,
+        observation_likelihood,
+    )
 
     matrices, theta = fixed_effect_problem(widths, fixed, coupled, False, "regular")
     response = _rust.LmmDesign(**native_arguments(matrices)).with_response(matrices.y)
@@ -2175,8 +2186,7 @@ def test_benchmark_wide_fixed_effect_lmm_gradients(benchmark, widths, fixed, cou
 def test_benchmark_independent_lmm_design_storage(benchmark, q, width):
     from mixedlm import _rust
 
-    from tests.test_lmm_compact_design import grouped_slope_oracle, large_slopes
-    from tests.test_lmm_prepared_design import native_arguments
+    from tests._lmm_oracles import grouped_slope_oracle, large_slopes, native_arguments
 
     matrices, terms, theta = large_slopes(q // width, width)
     design = benchmark(_rust.LmmDesign, **native_arguments(matrices))
@@ -2193,8 +2203,7 @@ def test_benchmark_independent_lmm_design_storage(benchmark, q, width):
 def test_benchmark_many_level_lmm_evaluation(benchmark, q, width, gradient):
     from mixedlm import _rust
 
-    from tests.test_lmm_compact_design import grouped_slope_oracle, large_slopes
-    from tests.test_lmm_prepared_design import native_arguments
+    from tests._lmm_oracles import grouped_slope_oracle, large_slopes, native_arguments
 
     matrices, terms, theta = large_slopes(q // width, width)
     response = _rust.LmmDesign(**native_arguments(matrices)).with_response(matrices.y)
@@ -2217,8 +2226,8 @@ def test_benchmark_lmm_blocked_scalar_solves(benchmark, layout, groups, overlap,
 
     from mixedlm import _rust
 
-    from tests.test_glmm_final_state import mode_problem
-    from tests.test_lmm_prepared_design import native_arguments, observation_likelihood, parameters
+    from tests._glmm_oracles import mode_problem
+    from tests._lmm_oracles import native_arguments, observation_likelihood, parameters
 
     matrices, _, _ = mode_problem("gaussian", layout, n_obs=256, n_groups=groups)
     if overlap:
@@ -2239,8 +2248,7 @@ def test_benchmark_lmm_blocked_scalar_solves(benchmark, layout, groups, overlap,
 def test_benchmark_lmm_residual_rows(benchmark, layout, size, operation):
     from mixedlm.estimation.reml import _profiled_deviance_core
 
-    from tests.test_lmm_prepared_design import parameters
-    from tests.test_lmm_residual_rows import residual_problem
+    from tests._lmm_oracles import parameters, residual_problem
 
     matrices = residual_problem(layout, size, "disjoint")
     theta = parameters(matrices)
@@ -2260,7 +2268,7 @@ def test_benchmark_lmm_residual_rows(benchmark, layout, size, operation):
 def test_benchmark_prepared_lmm_threads(benchmark, reml, workers):
     from concurrent.futures import ThreadPoolExecutor
 
-    from tests.test_glmm_final_state import mode_problem
+    from tests._glmm_oracles import mode_problem
 
     matrices, _, theta = mode_problem("gaussian", "slope", n_obs=65536, n_groups=16)
     optimizer = LMMOptimizer(matrices, REML=reml, use_rust=True)
@@ -2280,7 +2288,7 @@ def test_benchmark_prepared_lmm_threads(benchmark, reml, workers):
 def test_benchmark_nonlinear_bootstrap_workers(benchmark, n_jobs):
     from mixedlm.inference.bootstrap import bootstrap_nlmer
 
-    from tests.test_nonlinear_bootstrap_workers import fitted_model
+    from tests._nlmm_models import fitted_model
 
     fitted = fitted_model()
     expected = bootstrap_nlmer(fitted, n_boot=8, seed=2026)
@@ -2296,7 +2304,7 @@ def test_benchmark_nonlinear_bootstrap_workers(benchmark, n_jobs):
 def test_benchmark_nonlinear_simulation_preparation(benchmark, groups, operation):
     from mixedlm.inference.bootstrap import _nlmer_bootstrap_responses
 
-    from tests.test_nonlinear_simulation_streams import make_result
+    from tests._nlmm_models import make_result
 
     result = make_result((0, 1), n_groups=groups, per_group=32)
     if operation == "fitted":
@@ -2328,7 +2336,7 @@ def test_benchmark_nonlinear_simulation_preparation(benchmark, groups, operation
 def test_benchmark_native_glmm_final_state(benchmark, kind, layout, order):
     from mixedlm.estimation.laplace import _native_deviance_with_status
 
-    from tests.test_glmm_final_state import mode_problem
+    from tests._glmm_oracles import mode_problem
 
     matrices, family, theta = mode_problem(kind, layout, n_obs=8192, n_groups=64)
     actual = benchmark(_native_deviance_with_status, theta, matrices, family, order)
@@ -2346,7 +2354,7 @@ def test_benchmark_prepared_glmm(benchmark, joint, order, size):
     from mixedlm.estimation.joint_glmm import JointGLMMObjective
     from mixedlm.estimation.laplace import GLMMOptimizer
 
-    from tests.test_glmm_final_state import mode_problem
+    from tests._glmm_oracles import mode_problem
 
     n, groups = (48, 4) if size == "small" else (8192, 64)
     matrices, family, theta = mode_problem("poisson", "intercept", n_obs=n, n_groups=groups)
@@ -2372,7 +2380,7 @@ def test_benchmark_prepared_glmm(benchmark, joint, order, size):
 def test_benchmark_native_quadrature_dispatch(benchmark, kind, groups, order):
     from mixedlm.estimation.laplace import _prepare_native_glmm
 
-    from tests.test_glmm_final_state import mode_problem
+    from tests._glmm_oracles import mode_problem
 
     matrices, family, theta = mode_problem(kind, "mode_only", n_obs=8192, n_groups=groups)
     problem = _prepare_native_glmm(matrices, family)
@@ -2389,7 +2397,7 @@ def test_benchmark_native_quadrature_dispatch(benchmark, kind, groups, order):
 def test_benchmark_modular_glmm_joint(benchmark, order, size):
     from mixedlm.models.modular import GlmerParsedFormula, mkGlmerDevfun
 
-    from tests.test_glmm_final_state import mode_problem
+    from tests._glmm_oracles import mode_problem
 
     n, groups = (48, 4) if size == "small" else (8192, 64)
     matrices, family, theta = mode_problem("poisson", "intercept", n_obs=n, n_groups=groups)
@@ -2411,7 +2419,7 @@ def test_benchmark_glmm_working_buffers(benchmark, kind, layout, mode_only, n):
 
     from mixedlm.estimation.laplace import _prepare_native_glmm
 
-    from tests.test_glmm_final_state import mode_problem
+    from tests._glmm_oracles import mode_problem
 
     matrices, family, theta = mode_problem(kind, layout, n_obs=n, n_groups=min(n, 64))
     if mode_only:
@@ -2432,7 +2440,7 @@ def test_benchmark_prepared_glmm_threads(benchmark, kind, workers):
 
     from mixedlm.estimation.laplace import _prepare_native_glmm
 
-    from tests.test_glmm_final_state import mode_problem
+    from tests._glmm_oracles import mode_problem
 
     matrices, family, theta = mode_problem(kind, "mode_only", n_obs=8192, n_groups=64)
     problem = _prepare_native_glmm(matrices, family)
@@ -2456,8 +2464,8 @@ def test_benchmark_prepared_glmm_threads(benchmark, kind, workers):
 def test_benchmark_constant_weight_glmm(benchmark, width, fixed, prepared):
     from mixedlm import _rust
 
-    from tests.test_lmm_covariance_transforms import wide_problem
-    from tests.test_native_covariance_transforms import _args
+    from tests._glmm_oracles import glmm_deviance_args as _args
+    from tests._lmm_oracles import wide_problem
 
     matrices, theta, _ = wide_problem(width, False, False, fixed=fixed)
     args = _args(matrices, theta, "gaussian")

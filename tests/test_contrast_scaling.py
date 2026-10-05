@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 from numpy.testing import assert_allclose, assert_array_equal
 
-from tests.test_emmeans import _synthetic_emmeans
+from tests._inference_results import synthetic_emmeans
 
 module = import_module("mixedlm.inference.emmeans")
 
@@ -19,7 +19,7 @@ def _pairwise_rows():
 @pytest.mark.parametrize("adjust", ["none", "bonferroni", "holm", "fdr", "tukey", "dunnett"])
 @pytest.mark.parametrize("exponent", [-300, -200, 200, 300])
 def test_contrast_tests_do_not_depend_on_coefficient_units(df, adjust, exponent):
-    means = _synthetic_emmeans(n_levels=4, n_beta=3)
+    means = synthetic_emmeans(n_levels=4, n_beta=3)
     means._df = df
     coefficients = _pairwise_rows()
     reference = means.contrast(coefficients, adjust=adjust)
@@ -37,7 +37,7 @@ def test_contrast_tests_do_not_depend_on_coefficient_units(df, adjust, exponent)
 @pytest.mark.parametrize("layout", ["readonly", "strided", "fortran"])
 @pytest.mark.parametrize("limit", [1, 13, 1_000_000])
 def test_general_rows_with_mixed_scales_match_direct_matrix_inference(monkeypatch, layout, limit):
-    means = _synthetic_emmeans(n_levels=7, n_beta=5)
+    means = synthetic_emmeans(n_levels=7, n_beta=5)
     rng = np.random.default_rng(420)
     coefficients = rng.normal(size=(5, 7))
     scales = np.array([1e-250, -1e250, 1.0, -0.125, 2e-200])
@@ -67,7 +67,7 @@ def test_general_rows_with_mixed_scales_match_direct_matrix_inference(monkeypatc
     "dtype", [np.float16, np.float32, np.float64, np.longdouble, np.int64, np.uint64]
 )
 def test_real_numeric_dtypes_use_supported_reference_distribution_inputs(dtype):
-    means = _synthetic_emmeans(n_levels=4, n_beta=3)
+    means = synthetic_emmeans(n_levels=4, n_beta=3)
     coefficients = np.array([[2, 0, 1, 0], [0, 3, 0, 1]], dtype=dtype)
 
     actual = means.contrast(coefficients)
@@ -80,7 +80,7 @@ def test_real_numeric_dtypes_use_supported_reference_distribution_inputs(dtype):
 
 @pytest.mark.parametrize("dtype", [np.int64, np.uint64])
 def test_integer_limits_are_converted_before_row_scale_calculation(dtype):
-    means = _synthetic_emmeans(n_levels=4, n_beta=3)
+    means = synthetic_emmeans(n_levels=4, n_beta=3)
     limits = np.iinfo(dtype)
     coefficients = np.array([[limits.min, limits.max, 0, 1]], dtype=dtype)
 
@@ -94,7 +94,7 @@ def test_integer_limits_are_converted_before_row_scale_calculation(dtype):
 
 @pytest.mark.parametrize("scale", [1e-310, -1e-310])
 def test_subnormal_coefficients_keep_full_precision_test_statistics(scale):
-    means = _synthetic_emmeans(n_levels=4, n_beta=3)
+    means = synthetic_emmeans(n_levels=4, n_beta=3)
     coefficients = _pairwise_rows()
     reference = means.contrast(coefficients)
 
@@ -110,7 +110,7 @@ def test_subnormal_coefficients_keep_full_precision_test_statistics(scale):
 def test_extended_range_coefficients_are_normalized_before_float64_conversion(exponent):
     if np.finfo(np.longdouble).maxexp == np.finfo(np.float64).maxexp:
         pytest.skip("This platform's long double has no extended exponent range")
-    means = _synthetic_emmeans(n_levels=4, n_beta=3)
+    means = synthetic_emmeans(n_levels=4, n_beta=3)
     coefficients = _pairwise_rows()
     reference = means.contrast(coefficients)
     scale = np.longdouble(10) ** exponent
@@ -131,7 +131,7 @@ def test_extended_range_coefficients_are_normalized_before_float64_conversion(ex
 
 @pytest.mark.parametrize("scale", [np.finfo(np.float64).max, np.nextafter(0.0, 1.0)])
 def test_float64_limits_do_not_overflow_or_underflow_the_test_statistic(scale):
-    means = _synthetic_emmeans(n_levels=4, n_beta=3)
+    means = synthetic_emmeans(n_levels=4, n_beta=3)
     coefficients = _pairwise_rows()
     reference = means.contrast(coefficients)
 
@@ -146,7 +146,7 @@ def test_float64_limits_do_not_overflow_or_underflow_the_test_statistic(scale):
 def test_custom_projection_batches_bound_both_mean_and_model_dimensions(
     monkeypatch, n_means, n_beta
 ):
-    means = _synthetic_emmeans(n_levels=n_means, n_beta=n_beta)
+    means = synthetic_emmeans(n_levels=n_means, n_beta=n_beta)
     rng = np.random.default_rng(421)
     custom = rng.normal(size=(17, n_means))
     limit = 50
@@ -167,7 +167,7 @@ def test_custom_projection_batches_bound_both_mean_and_model_dimensions(
 
 @pytest.mark.parametrize("n_means,n_beta,n_rows", [(4, 3, 0), (4, 0, 3), (0, 0, 3)])
 def test_empty_and_zero_dimensional_custom_contrasts(n_means, n_beta, n_rows):
-    means = _synthetic_emmeans(n_levels=n_means, n_beta=n_beta)
+    means = synthetic_emmeans(n_levels=n_means, n_beta=n_beta)
     custom = np.zeros((n_rows, n_means))
 
     with np.errstate(divide="raise", invalid="raise"):
@@ -180,7 +180,7 @@ def test_empty_and_zero_dimensional_custom_contrasts(n_means, n_beta, n_rows):
 
 
 def test_zero_rows_do_not_affect_other_contrasts():
-    means = _synthetic_emmeans(n_levels=4, n_beta=3)
+    means = synthetic_emmeans(n_levels=4, n_beta=3)
     coefficients = np.vstack([np.zeros(4), _pairwise_rows() * 1e200])
     reference = means.contrast(_pairwise_rows())
 
@@ -194,13 +194,13 @@ def test_zero_rows_do_not_affect_other_contrasts():
 
 
 def test_complex_coefficients_are_not_silently_discarded():
-    means = _synthetic_emmeans(n_levels=4, n_beta=3)
+    means = synthetic_emmeans(n_levels=4, n_beta=3)
     with pytest.raises(TypeError, match="real numeric"):
         means.contrast(np.ones((1, 4), dtype=complex) * (1 + 1j))
 
 
 def test_normalization_preserves_cancellation_of_large_common_model_terms():
-    means = _synthetic_emmeans(n_levels=3, n_beta=2)
+    means = synthetic_emmeans(n_levels=3, n_beta=2)
     means._L = np.column_stack([np.full(3, 2.0**400), [1.0, 2.0, 4.0]])
     means._beta = np.array([2.0**400, 1.0])
     means._vcov = np.eye(2)

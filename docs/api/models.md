@@ -31,7 +31,9 @@ result = mlm.lmer(formula, data, REML=True, control=None)
 - `REML`: Use REML estimation (default True). Set to False for ML.
 - `control`: Optional LmerControl object for optimization settings
 
-**Returns:** LmerMod result object
+**Returns:** `LmerResult`. Its `optimizer` attribute records the method whose
+estimates were kept, and `control` holds the controls that `update()`, `drop1()`,
+and `allFit()` reuse.
 
 **Example:**
 
@@ -59,7 +61,8 @@ result = mlm.glmer(formula, data, family, nAGQ=1, control=None)
 - `nAGQ`: Nonnegative integer. 0 selects the faster joint-PIRLS approximation; 1 uses Laplace approximation with joint optimization of fixed coefficients and covariance parameters. Values above one use adaptive quadrature and require a single random-effect term with one coefficient per group. Models with no random effects are also supported.
 - `control`: Optional GlmerControl object
 
-**Returns:** GlmerMod result object
+**Returns:** `GlmerResult`, with the optimizer and its final message in
+`optimizer` and `message`.
 
 The default fit optimizes the integrated likelihood over both `theta` and `beta`.
 This can change estimates and increase fitting time relative to the previous
@@ -93,7 +96,7 @@ result = mlm.glmer_nb(formula, data, control=None, theta=1.0)
 - `control`: Optional GlmerControl object
 - `theta`: Negative binomial dispersion; larger values mean less overdispersion
 
-**Returns:** GlmerMod result object. This is shorthand for
+**Returns:** `GlmerResult`. This is shorthand for
 `glmer(..., family=mlm.families.NegativeBinomial(theta=theta))`; unlike lme4's
 `glmer.nb()`, `theta` is not estimated.
 
@@ -165,7 +168,7 @@ Control objects configure optimization and convergence settings.
 
 ```python
 control = mlm.LmerControl(
-    optimizer="COBYQA",
+    optimizer="auto",
     maxiter=10000,
     optCtrl={"final_tr_radius": 1e-6},
 )
@@ -173,11 +176,32 @@ control = mlm.LmerControl(
 
 **Parameters:**
 
-- `optimizer`: Optimization algorithm, such as `"COBYQA"`, `"L-BFGS-B"`, `"BFGS"`,
-  `"Nelder-Mead"`, or `"Powell"`. `mlm.LmerControl().optimizer` shows the default, and
-  `mixedlm.estimation.available_optimizers()` lists every installed choice.
+- `optimizer`: Optimization algorithm, default `"auto"`. It fits with L-BFGS-B
+  using exact native gradients of the profiled deviance. If that fit does not
+  converge, ends with a large gradient, or leaves a variance scale of a correlated
+  term near zero (any variance scale when `restart_edge=False`), COBYQA refits from
+  the same start and the fit with the lower deviance is kept. Without native
+  gradients (`use_rust=False`, no native extension, or compound-symmetry and AR(1)
+  covariances), `"auto"` uses COBYQA alone. Other choices include `"COBYQA"`
+  (derivative-free), `"L-BFGS-B"` (fast, but finite-difference gradients limit
+  its precision unless `use_analytic_gradient=True`), `"BFGS"`, `"Nelder-Mead"`,
+  `"Powell"`, and the NLopt algorithms `"nloptwrap_BOBYQA"`,
+  `"nloptwrap_NEWUOA"`, `"nloptwrap_PRAXIS"`, `"nloptwrap_SBPLX"`,
+  `"nloptwrap_COBYLA"`, and `"nloptwrap_NELDERMEAD"` from the `optimizers` extra.
+  `mixedlm.estimation.available_optimizers()` lists every installed solver;
+  `"auto"` is a fitting policy of `lmer()` and is not in that list.
 - `maxiter`: Maximum number of iterations (function evaluations for TNC and COBYLA)
-- `optCtrl`: Optimizer-specific options, such as COBYQA's `final_tr_radius`
+- `ftol`: Objective-change tolerance, default `1e-8`. NLopt optimizers treat it as
+  an absolute deviance tolerance, as lme4's `nloptwrap` does. `"auto"` uses its own
+  tight tolerances and ignores `ftol` and `gtol`.
+- `optCtrl`: Optimizer-specific options, such as COBYQA's `final_tr_radius` or an
+  evaluation limit `maxfev`. With `"auto"`, the options apply to the COBYQA stage,
+  and an evaluation limit (`maxfev` or `maxfun`) also bounds the L-BFGS-B stage.
+  NLopt optimizers accept `initial_step` (default 0.5, limited to a quarter of any
+  finite bound range), a relative `ftol`, `ftol_abs`, and `xtol_abs`.
+- `use_analytic_gradient`: Boolean, default `False`. Use exact native gradients
+  with an explicitly chosen L-BFGS-B, BFGS, TNC, SLSQP, or trust-constr optimizer
+  instead of finite differences. `"auto"` always uses them where available.
 - `restart_edge`: Boolean, default `True`. Before accepting a zero or near-zero variance
   scale, check nearby positive scales for a better likelihood. Restart the
   requested optimizer if a probe improves the objective. Iteration and explicit
@@ -199,7 +223,9 @@ control = mlm.GlmerControl(
 
 **Parameters:**
 
-- The outer optimizer settings are the same as `LmerControl`.
+- `optimizer`, `maxiter`, `ftol`, `optCtrl`, and `restart_edge` work as in
+  `LmerControl`, except that the default optimizer is `"COBYQA"` and `"auto"` is
+  not accepted.
 - `nAGQ0initStep`: Boolean, default `True`. Initialize a joint fit with the
   `nAGQ=0` covariance optimization. `False` starts joint optimization after one
   PIRLS evaluation at the starting covariance parameters. This setting has no
@@ -277,6 +303,10 @@ available. Pass `restart_edge=False` or `restart_edge=True` to override that
 choice for one fit without changing the stored control.
 
 The `method` and `maxiter` arguments select the solver and its base limit.
+`method` defaults to `"L-BFGS-B"` with finite-difference gradients unless the
+control enables `use_analytic_gradient`; pass `method="auto"` for the policy that
+`lmer()` uses by default. Custom deviance callables have no exact gradient, so
+`"auto"` runs COBYQA for them. The result's `optimizer` records the method used.
 The stored control supplies the appropriate `ftol`, `gtol`, and `xtol`
 tolerances and any `optCtrl` options, whose entries override generated options.
 For example, `lmerControl(optCtrl={"maxfev": 10})` passed to `mkLmerDevfun()`
