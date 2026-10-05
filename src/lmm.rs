@@ -1292,7 +1292,7 @@ mod prepared_tests {
         )
         .unwrap();
         assert_eq!(design.engine(), "levels");
-        assert_eq!(design.crossproducts.tiles.len(), levels);
+        assert_eq!(design.crossproducts.tiles.n_values(), levels);
         assert_eq!(design.crossproducts.dense_dimension(), 0);
     }
 
@@ -1327,7 +1327,7 @@ mod prepared_tests {
         assert!(independent.order.is_none());
         let tiles = &independent.crossproducts.tiles;
         assert_eq!(tiles.tile(0), [2.0, 0.5, 0.5, 1.25]);
-        assert_eq!(tiles.len(), 4 + 5);
+        assert_eq!(tiles.n_values(), 4 + 5);
         for pair in [(0, 2), (2, 0), (0, 4), (4, 0)] {
             // A tiny coupling across levels keeps its own tile after reordering.
             let design = design(&[(0, 1, 0.5), (pair.0, pair.1, 1e-300)]);

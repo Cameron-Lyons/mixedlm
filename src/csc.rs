@@ -691,7 +691,7 @@ impl LevelTiles {
     }
 
     /// Number of stored values, including both triangles of diagonal tiles.
-    pub fn len(&self) -> usize {
+    pub fn n_values(&self) -> usize {
         self.values.len()
     }
 
@@ -1201,7 +1201,7 @@ mod tests {
             }
             let expected = Mat::<f64>::identity(q, q) + lambda.transpose() * &dense * &lambda;
             let penalized = tiles.dense_from(&tiles.penalized(&factors));
-            let pattern = tiles.dense_from(&vec![1.0; tiles.len()]);
+            let pattern = tiles.dense_from(&vec![1.0; tiles.n_values()]);
             let rhs = Mat::from_fn(q, 2, |i, j| (i + 2 * j) as f64 / 4.0 - 3.0);
             let product = tiles.symmetric_product(&rhs);
             let expected_product = &dense * &rhs;

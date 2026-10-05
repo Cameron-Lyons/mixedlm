@@ -188,7 +188,7 @@ pub struct LevelCholesky<'a> {
 impl<'a> LevelCholesky<'a> {
     /// Factor values on block-diagonal `tiles` in place.
     pub fn factor(tiles: &'a LevelTiles, mut values: Vec<f64>) -> Result<Self, LinalgError> {
-        assert!(tiles.block_diagonal() && values.len() == tiles.len());
+        assert!(tiles.block_diagonal() && values.len() == tiles.n_values());
         for (width, span, _) in tiles.runs() {
             let values = &mut values[span];
             if width == 1 {
@@ -291,7 +291,7 @@ impl<'a> BlockedCholesky<'a> {
         leading: usize,
         mut values: Vec<f64>,
     ) -> Result<Self, LinalgError> {
-        assert_eq!(values.len(), tiles.len());
+        assert_eq!(values.len(), tiles.n_values());
         let first = tiles.start(leading);
         let dimension = tiles.dimension() - first;
         for level in 0..leading {
@@ -457,7 +457,7 @@ impl<'a> BlockedCholesky<'a> {
         let dimension = self.trailing.nrows();
         let mut trailing = Mat::zeros(dimension, dimension);
         dense_inverse(self.trailing.as_ref(), trailing.as_mut());
-        let mut inverse = vec![0.0; tiles.len()];
+        let mut inverse = vec![0.0; tiles.n_values()];
         for level in self.leading..tiles.n_levels() {
             let left = tiles.start(level) - first;
             for tile in tiles.column(level) {
@@ -645,7 +645,7 @@ impl SparseCholesky {
                 }
             }
         }
-        let mut inverse_sources = vec![0; tiles.len()];
+        let mut inverse_sources = vec![0; tiles.n_values()];
         for level in 0..tiles.n_levels() {
             let left = tiles.start(level);
             for tile in tiles.column(level) {
@@ -942,7 +942,7 @@ mod tests {
             }
         }
         let inverse = reference.solve(Mat::<f64>::identity(q, q));
-        let pattern = tiles.dense_from(&vec![1.0; tiles.len()]);
+        let pattern = tiles.dense_from(&vec![1.0; tiles.n_values()]);
         let selected = tiles.dense_from(&selected);
         for j in 0..q {
             for i in 0..q {
