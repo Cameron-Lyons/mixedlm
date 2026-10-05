@@ -355,7 +355,7 @@ def test_bootstrap_uses_fitted_controls_in_serial_and_worker_paths(n_jobs):
         _, result = fitted_with_controls(1e6)
         with (
             patch.object(laplace, "GLMMOptimizer", side_effect=record_optimizer),
-            patch.object(bootstrap, "ProcessPoolExecutor", ThreadPoolExecutor),
+            patch.object(bootstrap, "process_pool", ThreadPoolExecutor),
         ):
             samples = bootstrap.bootstrap_glmer(result, n_boot=3, seed=25, n_jobs=n_jobs)
     assert samples.n_failed == 0
@@ -382,8 +382,8 @@ def test_model_comparisons_retain_inner_controls(workflow, n_jobs):
         data, result = fitted_with_controls(1e6)
         with (
             patch.object(GlmerMod, "fit", record_fit),
-            patch.object(allfit, "ProcessPoolExecutor", ThreadPoolExecutor),
-            patch.object(drop1, "ProcessPoolExecutor", ThreadPoolExecutor),
+            patch.object(allfit, "process_pool", ThreadPoolExecutor),
+            patch.object(drop1, "process_pool", ThreadPoolExecutor),
         ):
             if workflow == "allfit":
                 comparison = allfit.allfit_glmer(

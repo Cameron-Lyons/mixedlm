@@ -1,46 +1,30 @@
 from __future__ import annotations
 
-import os
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from collections.abc import Callable
+from contextlib import nullcontext
 from dataclasses import dataclass
+from functools import partial
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
+from numpy.typing import NDArray
+
+from mixedlm._parallel import process_pool, resolve_n_jobs
 
 if TYPE_CHECKING:
     import pandas as pd
 
+    from mixedlm.families.base import Family
+    from mixedlm.formula.terms import Formula
+    from mixedlm.models.control import GlmerControl
     from mixedlm.models.glmer import GlmerResult
     from mixedlm.models.lmer import LmerResult
 
 
-SCIPY_OPTIMIZERS = [
-    "L-BFGS-B",
-    "Nelder-Mead",
-    "Powell",
-    "BFGS",
-    "TNC",
-    "SLSQP",
-    "COBYQA",
-]
+def _default_optimizers() -> list[str]:
+    from mixedlm.estimation.optimizers import COMPATIBILITY_OPTIMIZERS, available_optimizers
 
-
-def _get_available_optimizers() -> list[str]:
-    from mixedlm.estimation.optimizers import has_nlopt
-
-    optimizers = list(SCIPY_OPTIMIZERS)
-    if has_nlopt():
-        optimizers.extend(
-            [
-                "nloptwrap_BOBYQA",
-                "nloptwrap_NEWUOA",
-                "nloptwrap_PRAXIS",
-                "nloptwrap_SBPLX",
-                "nloptwrap_COBYLA",
-                "nloptwrap_NELDERMEAD",
-            ]
-        )
-    return optimizers
+    return [name for name in available_optimizers() if name not in COMPATIBILITY_OPTIMIZERS]
 
 
 @dataclass
@@ -171,63 +155,76 @@ class AllFitResult:
         return bool((max(deviances) - min(deviances)) < tol)
 
 
-def _allfit_lmer_worker(
-    args: tuple[Any, ...],
-) -> tuple[str, LmerResult | None, str | None, list[str]]:
+def _fit_with_optimizer(
+    fit: Callable[[str], LmerResult | GlmerResult], optimizer: str
+) -> tuple[LmerResult | GlmerResult | None, str | None, list[str]]:
+    try:
+        result = fit(optimizer)
+        messages = []
+        if not result.converged:
+            messages.append("Did not converge")
+        if result.isSingular():
+            messages.append("Singular fit")
+    except Exception as error:
+        return None, str(error), []
+    return result, None, messages
+
+
+def _run_allfit(
+    fit: Callable[[str], LmerResult | GlmerResult],
+    optimizers: list[str],
+    n_jobs: int,
+    verbose: bool,
+) -> AllFitResult:
+    """Fit once per optimizer, serially or in worker processes, with the same worker."""
+    workers = resolve_n_jobs(n_jobs, max_tasks=len(optimizers))
+    attempt = partial(_fit_with_optimizer, fit)
+    fits: dict[str, LmerResult | GlmerResult | None] = {}
+    errors: dict[str, str] = {}
+    warnings: dict[str, list[str]] = {}
+    with process_pool(workers) if workers > 1 else nullcontext() as executor:
+        run = map if executor is None else executor.map
+        for name, (result, error, messages) in zip(
+            optimizers, run(attempt, optimizers), strict=True
+        ):
+            fits[name] = result
+            warnings[name] = messages
+            if error is not None:
+                errors[name] = error
+            if verbose:
+                summary = f"ERROR: {error}" if result is None else f"deviance={result.deviance:.4f}"
+                print("; ".join([f"{name}: {summary}", *messages]))
+    return AllFitResult(fits=fits, errors=errors, warnings=warnings)
+
+
+def _refit_lmer(
+    formula: Formula,
+    data: pd.DataFrame,
+    REML: bool,
+    weights: NDArray[np.floating] | None,
+    offset: NDArray[np.floating] | None,
+    optimizer: str,
+) -> LmerResult:
     from mixedlm.models.lmer import LmerMod
 
-    opt_name, formula, data, REML, weights, offset = args
-
-    warnings_list: list[str] = []
-
-    try:
-        lmer_model = LmerMod(
-            formula,
-            data,
-            REML=REML,
-            weights=weights,
-            offset=offset,
-        )
-        fit = lmer_model.fit(method=opt_name)
-
-        if not fit.converged:
-            warnings_list.append("Did not converge")
-        if fit.isSingular():
-            warnings_list.append("Singular fit")
-
-        return (opt_name, fit, None, warnings_list)
-    except Exception as e:
-        return (opt_name, None, str(e), [])
+    model = LmerMod(formula, data, REML=REML, weights=weights, offset=offset)
+    return model.fit(method=optimizer)
 
 
-def _allfit_glmer_worker(
-    args: tuple[Any, ...],
-) -> tuple[str, GlmerResult | None, str | None, list[str]]:
+def _refit_glmer(
+    formula: Formula,
+    data: pd.DataFrame,
+    family: Family,
+    weights: NDArray[np.floating] | None,
+    offset: NDArray[np.floating] | None,
+    nAGQ: int,
+    control: GlmerControl,
+    optimizer: str,
+) -> GlmerResult:
     from mixedlm.models.glmer import GlmerMod
 
-    opt_name, formula, data, family, weights, offset, nAGQ, control = args
-
-    warnings_list: list[str] = []
-
-    try:
-        glmer_model = GlmerMod(
-            formula,
-            data,
-            family=family,
-            control=control,
-            weights=weights,
-            offset=offset,
-        )
-        fit = glmer_model.fit(method=opt_name, nAGQ=nAGQ)
-
-        if not fit.converged:
-            warnings_list.append("Did not converge")
-        if fit.isSingular():
-            warnings_list.append("Singular fit")
-
-        return (opt_name, fit, None, warnings_list)
-    except Exception as e:
-        return (opt_name, None, str(e), [])
+    model = GlmerMod(formula, data, family=family, control=control, weights=weights, offset=offset)
+    return model.fit(method=optimizer, nAGQ=nAGQ)
 
 
 def allfit_lmer(
@@ -237,66 +234,18 @@ def allfit_lmer(
     n_jobs: int = 1,
     verbose: bool = False,
 ) -> AllFitResult:
-    from mixedlm.models.lmer import LmerMod
+    """Refit an LMM with each optimizer.
 
+    ``n_jobs`` worker processes, or -1 for all CPUs, run the refits. Workers are
+    started without forking, so scripts need an ``if __name__ == "__main__":``
+    guard.
+    """
     if optimizers is None:
-        optimizers = _get_available_optimizers()
-
+        optimizers = _default_optimizers()
     weights = model.matrices.weights if np.any(model.matrices.weights != 1.0) else None
     offset = model.matrices.offset if np.any(model.matrices.offset != 0.0) else None
-
-    fits: dict[str, LmerResult | GlmerResult | None] = {}
-    errors: dict[str, str] = {}
-    warnings: dict[str, list[str]] = {}
-
-    if n_jobs == 1:
-        for opt_name in optimizers:
-            if verbose:
-                print(f"Fitting with {opt_name}...")
-
-            try:
-                lmer_model = LmerMod(
-                    model.formula,
-                    data,
-                    REML=model.REML,
-                    weights=weights,
-                    offset=offset,
-                )
-                fit = lmer_model.fit(method=opt_name)
-                fits[opt_name] = fit
-                warnings[opt_name] = []
-
-                if not fit.converged:
-                    warnings[opt_name].append("Did not converge")
-                if fit.isSingular():
-                    warnings[opt_name].append("Singular fit")
-
-            except Exception as e:
-                fits[opt_name] = None
-                errors[opt_name] = str(e)
-    else:
-        if n_jobs == -1:
-            n_jobs = os.cpu_count() or 1
-
-        tasks = [
-            (opt_name, model.formula, data, model.REML, weights, offset) for opt_name in optimizers
-        ]
-
-        with ProcessPoolExecutor(max_workers=n_jobs) as executor:
-            futures = {executor.submit(_allfit_lmer_worker, task): task[0] for task in tasks}
-
-            for future in as_completed(futures):
-                fut_opt_name, fut_fit, fut_error, fut_warn_list = future.result()
-
-                if verbose:
-                    print(f"Completed {fut_opt_name}")
-
-                fits[fut_opt_name] = fut_fit
-                if fut_error is not None:
-                    errors[fut_opt_name] = fut_error
-                warnings[fut_opt_name] = fut_warn_list
-
-    return AllFitResult(fits=fits, errors=errors, warnings=warnings)
+    fit = partial(_refit_lmer, model.formula, data, model.REML, weights, offset)
+    return _run_allfit(fit, optimizers, n_jobs, verbose)
 
 
 def allfit_glmer(
@@ -306,11 +255,14 @@ def allfit_glmer(
     n_jobs: int = 1,
     verbose: bool = False,
 ) -> AllFitResult:
-    from mixedlm.models.glmer import GlmerMod
+    """Refit a GLMM with each optimizer, keeping its quadrature and inner controls.
 
+    ``n_jobs`` worker processes, or -1 for all CPUs, run the refits. Workers are
+    started without forking, so scripts need an ``if __name__ == "__main__":``
+    guard.
+    """
     if optimizers is None:
-        optimizers = _get_available_optimizers()
-
+        optimizers = _default_optimizers()
     # Count-response formulas apply trial counts when rebuilding the matrices.
     prior_weights = (
         model.matrices.weights
@@ -319,67 +271,14 @@ def allfit_glmer(
     )
     weights = prior_weights if np.any(prior_weights != 1.0) else None
     offset = model.matrices.offset if np.any(model.matrices.offset != 0.0) else None
-
-    fits: dict[str, LmerResult | GlmerResult | None] = {}
-    errors: dict[str, str] = {}
-    warnings: dict[str, list[str]] = {}
-
-    if n_jobs == 1:
-        for opt_name in optimizers:
-            if verbose:
-                print(f"Fitting with {opt_name}...")
-
-            try:
-                glmer_model = GlmerMod(
-                    model.formula,
-                    data,
-                    family=model.family,
-                    control=model._refit_control(),
-                    weights=weights,
-                    offset=offset,
-                )
-                fit = glmer_model.fit(method=opt_name, nAGQ=model.nAGQ)
-                fits[opt_name] = fit
-                warnings[opt_name] = []
-
-                if not fit.converged:
-                    warnings[opt_name].append("Did not converge")
-                if fit.isSingular():
-                    warnings[opt_name].append("Singular fit")
-
-            except Exception as e:
-                fits[opt_name] = None
-                errors[opt_name] = str(e)
-    else:
-        if n_jobs == -1:
-            n_jobs = os.cpu_count() or 1
-
-        tasks = [
-            (
-                opt_name,
-                model.formula,
-                data,
-                model.family,
-                weights,
-                offset,
-                model.nAGQ,
-                model._refit_control(),
-            )
-            for opt_name in optimizers
-        ]
-
-        with ProcessPoolExecutor(max_workers=n_jobs) as executor:
-            futures = {executor.submit(_allfit_glmer_worker, task): task[0] for task in tasks}
-
-            for future in as_completed(futures):
-                fut_opt_name, fut_fit, fut_error, fut_warn_list = future.result()
-
-                if verbose:
-                    print(f"Completed {fut_opt_name}")
-
-                fits[fut_opt_name] = fut_fit
-                if fut_error is not None:
-                    errors[fut_opt_name] = fut_error
-                warnings[fut_opt_name] = fut_warn_list
-
-    return AllFitResult(fits=fits, errors=errors, warnings=warnings)
+    fit = partial(
+        _refit_glmer,
+        model.formula,
+        data,
+        model.family,
+        weights,
+        offset,
+        model.nAGQ,
+        model._refit_control(),
+    )
+    return _run_allfit(fit, optimizers, n_jobs, verbose)

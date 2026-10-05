@@ -9,7 +9,7 @@ The pilot coefficients and variance components define the alternative hypothesis
 import mixedlm as mlm
 
 model = mlm.lmer("Reaction ~ Days + (Days | Subject)", mlm.load_sleepstudy())
-power = mlm.powerSim(model, test="Days", nsim=200, seed=42)
+power = mlm.powerSim(model, test="Days", nsim=100, seed=42)
 print(power)
 ```
 
@@ -47,7 +47,7 @@ power estimate less representative of the intended study.
 
 ```python
 curve = mlm.powerCurve(
-    model, test="Days", along="Subject", values=[10, 18, 24, 30], nsim=100, seed=42
+    model, test="Days", along="Subject", values=[10, 18, 24, 30], nsim=20, seed=42
 )
 print(curve)
 curve.plot()  # requires the plots extra
@@ -108,7 +108,7 @@ model = mlm.glmer(
     "incidence / size ~ period + (1 | herd)", cbpp, family=mlm.families.Binomial()
 )
 curve = mlm.powerCurve(
-    model, test=model.matrices.fixed_names[1], along="herd", values=[10, 15, 20], nsim=100
+    model, test=model.matrices.fixed_names[1], along="herd", values=[10, 15, 20], nsim=20, seed=42
 )
 ```
 

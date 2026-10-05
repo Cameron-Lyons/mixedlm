@@ -3,7 +3,7 @@ Comprehensive benchmark suite comparing mixedlm performance.
 
 This module benchmarks:
 1. mixedlm (Python/Rust) vs lme4 (R) vs MixedModels.jl (Julia)
-2. Different REML algorithms (Newton, MM, AI-REML, Riemannian)
+2. Different mixedlm optimizers
 3. Scaling with problem size
 
 Requirements:
@@ -66,54 +66,37 @@ def generate_lmm_data(
     }
 
 
-def benchmark_mixedlm(data: dict, algorithm: str = "COBYQA") -> BenchmarkResult:
-    """Benchmark mixedlm fitting."""
-    from mixedlm import lFormula
+def benchmark_mixedlm(data: dict, algorithm: str | None = None) -> BenchmarkResult:
+    """Benchmark mixedlm fitting with the given optimizer, or the default one."""
+    import mixedlm as mlm
+    import pandas as pd
 
-    try:
-        import pandas as pd
+    df = pd.DataFrame(
+        {
+            "y": data["y"],
+            "x1": data["x"][:, 1] if data["n_fixed"] > 1 else np.zeros(data["n_obs"]),
+            "group": data["group"].astype(str),
+        }
+    )
+    formula = "y ~ x1 + (1 | group)" if data["n_fixed"] > 1 else "y ~ 1 + (1 | group)"
+    control = None if algorithm is None else mlm.LmerControl(optimizer=algorithm)
 
-        df = pd.DataFrame(
-            {
-                "y": data["y"],
-                "x1": data["x"][:, 1] if data["n_fixed"] > 1 else np.zeros(data["n_obs"]),
-                "group": data["group"].astype(str),
-            }
-        )
+    start = time.perf_counter()
+    result = mlm.lmer(formula, df, REML=True, control=control)
+    elapsed = time.perf_counter() - start
 
-        formula = "y ~ x1 + (1 | group)" if data["n_fixed"] > 1 else "y ~ 1 + (1 | group)"
-
-        start = time.perf_counter()
-        parsed = lFormula(formula, df)
-        from mixedlm.estimation import fit_lmm
-
-        result = fit_lmm(parsed, REML=True, optimizer=algorithm, verbose=0)
-        elapsed = time.perf_counter() - start
-
-        return BenchmarkResult(
-            name=f"mixedlm_{algorithm}",
-            n_obs=data["n_obs"],
-            n_groups=data["n_groups"],
-            n_fixed=data["n_fixed"],
-            n_random=1,
-            fit_time_ms=elapsed * 1000,
-            algorithm=algorithm,
-            package="mixedlm",
-            converged=result.converged,
-        )
-    except Exception as e:
-        return BenchmarkResult(
-            name=f"mixedlm_{algorithm}",
-            n_obs=data["n_obs"],
-            n_groups=data["n_groups"],
-            n_fixed=data["n_fixed"],
-            n_random=1,
-            fit_time_ms=float("nan"),
-            algorithm=algorithm,
-            package="mixedlm",
-            converged=False,
-            extra={"error": str(e)},
-        )
+    algorithm = algorithm or "default"
+    return BenchmarkResult(
+        name=f"mixedlm_{algorithm}",
+        n_obs=data["n_obs"],
+        n_groups=data["n_groups"],
+        n_fixed=data["n_fixed"],
+        n_random=1,
+        fit_time_ms=elapsed * 1000,
+        algorithm=algorithm,
+        package="mixedlm",
+        converged=result.converged,
+    )
 
 
 def benchmark_lme4(data: dict) -> BenchmarkResult:
@@ -263,26 +246,22 @@ def run_scaling_benchmark(
         data = generate_lmm_data(n_obs, n_groups)
 
         for _ in range(n_repeats):
-            result = benchmark_mixedlm(data, "COBYQA")
+            result = benchmark_mixedlm(data)
             results.append(result)
-            if not np.isnan(result.fit_time_ms):
-                print(f"  mixedlm (COBYQA): {result.fit_time_ms:.2f}ms")
+            print(f"  mixedlm: {result.fit_time_ms:.2f}ms")
 
-        result = benchmark_lme4(data)
-        results.append(result)
-        if not np.isnan(result.fit_time_ms):
-            print(f"  lme4: {result.fit_time_ms:.2f}ms")
-
-        result = benchmark_mixedmodels_jl(data)
-        results.append(result)
-        if not np.isnan(result.fit_time_ms):
-            print(f"  MixedModels.jl: {result.fit_time_ms:.2f}ms")
+        for result in (benchmark_lme4(data), benchmark_mixedmodels_jl(data)):
+            results.append(result)
+            if result.extra:
+                print(f"  {result.package}: skipped ({result.extra['error']})")
+            else:
+                print(f"  {result.package}: {result.fit_time_ms:.2f}ms")
 
     return results
 
 
 def run_algorithm_comparison(n_obs: int = 1000, n_groups: int = 50) -> list[BenchmarkResult]:
-    """Compare different REML algorithms available in mixedlm."""
+    """Compare optimizers available in mixedlm."""
     print(f"\n{'=' * 60}")
     print(f"Algorithm Comparison: n_obs={n_obs}, n_groups={n_groups}")
     print("=" * 60)
@@ -296,8 +275,7 @@ def run_algorithm_comparison(n_obs: int = 1000, n_groups: int = 50) -> list[Benc
         result = benchmark_mixedlm(data, algo)
         results.append(result)
         status = "✓" if result.converged else "✗"
-        time_str = f"{result.fit_time_ms:.2f}ms" if not np.isnan(result.fit_time_ms) else "N/A"
-        print(f"  {algo:15s}: {time_str:>10s} [{status}]")
+        print(f"  {algo:15s}: {result.fit_time_ms:>8.2f}ms [{status}]")
 
     return results
 

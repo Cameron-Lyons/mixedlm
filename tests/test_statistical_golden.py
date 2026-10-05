@@ -16,6 +16,8 @@ from scipy import linalg, optimize, stats
 
 from tests._lmer_data import CBPP
 
+pytestmark = pytest.mark.installed_wheel
+
 _CBPP_FLOAT_ATOL = 1e-6
 
 

@@ -362,6 +362,17 @@ def _random_generator(random_state: int | np.random.Generator | None) -> np.rand
     return np.random.default_rng(random_state)
 
 
+def _group_codes(groups: Any, n_samples: int) -> NDArray[np.intp]:
+    """Validate one label per observation and number groups by first appearance."""
+    group_values = np.asarray(groups)
+    if group_values.ndim != 1 or len(group_values) != n_samples:
+        raise ValueError("groups must be a 1D array with one value per observation")
+    if bool(np.asarray(pd.isna(group_values)).any()):
+        raise ValueError("groups cannot contain missing values")
+    codes, _ = pd.factorize(group_values, sort=False)
+    return codes
+
+
 def make_folds(
     n_samples: int,
     cv: int = 5,
@@ -398,14 +409,8 @@ def make_folds(
             np.sort(chunk).astype(np.intp, copy=False) for chunk in np.array_split(order, cv)
         ]
     else:
-        group_values = np.asarray(groups)
-        if group_values.ndim != 1 or len(group_values) != n_samples:
-            raise ValueError("groups must be a 1D array with one value per observation")
-        if bool(np.asarray(pd.isna(group_values)).any()):
-            raise ValueError("groups cannot contain missing values")
-
-        codes, unique_groups = pd.factorize(group_values, sort=False)
-        n_groups = len(unique_groups)
+        codes = _group_codes(groups, n_samples)
+        n_groups = int(codes.max()) + 1
         if cv > n_groups:
             raise ValueError("cv cannot exceed the number of unique groups")
 
@@ -474,15 +479,7 @@ def _explicit_folds(
     except TypeError:
         raise TypeError("cv must be an integer or an iterable of train/test splits") from None
 
-    group_codes = None
-    if groups is not None:
-        group_values = np.asarray(groups)
-        if group_values.ndim != 1 or len(group_values) != n_samples:
-            raise ValueError("groups must be a 1D array with one value per observation")
-        if bool(np.asarray(pd.isna(group_values)).any()):
-            raise ValueError("groups cannot contain missing values")
-        group_codes, _ = pd.factorize(group_values, sort=False)
-
+    group_codes = None if groups is None else _group_codes(groups, n_samples)
     membership = np.full(n_samples, -1, dtype=np.int64)
     folds: list[CrossValidationFold] = []
     for fold_number, split in enumerate(supplied):

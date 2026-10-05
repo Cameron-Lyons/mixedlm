@@ -66,7 +66,7 @@ def test_invalid_refit_is_counted_and_leaves_the_whole_sample_missing(fitted, jo
     setattr(refit, field, value)
     with (
         patch.object(bootstrap, f"_refit_{kind}_response", return_value=refit),
-        patch.object(bootstrap, "ProcessPoolExecutor", ThreadPoolExecutor),
+        patch.object(bootstrap, "process_pool", ThreadPoolExecutor),
     ):
         actual = getattr(bootstrap, f"bootstrap_{kind}")(result, n_boot=1, seed=7, n_jobs=jobs)
     assert actual.n_failed == 1
@@ -88,7 +88,7 @@ def test_invalid_residual_scale_cannot_leave_finite_coefficient_samples(fitted, 
     refit.sigma = sigma
     with (
         patch.object(bootstrap, "_refit_lmer_response", return_value=refit),
-        patch.object(bootstrap, "ProcessPoolExecutor", ThreadPoolExecutor),
+        patch.object(bootstrap, "process_pool", ThreadPoolExecutor),
     ):
         actual = bootstrap.bootstrap_lmer(result, n_boot=1, seed=7, n_jobs=jobs)
     assert actual.n_failed == 1
@@ -105,7 +105,7 @@ def test_inner_glmm_nonconvergence_is_rejected_even_if_outer_status_is_true(fitt
     refit.pirls_converged = False
     with (
         patch.object(bootstrap, "_refit_glmer_response", return_value=refit),
-        patch.object(bootstrap, "ProcessPoolExecutor", ThreadPoolExecutor),
+        patch.object(bootstrap, "process_pool", ThreadPoolExecutor),
     ):
         actual = bootstrap.bootstrap_glmer(result, n_boot=1, seed=7, n_jobs=jobs)
     assert actual.n_failed == 1
@@ -126,7 +126,7 @@ def test_later_valid_refits_survive_an_earlier_failure(fitted, jobs):
             f"_refit_{kind}_response",
             side_effect=[first, RuntimeError("refit failed"), last],
         ),
-        patch.object(bootstrap, "ProcessPoolExecutor", ThreadPoolExecutor),
+        patch.object(bootstrap, "process_pool", ThreadPoolExecutor),
     ):
         actual = getattr(bootstrap, f"bootstrap_{kind}")(result, n_boot=3, seed=7, n_jobs=jobs)
     assert actual.n_failed == 1
@@ -211,7 +211,7 @@ def test_missing_refit_components_are_counted_as_failed_samples(fitted, jobs, mi
     delattr(refit, missing)
     with (
         patch.object(bootstrap, f"_refit_{kind}_response", return_value=refit),
-        patch.object(bootstrap, "ProcessPoolExecutor", ThreadPoolExecutor),
+        patch.object(bootstrap, "process_pool", ThreadPoolExecutor),
     ):
         actual = getattr(bootstrap, f"bootstrap_{kind}")(result, n_boot=1, seed=7, n_jobs=jobs)
     assert actual.n_failed == 1
@@ -227,7 +227,7 @@ def test_numpy_boolean_success_and_zero_variance_components_remain_valid(fitted,
     refit.theta[:] = 0.0
     with (
         patch.object(bootstrap, f"_refit_{kind}_response", return_value=refit),
-        patch.object(bootstrap, "ProcessPoolExecutor", ThreadPoolExecutor),
+        patch.object(bootstrap, "process_pool", ThreadPoolExecutor),
     ):
         actual = getattr(bootstrap, f"bootstrap_{kind}")(result, n_boot=2, seed=7, n_jobs=jobs)
     assert actual.n_failed == 0

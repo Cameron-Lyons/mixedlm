@@ -1,11 +1,8 @@
 """Failure details remain useful across model types and worker counts."""
 
-import multiprocessing
 import pickle
-from concurrent.futures import ProcessPoolExecutor
 from contextlib import ExitStack, contextmanager
 from dataclasses import FrozenInstanceError, fields
-from functools import partial
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -92,7 +89,7 @@ def test_mixed_failures_identify_rows_stages_and_messages(model, jobs):
         return {future}, pending - {future}
 
     with (
-        patch.object(bootstrap, "ProcessPoolExecutor", ImmediateExecutor),
+        patch.object(bootstrap, "process_pool", ImmediateExecutor),
         patch.object(bootstrap, "wait", side_effect=newest_first),
         model_outputs(
             kind,
@@ -151,7 +148,7 @@ def test_invalid_simulations_are_not_refitted_and_later_samples_survive(model, j
     if isinstance(invalid, list) and invalid != [1.0]:
         invalid = np.full(response.shape, invalid[0])
     with (
-        patch.object(bootstrap, "ProcessPoolExecutor", ImmediateExecutor),
+        patch.object(bootstrap, "process_pool", ImmediateExecutor),
         model_outputs(kind, result, simulations=[invalid, response]) as refit,
     ):
         actual = bootMer(result, nsim=2, seed=2, n_jobs=jobs)
@@ -174,7 +171,7 @@ def test_missing_refit_attributes_are_classified(model, jobs, field):
     fitted = valid_fit(result)
     delattr(fitted, field)
     with (
-        patch.object(bootstrap, "ProcessPoolExecutor", ImmediateExecutor),
+        patch.object(bootstrap, "process_pool", ImmediateExecutor),
         model_outputs(kind, result, refits=[fitted]),
     ):
         actual = bootMer(result, nsim=1, seed=1, n_jobs=jobs)
@@ -192,7 +189,7 @@ def test_missing_refit_attributes_are_classified(model, jobs, field):
 def test_success_and_legacy_results_have_empty_diagnostics(model, jobs):
     kind, result = model
     with (
-        patch.object(bootstrap, "ProcessPoolExecutor", ImmediateExecutor),
+        patch.object(bootstrap, "process_pool", ImmediateExecutor),
         model_outputs(kind, result),
     ):
         actual = bootMer(result, nsim=3, seed=3, n_jobs=jobs)
@@ -227,14 +224,10 @@ class ExplodingSimulationResult(NlmerResult):
     "result_type,stage",
     [(ExplodingRefitResult, "refit"), (ExplodingSimulationResult, "simulation")],
 )
-def test_spawn_preserves_details_without_serializing_exceptions(result_type, stage):
+def test_worker_processes_preserve_details_without_serializing_exceptions(result_type, stage):
     result = make_nonlinear_result()
     result = result_type(**{f.name: getattr(result, f.name) for f in fields(result)})
-    context = multiprocessing.get_context("spawn")
-    with patch.object(
-        bootstrap, "ProcessPoolExecutor", partial(ProcessPoolExecutor, mp_context=context)
-    ):
-        parallel = bootMer(result, nsim=3, seed=42, n_jobs=2)
+    parallel = bootMer(result, nsim=3, seed=42, n_jobs=2)
     serial = bootMer(result, nsim=3, seed=42)
     assert parallel.failures == serial.failures
     assert parallel.n_failed == 3
@@ -292,7 +285,7 @@ def test_shape_errors_identify_the_component_and_expected_dimensions(model, comp
 def test_worker_preparation_errors_are_reported(model):
     kind, result = model
     with (
-        patch.object(bootstrap, "ProcessPoolExecutor", ImmediateExecutor),
+        patch.object(bootstrap, "process_pool", ImmediateExecutor),
         patch.object(bootstrap, "deepcopy", side_effect=RuntimeError("copy failed")),
     ):
         actual = bootMer(result, nsim=2, seed=42, n_jobs=2)

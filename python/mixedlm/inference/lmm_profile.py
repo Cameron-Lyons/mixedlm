@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import os
 import warnings
 from collections.abc import Callable
-from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, replace
 from numbers import Integral
 from typing import TYPE_CHECKING, Any
@@ -14,6 +12,7 @@ import numpy as np
 from numpy.typing import NDArray
 from scipy import linalg, optimize, stats
 
+from mixedlm._parallel import process_pool, resolve_n_jobs
 from mixedlm.estimation.reml import (
     _build_theta_bounds,
     _count_theta,
@@ -200,13 +199,7 @@ def _grid(lower: float, upper: float, center: float, n_points: int) -> NDArray[n
 def _validate_options(n_points: int, n_jobs: int) -> int:
     if isinstance(n_points, (bool, np.bool_)) or not isinstance(n_points, Integral) or n_points < 3:
         raise ValueError("n_points must be an integer of at least 3")
-    if (
-        isinstance(n_jobs, (bool, np.bool_))
-        or not isinstance(n_jobs, Integral)
-        or (n_jobs != -1 and n_jobs < 1)
-    ):
-        raise ValueError("n_jobs must be a positive integer or -1")
-    return (os.cpu_count() or 1) if n_jobs == -1 else int(n_jobs)
+    return resolve_n_jobs(n_jobs)
 
 
 def _reference(
@@ -249,13 +242,12 @@ def _profile_one(task: tuple[Any, ...]) -> tuple[str, ProfileResult]:
     return name, ProfileResult(name, values, zeta, profile.mle, lower, upper, level)
 
 
-def _run_tasks(
-    worker: Callable[..., Any], tasks: list[Any], n_jobs: int, executor_factory: Callable[..., Any]
-) -> list[Any]:
-    if n_jobs == 1:
+def _run_tasks(worker: Callable[..., Any], tasks: list[Any], n_jobs: int) -> list[Any]:
+    workers = min(n_jobs, len(tasks))
+    if workers <= 1:
         return [worker(task) for task in tasks]
     try:
-        executor = executor_factory(max_workers=min(n_jobs, len(tasks)))
+        executor = process_pool(workers)
     except (NotImplementedError, OSError) as error:
         warnings.warn(
             "Process-based parallel profiling is unavailable; "
@@ -274,8 +266,6 @@ def likelihood_profiles(
     n_points: int,
     level: float,
     n_jobs: int,
-    *,
-    executor_factory: Callable[..., Any] = ProcessPoolExecutor,
 ) -> dict[str, ProfileResult]:
     level = _validate_confidence_level(level)
     jobs = _validate_options(n_points, n_jobs)
@@ -302,7 +292,7 @@ def likelihood_profiles(
         )
         for name in selected
     ]
-    return dict(_run_tasks(_profile_one, tasks, jobs, executor_factory))
+    return dict(_run_tasks(_profile_one, tasks, jobs))
 
 
 def _surface_row(task: tuple[Any, ...]) -> NDArray[np.floating]:
@@ -331,8 +321,6 @@ def likelihood_surface(
     n_points: int,
     level: float,
     n_jobs: int,
-    *,
-    executor_factory: Callable[..., Any] = ProcessPoolExecutor,
 ) -> Profile2DResult:
     level = _validate_confidence_level(level)
     jobs = _validate_options(n_points, n_jobs)
@@ -360,7 +348,7 @@ def likelihood_surface(
     tasks = [
         (likelihood, optimum, indices, float(first), grids[1], second_mle) for first in grids[0]
     ]
-    zeta = np.stack(_run_tasks(_surface_row, tasks, jobs, executor_factory))
+    zeta = np.stack(_run_tasks(_surface_row, tasks, jobs))
     return Profile2DResult(
         param1,
         param2,

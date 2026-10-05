@@ -1,6 +1,15 @@
 # Utilities
 
-This page documents utility functions for working with mixed models.
+This page documents utility functions for working with mixed models. The examples
+use a sleepstudy fit:
+
+```python
+import mixedlm as mlm
+import numpy as np
+
+data = mlm.load_sleepstudy()
+model = mlm.lmer("Reaction ~ Days + (Days | Subject)", data)
+```
 
 ## lme4 Compatibility
 
@@ -11,8 +20,6 @@ Functions for compatibility with R's lme4 package.
 Extract residual standard deviation.
 
 ```python
-import mixedlm as mlm
-
 s = mlm.sigma(model)
 ```
 
@@ -78,12 +85,12 @@ X = mlm.getME(model, "X")
 - `"theta"`: Variance parameters
 - `"Lambda"`: Relative covariance factor
 - `"beta"`: Fixed effects
-- `"b"`: Random effects (spherical)
-- `"u"`: Random effects (conditional modes)
+- `"b"`: Conditional modes of the random effects
+- `"u"`: Spherical random effects, `b = Lambda @ u`
 
 ### fortify
 
-Add model diagnostics to data.
+Add fitted values and residuals to data.
 
 ```python
 augmented = mlm.fortify(model, data)
@@ -93,8 +100,8 @@ augmented = mlm.fortify(model, data)
 
 - `.fitted`: Fitted values
 - `.resid`: Residuals
-- `.hat`: Leverage values
-- `.cooksd`: Cook's distance
+- `.fixed`: Fixed-effects contribution to the fitted values
+- `.mu`: Response-scale fitted values (GLMMs only)
 
 ### devcomp
 
@@ -102,16 +109,19 @@ Get deviance components.
 
 ```python
 dc = mlm.devcomp(model)
+dc.cmp["pwrss"]  # Penalized weighted residual sum of squares
 ```
 
-**Returns:** DevComp object with deviance breakdown
+**Returns:** `DevComp` with a `cmp` dictionary of deviance components (such as
+`dev`, `REML`, `logLik`, `wrss`, `ussq`, and `pwrss`) and a `dims` dictionary of
+model dimensions (`n`, `p`, `q`, and `ngrps`).
 
 ### lmList
 
 Fit separate linear models for each group.
 
 ```python
-lm_dict = mlm.lmList("y ~ x | group", data)
+lm_dict = mlm.lmList("Reaction ~ Days | Subject", data)
 ```
 
 This uses the built-in formula encoder and NumPy least squares, including
@@ -126,7 +136,8 @@ an optional pooled fit
 Check if random effects are nested.
 
 ```python
-nested = mlm.isNested(data['classroom'], data['school'])
+pastes = mlm.load_pastes()
+nested = mlm.isNested(pastes["sample"], pastes["batch"])
 ```
 
 **Returns:** Boolean indicating if first factor is nested in second
@@ -140,8 +151,6 @@ Functions for converting between variance parameterizations.
 Convert standard deviations and correlations to covariance matrix.
 
 ```python
-import numpy as np
-
 sd = np.array([2.0, 1.5])
 corr = np.array([[1.0, 0.3], [0.3, 1.0]])
 cov = mlm.sdcor2cov(sd, corr)
@@ -176,9 +185,9 @@ compound-symmetry, and AR(1) random effects.
 
 ```python
 components = mlm.vcconv(
-    result.theta,
-    result.matrices.random_structures,
-    sigma=result.sigma,  # Use 1.0 for a GLMM.
+    model.theta,
+    model.matrices.random_structures,
+    sigma=model.sigma,  # Use 1.0 for a GLMM.
     to="varcov",
 )
 ```
@@ -204,9 +213,14 @@ Choose `ordering="natural"` to retain the original variable order during
 factorization. Solutions always follow the original row order.
 
 ```python
+import scipy.sparse as sp
+
 from mixedlm import SparseCholeskySymbolic
 
 # A is a square scipy.sparse CSC matrix; rhs has shape (A.shape[0], n_rhs).
+A = sp.csc_matrix(np.array([[4.0, 1.0, 0.0], [1.0, 3.0, 1.0], [0.0, 1.0, 2.0]]))
+rhs = np.ones((3, 2))
+
 symbolic = SparseCholeskySymbolic(
     A.indices.astype("int64"), A.indptr.astype("int64"), A.shape[0],
     ordering="amd",
@@ -222,15 +236,13 @@ matrices and stored lower triangles are both accepted, including valid CSC
 columns with unsorted or duplicate entries. Numeric factorization reports a
 `ValueError` when the matrix is not positive definite.
 
-Symbolic analysis, factorization, solves, and determinant calculation release
-the Python interpreter lock. Factors can be reused across threads. Each call
-copies its array inputs before releasing the lock, so subsequent changes to
-those arrays do not affect work already in progress. `solve` accepts strided
-right-hand sides and returns an independent C-contiguous `float64` array.
+Analysis, factorization, solves, and determinants release the GIL, so factors
+can be shared across threads. Inputs are copied first; later changes to the
+caller's arrays do not affect work in progress. `solve` accepts strided
+right-hand sides and returns a new C-contiguous `float64` array.
 
-`python benchmarks/benchmark_sparse_ordering.py` compares both orderings on a
-hub system, reports factor storage and median run times, and checks solutions
-and determinants against its closed-form Schur complement.
+`pytest tests/test_benchmark.py -k sparse_hub_ordering --benchmark-only` compares
+both orderings on a hub system whose fill depends on the ordering.
 
 ## EM-REML Initialization
 
@@ -277,11 +289,11 @@ Simulate responses before fitting, using the same variance-parameter ordering
 and covariance structures as the model optimizers.
 
 ```python
-formula = mlm.set_cov_type("y ~ x + (x | g)", "cs")
+formula = mlm.set_cov_type("Reaction ~ Days + (Days | Subject)", "cs")
 simulated = mlm.simulate_formula(
     formula,
     data,
-    beta={"(Intercept)": 1.0, "x": 0.5},
+    beta={"(Intercept)": 250.0, "Days": 10.0},
     theta=[0.8, 0.25],
     seed=42,
 )
@@ -319,11 +331,6 @@ mlm.is_mixed_formula("y ~ x")            # False
 ### Extracting Model Information
 
 ```python
-import mixedlm as mlm
-
-data = mlm.load_sleepstudy()
-model = mlm.lmer("Reaction ~ Days + (Days | Subject)", data)
-
 # Residual SD
 print(f"Sigma: {mlm.sigma(model)}")
 
@@ -352,17 +359,15 @@ Lambda = mlm.getME(model, "Lambda")
 ### Adding Diagnostics to Data
 
 ```python
-# Fortify adds residuals, fitted values, etc.
+# Fortify adds fitted values and residuals
 augmented = mlm.fortify(model, data)
 print(augmented.columns.tolist())
-# [..., '.fitted', '.resid', '.hat', '.cooksd', ...]
+# ['Reaction', 'Days', 'Subject', '.fitted', '.resid', '.fixed']
 ```
 
 ### Variance Conversions
 
 ```python
-import numpy as np
-
 # Standard deviations and correlation
 sd = np.array([2.0, 1.5])
 corr = np.array([[1.0, 0.3], [0.3, 1.0]])
@@ -410,15 +415,15 @@ print(subject_fit["residuals"])
 ### Checking Nesting
 
 ```python
-# Check if group2 is nested within group1
-nested = mlm.isNested(data['classroom'], data['school'])
-print(f"Classrooms nested in schools: {nested}")
+# Check whether samples are nested within batches
+nested = mlm.isNested(pastes["sample"], pastes["batch"])
+print(f"Samples nested in batches: {nested}")
 ```
 
 ### Deviance Components
 
 ```python
 dc = mlm.devcomp(model)
-print(f"Deviance: {dc.deviance}")
-print(f"REML: {dc.REML}")
+print(f"REML criterion: {dc.cmp['REML']}")
+print(f"Observations: {dc.dims['n']}")
 ```

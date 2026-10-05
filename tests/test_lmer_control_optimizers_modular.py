@@ -270,11 +270,9 @@ class TestCobyqaOptimizer:
         result_cobyqa = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY, control=ctrl_cobyqa)
         result_lbfgsb = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY, control=ctrl_lbfgsb)
 
-        assert abs(result_cobyqa.deviance - result_lbfgsb.deviance) < 0.1
-        fe_cobyqa = result_cobyqa.fixef()
-        fe_lbfgsb = result_lbfgsb.fixef()
-        assert abs(fe_cobyqa["(Intercept)"] - fe_lbfgsb["(Intercept)"]) < 1.0
-        assert abs(fe_cobyqa["Days"] - fe_lbfgsb["Days"]) < 0.5
+        assert result_cobyqa.deviance == pytest.approx(result_lbfgsb.deviance, abs=1e-6)
+        np.testing.assert_allclose(result_cobyqa.beta, result_lbfgsb.beta, rtol=0, atol=1e-4)
+        np.testing.assert_allclose(result_cobyqa.theta, result_lbfgsb.theta, rtol=0, atol=1e-4)
 
     def test_has_cobyqa_function(self) -> None:
         from mixedlm.estimation.optimizers import has_cobyqa
@@ -282,9 +280,9 @@ class TestCobyqaOptimizer:
         assert has_cobyqa() is True
 
     def test_allfit_includes_cobyqa(self) -> None:
-        from mixedlm.inference.allfit import _get_available_optimizers
+        from mixedlm.inference.allfit import _default_optimizers
 
-        optimizers = _get_available_optimizers()
+        optimizers = _default_optimizers()
         assert "COBYQA" in optimizers
 
 
@@ -328,15 +326,18 @@ class TestNloptOptimizer:
         data = CBPP.copy()
         data["y"] = data["incidence"] / data["size"]
 
-        ctrl = glmerControl(optimizer="nloptwrap_BOBYQA")
-        result = glmer(
-            "y ~ period + (1 | herd)",
-            data,
-            family=families.Binomial(),
-            weights=data["size"].values,
-            control=ctrl,
-        )
-        assert result.converged
+        fits = [
+            glmer(
+                "y ~ period + (1 | herd)",
+                data,
+                family=families.Binomial(),
+                weights=data["size"].values,
+                control=glmerControl(optimizer=optimizer),
+            )
+            for optimizer in ("nloptwrap_BOBYQA", "COBYQA")
+        ]
+        assert fits[0].converged
+        assert fits[0].deviance == pytest.approx(fits[1].deviance, abs=1e-5)
 
     def test_nlopt_vs_lbfgsb_consistency(self, has_nlopt: bool) -> None:
         if not has_nlopt:
@@ -345,13 +346,12 @@ class TestNloptOptimizer:
         ctrl_nlopt = lmerControl(optimizer="nloptwrap_BOBYQA")
         ctrl_lbfgsb = lmerControl(optimizer="L-BFGS-B")
 
-        result_nlopt = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY, control=ctrl_nlopt)
-        result_lbfgsb = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY, control=ctrl_lbfgsb)
+        result_nlopt = lmer("Reaction ~ Days + (Days | Subject)", SLEEPSTUDY, control=ctrl_nlopt)
+        result_lbfgsb = lmer("Reaction ~ Days + (Days | Subject)", SLEEPSTUDY, control=ctrl_lbfgsb)
 
-        assert abs(result_nlopt.deviance - result_lbfgsb.deviance) < 0.1
-        fe_nlopt = result_nlopt.fixef()
-        fe_lbfgsb = result_lbfgsb.fixef()
-        assert abs(fe_nlopt["(Intercept)"] - fe_lbfgsb["(Intercept)"]) < 1.0
+        assert result_nlopt.converged
+        assert result_nlopt.deviance == pytest.approx(result_lbfgsb.deviance, abs=1e-4)
+        np.testing.assert_allclose(result_nlopt.beta, result_lbfgsb.beta, rtol=0, atol=1e-2)
 
     def test_has_nlopt_function(self) -> None:
         from mixedlm.estimation.optimizers import has_nlopt
@@ -363,9 +363,9 @@ class TestNloptOptimizer:
         if not has_nlopt:
             pytest.skip("nlopt not installed")
 
-        from mixedlm.inference.allfit import _get_available_optimizers
+        from mixedlm.inference.allfit import _default_optimizers
 
-        optimizers = _get_available_optimizers()
+        optimizers = _default_optimizers()
         assert "nloptwrap_BOBYQA" in optimizers
 
     def test_nlopt_control_valid(self) -> None:

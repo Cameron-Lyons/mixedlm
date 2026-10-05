@@ -7,7 +7,9 @@ import sys
 import textwrap
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from pathlib import Path
 
+import mixedlm
 import pytest
 from mixedlm.estimation.laplace import _native_glmm_args, _prepare_native_glmm
 from numpy.testing import assert_array_equal
@@ -15,6 +17,8 @@ from numpy.testing import assert_array_equal
 from tests.test_glmm_final_state import mode_problem
 
 native = pytest.importorskip("mixedlm._rust")
+
+pytestmark = pytest.mark.installed_wheel
 
 
 @pytest.mark.parametrize("kind", ["gaussian", "binomial", "poisson"])
@@ -33,6 +37,10 @@ def test_shared_problem_matches_stateless_evaluations_in_threads(kind, layout, o
     matrices, family, theta = mode_problem(kind, layout, n_obs=2048, n_groups=128)
     problem = _prepare_native_glmm(matrices, family)
     cases = [(theta * scale, matrices.offset + scale / 10) for scale in [0, 0.7, 1.3]]
+    # A zero final variance changes the sparse design pattern shared by the problem.
+    boundary = theta.copy()
+    boundary[-1] = 0.0
+    cases.append((boundary, matrices.offset - 0.05))
     expected = []
     for current, offset in cases:
         args = list(_native_glmm_args(current, matrices, family))
@@ -73,15 +81,17 @@ def test_detached_errors_do_not_damage_shared_problem():
         assert_array_equal(value, reference)
 
 
+@pytest.mark.parametrize("entry", ["prepared", "stateless"])
 @pytest.mark.parametrize("change_layout", [False, True])
-def test_evaluation_releases_interpreter_lock_and_snapshots_parameters(change_layout):
+def test_evaluation_releases_interpreter_lock_and_snapshots_parameters(entry, change_layout):
     # Isolate the long switch interval from the test runner and other tests.
-    script = textwrap.dedent("""
+    script = f"ENTRY = {entry!r}\n" + textwrap.dedent("""
         import json
         import sys
         import threading
         import numpy as np
-        from mixedlm.estimation.laplace import _prepare_native_glmm
+        from mixedlm import _rust
+        from mixedlm.estimation.laplace import _native_glmm_args, _prepare_native_glmm
         from tests.test_glmm_final_state import mode_problem
 
         assert getattr(sys, "_is_gil_enabled", lambda: True)(), "This test requires the GIL"
@@ -90,7 +100,15 @@ def test_evaluation_releases_interpreter_lock_and_snapshots_parameters(change_la
         backing = np.zeros(2 * matrices.n_obs)
         backing[::2] = matrices.offset + 0.2
         offset = backing[::2]
-        expected = problem.evaluate(theta, 31, offset=offset)
+        args = list(_native_glmm_args(theta, matrices, family))
+        args[7:9] = offset, theta
+
+        def solve():
+            if ENTRY == "prepared":
+                return problem.evaluate(theta, 31, offset=offset)
+            return _rust.glmm_deviance(*args, 31)
+
+        expected = solve()
         started = threading.Event()
         finished = threading.Event()
         outcome = []
@@ -98,7 +116,7 @@ def test_evaluation_releases_interpreter_lock_and_snapshots_parameters(change_la
         def evaluate():
             started.set()
             try:
-                outcome.append(problem.evaluate(theta, 31, offset=offset))
+                outcome.append(solve())
             finally:
                 finished.set()
 
@@ -118,16 +136,24 @@ def test_evaluation_releases_interpreter_lock_and_snapshots_parameters(change_la
     """)
     if change_layout:
         script = script.replace("theta[:] = 2", "theta[:] = 2; theta.shape = ()")
+    root = Path(__file__).resolve().parents[1]
+    python = Path(mixedlm.__file__).resolve().parents[1]
     # Test GIL release explicitly, regardless of the parent's current GIL state.
     env = dict(
         os.environ,
+        PYTHONPATH=os.pathsep.join([str(python), str(root)]),
         PYTHON_GIL="1",
         OPENBLAS_NUM_THREADS="1",
         OMP_NUM_THREADS="1",
         RAYON_NUM_THREADS="1",
     )
     result = subprocess.run(
-        [sys.executable, "-c", script], env=env, text=True, capture_output=True, timeout=40
+        [sys.executable, "-c", script],
+        env=env,
+        cwd=root,
+        text=True,
+        capture_output=True,
+        timeout=40,
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert json.loads(result.stdout)["progressed"], result.stdout

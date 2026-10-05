@@ -127,6 +127,8 @@ class GlmerResult(MerResultMixin):
     pirls_maxiter: int | None = None
     pirls_tol: float = 1e-6
     joint_fit: bool = False
+    message: str = ""
+    optimizer: str = ""
 
     def _refit_control(self) -> GlmerControl:
         """Carry the fitted inner settings into formula-based refitting paths."""
@@ -1631,6 +1633,7 @@ class GlmerResult(MerResultMixin):
         )
 
         start = kwargs.pop("start", self.theta)
+        kwargs.setdefault("method", "L-BFGS-B")
         opt_result = optimizer.optimize(start=start, **kwargs)
 
         return GlmerResult(
@@ -1648,6 +1651,8 @@ class GlmerResult(MerResultMixin):
             pirls_maxiter=optimizer.pirls_maxiter,
             pirls_tol=optimizer.pirls_tol,
             joint_fit=opt_result.joint_fit,
+            message=opt_result.message,
+            optimizer=kwargs["method"],
         )
 
     def refitML(self) -> GlmerResult:

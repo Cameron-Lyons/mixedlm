@@ -2,7 +2,7 @@ use pyo3::PyResult;
 use pyo3::exceptions::PyValueError;
 
 use crate::csc::CscMatrix;
-use crate::sparse_chol::SymbolicCholeskyCache;
+use crate::sparse_chol::{FillOrdering, NumericFactorization, SymbolicCholeskyCache};
 
 #[derive(Debug, Clone)]
 pub enum LinalgError {
@@ -62,10 +62,16 @@ pub(crate) fn square_csc_from_scipy(
     csc_from_scipy(data, indices, indptr, shape)
 }
 
+fn factor_csc(a: &CscMatrix, ordering: FillOrdering) -> Result<NumericFactorization, LinalgError> {
+    SymbolicCholeskyCache::new(a.row_indices(), a.col_offsets(), a.nrows(), ordering)?
+        .factor(a.values())
+}
+
 pub fn sparse_cholesky_solve(
     a: &CscMatrix,
     rhs: Vec<f64>,
     shape: (usize, usize),
+    ordering: FillOrdering,
 ) -> PyResult<Vec<f64>> {
     if shape.0 != a.nrows() {
         return Err(LinalgError::DimensionMismatch(format!(
@@ -75,15 +81,11 @@ pub fn sparse_cholesky_solve(
         ))
         .into());
     }
-    let cache = SymbolicCholeskyCache::new_amd(a.row_indices(), a.col_offsets(), a.nrows())?;
-    let factor = cache.factor(a.values(), a.row_indices(), a.col_offsets())?;
-    Ok(factor.solve_owned(rhs, shape)?)
+    Ok(factor_csc(a, ordering)?.solve_owned(rhs, shape)?)
 }
 
-pub fn sparse_cholesky_logdet(a: &CscMatrix) -> PyResult<f64> {
-    let cache = SymbolicCholeskyCache::new_amd(a.row_indices(), a.col_offsets(), a.nrows())?;
-    let factor = cache.factor(a.values(), a.row_indices(), a.col_offsets())?;
-    Ok(factor.logdet())
+pub fn sparse_cholesky_logdet(a: &CscMatrix, ordering: FillOrdering) -> PyResult<f64> {
+    Ok(factor_csc(a, ordering)?.logdet())
 }
 
 pub fn update_cholesky_factor(

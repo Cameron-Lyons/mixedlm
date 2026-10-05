@@ -399,33 +399,36 @@ class TestProfileIntegration:
         assert len(df) > 0
         assert len(ci) == len(profiles)
 
-    def test_parallel_profiling(self, lmer_result):
-        profiles_serial = profile_lmer(lmer_result, which=["Days"], n_points=10, n_jobs=1)
-        profiles_parallel = profile_lmer(lmer_result, which=["Days"], n_points=10, n_jobs=2)
+    @staticmethod
+    def assert_profiles_match(actual, expected):
+        assert list(actual) == list(expected)
+        for name, reference in expected.items():
+            assert_allclose(actual[name].values, reference.values)
+            assert_allclose(actual[name].zeta, reference.zeta, atol=1e-8)
+            assert actual[name].ci_lower == pytest.approx(reference.ci_lower)
+            assert actual[name].ci_upper == pytest.approx(reference.ci_upper)
 
-        assert "Days" in profiles_serial
-        assert "Days" in profiles_parallel
-        assert_allclose(profiles_serial["Days"].values, profiles_parallel["Days"].values)
-        assert_allclose(profiles_serial["Days"].zeta, profiles_parallel["Days"].zeta, atol=1e-8)
-        assert profiles_serial["Days"].ci_lower == pytest.approx(profiles_parallel["Days"].ci_lower)
-        assert profiles_serial["Days"].ci_upper == pytest.approx(profiles_parallel["Days"].ci_upper)
+    def test_parallel_profiling(self, lmer_result):
+        # One worker per profiled coefficient; a single coefficient runs serially.
+        which = ["(Intercept)", "Days"]
+        profiles_serial = profile_lmer(lmer_result, which=which, n_points=10, n_jobs=1)
+        profiles_parallel = profile_lmer(lmer_result, which=which, n_points=10, n_jobs=2)
+
+        self.assert_profiles_match(profiles_parallel, profiles_serial)
 
     def test_parallel_profiling_falls_back_when_process_pool_is_unavailable(
         self, lmer_result, monkeypatch
     ):
-        import mixedlm.inference.profile as profile_module
+        from mixedlm.inference import lmm_profile
 
-        class UnavailableExecutor:
-            def __init__(self, *args, **kwargs):
-                raise PermissionError("process semaphores are unavailable")
+        def unavailable(*args, **kwargs):
+            raise PermissionError("process semaphores are unavailable")
 
-        monkeypatch.setattr(profile_module, "ProcessPoolExecutor", UnavailableExecutor)
+        monkeypatch.setattr(lmm_profile, "process_pool", unavailable)
 
-        expected = profile_lmer(lmer_result, which=["Days"], n_points=10, n_jobs=1)
+        which = ["(Intercept)", "Days"]
+        expected = profile_lmer(lmer_result, which=which, n_points=10, n_jobs=1)
         with pytest.warns(RuntimeWarning, match="falling back to serial execution"):
-            actual = profile_lmer(lmer_result, which=["Days"], n_points=10, n_jobs=2)
+            actual = profile_lmer(lmer_result, which=which, n_points=10, n_jobs=2)
 
-        assert_allclose(actual["Days"].values, expected["Days"].values)
-        assert_allclose(actual["Days"].zeta, expected["Days"].zeta, atol=1e-8)
-        assert actual["Days"].ci_lower == pytest.approx(expected["Days"].ci_lower)
-        assert actual["Days"].ci_upper == pytest.approx(expected["Days"].ci_upper)
+        self.assert_profiles_match(actual, expected)

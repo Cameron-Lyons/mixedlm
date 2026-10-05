@@ -127,6 +127,8 @@ class GlmerMod:
             pirls_maxiter=optimizer.pirls_maxiter,
             pirls_tol=optimizer.pirls_tol,
             joint_fit=opt_result.joint_fit,
+            message=opt_result.message,
+            optimizer=opt_method,
         )
 
         if ctrl.check_conv and not result.converged:

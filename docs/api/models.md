@@ -18,7 +18,7 @@ including the `nAGQ` requested when constructing a modular GLMM result.
 
 Fit a linear mixed model.
 
-```python
+```py
 import mixedlm as mlm
 
 result = mlm.lmer(formula, data, REML=True, control=None)
@@ -36,6 +36,8 @@ result = mlm.lmer(formula, data, REML=True, control=None)
 **Example:**
 
 ```python
+import mixedlm as mlm
+
 data = mlm.load_sleepstudy()
 model = mlm.lmer("Reaction ~ Days + (Days | Subject)", data)
 print(model.summary())
@@ -45,7 +47,7 @@ print(model.summary())
 
 Fit a generalized linear mixed model.
 
-```python
+```py
 result = mlm.glmer(formula, data, family, nAGQ=1, control=None)
 ```
 
@@ -78,10 +80,10 @@ model = mlm.glmer(
 
 ### glmer_nb
 
-Fit a negative binomial GLMM with estimated dispersion.
+Fit a negative binomial GLMM with a fixed dispersion parameter.
 
-```python
-result = mlm.glmer_nb(formula, data, control=None)
+```py
+result = mlm.glmer_nb(formula, data, control=None, theta=1.0)
 ```
 
 **Parameters:**
@@ -89,21 +91,24 @@ result = mlm.glmer_nb(formula, data, control=None)
 - `formula`: Model formula string
 - `data`: DataFrame
 - `control`: Optional GlmerControl object
+- `theta`: Negative binomial dispersion; larger values mean less overdispersion
 
-**Returns:** GlmerMod result object with estimated theta
+**Returns:** GlmerMod result object. This is shorthand for
+`glmer(..., family=mlm.families.NegativeBinomial(theta=theta))`; unlike lme4's
+`glmer.nb()`, `theta` is not estimated.
 
 **Example:**
 
-```python
-model = mlm.glmer_nb("count ~ treatment + (1 | subject)", data)
-print(f"Estimated theta: {model.family.theta}")
+```py
+model = mlm.glmer_nb("count ~ treatment + (1 | subject)", data, theta=2.0)
+print(model.family.theta)
 ```
 
 ### nlmer
 
 Fit a nonlinear mixed model.
 
-```python
+```py
 result = mlm.nlmer(
     model, data, x_var, y_var, group_var,
     random_params=None, start=None, weights=None, offset=None,
@@ -139,7 +144,7 @@ A valid result retains the optimizer's convergence status in `converged`.
 
 **Example:**
 
-```python
+```py
 from mixedlm.nlme import SSlogis
 
 model = mlm.nlmer(
@@ -168,7 +173,9 @@ control = mlm.LmerControl(
 
 **Parameters:**
 
-- `optimizer`: Optimization algorithm. Options include `"COBYQA"` (default), `"L-BFGS-B"`, `"BFGS"`, `"Nelder-Mead"`, and `"Powell"`
+- `optimizer`: Optimization algorithm, such as `"COBYQA"`, `"L-BFGS-B"`, `"BFGS"`,
+  `"Nelder-Mead"`, or `"Powell"`. `mlm.LmerControl().optimizer` shows the default, and
+  `mixedlm.estimation.available_optimizers()` lists every installed choice.
 - `maxiter`: Maximum number of iterations (function evaluations for TNC and COBYLA)
 - `optCtrl`: Optimizer-specific options, such as COBYQA's `final_tr_radius`
 - `restart_edge`: Boolean, default `True`. Before accepting a zero or near-zero variance
@@ -228,7 +235,7 @@ For advanced users who need fine-grained control over the fitting process.
 
 Parse formula and prepare data structures for LMM.
 
-```python
+```py
 parsed = mlm.lFormula(formula, data, REML=True)
 ```
 
@@ -238,7 +245,7 @@ parsed = mlm.lFormula(formula, data, REML=True)
 
 Parse formula and prepare data structures for GLMM.
 
-```python
+```py
 parsed = mlm.glFormula(formula, data, family)
 ```
 
@@ -251,7 +258,7 @@ objects returned by utilities such as `set_cov_type()`.
 
 Create the deviance function for optimization.
 
-```python
+```py
 devfun = mlm.mkLmerDevfun(parsed_formula)
 ```
 
@@ -259,7 +266,7 @@ devfun = mlm.mkLmerDevfun(parsed_formula)
 
 Run the optimizer on the deviance function.
 
-```python
+```py
 opt_result = mlm.optimizeLmer(devfun)
 ```
 
@@ -284,7 +291,7 @@ returned with non-converged status.
 
 Create the final model object from optimization results.
 
-```python
+```py
 model = mlm.mkLmerMod(devfun, opt_result)
 ```
 
@@ -355,7 +362,7 @@ control = mlm.GlmerControl(
 
 model = mlm.glmer(
     "incidence / size ~ period + (1 | herd)",
-    data,
+    cbpp,
     family=mlm.families.Binomial(),
     control=control
 )
@@ -365,8 +372,8 @@ model = mlm.glmer(
 
 ```python
 # Step-by-step fitting for custom workflows
-parsed = mlm.lFormula("y ~ x + (1 | g)", data)
+parsed = mlm.lFormula("Reaction ~ Days + (Days | Subject)", data)
 devfun = mlm.mkLmerDevfun(parsed)
 opt_result = mlm.optimizeLmer(devfun)
-model = mlm.mkLmerMod(parsed, opt_result)
+model = mlm.mkLmerMod(devfun, opt_result)
 ```

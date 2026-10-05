@@ -18,7 +18,7 @@ Test arbitrary linear restrictions on fixed-effect coefficients. The null
 hypothesis is expressed as $C\beta = r$, where $C$ contains one or more
 constraint rows and $r$ is supplied with `rhs`.
 
-```python
+```py
 from mixedlm.inference import linear_hypothesis
 
 # H0: the x and z slopes are equal
@@ -28,7 +28,7 @@ print(test)
 
 Named rows test several restrictions jointly while retaining readable labels:
 
-```python
+```py
 test = linear_hypothesis(
     model,
     {
@@ -81,7 +81,7 @@ degrees of freedom unless `denominator_df` is provided explicitly.
 Refit an LMM or GLMM across exhaustive folds and score aligned out-of-fold
 predictions.
 
-```python
+```py
 import mixedlm as mlm
 
 model = mlm.lmer("y ~ x + (1 | subject)", data)
@@ -135,7 +135,7 @@ can share a group. Invalid partitions are rejected before any model is refitted.
 
 Reuse a partition to compare model specifications on identical held-out observations:
 
-```python
+```py
 folds = mlm.make_folds(len(data), cv=5, groups=data["subject"], random_state=42)
 first_cv = mlm.cross_validate(first_model, cv=folds, group="subject")
 second_cv = mlm.cross_validate(second_model, cv=folds, group="subject")
@@ -159,7 +159,7 @@ The result exposes:
 
 Construct folds without fitting a model:
 
-```python
+```py
 folds = mlm.make_folds(
     len(data),
     cv=5,
@@ -176,7 +176,7 @@ balanced without adding a machine-learning dependency.
 
 The vectorized scoring functions are also public:
 
-```python
+```py
 rmse = mlm.weighted_rmse(y_true, y_pred, weights)
 mse = mlm.weighted_mse(y_true, y_pred, weights)
 mae = mlm.weighted_mae(y_true, y_pred, weights)
@@ -197,7 +197,7 @@ overflow from intermediate sums and squares.
 
 Rank candidate mixed models with AIC, small-sample corrected AIC, or BIC:
 
-```python
+```py
 ranking = mlm.model_selection(
     model1,
     model2,
@@ -221,7 +221,7 @@ class, and generalized family. Linear models should be fit with `REML=False`; se
 
 Likelihood ratio tests between nested models.
 
-```python
+```py
 import mixedlm as mlm
 
 result = mlm.anova(model1, model2, ...)
@@ -235,7 +235,7 @@ result = mlm.anova(model1, model2, ...)
 
 **Example:**
 
-```python
+```py
 m1 = mlm.lmer("y ~ x + (1 | g)", data, REML=False)
 m2 = mlm.lmer("y ~ x + z + (1 | g)", data, REML=False)
 print(mlm.anova(m1, m2))
@@ -245,7 +245,7 @@ print(mlm.anova(m1, m2))
 
 Type III ANOVA for a single model.
 
-```python
+```py
 result = mlm.anova_type3(model)
 ```
 
@@ -253,17 +253,12 @@ result = mlm.anova_type3(model)
 
 **Example:**
 
-```python
+```py
 model = mlm.lmer("y ~ a * b + (1 | g)", data)
 print(mlm.anova_type3(model))
 ```
 
 ## Degrees of Freedom
-
-Fixed-effect information projections use sparse random-effect precision solves
-for systems with at least 256 random coefficients. This avoids constructing a
-dense random-effect precision matrix for each information perturbation. Smaller
-systems retain dense Cholesky solves.
 
 ### satterthwaite_df
 
@@ -273,7 +268,7 @@ The variance calculation uses relative uncertainty so that changing response
 units (for example, milliseconds to seconds) preserves the degrees of freedom
 and p-values, apart from numerical fitting tolerance.
 
-```python
+```py
 df = mlm.satterthwaite_df(model)
 by_coefficient = df.as_dict()
 ```
@@ -286,7 +281,7 @@ dictionary.
 
 Compute Kenward-Roger denominator degrees of freedom.
 
-```python
+```py
 df = mlm.kenward_roger_df(model)
 ```
 
@@ -296,7 +291,7 @@ df = mlm.kenward_roger_df(model)
 
 Compute p-values using denominator degrees of freedom.
 
-```python
+```py
 pvals = mlm.pvalues_with_ddf(model, method="Satterthwaite")
 ```
 
@@ -316,7 +311,7 @@ Compute adjusted fixed-effect predictions for continuous variables, factors,
 or their Cartesian product. Numeric variables outside the requested grid are
 held at their mean and factors at their reference level.
 
-```python
+```py
 predictions = mlm.ggpredict(
     model,
     ["Days", "treatment"],
@@ -331,13 +326,10 @@ the confidence interval on the link scale before transforming its bounds with
 bounds, and square-root links include zero when the interval crosses zero.
 Use `type="link"` to keep results on the linear-predictor scale.
 
-Effect grids are constructed column by column, preserving the Cartesian-product
-order with the last requested variable changing fastest. Design matrices and
-covariance projections are evaluated in batches sized using a one-million-element
-budget and the larger of the fitted coefficient and predictor counts (at least
-one row per batch). The full reference grid and returned data frame still scale
-with the requested number of combinations. These calculations also apply to each
-grid returned by `allEffects()`.
+Effect grids follow the Cartesian-product order with the last requested variable
+changing fastest. Predictions are computed in bounded batches, but the returned
+data frame grows with the number of combinations. The same applies to each grid
+returned by `allEffects()`.
 
 Both adjusted-effect functions default to `offset=None`, using the unweighted
 mean of the model's fitted link-scale offsets after missing-value omission.
@@ -357,15 +349,10 @@ or an immutable tuple of row offsets.
 
 Compute a separate adjusted prediction grid for every fixed-effect variable.
 
-```python
+```py
 effects = mlm.allEffects(model, n_points=25)
 days_effect = effects["Days"]
 ```
-
-`allEffects()` prepares the model frame, conditioning values, coefficient
-covariance, and confidence cutoff once per call. It evaluates grids separately,
-so temporary grid storage depends on the largest individual grid. Prepared
-values are discarded after the call; later calls use current model values.
 
 When a model has multiple fixed-effect variables, each variable also conditions
 the other grids. Therefore, `at` must supply just one value per variable, either
@@ -387,7 +374,7 @@ their source data uses a different category order.
 The optional `contrasts=` mapping remains available as an explicit override; it
 should match the fitted coefficient parameterization. For example:
 
-```python
+```py
 model = mlm.lmer("yield ~ treatment * dose + (1 | block)", data,
                  contrasts={"treatment": "sum"})
 predictions = mlm.ggpredict(model, "treatment")
@@ -397,14 +384,9 @@ effects = mlm.allEffects(model)
 Grid calculations read the fitted pandas frame without copying or modifying it.
 Returned prediction tables are independent of that frame.
 
-For Polars models, adjusted prediction grids convert only fixed-effect predictor
-columns through NumPy arrays. This avoids creating Python objects for the whole
-model frame. Contiguous numeric columns without missing values can share their
-underlying storage; floating-point reference reductions retain float64 precision.
-Category order and missing values are preserved, and returned prediction tables
-can be edited independently of the fitted data.
-Extraction also handles Polars 0.20 releases that cannot export categorical
-columns directly to NumPy or return nonnullable Booleans as object arrays.
+Polars models are supported as well; category order and missing values are
+preserved, and returned prediction tables can be edited independently of the
+fitted data.
 
 ### emmeans
 
@@ -412,11 +394,9 @@ Compute estimated marginal means.
 
 Factors outside `specs` are averaged equally over their reference-grid levels;
 `at` can restrict those levels. Grid reduction preserves the order of `specs`
-and each factor's levels. Pairwise, treatment-versus-control, and custom
-comparisons evaluate coefficient projections in bounded batches. The returned
-comparison arrays and labels still grow with the number of comparisons.
+and each factor's levels.
 
-```python
+```py
 em = mlm.emmeans(model, "treatment", type="response")
 ```
 
@@ -447,12 +427,8 @@ scale even when `type="response"` displays back-transformed marginal means.
 Undefined comparison p-values print as `nan`. Small p-values use scientific
 notation or `< 2e-16`, as in model summaries.
 
-Reference grids are evaluated in batches so averaging over many combinations
-of other factors does not require keeping the complete grid and design matrix
-in memory. All combinations still contribute with equal weight, using the
-fitted categorical encoding. Memory for the returned grid and its coefficient
-matrix scales with the number of requested means. Splitting a large average
-across batches can change floating-point rounding slightly.
+All combinations of the averaged factors contribute with equal weight, using the
+fitted categorical encoding.
 
 Pass `specs=[]` to return a single overall mean, averaged over all factor levels.
 
@@ -469,7 +445,7 @@ comparisons in the supplied family.
 Contrast results provide `confint()` for a table containing the contrast label,
 estimate, standard error, degrees of freedom, and `lower`/`upper` confidence bounds:
 
-```python
+```py
 comparisons = em.pairs(adjust="tukey", level=0.90)
 intervals = comparisons.confint()  # uses the requested 90% confidence level
 pointwise = comparisons.confint(level=0.95, adjust="none")
@@ -500,25 +476,18 @@ the contrast result, and empty contrast sets return empty tables.
 
 Custom coefficients accept rectangular two-dimensional arrays, nested lists,
 or data frames, with one row per comparison and one column per marginal mean
-in the comparison family.
-Malformed shapes, complex values, and nonfinite or masked coefficients raise
-clear errors before covariance calculations. Numeric coefficient matrices are
-validated in bounded batches. The legacy `"dunnett"` option remains a Bonferroni approximation and
-counts the comparisons actually requested; it does not compute the exact
-Dunnett distribution.
+in the comparison family. Malformed shapes, complex values, and nonfinite or
+masked coefficients raise clear errors before covariance calculations. The
+legacy `"dunnett"` option remains a Bonferroni approximation and counts the
+comparisons actually requested; it does not compute the exact Dunnett
+distribution.
 
-Custom contrasts are evaluated in batches, with each coefficient row normalized
-by a power of two before its estimate and standard error are calculated. This
-keeps two-sided tests stable when a row is multiplied by a very
-small or large nonzero constant. Estimates and standard errors are returned in
-the requested units. Calculation uses float64 precision; values outside its
-representable range may round to zero or infinity even when the corresponding
-test statistic is finite. Scaling cannot recover precision already lost in the
-input coefficients.
+Multiplying a custom contrast row by a nonzero constant does not change its test.
+Estimates and standard errors are returned in the requested units.
 
 **Example:**
 
-```python
+```py
 model = mlm.lmer("yield ~ treatment + (1 | block)", data)
 em = mlm.emmeans(model, "treatment")
 print(em)
@@ -540,7 +509,7 @@ requested value enters the reference grid. Predictors in `specs` or `by` identif
 separate result rows; other grid dimensions are averaged with equal weights.
 Categorical levels follow the fitted order unless `at` supplies an explicit order.
 
-```python
+```py
 # Compare treatments separately at each requested dose
 model = mlm.lmer("yield ~ treatment * dose + (1 | block)", data)
 em = mlm.emmeans(model, "treatment", by="dose", at={"dose": [0, 5, 10]})
@@ -566,7 +535,7 @@ The default reference offset is shared by all means; it does not depend on `by`,
 of the log exposures, rather than the log of the mean exposure. Supply an override
 when a different exposure or group-specific offsets are wanted.
 
-```python
+```py
 # Per-unit rates from a count model fitted with a log-exposure offset
 rates = mlm.emmeans(count_model, "treatment", offset=0)
 # Expected counts at an exposure of 10
@@ -588,7 +557,7 @@ retained as an alias; passing both names raises an error.
 
 Parametric bootstrap for mixed models.
 
-```python
+```py
 boot = mlm.bootMer(model, nsim=500, seed=42)
 ```
 
@@ -608,26 +577,21 @@ processes. A fixed integer seed gives the same samples with serial and parallel
 execution. The direct `bootstrap_lmer()` and `bootstrap_glmer()` functions also
 accept a reusable NumPy `RandomState` or `Generator` as `seed`:
 
-```python
+```py
 import numpy as np
 
+from mixedlm.inference import bootstrap_lmer
+
 rng = np.random.default_rng(42)
-first = mlm.bootstrap_lmer(model, n_boot=100, seed=rng)
-next_batch = mlm.bootstrap_lmer(model, n_boot=100, seed=rng)
+first = bootstrap_lmer(model, n_boot=100, seed=rng)
+next_batch = bootstrap_lmer(model, n_boot=100, seed=rng)
 ```
 
 The sample count must be a positive integer.
 
-Parallel linear and generalized bootstrap initialize the fitted design once per
-worker and keep at most two tasks per worker outstanding. Worker count is capped
-at the number of replicates. Each task sends its index and random seed; returned
-samples retain replicate order. Output arrays still retain every sample.
-Invalid worker counts fail before consuming a supplied random stream. Queued
-tasks are cancelled if the run is interrupted or the worker pool fails.
-
-Linear bootstrap also prepares weighted design products once per serial call
-or parallel worker. Each replicate updates only the response-dependent products
-and starts optimization from the original fitted covariance parameters.
+Parallel runs return samples in replicate order. The worker count is capped at
+the number of replicates, and invalid counts fail before consuming a supplied
+random stream. Each refit starts from the original fitted covariance parameters.
 
 **Methods:**
 
@@ -640,7 +604,7 @@ and starts optimization from the original fitted covariance parameters.
 
 **Example:**
 
-```python
+```py
 boot = mlm.bootMer(model, nsim=500, seed=42)
 ci = boot.ci()
 print(ci)
@@ -672,7 +636,7 @@ including `pirls_converged` or `pnls_converged` when applicable. Validation chec
 the returned estimates and residual scale. The first failure in each replicate
 is recorded. Setup errors, worker-pool failures, and interruptions still propagate.
 
-```python
+```py
 print(boot.summary())
 for failure in boot.failures:
     print(failure.index, failure.stage, failure.exception_type, failure.message)
@@ -698,17 +662,9 @@ NumPy `RandomState` or `Generator` as `seed`.
 
 Set `n_jobs=2` on any nonlinear bootstrap interface to refit with two worker
 processes. Simulation stays in the calling process and follows the same draw
-sequence as serial execution; completed samples retain replicate order.
-Fitted numerical data are transferred once per worker, and at most two response
-vectors per worker are queued. The original data frame is excluded from worker
-payloads. Worker counts are validated before drawing responses and capped at
-the number of replicates.
-
-Nonlinear bootstrap prepares group rows, the covariance transform, offsets,
-and residual scales once per call and reuses them across simulated responses.
-Preparation is refreshed on the next call. Custom overrides of `simulate()`
-are still invoked for every replicate, and a failed draw does not prevent
-later draws from being attempted.
+sequence as serial execution; completed samples retain replicate order. Custom
+overrides of `simulate()` are invoked for every replicate, and a failed draw does
+not prevent later draws from being attempted.
 
 Custom nonlinear model classes must be importable and picklable, with
 deterministic prediction and gradient methods. Each worker refit receives a
@@ -721,7 +677,7 @@ outweigh the gain for small bootstrap jobs; `n_jobs=1` remains the default.
 Create tidy confidence intervals for fixed effects, variance parameters, and
 the residual scale. Multiple interval methods can be computed in one pass.
 
-```python
+```py
 intervals = mlm.bootCI(
     boot,
     component="all",
@@ -750,11 +706,8 @@ likelihood, including an ML refit when the input used REML. The original result
 is unchanged. `ProfileResult.mle` records the ML center, which can differ from
 the input coefficient; a warning reports shifts above 0.001 ML standard errors.
 
-Weighted design crossproducts are reused across constrained fits, and large
-random-effect systems remain sparse. Diagonal systems, including models with a
-single random intercept term, use scalar solves without assembling a random-effect
-precision matrix. `n_jobs` supports parallel profiling of coefficients, with serial
-fallback if process workers cannot be created.
+`n_jobs` supports parallel profiling of coefficients, with serial fallback if
+process workers cannot be created.
 Confidence limits use likelihood-ratio cutoffs and adaptive bracketing. A failed
 gradient optimization retries the same likelihood with COBYQA. Fits starting at
 zero variance use COBYQA directly so constrained optima can leave that boundary.
@@ -772,7 +725,7 @@ constrained optima can leave a zero-variance fit. `model.confint(method="profile
 uses the same calculation. These intervals can be asymmetric; they are no
 longer copies of the Wald intervals.
 
-```python
+```py
 profiles = model.profile(which="x", n_points=20, level=0.95)
 interval = model.confint(parm="x", method="profile", level=0.95)
 ```
@@ -797,7 +750,7 @@ currently runs serially and costs more than Wald inference.
 
 Plot 1D profile likelihood curves.
 
-```python
+```py
 profiles = model.profile()
 mlm.plot_profiles(profiles)
 ```
@@ -806,7 +759,7 @@ mlm.plot_profiles(profiles)
 
 Compute a conditional slice or a full two-parameter likelihood profile.
 
-```python
+```py
 profile_2d = mlm.slice2D(model, param1, param2, n_points=20)
 
 # Re-optimize covariance for a joint likelihood-ratio region:
@@ -837,20 +790,21 @@ metadata identifying the calculation used.
 
 Check model convergence.
 
-```python
+```py
 conv = mlm.checkConv(model)
 ```
 
 **Returns:** ConvergenceInfo object with:
 
-- `ok`: Boolean indicating successful convergence
+- `converged`: Boolean indicating successful convergence
 - `messages`: List of warning/error messages
+- `is_singular`, `gradient_norm`, `hessian_ok`, `iterations`, and `optimizer`
 
 ### convergence_ok
 
 Quick check if model converged successfully.
 
-```python
+```py
 if mlm.convergence_ok(model):
     print("Model converged")
 ```
@@ -878,8 +832,9 @@ print(result)
 ### Type III ANOVA
 
 ```python
-model = mlm.lmer("y ~ a * b + (1 | group)", data)
-result = mlm.anova_type3(model)
+cake = mlm.load_cake()
+cake_model = mlm.lmer("angle ~ recipe * temperature + (1 | recipe:replicate)", cake)
+result = mlm.anova_type3(cake_model)
 print(result)
 ```
 
@@ -903,10 +858,8 @@ pvals = mlm.pvalues_with_ddf(model)
 ### Estimated Marginal Means
 
 ```python
-model = mlm.lmer("yield ~ treatment + (1 | block)", data)
-
-# Marginal means for treatment
-em = mlm.emmeans(model, "treatment")
+# Marginal means for each recipe
+em = mlm.emmeans(cake_model, "recipe")
 print(em)
 
 # Pairwise contrasts
@@ -918,8 +871,8 @@ print(em.pairs())
 ```python
 model = mlm.lmer("Reaction ~ Days + (Days | Subject)", data)
 
-# Parametric bootstrap
-boot = mlm.bootMer(model, nsim=500, seed=42)
+# Parametric bootstrap; use more replicates for reported intervals
+boot = mlm.bootMer(model, nsim=200, seed=42)
 
 # Get CIs
 ci = mlm.bootCI(boot, component="all")
@@ -932,7 +885,7 @@ print(ci)
 model = mlm.lmer("Reaction ~ Days + (Days | Subject)", data)
 
 # Compute profiles
-profiles = model.profile()
+profiles = model.profile(which="Days")
 
 # Plot
 mlm.plot_profiles(profiles)
@@ -955,10 +908,8 @@ profile_2d.plot()
 ### Check Convergence
 
 ```python
-model = mlm.lmer("y ~ x + (x | g)", data)
-
 conv = mlm.checkConv(model)
-if not conv.ok:
+if not conv.converged:
     print("Convergence issues:")
     for msg in conv.messages:
         print(f"  - {msg}")

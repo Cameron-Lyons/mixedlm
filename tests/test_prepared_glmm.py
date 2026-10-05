@@ -40,6 +40,21 @@ def test_reused_problem_matches_fresh_solves_including_zero_covariance(kind, lay
 
 
 @pytest.mark.parametrize("kind", ["gaussian", "binomial", "poisson"])
+@pytest.mark.parametrize("layout", ["slope", "crossed"])
+def test_reused_sparse_problem_matches_fresh_solves_across_design_patterns(kind, layout):
+    # 128 groups select the sparse random-effect system. A zero final variance
+    # removes design columns: slopes keep a smaller sparse pattern, while the
+    # crossed model becomes diagonal before returning to the original pattern.
+    matrices, family, theta = mode_problem(kind, layout, n_obs=1024, n_groups=128)
+    problem = laplace._prepare_native_glmm(matrices, family)
+    boundary = theta.copy()
+    boundary[-1] = 0.0
+    for current in [theta, boundary, theta, 1.6 * theta, boundary, 0.7 * theta]:
+        expected = native.glmm_deviance(*laplace._native_glmm_args(current, matrices, family), 1)
+        assert_state_equal(problem.evaluate(current), expected)
+
+
+@pytest.mark.parametrize("kind", ["gaussian", "binomial", "poisson"])
 @pytest.mark.parametrize("layout", ["intercept", "fixed_only", "mode_only"])
 @pytest.mark.parametrize("order", [1, 7])
 def test_offset_overrides_use_current_start_and_do_not_change_prepared_offset(kind, layout, order):

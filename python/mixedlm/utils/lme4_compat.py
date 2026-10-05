@@ -552,13 +552,15 @@ def checkConv(
     check_singular : bool, default True
         Check if the model has a singular (boundary) fit.
     check_gradient : bool, default True
-        Check if the gradient is near zero at convergence.
+        Check that the optimizer's final gradient is near zero. Only
+        gradient-based optimizers record one, and fits with a variance
+        parameter on its boundary are not checked.
     check_hessian : bool, default False
         Check if the Hessian is positive definite.
     tol : float, default 1e-4
         Tolerance for singular fit detection.
     grad_tol : float, default 1e-3
-        Tolerance for gradient norm check.
+        Tolerance for the final gradient norm per observation.
 
     Returns
     -------
@@ -573,7 +575,7 @@ def checkConv(
     Convergence Information:
       Converged: True
       Singular fit: False
-      Optimizer: L-BFGS-B
+      Optimizer: COBYQA
       ...
 
     >>> if not conv.converged or conv.is_singular:
@@ -588,7 +590,8 @@ def checkConv(
 
     converged = getattr(model, "converged", True)
     if not converged:
-        messages.append("Optimizer did not report convergence")
+        reason = getattr(model, "message", "")
+        messages.append("Optimizer did not report convergence" + (f": {reason}" if reason else ""))
 
     is_singular = False
     if check_singular and hasattr(model, "isSingular"):
@@ -596,25 +599,19 @@ def checkConv(
         if is_singular:
             messages.append(f"Model is singular (boundary fit) at tolerance {tol}")
 
-    optimizer = "unknown"
-    if hasattr(model, "control") and hasattr(model.control, "optimizer"):
-        optimizer = model.control.optimizer
-    elif hasattr(model, "optimizer"):
-        optimizer = model.optimizer
+    optimizer = getattr(model, "optimizer", "") or "unknown"
+    iterations = getattr(model, "n_iter", None)
 
-    iterations = None
-    if hasattr(model, "optinfo") and isinstance(model.optinfo, dict):
-        iterations = model.optinfo.get("nit") or model.optinfo.get("iterations")
-
-    gradient_norm = None
-    if check_gradient and hasattr(model, "optinfo") and isinstance(model.optinfo, dict):
-        grad = model.optinfo.get("jac") or model.optinfo.get("gradient")
-        if grad is not None:
-            gradient_norm = float(np.linalg.norm(grad))
-            if gradient_norm > grad_tol:
-                messages.append(
-                    f"Gradient norm ({gradient_norm:.2e}) exceeds tolerance ({grad_tol:.2e})"
-                )
+    gradient_norm = getattr(model, "gradient_norm", None) if check_gradient else None
+    # The deviance sums observation terms, so its gradient grows with the data.
+    # Bounded parameters need not have a zero gradient at a boundary optimum.
+    if gradient_norm is not None and not getattr(model, "at_boundary", False):
+        per_observation = gradient_norm / model.nobs()
+        if per_observation > grad_tol:
+            messages.append(
+                f"Gradient norm per observation ({per_observation:.2e}) "
+                f"exceeds tolerance ({grad_tol:.2e})"
+            )
 
     hessian_ok = None
     if check_hessian:

@@ -11,6 +11,7 @@ from numpy.typing import NDArray
 from scipy.optimize import minimize
 
 _HAS_NLOPT = find_spec("nlopt") is not None
+_NLOPT_NONFINITE_PENALTY = 1e10
 
 
 SCIPY_OPTIMIZERS = {
@@ -176,70 +177,78 @@ def _optimize_nlopt(
 
     opt = nlopt.opt(getattr(nlopt, algorithm), n)
 
-    lower_clean = np.where(np.isfinite(lower), lower, -1e30)
-    upper_clean = np.where(np.isfinite(upper), upper, 1e30)
+    # NLopt accepts infinite bounds; finite stand-ins such as 1e30 derail
+    # PRAXIS and inflate NLopt's default initial step to the bound range.
+    opt.set_lower_bounds(lower.tolist())
+    opt.set_upper_bounds(upper.tolist())
+    # Like NLopt's own heuristic, keep steps within a quarter of a finite box:
+    # BOBYQA rejects larger ones and other methods stall at the bounds.
+    step = np.full(n, options.get("initial_step", 0.5), dtype=np.float64)
+    finite = np.isfinite(lower) & np.isfinite(upper)
+    step[finite] = np.minimum(step[finite], 0.25 * (upper - lower)[finite])
+    opt.set_initial_step(step.tolist())
 
-    opt.set_lower_bounds(lower_clean.tolist())
-    opt.set_upper_bounds(upper_clean.tolist())
+    neval = 0
+    best_x, best_fun = np.array(x0, dtype=np.float64), np.inf
 
-    neval = [0]
-
-    def nlopt_objective(x: list[float], grad: list[float]) -> float:
-        neval[0] += 1
-        return fun(np.array(x))
+    def nlopt_objective(x: NDArray[np.floating], grad: NDArray[np.floating]) -> float:
+        nonlocal neval, best_x, best_fun
+        neval += 1
+        value = float(fun(np.array(x, dtype=np.float64)))
+        if value < best_fun:
+            best_x, best_fun = np.array(x, dtype=np.float64), value
+        # NLopt's COBYLA loops indefinitely and BOBYQA stops early on
+        # non-finite values, so report infeasible points as a large penalty.
+        return value if np.isfinite(value) else _NLOPT_NONFINITE_PENALTY
 
     opt.set_min_objective(nlopt_objective)
 
     maxeval = options.get("maxiter", 1000)
     opt.set_maxeval(maxeval)
 
-    ftol_rel = options.get("ftol", 1e-8)
-    xtol_rel = options.get("xtol", 1e-8)
-    opt.set_ftol_rel(ftol_rel)
-    opt.set_xtol_rel(xtol_rel)
+    # Like lme4's nloptwrap, stop on an absolute change in the objective: a
+    # relative 1e-8 on deviances in the thousands stops BOBYQA and SBPLX early.
+    opt.set_ftol_abs(options.get("ftol_abs", 1e-8))
+    opt.set_xtol_rel(options.get("xtol", 1e-8))
 
-    if "ftol_abs" in options:
-        opt.set_ftol_abs(options["ftol_abs"])
+    if "ftol" in options:
+        opt.set_ftol_rel(options["ftol"])
     if "xtol_abs" in options:
         opt.set_xtol_abs(options["xtol_abs"])
 
+    messages = {
+        nlopt.SUCCESS: "Optimization succeeded",
+        nlopt.STOPVAL_REACHED: "Stopval reached",
+        nlopt.FTOL_REACHED: "Ftol reached",
+        nlopt.XTOL_REACHED: "Xtol reached",
+        nlopt.MAXEVAL_REACHED: "Max evaluations reached",
+        nlopt.MAXTIME_REACHED: "Max time reached",
+    }
     try:
-        x_opt = opt.optimize(x0.tolist())
-        f_opt = opt.last_optimum_value()
+        opt.optimize(x0.tolist())
         result_code = opt.last_optimize_result()
-
-        success = result_code > 0
-
-        messages = {
-            nlopt.SUCCESS: "Optimization succeeded",
-            nlopt.STOPVAL_REACHED: "Stopval reached",
-            nlopt.FTOL_REACHED: "Ftol reached",
-            nlopt.XTOL_REACHED: "Xtol reached",
-            nlopt.MAXEVAL_REACHED: "Max evaluations reached",
-            nlopt.MAXTIME_REACHED: "Max time reached",
-            nlopt.FAILURE: "Generic failure",
-            nlopt.INVALID_ARGS: "Invalid arguments",
-            nlopt.OUT_OF_MEMORY: "Out of memory",
-            nlopt.ROUNDOFF_LIMITED: "Roundoff limited",
-            nlopt.FORCED_STOP: "Forced stop",
-        }
         message = messages.get(result_code, f"Unknown result code: {result_code}")
-
-        return OptimizeResult(
-            x=np.array(x_opt),
-            fun=f_opt,
-            success=success,
-            nit=neval[0],
-            message=message,
-        )
     except Exception as e:
-        return OptimizeResult(
-            x=x0,
-            fun=float("inf"),
-            success=False,
-            nit=neval[0],
-            message=str(e),
-        )
+        # NLopt raises for its failure codes (for example roundoff-limited, or
+        # NEWUOA with one parameter) and for objective errors.
+        result_code = None
+        message = f"NLopt {algorithm} failed: {str(e) or type(e).__name__}"
+
+    # Evaluation and time limits are positive result codes but not convergence.
+    converged = result_code in {
+        nlopt.SUCCESS,
+        nlopt.STOPVAL_REACHED,
+        nlopt.FTOL_REACHED,
+        nlopt.XTOL_REACHED,
+    }
+    return OptimizeResult(
+        x=best_x,
+        fun=best_fun,
+        success=converged and bool(np.isfinite(best_fun)),
+        nit=neval,
+        message=message,
+        nfev=neval,
+    )
 
 
 def _optimize_scipy(
@@ -284,7 +293,8 @@ def _optimize_scipy(
     nit_val = getattr(result, "nit", nfev_val)
 
     return OptimizeResult(
-        x=result.x,
+        # SciPy's COBYLA returns a strided view, which native evaluators reject.
+        x=np.ascontiguousarray(result.x, dtype=np.float64),
         fun=result.fun,
         success=result.success,
         nit=nit_val,

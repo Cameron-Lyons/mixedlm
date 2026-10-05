@@ -214,9 +214,12 @@ def test_invalid_plot_sizes_are_rejected(value):
         profile_lmer(fitted_model(), n_points=value)
 
 
-@pytest.mark.parametrize("value", [True, 0, -2, 1.0, np.nan])
-def test_invalid_worker_counts_are_rejected(value):
-    with pytest.raises(ValueError, match="n_jobs"):
+@pytest.mark.parametrize(
+    "value,error",
+    [(True, TypeError), (0, ValueError), (-2, ValueError), (1.0, TypeError), (np.nan, TypeError)],
+)
+def test_invalid_worker_counts_are_rejected(value, error):
+    with pytest.raises(error, match="n_jobs"):
         profile_lmer(fitted_model(), n_jobs=value)
 
 

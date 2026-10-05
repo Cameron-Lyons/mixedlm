@@ -272,35 +272,30 @@ class TestNLMMOptimizer:
             python_optimizer.objective(theta), rel=1e-10
         )
 
-    def test_downweighting_outlier_recovers_clean_fit(self, simple_nlmm_data):
+    @pytest.mark.parametrize("use_rust", [False, True])
+    def test_downweighting_outlier_recovers_clean_fit(self, simple_nlmm_data, use_rust):
         x, y, groups = simple_nlmm_data
-        clean = NLMMOptimizer(
-            y, x, groups, SSasymp(), [0], use_rust=False, pnls_maxiter=2000
-        ).optimize(maxiter=100)
+
+        def fit(response, weights=None):
+            optimizer = NLMMOptimizer(
+                response, x, groups, SSasymp(), [0], use_rust=use_rust, weights=weights
+            )
+            return optimizer.optimize(maxiter=100)
 
         contaminated_y = y.copy()
         contaminated_y[0] += 50.0
-        unweighted = NLMMOptimizer(
-            contaminated_y, x, groups, SSasymp(), [0], use_rust=False, pnls_maxiter=2000
-        ).optimize(maxiter=100)
         weights = np.ones(len(y))
         weights[0] = 1e-5
-        weighted = NLMMOptimizer(
-            contaminated_y,
-            x,
-            groups,
-            SSasymp(),
-            [0],
-            use_rust=False,
-            pnls_maxiter=2000,
-            weights=weights,
-        ).optimize(maxiter=100)
+        clean = fit(y)
+        weighted = fit(contaminated_y, weights)
+        # The unweighted fit is only a reference: whether its optimizer
+        # converges with the outlier is incidental to this test.
+        unweighted = fit(contaminated_y)
 
         weighted_error = np.linalg.norm(weighted.phi - clean.phi)
         unweighted_error = np.linalg.norm(unweighted.phi - clean.phi)
         assert clean.converged and weighted.converged
-        assert not unweighted.converged and not unweighted.pnls_converged
-        assert weighted_error < unweighted_error
+        assert weighted_error < 0.05 < unweighted_error
 
     @pytest.mark.parametrize(
         ("weights", "message"),

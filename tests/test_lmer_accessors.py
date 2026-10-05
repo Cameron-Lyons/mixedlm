@@ -676,13 +676,13 @@ class TestAllFit:
         assert "Nelder-Mead" in allfit_result.fits
 
     def test_allfit_lmer_default_optimizers(self):
-        from mixedlm.inference.allfit import _get_available_optimizers
+        from mixedlm.inference.allfit import _default_optimizers
 
         result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
         allfit_result = result.allFit(SLEEPSTUDY)
 
-        expected_count = len(_get_available_optimizers())
-        assert len(allfit_result.fits) == expected_count
+        assert list(allfit_result.fits) == _default_optimizers()
+        assert allfit_result.warnings.keys() == allfit_result.fits.keys()
 
     def test_allfit_glmer_basic(self):
         result = glmer(

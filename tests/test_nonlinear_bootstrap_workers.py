@@ -1,17 +1,14 @@
 """Parallel nonlinear refits preserve the sequential simulation stream."""
 
-import multiprocessing
 import pickle
-from concurrent.futures import ProcessPoolExecutor
 from dataclasses import replace
-from functools import partial
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
 import pytest
-from mixedlm import bootMer, nlmer
+from mixedlm import _parallel, bootMer, nlmer
 from mixedlm.inference import bootstrap
 from mixedlm.models.nlmer import NlmerResult
 from mixedlm.nlme.models import SSasymp
@@ -53,7 +50,7 @@ def test_invalid_workers_fail_before_simulation_or_stream_consumption(entry, job
     with (
         patch.object(result, "simulate") as simulate,
         patch.object(result, "refit") as refit,
-        patch.object(bootstrap, "ProcessPoolExecutor") as pool,
+        patch.object(bootstrap, "process_pool") as pool,
         pytest.raises((TypeError, ValueError), match="n_jobs"),
     ):
         run(result, entry, seed=rng, jobs=jobs)
@@ -68,8 +65,8 @@ def test_invalid_workers_fail_before_simulation_or_stream_consumption(entry, job
 def test_public_entries_forward_and_cap_workers(entry, jobs):
     result = make_result()
     with (
-        patch.object(bootstrap.os, "cpu_count", return_value=6),
-        patch.object(bootstrap, "ProcessPoolExecutor", ImmediateExecutor),
+        patch.object(_parallel.os, "cpu_count", return_value=6),
+        patch.object(bootstrap, "process_pool", ImmediateExecutor),
         patch.object(bootstrap, "_nlmer_bootstrap_refit", side_effect=summarize_response),
     ):
         actual = run(result, entry, count=3, jobs=jobs)
@@ -97,7 +94,7 @@ def test_seeded_bootstrap_preserves_the_legacy_draw_sequence(random_params, jobs
 
     before = pickle.dumps(np.random.get_state())
     with (
-        patch.object(bootstrap, "ProcessPoolExecutor", ImmediateExecutor),
+        patch.object(bootstrap, "process_pool", ImmediateExecutor),
         patch.object(bootstrap, "_nlmer_bootstrap_refit", side_effect=record),
     ):
         actual = bootstrap.bootstrap_nlmer(result, n_boot=7, seed=22, n_jobs=jobs)
@@ -113,7 +110,7 @@ def test_streams_continue_across_calls_and_worker_counts(factory, entry):
     rng = factory(43)
     reference = factory(43)
     with (
-        patch.object(bootstrap, "ProcessPoolExecutor", ImmediateExecutor),
+        patch.object(bootstrap, "process_pool", ImmediateExecutor),
         patch.object(bootstrap, "_nlmer_bootstrap_refit", side_effect=summarize_response),
     ):
         first = run(result, entry, seed=rng, jobs=1)
@@ -150,7 +147,7 @@ def test_failed_refits_leave_whole_rows_missing(jobs, field, value):
     result = make_result()
     invalid = value if field in {"exception", "missing"} else replace(result, **{field: value})
     with (
-        patch.object(bootstrap, "ProcessPoolExecutor", ImmediateExecutor),
+        patch.object(bootstrap, "process_pool", ImmediateExecutor),
         patch.object(NlmerResult, "refit", side_effect=[invalid, result]),
     ):
         actual = bootstrap.bootstrap_nlmer(result, n_boot=2, seed=42, n_jobs=jobs)
@@ -167,7 +164,7 @@ def test_failed_refits_leave_whole_rows_missing(jobs, field, value):
 def test_simulation_failure_does_not_skip_later_refits(jobs):
     result = make_result()
     with (
-        patch.object(bootstrap, "ProcessPoolExecutor", ImmediateExecutor),
+        patch.object(bootstrap, "process_pool", ImmediateExecutor),
         patch.object(result, "simulate", side_effect=[ValueError("draw failed"), result.y]),
         patch.object(NlmerResult, "refit", return_value=result) as refit,
     ):
@@ -181,7 +178,7 @@ def test_simulation_failure_does_not_skip_later_refits(jobs):
 def test_parallel_queue_does_not_simulate_the_entire_bootstrap_ahead():
     result = make_result()
     with (
-        patch.object(bootstrap, "ProcessPoolExecutor", PendingExecutor),
+        patch.object(bootstrap, "process_pool", PendingExecutor),
         patch.object(result, "simulate", wraps=result.simulate) as simulate,
         patch.object(bootstrap, "_nlmer_bootstrap_refit", side_effect=summarize_response),
     ):
@@ -215,7 +212,7 @@ def test_generator_owns_responses_before_asynchronous_serialization():
 def test_interrupted_simulation_cancels_queued_tasks():
     result = make_result()
     with (
-        patch.object(bootstrap, "ProcessPoolExecutor", PendingExecutor),
+        patch.object(bootstrap, "process_pool", PendingExecutor),
         patch.object(result, "simulate", side_effect=[result.y, KeyboardInterrupt]),
         patch.object(bootstrap, "_nlmer_bootstrap_refit", side_effect=summarize_response),
         pytest.raises(KeyboardInterrupt),
@@ -228,7 +225,7 @@ def test_interrupted_simulation_cancels_queued_tasks():
 def test_public_interrupt_closes_pool_with_retained_traceback():
     result = make_result()
     with (
-        patch.object(bootstrap, "ProcessPoolExecutor", ImmediateExecutor),
+        patch.object(bootstrap, "process_pool", ImmediateExecutor),
         patch.object(result, "simulate", wraps=result.simulate) as simulate,
         patch.object(bootstrap, "_nlmer_bootstrap_refit", side_effect=summarize_response),
         patch("builtins.print", side_effect=KeyboardInterrupt),
@@ -242,7 +239,7 @@ def test_public_interrupt_closes_pool_with_retained_traceback():
 
 
 class PythonAsymptotic(SSasymp):
-    """Importable custom model using the Python estimator in spawned workers."""
+    """Importable custom model using the Python estimator in worker processes."""
 
 
 def fitted_model(custom=False):
@@ -268,18 +265,14 @@ def fitted_model(custom=False):
 
 
 @pytest.mark.parametrize("custom", [False, True])
-def test_spawn_refits_match_serial_with_weights_offsets_and_inner_controls(custom):
+def test_worker_process_refits_match_serial_with_weights_offsets_and_inner_controls(custom):
     result = fitted_model(custom)
     assert result.converged and result.pnls_converged
     # The original frame is not needed by workers and may contain unpicklable data.
     result._data["unused"] = [lambda: None] * len(result.y)
     before = pickle.dumps(np.random.get_state())
     serial = bootstrap.bootstrap_nlmer(result, n_boot=4, seed=2026)
-    context = multiprocessing.get_context("spawn")
-    with patch.object(
-        bootstrap, "ProcessPoolExecutor", partial(ProcessPoolExecutor, mp_context=context)
-    ):
-        parallel = bootstrap.bootstrap_nlmer(result, n_boot=4, seed=2026, n_jobs=2)
+    parallel = bootstrap.bootstrap_nlmer(result, n_boot=4, seed=2026, n_jobs=2)
     assert_samples_equal(serial, parallel)
     assert serial.n_failed == 0
     assert pickle.dumps(np.random.get_state()) == before

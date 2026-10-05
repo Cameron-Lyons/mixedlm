@@ -309,29 +309,34 @@ class TestProfile2D:
         with pytest.raises(ValueError, match="not found"):
             slice2D(result, "invalid_param", "Days")
 
-    def test_slice2d_parallel_matches_serial(self):
+    def test_slice2d_parallel_matches_serial(self, monkeypatch):
+        import mixedlm.inference.profile as profile_mod
         from mixedlm.inference.profile import slice2D
 
-        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+        # Send even this fast slice to workers started after a native fit.
+        monkeypatch.setattr(profile_mod, "_SLICE2D_PARALLEL_MIN_SECONDS", 0.0)
+        result = lmer("Reaction ~ Days + (Days | Subject)", SLEEPSTUDY)
 
-        profile_serial = slice2D(result, "(Intercept)", "Days", n_points=5, n_jobs=1)
-        profile_parallel = slice2D(result, "(Intercept)", "Days", n_points=5, n_jobs=2)
+        profile_serial = slice2D(result, "(Intercept)", "Days", n_points=20, n_jobs=1)
+        profile_parallel = slice2D(result, "(Intercept)", "Days", n_points=20, n_jobs=2)
 
-        assert np.allclose(profile_serial.zeta, profile_parallel.zeta, rtol=1e-8, atol=1e-8)
+        np.testing.assert_array_equal(profile_parallel.values1, profile_serial.values1)
+        np.testing.assert_array_equal(profile_parallel.zeta, profile_serial.zeta)
 
-    def test_slice2d_small_grid_skips_parallel_pool(self, monkeypatch):
+    def test_fast_slice2d_skips_parallel_pool(self, monkeypatch):
         import mixedlm.inference.profile as profile_mod
         from mixedlm.inference.profile import slice2D
 
         class _FailExecutor:
             def __init__(self, *args, **kwargs):
-                raise AssertionError("Process pool should not be created for small grids")
+                raise AssertionError("Process pool should not be created for fast slices")
 
-        monkeypatch.setattr(profile_mod, "ProcessPoolExecutor", _FailExecutor)
-
-        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
-        profile2d = slice2D(result, "(Intercept)", "Days", n_points=5, n_jobs=2)
-        assert profile2d.zeta.shape == (5, 5)
+        # Starting workers would take far longer than this whole 20 x 20 slice.
+        result = lmer("Reaction ~ Days + (Days | Subject)", SLEEPSTUDY)
+        expected = slice2D(result, "(Intercept)", "Days", n_points=20, n_jobs=1)
+        monkeypatch.setattr(profile_mod, "process_pool", _FailExecutor)
+        actual = slice2D(result, "(Intercept)", "Days", n_points=20, n_jobs=2)
+        np.testing.assert_array_equal(actual.zeta, expected.zeta)
 
 
 class TestExportsAndImports:

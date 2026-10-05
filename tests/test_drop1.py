@@ -162,6 +162,25 @@ class TestDrop1Lmer:
         with pytest.raises(ValueError, match="n_jobs"):
             drop1_lmer(model, multi_predictor_data, n_jobs=n_jobs)
 
+    @pytest.mark.parametrize("n_jobs", [1, 2])
+    def test_failed_deletion_is_reported_and_other_deletions_kept(
+        self, multi_predictor_data, n_jobs
+    ):
+        model = lmer("y ~ x1 + x2 + (1|group)", multi_predictor_data, REML=False)
+        # Only the model without x2 needs the missing x1 column.
+        data = multi_predictor_data.drop(columns="x1")
+
+        with pytest.warns(RuntimeWarning, match="failed for 1 term") as record:
+            result = drop1_lmer(model, data, n_jobs=n_jobs)
+
+        assert record[0].filename == __file__
+        assert "x2: " in str(record[0].message)
+        expected = lmer("y ~ x2 + (1|group)", data, REML=False)
+        assert result.terms == ["x1"]
+        assert result.df == [4]
+        assert result.aic == pytest.approx([expected.AIC()])
+        assert result.lrt == pytest.approx([2 * (model.logLik().value - expected.logLik().value)])
+
 
 class TestDrop1Glmer:
     def test_basic_drop1(self, binomial_data):

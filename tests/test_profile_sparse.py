@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from functools import partial
 
 import numpy as np
 import pandas as pd
 import pytest
+from mixedlm._parallel import process_pool
 from mixedlm.estimation import reml as reml_module
 from mixedlm.estimation.reml import _build_lambda
 from mixedlm.formula.parser import parse_formula, set_cov_type
@@ -65,24 +66,10 @@ def _result(structure="slope", reml=True, n_groups=8):
     )
 
 
-def _from_components(result, keep):
-    matrices = result.matrices
-    zt = matrices.Zt
-    return _ProfileProjection.from_components(
-        result.theta,
-        matrices.y - matrices.offset,
-        matrices.weights,
-        matrices.X,
-        keep,
-        zt.data,
-        zt.indices,
-        zt.indptr,
-        zt.shape,
-        matrices.random_structures,
-        matrices.n_obs,
-        matrices.n_random,
-        result.REML,
-    )
+def _use_sparse_profiles():
+    # Worker processes import fresh modules; repeat the parent's monkeypatches.
+    shared_utils._SPARSE_PROJECTION_MIN_RANDOM = 0
+    reml_module._SPARSE_PROFILE_MIN_RANDOM = 0
 
 
 def _direct_deviance(result, adjusted_y, keep):
@@ -120,13 +107,10 @@ def test_profiles_match_direct_marginal_covariance(backend, reml, structure, hel
     adjusted_y = adjusted_y - result.matrices.X[:, held] @ (result.beta[held] + 0.25)
     expected = _direct_deviance(result, adjusted_y, keep)
 
-    for projection in (
-        _ProfileProjection.from_result(result, keep),
-        _from_components(result, keep),
-    ):
-        assert_allclose(projection.deviance(adjusted_y), expected, rtol=1e-12, atol=1e-11)
-        if backend == "sparse" and projection.random_factor is not None:
-            assert "cholesky" not in projection.random_factor.__dict__
+    projection = _ProfileProjection.from_result(result, keep)
+    assert_allclose(projection.deviance(adjusted_y), expected, rtol=1e-12, atol=1e-11)
+    if backend == "sparse" and projection.random_factor is not None:
+        assert "cholesky" not in projection.random_factor.__dict__
 
 
 @pytest.mark.parametrize("backend", ["dense", "sparse"])
@@ -145,8 +129,7 @@ def test_factor_logdet_matches_correlated_precision(backend, monkeypatch):
         assert "cholesky" not in factor.__dict__
 
 
-@pytest.mark.parametrize("builder", ["result", "components"])
-def test_large_profile_never_densifies_random_precision(builder, monkeypatch):
+def test_large_profile_never_densifies_random_precision(monkeypatch):
     result = _result(n_groups=150)
     q = result.matrices.n_random
     adjusted_y = result.matrices.y - result.matrices.offset - 0.5 * result.matrices.X[:, 1]
@@ -168,57 +151,43 @@ def test_large_profile_never_densifies_random_precision(builder, monkeypatch):
 
         monkeypatch.setattr(cls, "toarray", guarded_toarray)
 
-    if builder == "result":
-        result.vcov()
-        projection = _ProfileProjection.from_result(result, [0, 2])
-    else:
-        projection = _from_components(result, [0, 2])
+    result.vcov()
+    projection = _ProfileProjection.from_result(result, [0, 2])
     for _ in range(3):
         assert_allclose(projection.deviance(adjusted_y), expected, rtol=1e-12, atol=1e-10)
     assert calls == [(q, q)]
 
 
-def test_sparse_serial_and_parallel_profiles_match_dense_profiles(monkeypatch):
+def test_sparse_profiles_and_parallel_slices_match_dense_profiles(monkeypatch):
     result = _result("crossed")
     monkeypatch.setattr(shared_utils, "_SPARSE_PROJECTION_MIN_RANDOM", np.inf)
     monkeypatch.setattr(reml_module, "_SPARSE_PROFILE_MIN_RANDOM", np.inf)
-    expected_profiles = profile_lmer(replace(result), n_points=7)
+    # Each profiled coefficient costs seconds of nuisance fits and takes the
+    # same sparse path; test_profile.py covers profiles in worker processes.
+    expected_profile = profile_lmer(replace(result), which="z", n_points=7)["z"]
     expected_slice = slice2D(replace(result), "(Intercept)", "x", n_points=5)
     monkeypatch.setattr(shared_utils, "_SPARSE_PROJECTION_MIN_RANDOM", 0)
     monkeypatch.setattr(reml_module, "_SPARSE_PROFILE_MIN_RANDOM", 0)
-    process_executor = profile_module.ProcessPoolExecutor
-    monkeypatch.setattr(profile_module, "_SLICE2D_PARALLEL_MIN_TASKS", 0)
 
+    actual = profile_lmer(replace(result), which="z", n_points=7)["z"]
+    # Nuisance fits and interval roots have optimization tolerance;
+    # the conditional slices below still agree to linear-solve precision.
+    assert_allclose(actual.values, expected_profile.values, rtol=1e-8, atol=1e-8)
+    assert_allclose(actual.zeta, expected_profile.zeta, rtol=1e-10, atol=1e-7)
+    assert_allclose(
+        [actual.ci_lower, actual.ci_upper],
+        [expected_profile.ci_lower, expected_profile.ci_upper],
+        rtol=1e-8,
+        atol=1e-8,
+    )
+
+    # Workers refactor the pickled sparse precision of the slice cache.
+    monkeypatch.setattr(
+        profile_module, "process_pool", partial(process_pool, initializer=_use_sparse_profiles)
+    )
+    monkeypatch.setattr(profile_module, "_SLICE2D_PARALLEL_MIN_SECONDS", 0.0)
     for jobs in (1, 2):
-        # Full profiles optimize independently in processes. Keep the actual
-        # executor instead of forcing concurrent SciPy solvers into threads.
-        monkeypatch.setattr(profile_module, "ProcessPoolExecutor", process_executor)
-        actual = profile_lmer(replace(result), n_points=7, n_jobs=jobs)
-        for name, reference in expected_profiles.items():
-            # Nuisance fits and interval roots have optimization tolerance;
-            # the conditional slices below still agree to linear-solve precision.
-            assert_allclose(actual[name].values, reference.values, rtol=1e-8, atol=1e-8)
-            assert_allclose(actual[name].zeta, reference.zeta, rtol=1e-10, atol=1e-7)
-            assert_allclose(
-                [actual[name].ci_lower, actual[name].ci_upper],
-                [reference.ci_lower, reference.ci_upper],
-                rtol=1e-8,
-                atol=1e-8,
-            )
-        monkeypatch.setattr(profile_module, "ProcessPoolExecutor", ThreadPoolExecutor)
         actual_slice = slice2D(replace(result), "(Intercept)", "x", n_points=5, n_jobs=jobs)
         assert_allclose(actual_slice.values1, expected_slice.values1, rtol=1e-12, atol=1e-12)
         assert_allclose(actual_slice.values2, expected_slice.values2, rtol=1e-12, atol=1e-12)
         assert_allclose(actual_slice.zeta, expected_slice.zeta, rtol=1e-10, atol=1e-6)
-
-
-@pytest.mark.parametrize("error", [linalg.LinAlgError, RuntimeError])
-def test_failed_profile_factorization_returns_penalty(error, monkeypatch):
-    result = _result()
-
-    def failed_factor(*args, **kwargs):
-        raise error("factorization failed")
-
-    monkeypatch.setattr(profile_module, "_RandomEffectFactor", failed_factor)
-    projection = _from_components(result, [0, 2])
-    assert projection.deviance(result.matrices.y) == 1e10

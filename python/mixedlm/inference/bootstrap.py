@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-import os
-import sys
 from collections.abc import Callable, Generator, Iterable
-from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wait
+from concurrent.futures import FIRST_COMPLETED, Future, wait
 from contextlib import closing
 from copy import deepcopy
 from dataclasses import dataclass, replace
@@ -16,6 +14,7 @@ import numpy as np
 from numpy.typing import NDArray
 from scipy import stats
 
+from mixedlm._parallel import process_pool, resolve_n_jobs
 from mixedlm.utils.names import _check_unique_coefficient_names
 from mixedlm.utils.random import RandomSeed, random_seeds, random_stream, validate_simulation_count
 from mixedlm.utils.simulation import simulate_random_effects
@@ -325,20 +324,6 @@ _BootstrapSample = TypeVar("_BootstrapSample")
 _bootstrap_worker_state = local()
 
 
-def _bootstrap_worker_count(n_jobs: int, n_boot: int) -> int:
-    if isinstance(n_jobs, bool | np.bool_) or not isinstance(n_jobs, Integral):
-        raise TypeError("n_jobs must be -1 or a positive integer")
-    if n_jobs != -1 and n_jobs < 1:
-        raise ValueError("n_jobs must be -1 or a positive integer")
-    if n_jobs == -1:
-        workers = os.cpu_count() or 1
-        if sys.platform == "win32":
-            workers = min(workers, 61)
-    else:
-        workers = int(n_jobs)
-    return min(workers, n_boot)
-
-
 def _initialize_bootstrap_worker(
     worker: Callable[[tuple[Any, ...]], Any],
     data: tuple[Any, ...],
@@ -375,10 +360,8 @@ def _parallel_bootstrap_tasks(
 ) -> Generator[_BootstrapSample, None, None]:
     """Consume a bounded stream of seed or response tasks using shared worker data."""
     tasks = iter(tasks)
-    with ProcessPoolExecutor(
-        max_workers=workers,
-        initializer=_initialize_bootstrap_worker,
-        initargs=(worker, data),
+    with process_pool(
+        workers, initializer=_initialize_bootstrap_worker, initargs=(worker, data)
     ) as executor:
         pending: set[Future[_BootstrapSample]] = set()
         try:
@@ -555,10 +538,12 @@ def bootstrap_lmer(
     ``n_jobs`` must be a positive integer or -1 for available CPUs. Parallel
     workers reuse the fitted design and keep only a bounded number of tasks
     outstanding; the worker count never exceeds ``n_boot``. Weighted design
-    products are prepared once per serial call or parallel worker.
+    products are prepared once per serial call or parallel worker. Workers are
+    started without forking, so scripts need an ``if __name__ == "__main__":``
+    guard.
     """
     validate_simulation_count(n_boot, "n_boot")
-    workers = _bootstrap_worker_count(n_jobs, n_boot)
+    workers = resolve_n_jobs(n_jobs, max_tasks=n_boot)
     p = result.matrices.n_fixed
     n_theta = len(result.theta)
 
@@ -571,7 +556,7 @@ def bootstrap_lmer(
 
     failures: list[BootstrapFailure] = []
 
-    if n_jobs == 1:
+    if workers == 1:
         from mixedlm.estimation.reml import LMMOptimizer
 
         optimizer = LMMOptimizer(result.matrices, REML=result.REML, use_rust=True)
@@ -668,10 +653,11 @@ def bootstrap_glmer(
 
     ``n_jobs`` must be a positive integer or -1 for available CPUs. Parallel
     workers reuse the fitted design and keep only a bounded number of tasks
-    outstanding; the worker count never exceeds ``n_boot``.
+    outstanding; the worker count never exceeds ``n_boot``. Workers are started
+    without forking, so scripts need an ``if __name__ == "__main__":`` guard.
     """
     validate_simulation_count(n_boot, "n_boot")
-    workers = _bootstrap_worker_count(n_jobs, n_boot)
+    workers = resolve_n_jobs(n_jobs, max_tasks=n_boot)
     p = result.matrices.n_fixed
     n_theta = len(result.theta)
 
@@ -683,7 +669,7 @@ def bootstrap_glmer(
 
     failures: list[BootstrapFailure] = []
 
-    if n_jobs == 1:
+    if workers == 1:
         for b in range(n_boot):
             if verbose and (b + 1) % 100 == 0:
                 print(f"Bootstrap iteration {b + 1}/{n_boot}")
@@ -793,7 +779,9 @@ def bootMer(
         Local random seed or reusable stream for reproducibility.
     n_jobs : int, default 1
         Positive worker count or -1 for available CPUs, for all model types.
-        The worker count never exceeds the number of replicates.
+        The worker count never exceeds the number of replicates. Workers are
+        started without forking, so scripts need an ``if __name__ == "__main__":``
+        guard.
     verbose : bool, default False
         Print progress information.
     bootstrap_type : str, default "parametric"
@@ -1011,7 +999,8 @@ def bootstrap_nlmer(
         Print progress information.
     n_jobs : int, default 1
         Positive refit worker count or -1 for available CPUs, capped at n_boot.
-        Parallel workers require a picklable nonlinear model.
+        Parallel workers require a picklable nonlinear model and are started
+        without forking, so scripts need an ``if __name__ == "__main__":`` guard.
 
     Returns
     -------
@@ -1046,7 +1035,7 @@ def bootstrap_nlmer(
         raise TypeError("n_boot must be a positive integer")
     if n_boot < 1:
         raise ValueError("n_boot must be a positive integer")
-    workers = _bootstrap_worker_count(n_jobs, n_boot)
+    workers = resolve_n_jobs(n_jobs, max_tasks=n_boot)
 
     n_params = len(result.phi)
     n_theta = len(result.theta)
@@ -1059,7 +1048,7 @@ def bootstrap_nlmer(
     responses = _nlmer_bootstrap_responses(result, n_boot, rng)
     failures: list[BootstrapFailure] = []
 
-    if n_jobs == 1:
+    if workers == 1:
         for b in range(n_boot):
             if verbose and (b + 1) % 100 == 0:
                 print(f"Bootstrap iteration {b + 1}/{n_boot}")

@@ -7,6 +7,7 @@ import warnings
 import numpy as np
 import pytest
 from mixedlm.estimation.optimizers import (
+    NLOPT_OPTIMIZER_NAMES,
     NelderMead,
     OptimizeResult,
     available_optimizers,
@@ -344,14 +345,111 @@ class TestCobyqa:
             )
 
 
+NLOPT_NAMES = sorted(NLOPT_OPTIMIZER_NAMES)
+
+
 @pytest.mark.skipif(not has_nlopt(), reason="nlopt not installed")
 class TestNlopt:
-    def test_bobyqa(self):
-        bounds = [(-5, 5), (-5, 5)]
-        result = run_optimizer(quadratic, np.array([0.0, 0.0]), "nloptwrap_BOBYQA", bounds)
-        assert_allclose(result.x, [2.0, 3.0], atol=0.1)
+    @pytest.mark.parametrize("name", NLOPT_NAMES)
+    def test_unbounded_parameters_reach_a_distant_optimum(self, name):
+        # Finite 1e30 stand-ins for infinite bounds sent NLopt's first steps
+        # to 5e29 and left most algorithms at false optima.
+        def objective(x):
+            return (x[0] - 0.7) ** 2 + (x[1] - 40.0) ** 2 + 0.5 * (x[0] - 0.7) * (x[1] - 40.0)
 
-    def test_neldermead(self):
-        bounds = [(-5, 5), (-5, 5)]
-        result = run_optimizer(quadratic, np.array([0.0, 0.0]), "nloptwrap_NELDERMEAD", bounds)
-        assert_allclose(result.x, [2.0, 3.0], atol=0.1)
+        result = run_optimizer(objective, np.array([1.0, 0.0]), name, [(0.0, None), (None, None)])
+        assert result.success, result.message
+        assert_allclose(result.x, [0.7, 40.0], atol=1e-4)
+        assert result.nfev == result.nit > 0
+
+    # A 0.5 step wider than these boxes made BOBYQA fail with an invalid
+    # argument and left NEWUOA at a bound and NELDERMEAD at the start.
+    @pytest.mark.parametrize(
+        ("name", "bounds"),
+        [(name, [(-0.2, 0.2), (-0.2, 0.2)]) for name in NLOPT_NAMES]
+        # NLopt's PRAXIS has no native bounds and stalls when started on one.
+        + [(name, [(0.0, 0.3), (-0.2, 0.0)]) for name in NLOPT_NAMES if name != "nloptwrap_PRAXIS"],
+    )
+    def test_narrow_bounds_reach_the_interior_optimum(self, name, bounds):
+        def objective(x):
+            return (x[0] - 0.15) ** 2 + (x[1] + 0.1) ** 2
+
+        result = run_optimizer(objective, np.zeros(2), name, bounds)
+        assert result.success, result.message
+        assert_allclose(result.x, [0.15, -0.1], atol=1e-4)
+
+    @pytest.mark.parametrize("name", NLOPT_NAMES)
+    def test_large_objective_values_do_not_loosen_the_stopping_rule(self, name):
+        # Like deviances in the thousands, the offset made a relative function
+        # tolerance stop COBYLA, NELDERMEAD and SBPLX up to 6e-3 from the optimum.
+        target = np.array([0.7, -1.3, 2.0])
+
+        def objective(x):
+            return 1e4 + np.sum((x - target) ** 2) + 0.3 * (x[0] - 0.7) * (x[1] + 1.3)
+
+        bounds = [(0.0, None), (None, None), (None, None)]
+        result = run_optimizer(objective, np.zeros(3), name, bounds)
+        assert result.success, result.message
+        assert_allclose(result.x, target, atol=1e-3)
+
+    @pytest.mark.parametrize("name", NLOPT_NAMES)
+    def test_evaluation_limit_is_not_convergence(self, name):
+        calls = []
+
+        def objective(x):
+            calls.append(x.copy())
+            return rosenbrock(x)
+
+        result = run_optimizer(
+            objective, np.array([-1.2, 1.0]), name, [(None, None)] * 2, options={"maxiter": 5}
+        )
+        assert not result.success
+        assert result.message == "Max evaluations reached"
+        assert result.nfev == len(calls) == 5
+        assert result.fun == min(rosenbrock(x) for x in calls)
+
+    # NLopt's COBYLA never returns on infinite values, so a regression in the
+    # shared finite penalty would hang it; the other algorithms cover it.
+    @pytest.mark.parametrize("name", [name for name in NLOPT_NAMES if name != "nloptwrap_COBYLA"])
+    def test_infeasible_region_does_not_end_the_search(self, name):
+        target = np.array([1.0, 0.3, -0.5])
+
+        def objective(x):
+            return np.inf if x[1] < -1 else np.sum((x - target) ** 2)
+
+        bounds = [(0.0, None), (None, None), (None, None)]
+        result = run_optimizer(objective, np.array([0.5, 0.0, 0.0]), name, bounds)
+        assert result.success, result.message
+        assert_allclose(result.x, target, atol=1e-4)
+
+    def test_algorithm_failure_returns_the_unconverged_start(self):
+        # NLopt rejects NEWUOA for one parameter instead of optimizing.
+        result = run_optimizer(sphere, np.array([0.5]), "nloptwrap_NEWUOA", [(0.0, None)])
+        assert not result.success
+        assert result.message.startswith("NLopt LN_NEWUOA_BOUND failed")
+        assert_array_equal(result.x, [0.5])
+
+    @pytest.mark.parametrize("step", [0.5, 0.125])
+    def test_initial_step_sets_the_first_trial_point(self, step):
+        calls = []
+
+        def objective(x):
+            calls.append(x.copy())
+            return quadratic(x)
+
+        options = {} if step == 0.5 else {"initial_step": step}
+        run_optimizer(objective, np.zeros(2), "nloptwrap_BOBYQA", [(None, None)] * 2, options)
+        assert_array_equal(calls[1], [step, 0.0])
+
+    def test_initial_step_is_limited_to_a_quarter_of_finite_bounds(self):
+        calls = []
+
+        def objective(x):
+            calls.append(x.copy())
+            return quadratic(x)
+
+        bounds = [(-0.2, 0.2), (0.0, None)]
+        options = {"initial_step": [0.5, 0.25]}
+        run_optimizer(objective, np.array([0.0, 1.0]), "nloptwrap_BOBYQA", bounds, options)
+        assert_allclose(calls[1], [0.1, 1.0])
+        assert_allclose(calls[2], [0.0, 1.25])

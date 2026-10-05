@@ -2,6 +2,7 @@ from unittest.mock import patch
 
 import numpy as np
 import pytest
+from mixedlm import _parallel
 from mixedlm.estimation import nlmm
 from mixedlm.nlme.models import SSasymp
 
@@ -45,7 +46,7 @@ def test_pnls_uses_sorted_unique_group_labels(labels, jobs, random_params):
     data = problem(random_params=random_params)
     expected = nlmm.pnls_step(**data)
     data["groups"] = labels[data["groups"]]
-    with patch.object(nlmm.os, "cpu_count", return_value=2):
+    with patch.object(_parallel.os, "cpu_count", return_value=2):
         actual = nlmm.pnls_step(**data, n_jobs=jobs)
     for observed, reference in zip(actual, expected, strict=True):
         np.testing.assert_allclose(observed, reference, rtol=1e-13, atol=1e-13)

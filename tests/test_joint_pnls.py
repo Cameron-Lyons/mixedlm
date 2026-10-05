@@ -4,6 +4,8 @@ from mixedlm.estimation import nlmm
 from mixedlm.nlme.models import CustomModel, SSasymp, SSlogis, SSmicmen
 from scipy import linalg, optimize
 
+pytestmark = pytest.mark.installed_wheel
+
 
 @pytest.mark.parametrize("jobs", [1, 2])
 @pytest.mark.parametrize("n_groups", [2, 7])

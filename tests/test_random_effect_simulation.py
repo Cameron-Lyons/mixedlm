@@ -11,7 +11,10 @@ try:
 except ImportError:
     _HAS_RUST = False
 
-pytestmark = pytest.mark.skipif(not _HAS_RUST, reason="Rust extension not available")
+pytestmark = [
+    pytest.mark.installed_wheel,
+    pytest.mark.skipif(not _HAS_RUST, reason="Rust extension not available"),
+]
 
 
 class TestRandomEffectSimulationValidation:

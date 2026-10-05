@@ -119,6 +119,23 @@ pub(crate) fn right_apply_repeated_in_place(
     }
 }
 
+/// Multiply each level's rows by a diagonal factor.
+fn scale_levels(lower: &Mat<f64>, values: &mut [f64]) {
+    let width = lower.nrows();
+    if width == 1 {
+        let scale = lower[(0, 0)];
+        for value in values {
+            *value *= scale;
+        }
+        return;
+    }
+    for level in values.chunks_exact_mut(width) {
+        for (i, value) in level.iter_mut().enumerate() {
+            *value *= lower[(i, i)];
+        }
+    }
+}
+
 #[derive(Debug)]
 struct FactorBlock {
     offset: usize,
@@ -266,30 +283,39 @@ impl CovarianceFactor {
     }
 
     fn apply_vector<const TRANSPOSE: bool>(&self, vector: &Col<f64>) -> Col<f64> {
-        assert_eq!(vector.nrows(), self.dimension);
-        let mut result = Col::zeros(self.dimension);
-        for block in &self.blocks {
-            let width = block.lower.nrows();
-            for level in 0..block.n_levels {
-                let offset = block.offset + level * width;
-                for i in 0..width {
-                    let indices = if block.diagonal {
-                        i..i + 1
-                    } else if TRANSPOSE {
-                        i..width
+        self.product::<TRANSPOSE>(vector.as_mat()).col(0).to_owned()
+    }
+
+    /// Multiply a matrix by Lambda from the left.
+    pub fn apply_matrix(&self, matrix: MatRef<'_, f64>) -> Mat<f64> {
+        self.product::<false>(matrix)
+    }
+
+    fn product<const TRANSPOSE: bool>(&self, matrix: MatRef<'_, f64>) -> Mat<f64> {
+        assert_eq!(matrix.nrows(), self.dimension);
+        let mut result = matrix.to_owned();
+        for column in 0..result.ncols() {
+            let values = result.col_as_slice_mut(column);
+            for block in &self.blocks {
+                let width = block.lower.nrows();
+                let values = &mut values[block.offset..block.offset + block.n_levels * width];
+                if block.diagonal {
+                    scale_levels(&block.lower, values);
+                    continue;
+                }
+                let lower = &block.lower;
+                for level in values.chunks_exact_mut(width) {
+                    if TRANSPOSE {
+                        // Ascending rows only read entries not yet overwritten.
+                        for i in 0..width {
+                            level[i] = (i..width).map(|k| lower[(k, i)] * level[k]).sum();
+                        }
                     } else {
-                        0..i + 1
-                    };
-                    let mut value = 0.0;
-                    for k in indices {
-                        let coefficient = if TRANSPOSE {
-                            block.lower[(k, i)]
-                        } else {
-                            block.lower[(i, k)]
-                        };
-                        value += coefficient * vector[offset + k];
+                        // Descending rows only read entries not yet overwritten.
+                        for i in (0..width).rev() {
+                            level[i] = (0..=i).map(|k| lower[(i, k)] * level[k]).sum();
+                        }
                     }
-                    result[offset + i] = value;
                 }
             }
         }
@@ -305,6 +331,16 @@ impl CovarianceFactor {
 
     fn transpose_apply_in_place(&self, matrix: &mut Mat<f64>) {
         for block in &self.blocks {
+            if block.diagonal {
+                let rows = block.offset..block.offset + block.n_levels * block.lower.nrows();
+                for column in 0..matrix.ncols() {
+                    scale_levels(
+                        &block.lower,
+                        &mut matrix.col_as_slice_mut(column)[rows.clone()],
+                    );
+                }
+                continue;
+            }
             transpose_apply_repeated_in_place(
                 &block.lower,
                 block.n_levels,
@@ -315,50 +351,12 @@ impl CovarianceFactor {
     }
 
     /// Multiply by Lambda directly, without transposing a full intermediate.
+    #[cfg(test)]
     pub fn right_apply(&self, matrix: MatRef<'_, f64>) -> Mat<f64> {
         assert_eq!(matrix.ncols(), self.dimension);
         let mut result = matrix.to_owned();
         self.right_apply_in_place(&mut result);
         result
-    }
-
-    /// Transform only independent level crossproducts, stacked per structure.
-    /// The caller must establish that all cross-level and cross-structure entries vanish.
-    pub fn right_apply_level_crossproducts(&self, matrix: MatRef<'_, f64>) -> Vec<Mat<f64>> {
-        assert_eq!(matrix.nrows(), self.dimension);
-        assert_eq!(matrix.ncols(), self.dimension);
-        self.blocks
-            .iter()
-            .map(|block| {
-                let width = block.lower.nrows();
-                let mut product = Mat::from_fn(block.n_levels * width, width, |row, column| {
-                    matrix[(
-                        block.offset + row,
-                        block.offset + row / width * width + column,
-                    )]
-                });
-                right_apply_repeated_in_place(&block.lower, 1, block.diagonal, product.as_mut());
-                product
-            })
-            .collect()
-    }
-
-    /// Transform crossproducts already stored as stacked independent blocks.
-    pub fn right_apply_stacked_level_crossproducts(&self, matrices: &[Mat<f64>]) -> Vec<Mat<f64>> {
-        assert_eq!(matrices.len(), self.blocks.len());
-        self.blocks
-            .iter()
-            .zip(matrices)
-            .map(|(block, matrix)| {
-                assert_eq!(
-                    matrix.shape(),
-                    (block.n_levels * block.lower.nrows(), block.lower.nrows())
-                );
-                let mut product = matrix.clone();
-                right_apply_repeated_in_place(&block.lower, 1, block.diagonal, product.as_mut());
-                product
-            })
-            .collect()
     }
 
     fn right_apply_in_place(&self, matrix: &mut Mat<f64>) {

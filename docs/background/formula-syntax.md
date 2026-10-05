@@ -229,7 +229,7 @@ distinct combinations from merging.
 
 ### Example
 
-```python
+```py
 import mixedlm as mlm
 
 # Students nested in classrooms nested in schools
@@ -255,7 +255,7 @@ When grouping factors are crossed (not nested):
 
 ### Example
 
-```python
+```py
 # Subjects rate multiple items
 # Each item rated by multiple subjects
 model = mlm.lmer(
@@ -325,7 +325,7 @@ Some random effects structures aren't identifiable:
 
 If variance is estimated at zero, the model is singular:
 
-```python
+```py
 model = mlm.lmer("y ~ x + (x | g)", data)
 if model.is_singular():
     # Try simpler model
@@ -337,7 +337,7 @@ if model.is_singular():
 ### Parsing Formulas
 
 ```python
-from mixedlm.formula import parse_formula, findbars, nobars
+from mixedlm import findbars, nobars, parse_formula
 
 formula = "y ~ x + (x | g)"
 
@@ -353,7 +353,7 @@ fixed = nobars(formula)
 ### Checking Formula Type
 
 ```python
-from mixedlm.formula import is_mixed_formula
+from mixedlm import is_mixed_formula
 
 is_mixed_formula("y ~ x + (1 | g)")  # True
 is_mixed_formula("y ~ x")            # False

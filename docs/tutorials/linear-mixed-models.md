@@ -100,7 +100,7 @@ Use this when:
 
 When groups are nested (e.g., students within schools within districts):
 
-```python
+```py
 # Classrooms nested within schools
 model = mlm.lmer("score ~ treatment + (1 | school/classroom)", data)
 
@@ -122,28 +122,30 @@ print(model.summary())
 
 When groups are crossed (not nested):
 
-```python
+```py
 # Items crossed with subjects
 model = mlm.lmer("rating ~ (1 | subject) + (1 | item)", data)
 ```
 
-### Example: Instructor Evaluations
+### Example: Penicillin Assay
+
+Every sample is tested on every plate, so the two grouping factors are crossed:
 
 ```python
-insteval = mlm.load_insteval()
+penicillin = mlm.load_penicillin()
 
-# Students crossed with instructors, nested in departments
-model = mlm.lmer(
-    "y ~ service + lectage + studage + (1 | s) + (1 | d) + (1 | dept:service)",
-    insteval
-)
+model = mlm.lmer("diameter ~ 1 + (1 | plate) + (1 | sample)", penicillin)
+print(model.VarCorr())
 ```
+
+The larger `load_insteval()` dataset (73,421 ratings) has students crossed with
+instructors; fitting it takes noticeably longer than these small examples.
 
 ## Multiple Random Slopes
 
 Include multiple random slopes:
 
-```python
+```py
 model = mlm.lmer("y ~ x1 + x2 + (x1 + x2 | group)", data)
 ```
 
@@ -159,10 +161,10 @@ By default, mixedlm uses REML (Restricted Maximum Likelihood):
 
 ```python
 # REML (default) - better variance estimates
-model_reml = mlm.lmer("y ~ x + (1 | g)", data, REML=True)
+model_reml = mlm.lmer("Reaction ~ Days + (Days | Subject)", data, REML=True)
 
 # ML - needed for likelihood ratio tests of fixed effects
-model_ml = mlm.lmer("y ~ x + (1 | g)", data, REML=False)
+model_ml = mlm.lmer("Reaction ~ Days + (Days | Subject)", data, REML=False)
 ```
 
 Use ML when comparing models with different fixed effects. Use REML for final variance estimates.
@@ -189,16 +191,18 @@ mlm.anova(m1, m2)
 
 ### Comparing Fixed Effects
 
-For fixed effects comparisons, use Type III ANOVA or drop1:
+For fixed effects comparisons, use Type III ANOVA or drop1. The cake data has
+two crossed treatment factors, with replicates nested in recipes:
 
 ```python
-model = mlm.lmer("y ~ a * b + (1 | g)", data)
+cake = mlm.load_cake()
+cake_model = mlm.lmer("angle ~ recipe * temperature + (1 | recipe:replicate)", cake)
 
 # Type III ANOVA (marginal tests)
-mlm.anova_type3(model)
+mlm.anova_type3(cake_model)
 
 # Single term deletions
-model.drop1(data)
+cake_model.drop1(cake)
 ```
 
 ## Predictions
@@ -208,6 +212,11 @@ model.drop1(data)
 Include random effects in predictions (default):
 
 ```python
+import pandas as pd
+
+model = mlm.lmer("Reaction ~ Days + (Days | Subject)", data)
+new_data = pd.DataFrame({"Days": [0.0, 5.0, 9.0], "Subject": ["308", "308", "309"]})
+
 # Predictions for observed subjects
 model.predict()
 
@@ -240,6 +249,7 @@ including correlated random slopes. For unseen groups, allow the level explicitl
 effect is centered at zero and its fitted population covariance is included in the uncertainty:
 
 ```python
+new_subject_data = pd.DataFrame({"Days": [0.0, 5.0], "Subject": ["new", "new"]})
 new_group_pi = model.predict(
     newdata=new_subject_data,
     allow_new_levels=True,
@@ -256,7 +266,7 @@ its bounds additionally include the residual variance.
 
 ```python
 conv = mlm.checkConv(model)
-if not conv.ok:
+if not conv.converged:
     print(conv.messages)
 ```
 
@@ -265,7 +275,7 @@ if not conv.ok:
 ```python
 # Use allFit to try multiple optimizers
 all_results = model.allFit(data)
-print(all_results.summary())
+print(all_results.summary)
 ```
 
 ### EM-REML Initialization
@@ -299,7 +309,7 @@ if model.is_singular():
 ### Residual Plots
 
 ```python
-from mixedlm import plot_diagnostics
+from mixedlm.diagnostics import plot_diagnostics
 
 plot_diagnostics(model)
 ```
@@ -309,18 +319,18 @@ This creates:
 - Residuals vs fitted values
 - Q-Q plot of residuals
 - Scale-location plot
-- Random effects Q-Q plots
+- Residuals by group
 
 ### Influence Measures
 
 ```python
-from mixedlm import influence, cooks_distance
+from mixedlm.diagnostics import cooks_distance, influence
 
 # Full influence diagnostics
-inf = influence(model, data)
+inf = influence(model)
 
 # Cook's distance
-cd = cooks_distance(model, data)
+cd = cooks_distance(inf)
 ```
 
 ## Complete Example
@@ -345,8 +355,8 @@ ci = model.confint(method="profile")
 print(ci)
 
 # Check for influential observations
-from mixedlm import cooks_distance
-cd = cooks_distance(model, data)
+from mixedlm.diagnostics import cooks_distance
+cd = cooks_distance(model)
 print(f"Max Cook's distance: {cd.max():.3f}")
 
 # Predictions

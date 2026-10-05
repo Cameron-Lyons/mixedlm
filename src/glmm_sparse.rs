@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 use std::fmt;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use faer::MatMut;
 use faer::linalg::solvers::Llt;
@@ -7,7 +8,7 @@ use faer::linalg::solvers::Llt;
 use crate::covariance::CovarianceFactor;
 use crate::csc::CscMatrix;
 use crate::linalg::LinalgError;
-use crate::sparse_chol::{NumericFactorization, SymbolicCholeskyCache};
+use crate::sparse_chol::{FillOrdering, NumericFactorization, SymbolicCholeskyCache};
 
 /// Independent columns need only their diagonal precision, including small models.
 #[derive(Debug)]
@@ -83,11 +84,16 @@ pub enum WeightedRandomDesign {
 }
 
 impl WeightedRandomDesign {
-    pub fn new(design: &CscMatrix, covariance: &CovarianceFactor) -> Option<Self> {
+    /// A pattern cache lets repeated likelihood evaluations skip the sparse analysis.
+    pub fn new(
+        design: &CscMatrix,
+        covariance: &CovarianceFactor,
+        patterns: Option<&SparsePatternCache>,
+    ) -> Option<Self> {
         if let Some(diagonal) = DiagonalWeightedDesign::new(design, covariance) {
             return Some(Self::Diagonal(diagonal));
         }
-        SparseWeightedDesign::new(design, covariance).map(Self::Sparse)
+        SparseWeightedDesign::new(design, covariance, patterns).map(Self::Sparse)
     }
 
     pub fn factor(
@@ -106,38 +112,49 @@ impl WeightedRandomDesign {
     }
 }
 
-/// The row layout of Z Lambda and the reusable pattern of its penalized crossproduct.
-pub struct SparseWeightedDesign {
-    row_offsets: Vec<usize>,
-    columns: Vec<usize>,
-    design_values: Vec<f64>,
-    indices: Vec<usize>,
-    offsets: Vec<usize>,
-    symbolic: SymbolicCholeskyCache,
-}
+/// Reuse the theta-independent sparse analysis while Z Lambda keeps one
+/// pattern. Covariance entries that vanish at boundary parameters remove
+/// design entries, which replaces the cached analysis.
+#[derive(Default)]
+pub struct SparsePatternCache(Mutex<Option<Arc<SparsePattern>>>);
 
-impl fmt::Debug for SparseWeightedDesign {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("SparseWeightedDesign")
-            .field("dimension", &self.symbolic.n())
-            .field("design_nonzeros", &self.design_values.len())
-            .field("precision_nonzeros", &self.indices.len())
-            .finish_non_exhaustive()
+impl SparsePatternCache {
+    fn find(&self, design: &CscMatrix) -> Option<Arc<SparsePattern>> {
+        // Compare outside the lock so concurrent evaluations only share a clone.
+        let cached = self
+            .0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()?;
+        cached.describes(design).then_some(cached)
+    }
+
+    fn store(&self, pattern: Arc<SparsePattern>) {
+        *self.0.lock().unwrap_or_else(PoisonError::into_inner) = Some(pattern);
     }
 }
 
-impl SparseWeightedDesign {
-    pub fn new(design: &CscMatrix, covariance: &CovarianceFactor) -> Option<Self> {
+/// The row layout of one Z Lambda pattern and the analysis of its penalized crossproduct.
+struct SparsePattern {
+    design_rows: usize,
+    design_offsets: Vec<usize>,
+    design_indices: Vec<usize>,
+    row_offsets: Vec<usize>,
+    // The Z Lambda CSC entry stored at each row-layout position.
+    sources: Vec<usize>,
+    // Precision position of each column's diagonal entry.
+    diagonal: Vec<usize>,
+    // Precision position of each row crossproduct, in the (row, left,
+    // right >= left) order in which factor() visits them. Compact positions
+    // reduce the memory traffic of every PIRLS assembly.
+    targets: Vec<u32>,
+    nonzeros: usize,
+    symbolic: SymbolicCholeskyCache,
+}
+
+impl SparsePattern {
+    fn new(design: &CscMatrix) -> Option<Self> {
         let q = design.ncols();
-        // Small or densely populated systems benefit from the dense kernels.
-        if q < 128 || design.values().len() / design.nrows().max(1) > q / 8 {
-            return None;
-        }
-        let design = covariance.sparse_design(design)?;
-        if design.values().len() / design.nrows().max(1) > q / 8 {
-            return None;
-        }
         let mut row_offsets = vec![0; design.nrows() + 1];
         for &row in design.row_indices() {
             row_offsets[row + 1] += 1;
@@ -147,13 +164,13 @@ impl SparseWeightedDesign {
         }
         let mut cursors = row_offsets[..design.nrows()].to_vec();
         let mut columns = vec![0; design.values().len()];
-        let mut design_values = vec![0.0; design.values().len()];
+        let mut sources = vec![0; design.values().len()];
         for column in 0..q {
             for entry in design.col_offsets()[column]..design.col_offsets()[column + 1] {
                 let row = design.row_indices()[entry];
                 let position = cursors[row];
                 columns[position] = column;
-                design_values[position] = design.values()[entry];
+                sources[position] = entry;
                 cursors[row] += 1;
             }
         }
@@ -182,19 +199,98 @@ impl SparseWeightedDesign {
             indices.extend(column);
             offsets.push(indices.len());
         }
-        let symbolic = SymbolicCholeskyCache::new_amd(&indices, &offsets, q).ok()?;
+        let symbolic = SymbolicCholeskyCache::new(&indices, &offsets, q, FillOrdering::Amd).ok()?;
         // Symbolic fill can make a sparse input expensive to factor. Preserve
         // the dense path when the factor itself would lose its sparsity.
         if symbolic.factor_nonzeros() > q.saturating_mul(q) / 4 {
             return None;
         }
+        let mut targets = Vec::new();
+        for row in 0..design.nrows() {
+            let end = row_offsets[row + 1];
+            for left in row_offsets[row]..end {
+                let base = offsets[columns[left]];
+                let pattern = &indices[base..offsets[columns[left] + 1]];
+                for &right in &columns[left..end] {
+                    let position = pattern
+                        .binary_search(&right)
+                        .expect("symbolic pattern includes each row crossproduct");
+                    targets.push(u32::try_from(base + position).ok()?);
+                }
+            }
+        }
+        // Each lower column starts with its diagonal entry.
+        offsets.truncate(q);
         Some(Self {
+            design_rows: design.nrows(),
+            design_offsets: design.col_offsets().to_vec(),
+            design_indices: design.row_indices().to_vec(),
             row_offsets,
-            columns,
-            design_values,
-            indices,
-            offsets,
+            sources,
+            diagonal: offsets,
+            targets,
+            nonzeros,
             symbolic,
+        })
+    }
+
+    fn describes(&self, design: &CscMatrix) -> bool {
+        self.design_rows == design.nrows()
+            && self.design_offsets == design.col_offsets()
+            && self.design_indices == design.row_indices()
+    }
+}
+
+/// The values of Z Lambda in the row layout of their shared sparse pattern.
+pub struct SparseWeightedDesign {
+    pattern: Arc<SparsePattern>,
+    design_values: Vec<f64>,
+}
+
+impl fmt::Debug for SparseWeightedDesign {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SparseWeightedDesign")
+            .field("dimension", &self.pattern.symbolic.n())
+            .field("design_nonzeros", &self.design_values.len())
+            .field("precision_nonzeros", &self.pattern.nonzeros)
+            .finish_non_exhaustive()
+    }
+}
+
+impl SparseWeightedDesign {
+    pub fn new(
+        design: &CscMatrix,
+        covariance: &CovarianceFactor,
+        patterns: Option<&SparsePatternCache>,
+    ) -> Option<Self> {
+        let q = design.ncols();
+        // Small or densely populated systems benefit from the dense kernels.
+        if q < 128 || design.values().len() / design.nrows().max(1) > q / 8 {
+            return None;
+        }
+        let design = covariance.sparse_design(design)?;
+        if design.values().len() / design.nrows().max(1) > q / 8 {
+            return None;
+        }
+        let pattern = match patterns.and_then(|patterns| patterns.find(&design)) {
+            Some(pattern) => pattern,
+            None => {
+                let pattern = Arc::new(SparsePattern::new(&design)?);
+                if let Some(patterns) = patterns {
+                    patterns.store(Arc::clone(&pattern));
+                }
+                pattern
+            }
+        };
+        let design_values = pattern
+            .sources
+            .iter()
+            .map(|&entry| design.values()[entry])
+            .collect();
+        Some(Self {
+            pattern,
+            design_values,
         })
     }
 
@@ -203,28 +299,25 @@ impl SparseWeightedDesign {
         weights: &[f64],
         regularization: f64,
     ) -> Result<NumericFactorization, LinalgError> {
-        assert_eq!(weights.len() + 1, self.row_offsets.len());
-        let mut values = vec![0.0; self.indices.len()];
-        for &diagonal in &self.offsets[..self.symbolic.n()] {
+        let pattern = &*self.pattern;
+        assert_eq!(weights.len() + 1, pattern.row_offsets.len());
+        let mut values = vec![0.0; pattern.nonzeros];
+        for &diagonal in &pattern.diagonal {
             values[diagonal] = 1.0 + regularization;
         }
+        let mut target = 0;
         for (row, &weight) in weights.iter().enumerate() {
-            let start = self.row_offsets[row];
-            let end = self.row_offsets[row + 1];
-            for left in start..end {
-                let column = self.columns[left];
-                let base = self.offsets[column];
-                let pattern = &self.indices[base..self.offsets[column + 1]];
-                let weighted = self.design_values[left] * weight;
-                for right in left..end {
-                    let position = pattern
-                        .binary_search(&self.columns[right])
-                        .expect("symbolic pattern includes each row crossproduct");
-                    values[base + position] += weighted * self.design_values[right];
+            let entries =
+                &self.design_values[pattern.row_offsets[row]..pattern.row_offsets[row + 1]];
+            for (left, &value) in entries.iter().enumerate() {
+                let weighted = value * weight;
+                for &right in &entries[left..] {
+                    values[pattern.targets[target] as usize] += weighted * right;
+                    target += 1;
                 }
             }
         }
-        self.symbolic.factor(&values, &self.indices, &self.offsets)
+        pattern.symbolic.factor(&values)
     }
 }
 
@@ -314,7 +407,8 @@ mod tests {
             let input =
                 CscMatrix::try_from_usize(&values, &rows, &offsets, (3 * q + 1, q)).unwrap();
             for scale in [0.0, 0.6, -0.9] {
-                let system = WeightedRandomDesign::new(&input, &covariance(q, scale)).unwrap();
+                let system =
+                    WeightedRandomDesign::new(&input, &covariance(q, scale), None).unwrap();
                 let WeightedRandomDesign::Diagonal(ref storage) = system else {
                     panic!("independent columns require only diagonal storage");
                 };
@@ -375,14 +469,14 @@ mod tests {
         }];
         for coupling in [0.0, 0.4] {
             let covariance = CovarianceFactor::new(&[0.7, coupling, 0.8], &structure);
-            let selected = WeightedRandomDesign::new(&input, &covariance);
+            let selected = WeightedRandomDesign::new(&input, &covariance, None);
             assert_eq!(
                 matches!(selected, Some(WeightedRandomDesign::Diagonal(_))),
                 coupling == 0.0
             );
         }
         let crossed = CscMatrix::try_from_usize(&[1.0, -0.5], &[0, 0], &[0, 1, 2], (3, 2)).unwrap();
-        assert!(WeightedRandomDesign::new(&crossed, &covariance(2, 0.7)).is_none());
+        assert!(WeightedRandomDesign::new(&crossed, &covariance(2, 0.7), None).is_none());
         // A zero covariance column has no contribution to the precision.
         let covariance = CovarianceFactor::new(
             &[0.0, 0.8],
@@ -393,7 +487,7 @@ mod tests {
             }],
         );
         assert!(matches!(
-            WeightedRandomDesign::new(&crossed, &covariance),
+            WeightedRandomDesign::new(&crossed, &covariance, None),
             Some(WeightedRandomDesign::Diagonal(_))
         ));
     }
@@ -401,7 +495,7 @@ mod tests {
     #[test]
     fn diagonal_factor_rejects_nonfinite_precision_and_keeps_empty_levels() {
         let input = CscMatrix::try_from_usize(&[1.0], &[0], &[0, 1, 1], (2, 2)).unwrap();
-        let system = WeightedRandomDesign::new(&input, &covariance(2, 0.7)).unwrap();
+        let system = WeightedRandomDesign::new(&input, &covariance(2, 0.7), None).unwrap();
         for invalid in [f64::NAN, f64::INFINITY, -100.0] {
             assert!(system.factor(&[invalid, 1.0], 0.0).is_err());
         }
@@ -418,7 +512,7 @@ mod tests {
         let input =
             CscMatrix::try_from_usize(&vec![1.0; n], &(0..n).collect::<Vec<_>>(), &[0, n], (n, 1))
                 .unwrap();
-        let system = WeightedRandomDesign::new(&input, &covariance(1, 1e-8)).unwrap();
+        let system = WeightedRandomDesign::new(&input, &covariance(1, 1e-8), None).unwrap();
         for regularization in [0.0, 1e-6] {
             let factor = system.factor(&vec![1.0; n], regularization).unwrap();
             let expected = (n as f64 * 1e-16 + regularization).ln_1p();
@@ -433,9 +527,9 @@ mod tests {
         let rows: Vec<_> = (0..2 * q).collect();
         let input =
             CscMatrix::try_from_usize(&vec![1.0; 2 * q], &rows, &offsets, (2 * q, q)).unwrap();
-        let system = SparseWeightedDesign::new(&input, &covariance(q, 0.6)).unwrap();
-        assert_eq!(system.indices.len(), q);
-        assert_eq!(system.symbolic.factor_nonzeros(), q);
+        let system = SparseWeightedDesign::new(&input, &covariance(q, 0.6), None).unwrap();
+        assert_eq!(system.pattern.nonzeros, q);
+        assert_eq!(system.pattern.symbolic.factor_nonzeros(), q);
         for varying in [false, true] {
             let weights: Vec<_> = (0..2 * q)
                 .map(|i| {
@@ -479,7 +573,7 @@ mod tests {
             (1, q),
         )
         .unwrap();
-        assert!(SparseWeightedDesign::new(&dense, &covariance(q, 1.0)).is_none());
+        assert!(SparseWeightedDesign::new(&dense, &covariance(q, 1.0), None).is_none());
         // A sparse design can still produce a dense normal equation pattern.
         let mut column_rows = vec![Vec::new(); q];
         let mut row = 0;
@@ -498,7 +592,7 @@ mod tests {
         }
         let pairwise =
             CscMatrix::try_from_usize(&vec![1.0; rows.len()], &rows, &offsets, (row, q)).unwrap();
-        assert!(SparseWeightedDesign::new(&pairwise, &covariance(q, 1.0)).is_none());
+        assert!(SparseWeightedDesign::new(&pairwise, &covariance(q, 1.0), None).is_none());
     }
 
     #[test]
@@ -516,9 +610,9 @@ mod tests {
         }
         let star =
             CscMatrix::try_from_usize(&vec![1.0; rows.len()], &rows, &offsets, (q - 1, q)).unwrap();
-        let system = SparseWeightedDesign::new(&star, &covariance(q, 1.0)).unwrap();
-        assert_eq!(system.indices.len(), 2 * q - 1);
-        assert_eq!(system.symbolic.factor_nonzeros(), 2 * q - 1);
+        let system = SparseWeightedDesign::new(&star, &covariance(q, 1.0), None).unwrap();
+        assert_eq!(system.pattern.nonzeros, 2 * q - 1);
+        assert_eq!(system.pattern.symbolic.factor_nonzeros(), 2 * q - 1);
         let weights: Vec<_> = (0..q - 1).map(|i| 0.5 + (i % 7) as f64 / 4.0).collect();
         let factor = system.factor(&weights, 0.0).unwrap();
         let matrix = Mat::from_fn(q, q, |i, j| match (i, j) {
@@ -549,6 +643,66 @@ mod tests {
                     assert!((actual[(i, j)] - expected[(i, j)]).abs() < 1e-11);
                 }
             }
+        }
+    }
+
+    #[test]
+    fn pattern_cache_reuses_analysis_until_the_scaled_design_pattern_changes() {
+        // Random slopes for 64 groups: every row loads its group's two columns.
+        let (levels, rows) = (64, 192);
+        let mut values = Vec::new();
+        let mut row_indices = Vec::new();
+        let mut offsets = vec![0];
+        for column in 0..2 * levels {
+            for row in (column / 2..rows).step_by(levels) {
+                row_indices.push(row);
+                values.push(if column % 2 == 0 {
+                    1.0
+                } else {
+                    0.3 + ((row * 7) % 11) as f64 / 5.0
+                });
+            }
+            offsets.push(row_indices.len());
+        }
+        let input =
+            CscMatrix::try_from_usize(&values, &row_indices, &offsets, (rows, 2 * levels)).unwrap();
+        let structure = [RandomEffectStructure {
+            n_levels: levels,
+            n_terms: 2,
+            correlated: true,
+        }];
+        let weights: Vec<_> = (0..rows).map(|i| 0.5 + (i % 5) as f64 / 3.0).collect();
+        let rhs = Mat::from_fn(2 * levels, 3, |i, j| ((i * 5 + j) % 13) as f64 / 4.0 - 1.0);
+        let cache = SparsePatternCache::default();
+        let mut previous: Option<Arc<SparsePattern>> = None;
+        // A zero slope variance removes every slope column from Z Lambda.
+        for (theta, reused) in [
+            ([0.7, 0.2, 0.5], false),
+            ([0.4, -0.3, 0.9], true),
+            ([0.7, 0.2, 0.0], false),
+            ([0.7, 0.2, 0.5], false),
+            ([1.1, 0.6, 0.2], true),
+        ] {
+            let covariance = CovarianceFactor::new(&theta, &structure);
+            let cached = SparseWeightedDesign::new(&input, &covariance, Some(&cache)).unwrap();
+            let fresh = SparseWeightedDesign::new(&input, &covariance, None).unwrap();
+            if let Some(previous) = &previous {
+                assert_eq!(Arc::ptr_eq(previous, &cached.pattern), reused);
+            }
+            assert_eq!(cached.pattern.nonzeros, fresh.pattern.nonzeros);
+            for regularization in [0.0, 1e-6] {
+                let cached = cached.factor(&weights, regularization).unwrap();
+                let fresh = fresh.factor(&weights, regularization).unwrap();
+                assert_eq!(cached.logdet().to_bits(), fresh.logdet().to_bits());
+                let mut expected = rhs.clone();
+                fresh.solve_lower_in_place(expected.as_mut());
+                fresh.solve_upper_in_place(expected.as_mut());
+                let mut actual = rhs.clone();
+                cached.solve_lower_in_place(actual.as_mut());
+                cached.solve_upper_in_place(actual.as_mut());
+                assert_eq!(actual, expected);
+            }
+            previous = Some(cached.pattern);
         }
     }
 }

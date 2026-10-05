@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-from numpy.testing import assert_allclose
+from numpy.testing import assert_allclose, assert_array_equal
 from scipy import sparse
 
 try:
@@ -137,3 +137,59 @@ class TestSparseCholeskySolve:
 
         with pytest.raises(ValueError, match="right-hand side has 3 rows, expected 2"):
             numeric.solve(np.ones((3, 1)))
+
+
+def _ordering_system(layout, size):
+    if layout == "banded":
+        offdiag = np.full(size - 1, -1.0)
+        matrix = sparse.diags((offdiag, np.full(size, 4.0), offdiag), (-1, 0, 1), format="csc")
+    else:
+        from tests.test_sparse_ordering import arrowhead_system
+
+        matrix = arrowhead_system(size)[0].tocsc()
+    return matrix, matrix.data, matrix.indices.astype(np.int64), matrix.indptr.astype(np.int64)
+
+
+class TestSparseCholeskyOrdering:
+    @pytest.mark.parametrize("ordering", ["amd", "natural"])
+    @pytest.mark.parametrize("hub", [0, 27])
+    def test_one_shot_functions_accept_either_ordering(self, ordering, hub):
+        from tests.test_sparse_ordering import arrowhead_system
+
+        matrix, rhs, expected, logdet = arrowhead_system(61, hub)
+        csc = matrix.tocsc()
+        arguments = (csc.data, csc.indices.astype(np.int64), csc.indptr.astype(np.int64), csc.shape)
+
+        actual = sparse_cholesky_solve(*arguments, rhs, ordering=ordering)
+
+        assert_allclose(actual, expected, rtol=2e-13, atol=2e-13)
+        assert sparse_cholesky_logdet(*arguments, ordering=ordering) == pytest.approx(
+            logdet, rel=2e-13
+        )
+
+    @pytest.mark.parametrize("ordering", ["AMD", "identity", ""])
+    def test_one_shot_functions_reject_unsupported_orderings(self, ordering):
+        _, data, indices, indptr, shape = sparse_arguments(np.eye(2))
+
+        with pytest.raises(ValueError, match="ordering must be 'amd' or 'natural'"):
+            sparse_cholesky_solve(data, indices, indptr, shape, np.ones((2, 1)), ordering=ordering)
+        with pytest.raises(ValueError, match="ordering must be 'amd' or 'natural'"):
+            sparse_cholesky_logdet(data, indices, indptr, shape, ordering=ordering)
+
+    @pytest.mark.parametrize("layout", ["banded", "hub"])
+    @pytest.mark.parametrize("n_rhs", [1, 3, 128])
+    @pytest.mark.parametrize("order", ["C", "F"])
+    def test_amd_solves_match_natural_order_for_many_right_hand_sides(self, layout, n_rhs, order):
+        matrix, data, indices, indptr = _ordering_system(layout, 300)
+        rhs = np.asarray(np.random.default_rng(n_rhs).standard_normal((300, n_rhs)), order=order)
+        solutions = {}
+        for ordering in ["amd", "natural"]:
+            symbolic = SparseCholeskySymbolic(indices, indptr, 300, ordering=ordering)
+            solutions[ordering] = symbolic.factor(data).solve(rhs)
+            one_shot = sparse_cholesky_solve(
+                data, indices, indptr, matrix.shape, rhs, ordering=ordering
+            )
+            assert_array_equal(one_shot, solutions[ordering])
+
+        assert_allclose(solutions["amd"], solutions["natural"], rtol=1e-12, atol=1e-12)
+        assert_allclose(matrix @ solutions["amd"], rhs, rtol=1e-12, atol=1e-12)

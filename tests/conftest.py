@@ -8,6 +8,12 @@ import pytest
 from tools.native_build import NativeBuildError, check_native_build
 
 
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers", "installed_wheel: regression tests run against installed wheels in CI"
+    )
+
+
 def pytest_sessionstart(session):
     if session.config.option.collectonly:
         return

@@ -1,10 +1,7 @@
-import multiprocessing
 import pickle
-from concurrent.futures import Future, ProcessPoolExecutor, ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import replace
-from functools import partial
 from threading import Barrier
-from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
@@ -63,7 +60,7 @@ def test_invalid_workers_fail_before_consuming_random_stream(kind, entry, jobs):
     state = pickle.dumps(rng.bit_generator.state)
     fn = bootstrap.bootstrap_lmer if kind == "lmm" else bootstrap.bootstrap_glmer
     with (
-        patch.object(bootstrap, "ProcessPoolExecutor") as pool,
+        patch.object(bootstrap, "process_pool") as pool,
         pytest.raises((TypeError, ValueError), match="n_jobs"),
     ):
         if entry == "wrapper":
@@ -74,34 +71,28 @@ def test_invalid_workers_fail_before_consuming_random_stream(kind, entry, jobs):
     assert pickle.dumps(rng.bit_generator.state) == state
 
 
-@pytest.mark.parametrize(
-    "jobs,cpu,platform,count,expected",
-    [
-        (-1, None, "linux", 10, 1),
-        (-1, 128, "linux", 3, 3),
-        (-1, 128, "win32", 100, 61),
-        (np.int64(2), 8, "linux", 10, 2),
-        (100, 8, "linux", 3, 3),
-        (1, 8, "linux", 5, 1),
-    ],
-)
-def test_worker_count_uses_available_cpus_and_never_exceeds_replicates(
-    jobs, cpu, platform, count, expected
-):
+@pytest.mark.parametrize("kind", ["lmm", "poisson"])
+def test_single_worker_runs_serially_without_a_pool(kind):
+    result = make_result(kind)
+    fn = bootstrap.bootstrap_lmer if kind == "lmm" else bootstrap.bootstrap_glmer
     with (
-        patch.object(bootstrap.os, "cpu_count", return_value=cpu),
-        patch.object(bootstrap, "sys", SimpleNamespace(platform=platform)),
+        patch.object(bootstrap, "process_pool") as pool,
+        patch.object(bootstrap, "_refit_lmer_response", side_effect=fake_refit),
+        patch.object(bootstrap, "_refit_glmer_response", side_effect=fake_refit),
     ):
-        assert bootstrap._bootstrap_worker_count(jobs, count) == expected
+        actual = fn(result, n_boot=1, seed=42, n_jobs=8)
+        serial = fn(result, n_boot=1, seed=42, n_jobs=1)
+    pool.assert_not_called()
+    np.testing.assert_array_equal(actual.beta_samples, serial.beta_samples)
 
 
 @pytest.mark.parametrize("kind", ["lmm", "poisson"])
-@pytest.mark.parametrize("count,jobs", [(1, 8), (11, 2), (1003, 3)])
+@pytest.mark.parametrize("count,jobs", [(3, 8), (11, 2), (1003, 3)])
 def test_parallel_submission_is_bounded_and_sends_only_index_and_seed(kind, count, jobs):
     result = make_result(kind)
     fn = bootstrap.bootstrap_lmer if kind == "lmm" else bootstrap.bootstrap_glmer
     with (
-        patch.object(bootstrap, "ProcessPoolExecutor", ImmediateExecutor),
+        patch.object(bootstrap, "process_pool", ImmediateExecutor),
         patch.object(bootstrap, "_refit_lmer_response", side_effect=fake_refit),
         patch.object(bootstrap, "_refit_glmer_response", side_effect=fake_refit),
     ):
@@ -139,7 +130,7 @@ class PendingExecutor(ImmediateExecutor):
 @pytest.mark.parametrize("failure", [False, True])
 def test_early_exit_cancels_queued_work_and_closes_the_pool(failure):
     with (
-        patch.object(bootstrap, "ProcessPoolExecutor", PendingExecutor),
+        patch.object(bootstrap, "process_pool", PendingExecutor),
         patch.object(PendingExecutor, "failure", failure),
     ):
         stream = bootstrap._parallel_bootstrap_samples(echo_task, (100,), np.arange(500), 2)
@@ -170,17 +161,13 @@ def probe_task(args):
     return index, int(seed + probe.value)
 
 
-def test_spawn_transfers_shared_data_once_per_worker():
+def test_worker_processes_receive_shared_data_once_each():
     SerializationProbe.count = 0
-    context = multiprocessing.get_context("spawn")
-    with patch.object(
-        bootstrap, "ProcessPoolExecutor", partial(ProcessPoolExecutor, mp_context=context)
-    ):
-        actual = list(
-            bootstrap._parallel_bootstrap_samples(
-                probe_task, (SerializationProbe(17),), np.arange(17), 2
-            )
+    actual = list(
+        bootstrap._parallel_bootstrap_samples(
+            probe_task, (SerializationProbe(17),), np.arange(17), 2
         )
+    )
     assert sorted(actual) == [(i, i + 17) for i in range(17)]
     assert SerializationProbe.count == 2
 
@@ -200,7 +187,7 @@ def test_simultaneous_pools_keep_their_worker_data_separate():
         )
 
     with (
-        patch.object(bootstrap, "ProcessPoolExecutor", ThreadPoolExecutor),
+        patch.object(bootstrap, "process_pool", ThreadPoolExecutor),
         ThreadPoolExecutor(max_workers=2) as callers,
     ):
         first = callers.submit(run, 100)
@@ -222,7 +209,7 @@ def test_each_parallel_replicate_receives_a_fresh_custom_family():
     result = replace(make_result("poisson"), family=family)
     data = tuple(bootstrap._prepare_glmer_worker_data(result).values())
     with (
-        patch.object(bootstrap, "ProcessPoolExecutor", ThreadPoolExecutor),
+        patch.object(bootstrap, "process_pool", ThreadPoolExecutor),
         patch.object(bootstrap, "_refit_glmer_response", side_effect=fake_refit),
     ):
         actual = sorted(
@@ -244,7 +231,7 @@ def test_failed_submission_cancels_previously_queued_tasks():
             return super().submit(fn, *args)
 
     with (
-        patch.object(bootstrap, "ProcessPoolExecutor", FailedSubmitExecutor),
+        patch.object(bootstrap, "process_pool", FailedSubmitExecutor),
         pytest.raises(RuntimeError, match="submission failed"),
     ):
         list(bootstrap._parallel_bootstrap_samples(echo_task, (100,), np.arange(500), 2))
@@ -255,7 +242,7 @@ def test_failed_submission_cancels_previously_queued_tasks():
 
 def test_interrupted_wait_cancels_queued_tasks():
     with (
-        patch.object(bootstrap, "ProcessPoolExecutor", PendingExecutor),
+        patch.object(bootstrap, "process_pool", PendingExecutor),
         patch.object(bootstrap, "wait", side_effect=KeyboardInterrupt),
         pytest.raises(KeyboardInterrupt),
     ):
@@ -270,7 +257,7 @@ def test_public_interrupt_closes_the_pool_even_when_the_traceback_is_retained(ki
     result = make_result(kind)
     fn = bootstrap.bootstrap_lmer if kind == "lmm" else bootstrap.bootstrap_glmer
     with (
-        patch.object(bootstrap, "ProcessPoolExecutor", ImmediateExecutor),
+        patch.object(bootstrap, "process_pool", ImmediateExecutor),
         patch.object(bootstrap, "_refit_lmer_response", side_effect=fake_refit),
         patch.object(bootstrap, "_refit_glmer_response", side_effect=fake_refit),
         patch("builtins.print", side_effect=KeyboardInterrupt),

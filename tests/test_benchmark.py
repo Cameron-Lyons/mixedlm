@@ -73,6 +73,32 @@ def test_benchmark_python_nonlinear_likelihood(benchmark, n_groups, n_jobs):
         np.testing.assert_allclose(value, reference, rtol=1e-8, atol=1e-8)
 
 
+@pytest.mark.benchmark(group="native-nonlinear-likelihood")
+@pytest.mark.parametrize("n_groups", [40, 200])
+@pytest.mark.parametrize("n_random", [1, 3])
+def test_benchmark_native_nonlinear_likelihood(benchmark, n_groups, n_random):
+    from mixedlm.estimation.nlmm import _nlmm_deviance_rust_with_status, nlmm_deviance_with_status
+    from mixedlm.nlme.models import SSasymp
+
+    rng = np.random.default_rng(766)
+    model = SSasymp()
+    phi = np.array([10.0, 0.5, -0.5])
+    groups = np.repeat(np.arange(n_groups), 10)
+    x = np.tile(np.linspace(0.0, 5.0, 10), n_groups)
+    effects = rng.normal(0, 1.0, n_groups)
+    y = np.concatenate([model.predict(phi + [effect, 0, 0], x[:10]) for effect in effects])
+    y += rng.normal(0, 0.3, len(y))
+    weights = np.geomspace(0.5, 2, len(y))
+    theta = np.eye(n_random)[np.tril_indices(n_random)]
+    b = np.zeros((n_groups, n_random))
+    args = (theta, y, x, groups, model, phi, b, list(range(n_random)), 0.3)
+    expected = nlmm_deviance_with_status(*args, weights=weights)
+    actual = benchmark(_nlmm_deviance_rust_with_status, *args, weights)
+    assert actual[4] and expected[4]
+    for value, reference in zip(actual[:4], expected[:4], strict=True):
+        np.testing.assert_allclose(value, reference, rtol=1e-8, atol=1e-8)
+
+
 @pytest.mark.benchmark(group="diagonal-lmm-likelihood")
 @pytest.mark.parametrize("n_groups", [8, 255, 256, 4096])
 def test_benchmark_diagonal_lmm_likelihood(benchmark, n_groups):
@@ -167,6 +193,39 @@ def test_benchmark_native_glmm_crossproducts(benchmark, layout, n_obs, n_groups)
     from mixedlm.estimation.laplace import _laplace_deviance_rust, laplace_deviance
     from mixedlm.families import Poisson
 
+    matrices, theta = _poisson_glmm_layout(layout, n_obs, n_groups)
+    family = Poisson()
+    expected = laplace_deviance(theta, matrices, family)
+    actual = benchmark(_laplace_deviance_rust, theta, matrices, family)
+    for left, right in zip(actual, expected, strict=True):
+        np.testing.assert_allclose(left, right, rtol=1e-7, atol=1e-7)
+
+
+@pytest.mark.benchmark(group="native-glmm-prepared")
+@pytest.mark.parametrize(
+    ("layout", "n_obs", "n_groups"),
+    [("slopes", 6000, 150), ("crossed", 6000, 150), ("slopes", 20000, 1000)],
+)
+def test_benchmark_prepared_sparse_glmm_evaluations(benchmark, layout, n_obs, n_groups):
+    """Optimizer-style evaluations reuse one prepared sparse random-effect analysis."""
+    from mixedlm import _rust
+    from mixedlm.estimation.laplace import _native_glmm_args, _prepare_native_glmm
+    from mixedlm.families import Poisson
+
+    matrices, theta = _poisson_glmm_layout(layout, n_obs, n_groups)
+    family = Poisson()
+    problem = _prepare_native_glmm(matrices, family)
+    thetas = [theta * scale for scale in (0.8, 1.0, 1.25)]
+    expected = [_rust.glmm_deviance(*_native_glmm_args(t, matrices, family), 1) for t in thetas]
+
+    actual = benchmark(lambda: [problem.evaluate(current) for current in thetas])
+
+    for result, reference in zip(actual, expected, strict=True):
+        for value, reference_value in zip(result, reference, strict=True):
+            np.testing.assert_array_equal(value, reference_value)
+
+
+def _poisson_glmm_layout(layout, n_obs, n_groups):
     rng = np.random.default_rng(564)
     rows = np.arange(n_obs)
     x = rng.uniform(-1.0, 1.0, n_obs)
@@ -198,11 +257,7 @@ def test_benchmark_native_glmm_crossproducts(benchmark, layout, n_obs, n_groups)
     matrices = build_model_matrices(
         parse_formula(formula), data, weights=np.linspace(0.4, 2.0, n_obs), offset=offset
     )
-    family = Poisson()
-    expected = laplace_deviance(theta, matrices, family)
-    actual = benchmark(_laplace_deviance_rust, theta, matrices, family)
-    for left, right in zip(actual, expected, strict=True):
-        np.testing.assert_allclose(left, right, rtol=1e-7, atol=1e-7)
+    return matrices, theta
 
 
 @pytest.mark.benchmark(group="native-glmm-crossproducts")
@@ -615,6 +670,84 @@ def test_benchmark_sparse_python_likelihood(benchmark, large_crossed_sparse_data
     assert actual == pytest.approx(expected)
 
 
+def _coupled_lmm_data(layout, large_crossed_sparse_data):
+    """Nested and crossed designs whose random-effect levels share observations."""
+    rng = np.random.default_rng(29)
+    if layout == "regular_crossed":
+        return large_crossed_sparse_data, "y ~ x + (1 | group1) + (1 | group2)"
+    if layout == "random_crossed":
+        n_obs = 9_000
+        group1 = rng.integers(0, 1_000, n_obs)
+        group2 = rng.integers(0, 800, n_obs)
+        x = rng.normal(size=n_obs)
+        y = x + rng.normal(size=1_000)[group1] + rng.normal(size=800)[group2]
+        data = pd.DataFrame({"y": y + rng.normal(size=n_obs), "x": x, "g1": group1, "g2": group2})
+        return data, "y ~ x + (1 | g1) + (1 | g2)"
+    # Formula order lists the coarsest factor, which has the fewest levels, first.
+    sizes = (100, 10) if layout == "nested" else (20, 10, 10)
+    cell = np.repeat(np.arange(int(np.prod(sizes))), 5)
+    x = rng.normal(size=cell.size)
+    y = x + rng.normal(size=cell.size)
+    columns, stride = {"x": x}, int(np.prod(sizes))
+    for depth, size in enumerate(sizes):
+        stride //= size
+        level = cell // stride
+        columns[f"f{depth}"] = level % size
+        y += rng.normal(size=level.max() + 1)[level]
+    columns["y"] = y
+    factors = "/".join(f"f{depth}" for depth in range(len(sizes)))
+    return pd.DataFrame(columns), f"y ~ x + (1 | {factors})"
+
+
+@pytest.mark.benchmark(group="lmm-coupled-native")
+@pytest.mark.parametrize("layout", ["nested", "nested3", "regular_crossed", "random_crossed"])
+@pytest.mark.parametrize("operation", ["deviance", "deviance_with_gradient"])
+def test_benchmark_native_coupled_lmm(benchmark, large_crossed_sparse_data, layout, operation):
+    data, formula = _coupled_lmm_data(layout, large_crossed_sparse_data)
+    matrices = build_model_matrices(parse_formula(formula), data)
+    theta = np.linspace(0.6, 1.0, len(matrices.random_structures))
+    response = LMMOptimizer(matrices, use_rust=True)._rust_cache.response
+    expected = LMMOptimizer(matrices, use_rust=False).objective(theta)
+
+    result = benchmark(getattr(response, operation), theta, True)
+
+    value = result[0] if operation == "deviance_with_gradient" else result
+    assert value == pytest.approx(expected, rel=1e-10)
+
+
+@pytest.mark.benchmark(group="lmm-levels-native")
+@pytest.mark.parametrize(
+    "terms,theta", [("1", [0.8]), ("x", [0.8, 0.1, 0.5])], ids=["intercept", "slope"]
+)
+@pytest.mark.parametrize("operation", ["deviance", "deviance_with_gradient"])
+def test_benchmark_native_independent_level_lmm(benchmark, terms, theta, operation):
+    # Without coupling, each level's tile is factored on its own.
+    rng = np.random.default_rng(31)
+    group = np.repeat(np.arange(5_000), 4)
+    x = rng.normal(size=group.size)
+    y = x + rng.normal(size=5_000)[group] + 0.3 * x * rng.normal(size=5_000)[group]
+    data = pd.DataFrame({"y": y + rng.normal(size=group.size), "x": x, "g": group})
+    matrices = build_model_matrices(parse_formula(f"y ~ x + ({terms} | g)"), data)
+    theta = np.array(theta)
+    response = LMMOptimizer(matrices, use_rust=True)._rust_cache.response
+    expected = LMMOptimizer(matrices, use_rust=False).objective(theta)
+
+    result = benchmark(getattr(response, operation), theta, True)
+
+    value = result[0] if operation == "deviance_with_gradient" else result
+    assert value == pytest.approx(expected, rel=1e-10)
+
+
+@pytest.mark.benchmark(group="lmer-coupled")
+@pytest.mark.parametrize("layout", ["nested", "random_crossed"])
+def test_benchmark_lmer_coupled_default_engine(benchmark, large_crossed_sparse_data, layout):
+    data, formula = _coupled_lmm_data(layout, large_crossed_sparse_data)
+
+    result = benchmark.pedantic(lmer, args=(formula, data), rounds=3)
+
+    assert result.converged
+
+
 @pytest.mark.benchmark(group="covariance-conversion")
 def test_benchmark_sdcor2cov(benchmark, covariance_data):
     sd, corr, expected = covariance_data
@@ -732,25 +865,28 @@ def test_benchmark_glmm_conditional_variance(benchmark):
 
 
 @pytest.mark.benchmark(group="rust-sparse-cholesky")
-def test_benchmark_sparse_cholesky_solve(benchmark, sparse_spd_system):
+@pytest.mark.parametrize("ordering", ["amd", "natural"])
+def test_benchmark_sparse_cholesky_solve(benchmark, sparse_spd_system, ordering):
     data, indices, indptr, shape, rhs = sparse_spd_system
-    result = benchmark(sparse_cholesky_solve, data, indices, indptr, shape, rhs)
-    assert np.asarray(result).shape == rhs.shape
+    result = benchmark(sparse_cholesky_solve, data, indices, indptr, shape, rhs, ordering=ordering)
+    matrix = sparse.csc_matrix((data, indices, indptr), shape=shape)
+    np.testing.assert_allclose(matrix @ result, rhs, rtol=2e-12, atol=2e-12)
 
 
 @pytest.mark.benchmark(group="rust-sparse-rhs")
+@pytest.mark.parametrize("ordering", ["amd", "natural"])
 @pytest.mark.parametrize("cached", [False, True], ids=["uncached", "cached"])
 @pytest.mark.parametrize("n_rhs", [1, 16, 128])
-def test_benchmark_sparse_multiple_rhs(benchmark, sparse_spd_system, cached, n_rhs):
+def test_benchmark_sparse_multiple_rhs(benchmark, sparse_spd_system, cached, n_rhs, ordering):
     data, indices, indptr, shape, _ = sparse_spd_system
     rhs = np.random.default_rng(42).standard_normal((shape[0], n_rhs))
     if cached:
-        symbolic = SparseCholeskySymbolic(indices, indptr, shape[0])
+        symbolic = SparseCholeskySymbolic(indices, indptr, shape[0], ordering=ordering)
         solve = symbolic.factor(data).solve
     else:
 
         def solve(rhs):
-            return sparse_cholesky_solve(data, indices, indptr, shape, rhs)
+            return sparse_cholesky_solve(data, indices, indptr, shape, rhs, ordering=ordering)
 
     result = benchmark(solve, rhs)
     matrix = sparse.csc_matrix((data, indices, indptr), shape=shape)
@@ -758,17 +894,22 @@ def test_benchmark_sparse_multiple_rhs(benchmark, sparse_spd_system, cached, n_r
 
 
 @pytest.mark.benchmark(group="rust-sparse-cholesky")
-def test_benchmark_sparse_cholesky_logdet(benchmark, sparse_spd_system):
+@pytest.mark.parametrize("ordering", ["amd", "natural"])
+def test_benchmark_sparse_cholesky_logdet(benchmark, sparse_spd_system, ordering):
     data, indices, indptr, shape, _rhs = sparse_spd_system
-    result = benchmark(sparse_cholesky_logdet, data, indices, indptr, shape)
-    assert np.isfinite(result)
+    result = benchmark(sparse_cholesky_logdet, data, indices, indptr, shape, ordering=ordering)
+    # The tridiagonal factor's pivots follow the continued-fraction recurrence.
+    pivots = [4.0]
+    for _ in range(shape[0] - 1):
+        pivots.append(4.0 - 1.0 / pivots[-1])
+    assert result == pytest.approx(np.log(pivots).sum(), rel=1e-12)
 
 
 @pytest.mark.benchmark(group="rust-sparse-ordering")
 @pytest.mark.parametrize("ordering", ["natural", "amd"])
 @pytest.mark.parametrize("size", [128, 512])
 def test_benchmark_sparse_hub_ordering(benchmark, ordering, size):
-    from tests.test_sparse_ordering import arrowhead_system, sparse_arguments
+    from tests._sparse_systems import arrowhead_system, sparse_arguments
 
     matrix, rhs, expected, logdet = arrowhead_system(size)
     data, indices, offsets = sparse_arguments(matrix, "full")
@@ -779,6 +920,7 @@ def test_benchmark_sparse_hub_ordering(benchmark, ordering, size):
         return numeric.solve(rhs), numeric.logdet(), symbolic.factor_nonzeros()
 
     solution, actual_logdet, factor_nonzeros = benchmark(factor_and_solve)
+    benchmark.extra_info["factor_nonzeros"] = factor_nonzeros
     np.testing.assert_allclose(solution, expected, rtol=2e-12, atol=2e-12)
     np.testing.assert_allclose(matrix @ solution, rhs, rtol=2e-12, atol=2e-12)
     assert actual_logdet == pytest.approx(logdet, rel=2e-12)

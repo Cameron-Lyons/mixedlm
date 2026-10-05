@@ -1,16 +1,37 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from decimal import Decimal, localcontext
 from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
 import pytest
-from mixedlm import ICCResult, R2NakagawaResult, families, glmer, icc, lmer, r2_nakagawa
+from mixedlm import (
+    ICCResult,
+    R2NakagawaResult,
+    families,
+    glmer,
+    icc,
+    lmer,
+    lmerControl,
+    r2_nakagawa,
+)
+from mixedlm.diagnostics.fit_metrics import _distribution_specific_variance
 from mixedlm.estimation.nlmm import _build_psi_matrix
-from mixedlm.families import Binomial, Poisson
+from mixedlm.families import (
+    Binomial,
+    Gamma,
+    Gaussian,
+    InverseGaussian,
+    NegativeBinomial,
+    Poisson,
+    QuasiFamily,
+)
+from mixedlm.families.base import LogLink
 from mixedlm.nlme import SSmicmen
-from scipy import sparse
+from numpy.testing import assert_allclose
+from scipy import linalg, sparse
 
 
 @dataclass
@@ -114,6 +135,45 @@ def linear_model() -> _FakeLinearModel:
     )
 
 
+def _fixed_only_model(predictions, weights=None) -> _FakeLinearModel:
+    n_obs = len(predictions)
+    matrices = SimpleNamespace(
+        X=np.asarray(predictions, dtype=np.float64)[:, None],
+        Z=sparse.csc_matrix((n_obs, 0)),
+        offset=np.zeros(n_obs),
+        weights=np.ones(n_obs) if weights is None else np.asarray(weights, dtype=np.float64),
+    )
+    return _FakeLinearModel(
+        beta=np.array([1.0]), sigma=1.0, matrices=matrices, structures=[], covariances=[]
+    )
+
+
+def _decimal_residual(family, means, weights, approximation) -> float:
+    """Average link-scale residual variance from the distribution formulas."""
+    with localcontext() as context:
+        context.prec = 500
+        base = getattr(family, "base_family", family)
+        dispersion = Decimal(str(getattr(family, "phi", 1)))
+        contributions = []
+        for mean, weight in zip(means, weights, strict=True):
+            mu = Decimal(str(mean))
+            if isinstance(base, Gaussian):
+                variance = Decimal(1)
+            elif isinstance(base, Poisson):
+                variance = mu
+            elif isinstance(base, Gamma):
+                variance = mu**2
+            elif isinstance(base, InverseGaussian):
+                variance = mu**3
+            elif isinstance(base, NegativeBinomial):
+                variance = mu + mu**2 / Decimal(str(base.theta))
+            else:
+                raise AssertionError("Unknown oracle distribution")
+            ratio = dispersion * variance / (Decimal(str(weight)) * mu**2)
+            contributions.append((1 + ratio).ln() if approximation == "lognormal" else ratio)
+        return float(sum(contributions) / len(contributions))
+
+
 def _as_glmm(linear_model: _FakeLinearModel, family: object) -> _FakeGeneralizedModel:
     return _FakeGeneralizedModel(
         beta=np.array([-1.0, 0.2]),
@@ -142,6 +202,12 @@ class TestNakagawaR2:
         assert result.marginal == pytest.approx(fixed / total)
         assert result.conditional == pytest.approx((fixed + random) / total)
         assert result.approximation == "gaussian"
+
+    @pytest.mark.parametrize("sigma", [0.1, 0.3, 3.0, 123.456])
+    def test_unit_weights_keep_exact_residual_variance(self, linear_model, sigma) -> None:
+        linear_model.sigma = sigma
+
+        assert r2_nakagawa(linear_model).variance_residual == sigma**2
 
     def test_fixed_offset_contributes_to_explained_variance(self, linear_model) -> None:
         linear_model.beta = np.array([2.0, 0.0])
@@ -265,6 +331,199 @@ class TestICC:
         assert result.by_group == {}
 
 
+@pytest.mark.installed_wheel
+class TestVarianceOracles:
+    """Variance components checked against the covariance of observed responses."""
+
+    @pytest.mark.parametrize("use_rust", [False, True])
+    def test_weighted_crossed_fit_matches_observation_covariance(self, use_rust) -> None:
+        rng = np.random.default_rng(72)
+        subject = np.repeat(np.arange(8), 8)
+        item = np.tile(np.arange(8), 8)
+        x = rng.normal(size=64)
+        precision = np.exp(rng.normal(scale=0.6, size=64))
+        y = (
+            1.2
+            + 0.7 * x
+            + rng.normal(scale=0.8, size=8)[subject]
+            + rng.normal(scale=0.4, size=8)[item]
+            + rng.normal(scale=0.5, size=64) / np.sqrt(precision)
+        )
+        data = pd.DataFrame({"y": y, "x": x, "subject": subject, "item": item})
+        model = lmer(
+            "y ~ x + (1 | subject) + (1 | item)",
+            data,
+            weights=precision,
+            control=lmerControl(use_rust=use_rust),
+        )
+        assert model.converged
+
+        # Independent observation covariance: V = Z G Z' + sigma² W^-1.
+        blocks = [
+            np.kron(np.eye(structure.n_levels), covariance)
+            for structure, covariance in model._iter_random_cov_blocks(scale=model.sigma**2)
+        ]
+        design = model.matrices.Z.toarray()
+        random_covariance = design @ linalg.block_diag(*blocks) @ design.T
+        fixed = np.var(model.matrices.X @ model.beta, ddof=1)
+        random = np.trace(random_covariance) / len(data)
+        residual = np.trace(np.diag(model.sigma**2 / precision)) / len(data)
+        total = fixed + random + residual
+
+        result = r2_nakagawa(model)
+        correlation = icc(model)
+        assert result.variance_residual == pytest.approx(residual)
+        assert result.variance_random == pytest.approx(random)
+        assert result.marginal == pytest.approx(fixed / total)
+        assert result.conditional == pytest.approx((fixed + random) / total)
+        assert correlation.adjusted == pytest.approx(random / (random + residual))
+        assert sum(correlation.by_group.values()) == pytest.approx(correlation.adjusted)
+
+        # The same response distribution can be parameterized with a common
+        # precision multiplier, compensated by sigma and the relative covariance.
+        scaled = replace(
+            model,
+            sigma=model.sigma * np.sqrt(16.0),
+            theta=model.theta / np.sqrt(16.0),
+            matrices=replace(model.matrices, weights=16.0 * model.matrices.weights),
+        )
+        assert r2_nakagawa(scaled).as_dict() == pytest.approx(result.as_dict())
+        assert icc(scaled).as_dict() == pytest.approx(correlation.as_dict())
+
+    def test_multi_term_random_slope_matches_observation_covariance(self) -> None:
+        rng = np.random.default_rng(6)
+        n_obs, n_terms, n_levels = 11, 5, 3
+        term_design = rng.normal(size=(n_obs, n_terms))
+        levels = np.arange(n_obs) % n_levels
+        design = np.zeros((n_obs, n_levels * n_terms))
+        for row, level in enumerate(levels):
+            design[row, level * n_terms : (level + 1) * n_terms] = term_design[row]
+        factor = rng.normal(size=(n_terms, n_terms))
+        covariance = factor @ factor.T
+        model = _FakeLinearModel(
+            beta=np.array([0.0]),
+            sigma=1.0,
+            matrices=SimpleNamespace(
+                X=np.ones((n_obs, 1)),
+                Z=sparse.csc_matrix(design),
+                offset=np.zeros(n_obs),
+                weights=np.ones(n_obs),
+            ),
+            structures=[
+                SimpleNamespace(grouping_factor="group", n_terms=n_terms, n_levels=n_levels)
+            ],
+            covariances=[covariance],
+        )
+
+        expected = np.trace(design @ np.kron(np.eye(n_levels), covariance) @ design.T) / n_obs
+        assert r2_nakagawa(model).variance_random == pytest.approx(expected)
+
+    def test_nonlinear_residual_component_honors_precision(self) -> None:
+        class WeightedModel(_FakeNonlinearModel):
+            def weights(self, copy=True):
+                return np.array([0.25, 1.0, 4.0, 16.0])
+
+        model = WeightedModel(
+            model=SSmicmen(),
+            phi=np.array([10.0, 2.0]),
+            theta=np.array([0.2]),
+            sigma=2.0,
+            x=np.array([0.5, 1.0, 2.0, 4.0]),
+            random_params=[0],
+        )
+
+        expected = (16.0 + 4.0 + 1.0 + 0.25) / 4
+        assert r2_nakagawa(model).variance_residual == pytest.approx(expected)
+        assert icc(model).variance_residual == pytest.approx(expected)
+
+    def test_nonlinear_offsets_contribute_to_fixed_prediction_variance(self) -> None:
+        class OffsetModel(_FakeNonlinearModel):
+            def offset(self, copy=True):
+                # Known offsets exactly cancel the population Michaelis-Menten curve.
+                return -np.array([2.0, 10.0 / 3.0, 5.0, 20.0 / 3.0])
+
+        model = OffsetModel(
+            model=SSmicmen(),
+            phi=np.array([10.0, 2.0]),
+            theta=np.array([0.2]),
+            sigma=2.0,
+            x=np.array([0.5, 1.0, 2.0, 4.0]),
+            random_params=[0],
+        )
+
+        result = r2_nakagawa(model)
+        assert result.variance_fixed == pytest.approx(0.0, abs=1e-25)
+        assert result.marginal == pytest.approx(0.0, abs=1e-25)
+        assert result.variance_random > 0
+
+    def test_large_common_baseline_keeps_small_fixed_variation(self) -> None:
+        model = _fixed_only_model(1e15 + np.array([0.0, 0.25, 0.5, 0.75]))
+
+        expected = (0.375**2 + 0.125**2 + 0.125**2 + 0.375**2) / 3
+        assert r2_nakagawa(model).variance_fixed == pytest.approx(expected)
+
+
+@pytest.mark.installed_wheel
+class TestLogLinkResidualVariance:
+    """Extreme GLMM variances verified against decimal distribution formulas."""
+
+    @pytest.mark.parametrize(
+        "family",
+        [
+            Gaussian(link="log"),
+            Poisson(),
+            Gamma(),
+            InverseGaussian(),
+            NegativeBinomial(theta=4),
+            QuasiFamily(Gamma(), phi=2.5),
+        ],
+    )
+    @pytest.mark.parametrize("mean", [1e-150, 0.7, 1e150, 1e200])
+    @pytest.mark.parametrize("approximation", ["lognormal", "delta"])
+    def test_builtin_log_variance_matches_high_precision_distribution(
+        self, family, mean, approximation
+    ) -> None:
+        means = np.array([mean, 2 * mean])
+        weights = np.array([2.0, 8.0])
+        expected = _decimal_residual(family, means, weights, approximation)
+
+        with np.errstate(over="raise", invalid="raise", divide="raise"):
+            actual, used = _distribution_specific_variance(family, means, weights, approximation)
+
+        assert used == approximation
+        assert_allclose(actual, expected, rtol=2e-12, atol=0)
+
+    def test_custom_variance_override_is_preserved(self) -> None:
+        class CustomPoisson(Poisson):
+            def variance(self, mu):
+                return 7 * mu
+
+        actual, used = _distribution_specific_variance(
+            CustomPoisson(), np.array([2.0, 4.0]), np.array([1.0, 2.0]), "lognormal"
+        )
+
+        assert used == "lognormal"
+        assert actual == pytest.approx((np.log1p(3.5) + np.log1p(0.875)) / 2)
+
+    def test_custom_log_link_derivative_is_preserved(self) -> None:
+        class ScaledLogLink(LogLink):
+            def link(self, mu):
+                return 2 * np.log(mu)
+
+            def inverse(self, eta):
+                return np.exp(eta / 2)
+
+            def deriv(self, mu):
+                return 2 / mu
+
+        actual, used = _distribution_specific_variance(
+            Poisson(link=ScaledLogLink()), np.array([2.0, 4.0]), np.array([1.0, 2.0]), "delta"
+        )
+
+        assert used == "delta"
+        assert actual == pytest.approx((4 / 2 + 4 / (2 * 4)) / 2)
+
+
 class TestFitMetricValidation:
     def test_rejects_unknown_approximation(self, linear_model) -> None:
         with pytest.raises(ValueError, match="Unknown approximation"):
@@ -279,6 +538,22 @@ class TestFitMetricValidation:
     def test_rejects_non_model(self) -> None:
         with pytest.raises(TypeError, match="fitted linear"):
             r2_nakagawa(object())
+
+    @pytest.mark.parametrize("invalid", [np.nan, np.inf, -np.inf])
+    def test_rejects_nonfinite_predictions(self, invalid) -> None:
+        with pytest.raises(ValueError, match="Fixed predictions must be finite"):
+            r2_nakagawa(_fixed_only_model([1.0, invalid]))
+
+    @pytest.mark.parametrize("invalid", [0.0, -1.0, np.nan, np.inf])
+    def test_rejects_invalid_gaussian_precision(self, invalid) -> None:
+        with pytest.raises(ValueError, match="weights must be finite and positive"):
+            r2_nakagawa(_fixed_only_model([1.0, 1.0], weights=[1.0, invalid]))
+
+    def test_rejects_unrepresentable_delta_variance(self) -> None:
+        with pytest.raises(ValueError, match="Delta-method residual variance is not finite"):
+            _distribution_specific_variance(
+                Gaussian(link="log"), np.array([1e-200]), np.ones(1), "delta"
+            )
 
     def test_result_helpers(self, linear_model) -> None:
         r2 = r2_nakagawa(linear_model)

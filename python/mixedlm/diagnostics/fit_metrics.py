@@ -1,15 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from math import fsum
 from typing import Any
 
 import numpy as np
 from numpy.typing import NDArray
-from scipy import sparse
-from scipy.special import logsumexp
 
-from mixedlm.models.shared_utils import sparse_covariance_quadratic_form_diagonal
+from mixedlm.models.shared_utils import dense_quadratic_form_diagonal
 
 
 @dataclass(frozen=True)
@@ -99,9 +96,9 @@ def r2_nakagawa(model: Any, approximation: str = "lognormal") -> R2NakagawaResul
         R-squared values and the full variance decomposition.
     """
     components = _variance_components(model, approximation)
-    variances = (components.fixed, components.random, components.residual)
-    marginal = _safe_ratio((components.fixed,), variances)
-    conditional = _safe_ratio((components.fixed, components.random), variances)
+    total = components.fixed + components.random + components.residual
+    marginal = _safe_ratio(components.fixed, total)
+    conditional = _safe_ratio(components.fixed + components.random, total)
     return R2NakagawaResult(
         marginal=marginal,
         conditional=conditional,
@@ -121,16 +118,16 @@ def icc(model: Any, approximation: str = "lognormal") -> ICCResult:
     Group-specific values partition the corresponding overall ICC.
     """
     components = _variance_components(model, approximation)
-    adjusted_denominator = (components.random, components.residual)
-    total = (components.fixed, *adjusted_denominator)
-    adjusted = _safe_ratio((components.random,), adjusted_denominator)
-    unadjusted = _safe_ratio((components.random,), total)
+    adjusted_denominator = components.random + components.residual
+    total = components.fixed + adjusted_denominator
+    adjusted = _safe_ratio(components.random, adjusted_denominator)
+    unadjusted = _safe_ratio(components.random, total)
     by_group = {
-        group: _safe_ratio((variance,), adjusted_denominator)
+        group: _safe_ratio(variance, adjusted_denominator)
         for group, variance in components.random_by_group.items()
     }
     by_group_unadjusted = {
-        group: _safe_ratio((variance,), total)
+        group: _safe_ratio(variance, total)
         for group, variance in components.random_by_group.items()
     }
     return ICCResult(
@@ -232,14 +229,11 @@ def _linear_predictor_variances(
         n_terms = structure.n_terms
         width = structure.n_levels * n_terms
         block = model.matrices.Z[:, column_start : column_start + width]
-        block = block.tocsr()
-        term_design = sparse.csr_matrix(
-            (block.data, block.indices % n_terms, block.indptr),
-            shape=(block.shape[0], n_terms),
+        term_design = np.column_stack(
+            [np.asarray(block[:, term::n_terms].sum(axis=1)).reshape(-1) for term in range(n_terms)]
         )
-        term_design.sum_duplicates()
         covariance_array = np.asarray(covariance, dtype=np.float64)
-        row_variance = sparse_covariance_quadratic_form_diagonal(term_design, covariance_array)
+        row_variance = dense_quadratic_form_diagonal(term_design, covariance_array)
         component = _nonnegative_mean(row_variance)
         by_group[structure.grouping_factor] = (
             by_group.get(structure.grouping_factor, 0.0) + component
@@ -251,7 +245,7 @@ def _linear_predictor_variances(
             f"Random-effect structures describe {column_start} columns, "
             f"but Z has {model.matrices.Z.shape[1]}"
         )
-    return fixed, fsum(by_group.values()), by_group
+    return fixed, float(sum(by_group.values())), by_group
 
 
 def _fixed_linear_predictor(model: Any) -> NDArray[np.float64]:
@@ -306,13 +300,11 @@ def _distribution_specific_variance(
         if log_relative is not None:
             if approximation == "lognormal":
                 return _nonnegative_mean(np.logaddexp(0.0, log_relative)), "lognormal"
-            # Average before exponentiating: individual contributions may
-            # exceed float64 even when the mean is still representable.
             with np.errstate(over="ignore"):
-                residual = float(np.exp(logsumexp(log_relative) - np.log(len(mu))))
-            if not np.isfinite(residual):
+                values = np.exp(log_relative)
+            if np.any(~np.isfinite(values)):
                 raise ValueError("Delta-method residual variance is not finite")
-            return residual, "delta"
+            return _nonnegative_mean(values), "delta"
 
     conditional_variance = np.asarray(family.variance(mu), dtype=np.float64) / weights
     if np.any(~np.isfinite(conditional_variance)) or np.any(conditional_variance < 0.0):
@@ -325,8 +317,7 @@ def _distribution_specific_variance(
         return _nonnegative_mean(values), "lognormal"
 
     derivative = np.asarray(family.link.deriv(mu), dtype=np.float64)
-    with np.errstate(over="ignore", invalid="ignore"):
-        values = np.square(derivative * np.sqrt(conditional_variance))
+    values = derivative**2 * conditional_variance
     if np.any(~np.isfinite(values)):
         raise ValueError("Delta-method residual variance is not finite")
     return _nonnegative_mean(values), "delta"
@@ -378,31 +369,14 @@ def _sample_variance(values: NDArray[np.float64]) -> float:
         raise ValueError("Fixed predictions must be finite")
     if len(values) <= 1:
         return 0.0
-    # Center before reducing so a large common baseline does not erase small
-    # differences or overflow the mean. Scale before squaring to avoid an
-    # overflowing sum when the final sample variance is representable.
-    with np.errstate(over="ignore", invalid="ignore"):
-        centered = values - values[0]
-    scale = float(np.max(np.abs(centered)))
-    if not np.isfinite(scale):
-        raise ValueError("Fixed prediction variance exceeds the floating-point range")
-    if scale == 0:
-        return 0.0
-    variance = float(np.var(centered / scale, ddof=1))
-    with np.errstate(over="ignore"):
-        result = float((np.sqrt(variance) * scale) ** 2)
-    if not np.isfinite(result):
-        raise ValueError("Fixed prediction variance exceeds the floating-point range")
-    return result
+    # Center first so a large common baseline does not erase small differences.
+    return max(float(np.var(values - values[0], ddof=1)), 0.0)
 
 
 def _nonnegative_mean(values: NDArray[np.float64]) -> float:
     if np.any(~np.isfinite(values)):
         raise ValueError("Variance contributions must be finite")
-    if not len(values):
-        return 0.0
-    scale = float(np.max(np.abs(values)))
-    return max(float(np.mean(values / scale)) * scale, 0.0) if scale else 0.0
+    return max(float(np.mean(values)), 0.0) if len(values) else 0.0
 
 
 def _gaussian_residual_variance(sigma: float, weights: NDArray[np.float64]) -> float:
@@ -411,29 +385,16 @@ def _gaussian_residual_variance(sigma: float, weights: NDArray[np.float64]) -> f
         raise ValueError("Model weights must be finite and positive")
     if not np.isfinite(sigma) or sigma < 0:
         raise ValueError("Residual scale must be finite and nonnegative")
-    if sigma == 0 or not len(weights):
-        return 0.0
-    with np.errstate(over="ignore"):
-        result = float(
-            np.exp(2 * np.log(sigma) + logsumexp(-np.log(weights)) - np.log(len(weights)))
-        )
+    result = float(sigma**2 * np.mean(1.0 / weights))
     if not np.isfinite(result):
         raise ValueError("Residual variance exceeds the floating-point range")
     return result
 
 
-def _safe_ratio(numerator: tuple[float, ...], denominator: tuple[float, ...]) -> float:
-    scale = max(denominator)
-    if not np.isfinite(scale) or scale <= 0.0:
+def _safe_ratio(numerator: float, denominator: float) -> float:
+    if not np.isfinite(denominator) or denominator <= 0.0:
         return float("nan")
-    return float(
-        np.clip(
-            fsum(value / scale for value in numerator)
-            / fsum(value / scale for value in denominator),
-            0.0,
-            1.0,
-        )
-    )
+    return float(np.clip(numerator / denominator, 0.0, 1.0))
 
 
 def _model_flag(model: Any, name: str) -> bool:

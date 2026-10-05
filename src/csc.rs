@@ -1,7 +1,9 @@
 use std::borrow::Cow;
+use std::ops::Range;
 use std::sync::OnceLock;
 
-use faer::Mat;
+use faer::linalg::matmul::matmul;
+use faer::{Accum, Mat, Par};
 
 use crate::linalg::LinalgError;
 
@@ -378,6 +380,125 @@ impl CscMatrix {
         Some(result)
     }
 
+    /// Reorder columns, e.g. to eliminate random-effect structures in another order.
+    pub fn select_columns(&self, columns: &[usize]) -> Self {
+        let mut col_offsets = Vec::with_capacity(columns.len() + 1);
+        let mut row_indices = Vec::with_capacity(self.row_indices.len());
+        let mut values = Vec::with_capacity(self.values.len());
+        col_offsets.push(0);
+        for &column in columns {
+            let entries = self.col_offsets[column]..self.col_offsets[column + 1];
+            row_indices.extend_from_slice(&self.row_indices[entries.clone()]);
+            values.extend_from_slice(&self.values[entries]);
+            col_offsets.push(values.len());
+        }
+        Self {
+            nrows: self.nrows,
+            ncols: columns.len(),
+            col_offsets,
+            row_indices,
+            values,
+            rows: OnceLock::new(),
+        }
+    }
+
+    /// Compute the lower level tiles of Z' diag(weights) Z without a square matrix.
+    /// Blocks are given as for `weighted_repeated_block_crossproducts`. Each pair
+    /// of levels sharing an observation keeps one tile unless it is exactly zero.
+    pub fn weighted_level_crossproduct(
+        &self,
+        weights: &[f64],
+        blocks: &[(usize, usize)],
+    ) -> LevelTiles {
+        assert_eq!(weights.len(), self.nrows);
+        let mut tiles = LevelTiles::empty(blocks);
+        let n_levels = tiles.n_levels();
+        assert_eq!(tiles.dimension(), self.ncols);
+        let mut level_of = Vec::with_capacity(self.ncols);
+        for level in 0..n_levels {
+            level_of.extend(std::iter::repeat_n(level, tiles.width(level)));
+        }
+        let rows = self.rows.get_or_init(|| RowStorage::new(self));
+        // Levels touched by each observation, and observations touching each level.
+        let mut touched_offsets = vec![0];
+        let mut touched = Vec::new();
+        let mut counts = vec![0usize; n_levels + 1];
+        for row in 0..self.nrows {
+            for &column in &rows.columns[rows.offsets[row]..rows.offsets[row + 1]] {
+                let level = level_of[column];
+                // Columns are sorted within a row, so repeated levels are adjacent.
+                if touched.len() == touched_offsets[row] || touched.last() != Some(&level) {
+                    touched.push(level);
+                    counts[level + 1] += 1;
+                }
+            }
+            touched_offsets.push(touched.len());
+        }
+        for level in 0..n_levels {
+            counts[level + 1] += counts[level];
+        }
+        let mut cursors = counts[..n_levels].to_vec();
+        let mut observations = vec![0; touched.len()];
+        for row in 0..self.nrows {
+            for &level in &touched[touched_offsets[row]..touched_offsets[row + 1]] {
+                observations[cursors[level]] = row;
+                cursors[level] += 1;
+            }
+        }
+        let mut stamps = vec![usize::MAX; n_levels];
+        let mut coupled = Vec::new();
+        for column in 0..n_levels {
+            coupled.clear();
+            for &row in &observations[counts[column]..counts[column + 1]] {
+                for &level in &touched[touched_offsets[row]..touched_offsets[row + 1]] {
+                    if level > column && stamps[level] != column {
+                        stamps[level] = column;
+                        coupled.push(level);
+                    }
+                }
+            }
+            coupled.sort_unstable();
+            tiles.push_tile(column, column);
+            for &level in &coupled {
+                tiles.push_tile(level, column);
+            }
+            tiles.columns.push(tiles.rows.len());
+        }
+        // Accumulate each cell in ascending row order like weighted_crossproduct,
+        // weighting the same operand as its path for this density.
+        let weight_higher =
+            !self.values.is_empty() && self.values.len() / self.nrows > self.ncols / 4;
+        for (row, &weight) in weights.iter().enumerate() {
+            let end = rows.offsets[row + 1];
+            for left in rows.offsets[row]..end {
+                let left_column = rows.columns[left];
+                let column_level = level_of[left_column];
+                let column_offset = left_column - tiles.starts[column_level];
+                let weighted_left = weight * rows.values[left];
+                let mut tile = tiles.columns[column_level];
+                for right in left..end {
+                    let right_column = rows.columns[right];
+                    let row_level = level_of[right_column];
+                    let last = tiles.columns[column_level + 1];
+                    tile += tiles.rows[tile..last].partition_point(|&level| level < row_level);
+                    let height = tiles.width(row_level);
+                    let row_offset = right_column - tiles.starts[row_level];
+                    let value = if weight_higher {
+                        weight * rows.values[right] * rows.values[left]
+                    } else {
+                        weighted_left * rows.values[right]
+                    };
+                    let base = tiles.offsets[tile];
+                    tiles.values[base + row_offset + column_offset * height] += value;
+                    if tile == tiles.columns[column_level] && row_offset != column_offset {
+                        tiles.values[base + column_offset + row_offset * height] += value;
+                    }
+                }
+            }
+        }
+        tiles.without_zero_couplings()
+    }
+
     /// Materialize the upper triangle of a self-adjoint matrix from its lower
     /// triangle. Columns and rows are canonical by construction.
     pub fn self_adjoint_upper_from_lower(&self) -> Self {
@@ -419,6 +540,374 @@ impl CscMatrix {
             row_indices,
             values,
             rows: OnceLock::new(),
+        }
+    }
+}
+
+/// Tiles narrower than this use scalar loops instead of dense kernels.
+pub const SCALAR_WIDTH: usize = 16;
+
+/// A sparse symmetric matrix stored as dense column-major tiles between
+/// random-effect levels. Each level column holds its full diagonal tile and
+/// then the tiles below it in ascending row order. Repeated covariance factors
+/// act within tiles, so transformed matrices keep the same pattern and layout.
+#[derive(Debug, Clone)]
+pub struct LevelTiles {
+    /// Levels and width of each structure, and the structure of each level.
+    blocks: Vec<(usize, usize)>,
+    level_blocks: Vec<usize>,
+    starts: Vec<usize>,
+    columns: Vec<usize>,
+    rows: Vec<usize>,
+    offsets: Vec<usize>,
+    values: Vec<f64>,
+}
+
+impl LevelTiles {
+    fn empty(blocks: &[(usize, usize)]) -> Self {
+        let (mut starts, mut level_blocks) = (vec![0], Vec::new());
+        for (block, &(count, width)) in blocks.iter().enumerate() {
+            for _ in 0..count {
+                starts.push(starts[starts.len() - 1] + width);
+                level_blocks.push(block);
+            }
+        }
+        Self {
+            blocks: blocks.to_vec(),
+            level_blocks,
+            starts,
+            columns: vec![0],
+            rows: Vec::new(),
+            offsets: vec![0],
+            values: Vec::new(),
+        }
+    }
+
+    fn push_tile(&mut self, row: usize, column: usize) {
+        self.rows.push(row);
+        let size = self.width(row) * self.width(column);
+        self.values.resize(self.values.len() + size, 0.0);
+        self.offsets.push(self.values.len());
+    }
+
+    /// Store the lower tiles of a symmetric matrix given by its entries.
+    pub fn lower_from_entries(
+        blocks: &[(usize, usize)],
+        entry: impl Fn(usize, usize) -> f64,
+    ) -> Self {
+        let mut tiles = Self::empty(blocks);
+        for column in 0..tiles.n_levels() {
+            for row in column..tiles.n_levels() {
+                tiles.push_tile(row, column);
+                let tile = tiles.rows.len() - 1;
+                let (first, height) = (tiles.starts[row], tiles.width(row));
+                let left = tiles.starts[column];
+                let base = tiles.offsets[tile];
+                for (index, value) in tiles.values[base..].iter_mut().enumerate() {
+                    *value = entry(first + index % height, left + index / height);
+                }
+                if row != column && tiles.values[base..].iter().all(|&value| value == 0.0) {
+                    tiles.rows.pop();
+                    tiles.offsets.pop();
+                    tiles.values.truncate(base);
+                }
+            }
+            tiles.columns.push(tiles.rows.len());
+        }
+        tiles
+    }
+
+    /// Store independent levels from blocks stacked as by
+    /// `weighted_repeated_block_crossproducts`.
+    pub fn from_level_blocks(blocks: &[(usize, usize)], stacked: &[Mat<f64>]) -> Self {
+        assert_eq!(blocks.len(), stacked.len());
+        let mut tiles = Self::empty(blocks);
+        for (&(count, width), matrix) in blocks.iter().zip(stacked) {
+            assert_eq!(matrix.shape(), (count * width, width));
+            for level in 0..count {
+                tiles.rows.push(tiles.columns.len() - 1);
+                tiles.values.extend(
+                    (0..width * width)
+                        .map(|index| matrix[(level * width + index % width, index / width)]),
+                );
+                tiles.offsets.push(tiles.values.len());
+                tiles.columns.push(tiles.rows.len());
+            }
+        }
+        tiles
+    }
+
+    /// Drop exactly zero couplings, matching the dense independence checks.
+    fn without_zero_couplings(self) -> Self {
+        let mut kept = Self::empty(&self.blocks);
+        for column in 0..self.n_levels() {
+            for tile in self.column(column) {
+                let values = self.tile(tile);
+                if tile == self.columns[column] || values.iter().any(|&value| value != 0.0) {
+                    kept.rows.push(self.rows[tile]);
+                    kept.values.extend_from_slice(values);
+                    kept.offsets.push(kept.values.len());
+                }
+            }
+            kept.columns.push(kept.rows.len());
+        }
+        kept
+    }
+
+    pub fn n_levels(&self) -> usize {
+        self.starts.len() - 1
+    }
+
+    pub fn dimension(&self) -> usize {
+        self.starts[self.n_levels()]
+    }
+
+    pub fn start(&self, level: usize) -> usize {
+        self.starts[level]
+    }
+
+    pub fn width(&self, level: usize) -> usize {
+        self.starts[level + 1] - self.starts[level]
+    }
+
+    /// Tile indices of one level column: its diagonal tile, then ascending rows.
+    pub fn column(&self, level: usize) -> Range<usize> {
+        self.columns[level]..self.columns[level + 1]
+    }
+
+    pub fn row(&self, tile: usize) -> usize {
+        self.rows[tile]
+    }
+
+    /// Positions of one tile's values, which are column-major with the row
+    /// level's width as leading dimension. Matrices on this pattern share it.
+    pub fn span(&self, tile: usize) -> Range<usize> {
+        self.offsets[tile]..self.offsets[tile + 1]
+    }
+
+    pub fn tile(&self, tile: usize) -> &[f64] {
+        &self.values[self.span(tile)]
+    }
+
+    /// Number of stored values, including both triangles of diagonal tiles.
+    pub fn len(&self) -> usize {
+        self.values.len()
+    }
+
+    pub fn values(&self) -> &[f64] {
+        &self.values
+    }
+
+    /// Structure of a level, which selects its covariance factor.
+    pub fn block(&self, level: usize) -> usize {
+        self.level_blocks[level]
+    }
+
+    /// Whether no level couples another. Each structure's diagonal tiles and
+    /// rows are then contiguous, so its levels can be visited as one run.
+    pub fn block_diagonal(&self) -> bool {
+        self.rows.len() == self.n_levels()
+    }
+
+    /// Each structure's width, value range and row range in block-diagonal tiles.
+    pub fn runs(&self) -> impl Iterator<Item = (usize, Range<usize>, Range<usize>)> + '_ {
+        debug_assert!(self.block_diagonal());
+        let (mut values, mut rows) = (0, 0);
+        self.blocks.iter().map(move |&(count, width)| {
+            let run = (
+                width,
+                values..values + count * width * width,
+                rows..rows + count * width,
+            );
+            (values, rows) = (run.1.end, run.2.end);
+            run
+        })
+    }
+
+    /// Count the leading levels coupled to no earlier level. They can be
+    /// eliminated one tile at a time without changing each other.
+    pub fn independent_prefix(&self) -> usize {
+        let mut first_coupled = self.n_levels();
+        let mut level = 0;
+        while level < first_coupled {
+            if let Some(tile) = self.column(level).nth(1) {
+                first_coupled = first_coupled.min(self.rows[tile]);
+            }
+            level += 1;
+        }
+        level
+    }
+
+    /// Form Lambda' S Lambda + I with each structure's lower-triangular factor
+    /// repeated over its levels.
+    pub fn penalized(&self, lambda: &[Mat<f64>]) -> Vec<f64> {
+        assert_eq!(lambda.len(), self.blocks.len());
+        let mut values = vec![0.0; self.values.len()];
+        if self.block_diagonal() {
+            for ((width, span, _), factor) in self.runs().zip(lambda) {
+                let (output, tiles) = (&mut values[span.clone()], &self.values[span]);
+                if width == 1 {
+                    let scale = factor[(0, 0)];
+                    for (output, &tile) in output.iter_mut().zip(tiles) {
+                        *output = (scale * tile) * scale + 1.0;
+                    }
+                    continue;
+                }
+                let size = width * width;
+                for (output, tile) in output.chunks_exact_mut(size).zip(tiles.chunks_exact(size)) {
+                    transform_tile(factor, tile, factor, output);
+                    add_identity(output, width);
+                }
+            }
+            return values;
+        }
+        for column in 0..self.n_levels() {
+            let right = &lambda[self.level_blocks[column]];
+            for tile in self.column(column) {
+                let row = self.rows[tile];
+                let output = &mut values[self.span(tile)];
+                transform_tile(
+                    &lambda[self.level_blocks[row]],
+                    self.tile(tile),
+                    right,
+                    output,
+                );
+                if row == column {
+                    add_identity(output, right.nrows());
+                }
+            }
+        }
+        values
+    }
+
+    /// Multiply the symmetric matrix held by lower tiles.
+    pub fn symmetric_product(&self, rhs: &Mat<f64>) -> Mat<f64> {
+        assert_eq!(rhs.nrows(), self.dimension());
+        let mut result = Mat::zeros(rhs.nrows(), rhs.ncols());
+        if self.block_diagonal() {
+            for c in 0..rhs.ncols() {
+                let (source, output) = (rhs.col_as_slice(c), result.col_as_slice_mut(c));
+                for (width, span, rows) in self.runs() {
+                    let tiles = &self.values[span];
+                    let (source, output) = (&source[rows.clone()], &mut output[rows]);
+                    if width == 1 {
+                        for ((output, &tile), &source) in output.iter_mut().zip(tiles).zip(source) {
+                            *output = tile * source;
+                        }
+                        continue;
+                    }
+                    for ((output, tile), source) in output
+                        .chunks_exact_mut(width)
+                        .zip(tiles.chunks_exact(width * width))
+                        .zip(source.chunks_exact(width))
+                    {
+                        for (column, &source) in tile.chunks_exact(width).zip(source) {
+                            for (output, &value) in output.iter_mut().zip(column) {
+                                *output += value * source;
+                            }
+                        }
+                    }
+                }
+            }
+            return result;
+        }
+        for column_level in 0..self.n_levels() {
+            let (left, width) = (self.starts[column_level], self.width(column_level));
+            for tile in self.column(column_level) {
+                let row_level = self.rows[tile];
+                let (first, height) = (self.starts[row_level], self.width(row_level));
+                let values = self.tile(tile);
+                let mirrored = tile != self.columns[column_level];
+                for c in 0..rhs.ncols() {
+                    for j in 0..width {
+                        let source = rhs[(left + j, c)];
+                        let mut transposed = 0.0;
+                        for i in 0..height {
+                            let value = values[i + j * height];
+                            result[(first + i, c)] += value * source;
+                            transposed += value * rhs[(first + i, c)];
+                        }
+                        if mirrored {
+                            result[(left + j, c)] += transposed;
+                        }
+                    }
+                }
+            }
+        }
+        result
+    }
+
+    /// Expand values on this pattern, such as a factor's selected inverse.
+    #[cfg(test)]
+    pub fn dense_from(&self, values: &[f64]) -> Mat<f64> {
+        assert_eq!(values.len(), self.values.len());
+        let mut dense = Mat::zeros(self.dimension(), self.dimension());
+        for column_level in 0..self.n_levels() {
+            let left = self.starts[column_level];
+            for tile in self.column(column_level) {
+                let first = self.starts[self.rows[tile]];
+                let height = self.width(self.rows[tile]);
+                let mirrored = tile != self.columns[column_level];
+                for (index, &value) in values[self.span(tile)].iter().enumerate() {
+                    let (row, column) = (first + index % height, left + index / height);
+                    dense[(row, column)] = value;
+                    if mirrored {
+                        dense[(column, row)] = value;
+                    }
+                }
+            }
+        }
+        dense
+    }
+
+    #[cfg(test)]
+    pub fn to_dense(&self) -> Mat<f64> {
+        self.dense_from(&self.values)
+    }
+}
+
+fn add_identity(tile: &mut [f64], width: usize) {
+    for diagonal in 0..width {
+        tile[diagonal * (width + 1)] += 1.0;
+    }
+}
+
+/// Write Lambda_left' tile Lambda_right for one column-major tile.
+fn transform_tile(left: &Mat<f64>, tile: &[f64], right: &Mat<f64>, output: &mut [f64]) {
+    let (height, width) = (left.nrows(), right.nrows());
+    if height == 1 && width == 1 {
+        output[0] = (left[(0, 0)] * tile[0]) * right[(0, 0)];
+        return;
+    }
+    if height.max(width) >= SCALAR_WIDTH {
+        let mut product = Mat::zeros(height, width);
+        let tile = faer::MatRef::from_column_major_slice(tile, height, width);
+        matmul(product.as_mut(), Accum::Replace, tile, right, 1.0, Par::Seq);
+        let output = faer::MatMut::from_column_major_slice_mut(output, height, width);
+        matmul(
+            output,
+            Accum::Replace,
+            left.transpose(),
+            &product,
+            1.0,
+            Par::Seq,
+        );
+        return;
+    }
+    for column in 0..width {
+        let factor = &right.col_as_slice(column)[column..];
+        for row in 0..height {
+            output[row + column * height] = (column..width)
+                .zip(factor)
+                .map(|(k, &factor)| tile[row + k * height] * factor)
+                .sum();
+        }
+    }
+    for column in output.chunks_exact_mut(height) {
+        // Ascending rows only read entries not yet overwritten.
+        for row in 0..height {
+            let factor = &left.col_as_slice(row)[row..];
+            column[row] = factor.iter().zip(&column[row..]).map(|(l, c)| l * c).sum();
         }
     }
 }
@@ -551,6 +1040,189 @@ fn checked_indices(values: &[i64], field_name: &str) -> Result<Vec<usize>, Linal
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn level_tiles_match_dense_crossproducts_in_both_accumulation_paths() {
+        use super::*;
+        // Two structures: three levels of width two, then two of width one.
+        let blocks = [(3, 2), (2, 1)];
+        let level_of = [0, 0, 1, 1, 2, 2, 3, 4];
+        let n = 30;
+        for dense in [false, true] {
+            // Only rows 0 and 1 share levels 0 and 3, with products that can cancel.
+            let touched = |row: usize, column: usize| match (row, column) {
+                (0 | 1, 0 | 6) => true,
+                (0 | 1, _) => false,
+                _ if dense => match column {
+                    0 | 1 => row % 2 == 1,
+                    6 => row.is_multiple_of(2),
+                    _ => true,
+                },
+                _ if column < 6 => column == (row % 3) * 2 + row % 2,
+                _ => {
+                    column
+                        == if row.is_multiple_of(3) {
+                            7
+                        } else {
+                            6 + row % 2
+                        }
+                }
+            };
+            let (mut values, mut indices, mut offsets) = (Vec::new(), Vec::new(), vec![0]);
+            for column in 0..8 {
+                for row in (0..n).filter(|&row| touched(row, column)) {
+                    indices.push(row);
+                    values.push(match (row, column) {
+                        (1, 6) => -1.0,
+                        (0 | 1, _) => 1.0,
+                        _ => ((3 * row + column) % 7) as f64 / 9.0 - 0.25,
+                    });
+                }
+                offsets.push(indices.len());
+            }
+            let matrix = CscMatrix::try_from_usize(&values, &indices, &offsets, (n, 8)).unwrap();
+            assert_eq!(values.len() / n > 2, dense);
+            let weights: Vec<f64> = (0..n).map(|row| 0.5 + (row % 4) as f64 / 3.0).collect();
+            let mut cancelling = weights.clone();
+            cancelling[1] = cancelling[0];
+            for (weights, cancels) in [(&weights, false), (&cancelling, true)] {
+                let tiles = matrix.weighted_level_crossproduct(weights, &blocks);
+                let expected = matrix.weighted_crossproduct(weights);
+                assert_eq!(tiles.to_dense(), expected);
+                let shared = tiles.column(0).any(|tile| tiles.row(tile) == 3);
+                assert_eq!(shared, !cancels);
+                // Every pair of levels with a nonzero block keeps exactly one tile.
+                for column in 0..5 {
+                    let rows: Vec<_> = tiles.column(column).map(|tile| tiles.row(tile)).collect();
+                    let coupled: Vec<_> = (column..5)
+                        .filter(|&row| {
+                            row == column
+                                || (0..8).any(|i| {
+                                    (0..8).any(|j| {
+                                        level_of[i] == row
+                                            && level_of[j] == column
+                                            && expected[(i, j)] != 0.0
+                                    })
+                                })
+                        })
+                        .collect();
+                    assert_eq!(rows, coupled);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn level_tile_operations_match_dense_algebra() {
+        use super::*;
+        let blocks = [(2, 2), (3, 1)];
+        let stacked = [
+            Mat::from_fn(4, 2, |i, j| (i + 3 * j) as f64),
+            Mat::from_fn(3, 1, |i, _| 10.0 + i as f64),
+        ];
+        let independent = LevelTiles::from_level_blocks(&blocks, &stacked);
+        assert_eq!(independent.n_levels(), 5);
+        assert_eq!(independent.independent_prefix(), 5);
+        assert_eq!(independent.tile(1), [2.0, 3.0, 5.0, 6.0]);
+        assert_eq!(independent.tile(4), [12.0]);
+
+        let coupled_at = |pairs: &'static [(usize, usize)]| {
+            move |i: usize, j: usize| {
+                let level = |index: usize| if index < 4 { index / 2 } else { index - 2 };
+                let (high, low) = (level(i).max(level(j)), level(i).min(level(j)));
+                if high == low || pairs.contains(&(high, low)) {
+                    1.0 + ((i + j) % 3) as f64 / 4.0
+                } else {
+                    0.0
+                }
+            }
+        };
+        for (pairs, prefix) in [
+            (&[][..], 5),
+            (&[(2, 0)][..], 2),
+            (&[(3, 1), (2, 0)][..], 2),
+            (&[(4, 3)][..], 4),
+            (&[(1, 0)][..], 1),
+        ] {
+            let tiles = LevelTiles::lower_from_entries(&blocks, coupled_at(pairs));
+            assert_eq!(tiles.independent_prefix(), prefix);
+        }
+
+        let tiles = LevelTiles::lower_from_entries(&blocks, coupled_at(&[(3, 1), (4, 0), (2, 1)]));
+        assert!(!tiles.block_diagonal());
+        assert!(independent.block_diagonal());
+        assert_eq!(
+            independent.runs().collect::<Vec<_>>(),
+            [(2, 0..8, 0..4), (1, 8..11, 4..7)]
+        );
+        assert_eq!((independent.block(1), independent.block(2)), (0, 1));
+
+        // Coupled and block-diagonal tiles, with narrow and dense-kernel widths.
+        for (blocks, coupled) in [
+            ([(2, 2), (3, 1)], true),
+            ([(2, 2), (3, 1)], false),
+            ([(2, 17), (3, 1)], true),
+            ([(2, 17), (3, 1)], false),
+        ] {
+            let level_of: Vec<usize> = (0..blocks.len())
+                .flat_map(|block| {
+                    let (count, width) = blocks[block];
+                    let first: usize = blocks[..block].iter().map(|&(count, _)| count).sum();
+                    (first..first + count).flat_map(move |level| std::iter::repeat_n(level, width))
+                })
+                .collect();
+            let q = level_of.len();
+            let tiles = LevelTiles::lower_from_entries(&blocks, |i, j| {
+                let (high, low) = (level_of[i].max(level_of[j]), level_of[i].min(level_of[j]));
+                if high == low || (coupled && [(3, 1), (4, 0), (2, 1)].contains(&(high, low))) {
+                    1.0 + ((i + j) % 3) as f64 / 4.0
+                } else {
+                    0.0
+                }
+            });
+            assert_eq!(tiles.block_diagonal(), !coupled);
+            let dense = tiles.to_dense();
+            let factors = blocks.map(|(_, width)| {
+                Mat::from_fn(width, width, |i, j| {
+                    if i >= j {
+                        0.7 - 0.4 * (i + j) as f64 / width as f64
+                    } else {
+                        0.0
+                    }
+                })
+            });
+            let mut lambda = Mat::zeros(q, q);
+            for (i, j) in (0..q).flat_map(|i| (0..q).map(move |j| (i, j))) {
+                if level_of[i] == level_of[j] {
+                    let block = tiles.block(level_of[i]);
+                    let start = tiles.start(level_of[i]);
+                    lambda[(i, j)] = factors[block][(i - start, j - start)];
+                }
+            }
+            let expected = Mat::<f64>::identity(q, q) + lambda.transpose() * &dense * &lambda;
+            let penalized = tiles.dense_from(&tiles.penalized(&factors));
+            let pattern = tiles.dense_from(&vec![1.0; tiles.len()]);
+            let rhs = Mat::from_fn(q, 2, |i, j| (i + 2 * j) as f64 / 4.0 - 3.0);
+            let product = tiles.symmetric_product(&rhs);
+            let expected_product = &dense * &rhs;
+            for j in 0..q {
+                for i in 0..q {
+                    let expected = if pattern[(i, j)] == 1.0 {
+                        expected[(i, j)]
+                    } else {
+                        0.0
+                    };
+                    assert!((penalized[(i, j)] - expected).abs() < 1e-12 * expected.abs().max(1.0));
+                }
+            }
+            for j in 0..2 {
+                for i in 0..q {
+                    let expected = expected_product[(i, j)];
+                    assert!((product[(i, j)] - expected).abs() < 1e-13 * expected.abs().max(1.0));
+                }
+            }
+        }
+    }
+
     #[test]
     fn repeated_block_crossproducts_match_both_dense_accumulation_paths() {
         for blocks in [

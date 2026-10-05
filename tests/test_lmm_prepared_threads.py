@@ -20,6 +20,8 @@ from tests.test_lmm_prepared_design import (
     parameters,
 )
 
+pytestmark = pytest.mark.installed_wheel
+
 
 @pytest.mark.parametrize(
     "kind", ["fixed", "no_fixed", "intercept", "correlated", "slope", "crossed"]

@@ -28,10 +28,8 @@ jobs:
       - name: Set up Python
         run: uv python install "${{ matrix.python-version }}"
 
-      - name: Create venv and install dependencies
-        run: |
-          uv venv --python "${{ matrix.python-version }}"
-          uv pip install bandit pip-audit
+      - name: Install locked security scanners
+        run: uv sync --locked --only-group security --python "${{ matrix.python-version }}"
 
       - name: Run bandit security scan
         run: uv run --no-sync bandit -r python/ -ll -ii -x "**/tests/**"

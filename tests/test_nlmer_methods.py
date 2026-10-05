@@ -7,6 +7,7 @@ import pandas as pd
 import pytest
 from mixedlm import coef, fixef, getME, nlme, nlmer, ranef
 from mixedlm.inference.bootstrap import bootstrap_nlmer
+from mixedlm.models.nlmer import NlmerResult
 
 from tests.test_reporting import nlmm_model as nlmm_model
 
@@ -38,6 +39,23 @@ def create_offset_nlme_data(seed: int = 20260803) -> pd.DataFrame:
 
 
 NLME_DATA = create_nlme_data()
+
+
+def fit_nlme(**kwargs) -> NlmerResult:
+    """Fit a random asymptote, which NLME_DATA identifies well.
+
+    With all three parameters random this data is ill-conditioned: one-ulp
+    changes to the response decide whether the fit converges.
+    """
+    return nlmer(
+        nlme.SSasymp(),
+        NLME_DATA,
+        x_var="time",
+        y_var="y",
+        group_var="subject",
+        random_params=["Asym"],
+        **kwargs,
+    )
 
 
 class TestNlmerPredict:
@@ -79,55 +97,42 @@ class TestNlmerPredict:
 
 class TestNlmerSimulate:
     def test_simulate_single(self) -> None:
-        model = nlme.SSasymp()
-        result = nlmer(model, NLME_DATA, x_var="time", y_var="y", group_var="subject")
+        result = fit_nlme()
 
         sim = result.simulate(nsim=1, seed=123)
         assert sim.shape == (len(NLME_DATA),)
         assert not np.allclose(sim, result.y)
 
     def test_simulate_multiple(self) -> None:
-        model = nlme.SSasymp()
-        result = nlmer(model, NLME_DATA, x_var="time", y_var="y", group_var="subject")
+        result = fit_nlme()
 
         sim = result.simulate(nsim=5, seed=123)
         assert sim.shape == (len(NLME_DATA), 5)
 
     def test_simulate_reproducible(self) -> None:
-        model = nlme.SSasymp()
-        result = nlmer(model, NLME_DATA, x_var="time", y_var="y", group_var="subject")
+        result = fit_nlme()
 
         sim1 = result.simulate(nsim=1, seed=42)
         sim2 = result.simulate(nsim=1, seed=42)
         assert np.allclose(sim1, sim2)
 
     def test_simulate_no_random_effects(self) -> None:
-        model = nlme.SSasymp()
-        result = nlmer(model, NLME_DATA, x_var="time", y_var="y", group_var="subject")
+        result = fit_nlme()
 
         sim_with_re = result.simulate(nsim=1, seed=123, use_re=True)
         sim_no_re = result.simulate(nsim=1, seed=123, use_re=False)
         assert not np.allclose(sim_with_re, sim_no_re)
 
     def test_simulate_re_form_na(self) -> None:
-        model = nlme.SSasymp()
-        result = nlmer(model, NLME_DATA, x_var="time", y_var="y", group_var="subject")
+        result = fit_nlme()
 
         sim = result.simulate(nsim=1, seed=123, re_form="NA")
         assert sim.shape == (len(NLME_DATA),)
 
     def test_simulate_uses_inverse_weight_residual_variance(self) -> None:
-        model = nlme.SSasymp()
         weights = np.ones(len(NLME_DATA))
         weights[1] = 4.0
-        result = nlmer(
-            model,
-            NLME_DATA,
-            x_var="time",
-            y_var="y",
-            group_var="subject",
-            weights=weights,
-        )
+        result = fit_nlme(weights=weights)
 
         simulations = result.simulate(nsim=1500, seed=123, use_re=False)
         empirical_scale = np.std(simulations, axis=1)
@@ -137,8 +142,7 @@ class TestNlmerSimulate:
 
 class TestNlmerRefit:
     def test_refit_same_response(self) -> None:
-        model = nlme.SSasymp()
-        result = nlmer(model, NLME_DATA, x_var="time", y_var="y", group_var="subject")
+        result = fit_nlme()
 
         refit_result = result.refit()
         assert len(refit_result.phi) == len(result.phi)
@@ -147,8 +151,7 @@ class TestNlmerRefit:
             assert np.allclose(result.phi, refit_result.phi, atol=1.0)
 
     def test_refit_new_response(self) -> None:
-        model = nlme.SSasymp()
-        result = nlmer(model, NLME_DATA, x_var="time", y_var="y", group_var="subject")
+        result = fit_nlme()
 
         new_y = result.simulate(nsim=1, seed=456)
         refit_result = result.refit(new_y)
@@ -157,8 +160,7 @@ class TestNlmerRefit:
         assert np.allclose(refit_result.y, new_y)
 
     def test_refit_wrong_length_raises(self) -> None:
-        model = nlme.SSasymp()
-        result = nlmer(model, NLME_DATA, x_var="time", y_var="y", group_var="subject")
+        result = fit_nlme()
 
         with pytest.raises(ValueError, match="newresp has length"):
             result.refit(np.array([1, 2, 3]))
@@ -166,8 +168,7 @@ class TestNlmerRefit:
 
 class TestNlmerUpdate:
     def test_update_same_data(self) -> None:
-        model = nlme.SSasymp()
-        result = nlmer(model, NLME_DATA, x_var="time", y_var="y", group_var="subject")
+        result = fit_nlme()
 
         updated = result.update()
         for field in ("phi", "theta", "b", "deviance", "converged", "pnls_converged"):
@@ -192,23 +193,20 @@ class TestNlmerUpdate:
 
 class TestNlmerVcov:
     def test_vcov_shape(self) -> None:
-        model = nlme.SSasymp()
-        result = nlmer(model, NLME_DATA, x_var="time", y_var="y", group_var="subject")
+        result = fit_nlme()
 
         vcov = result.vcov()
         n_params = len(result.phi)
         assert vcov.shape == (n_params, n_params)
 
     def test_vcov_symmetric(self) -> None:
-        model = nlme.SSasymp()
-        result = nlmer(model, NLME_DATA, x_var="time", y_var="y", group_var="subject")
+        result = fit_nlme()
 
         vcov = result.vcov()
         assert np.allclose(vcov, vcov.T)
 
     def test_vcov_positive_diagonal(self) -> None:
-        model = nlme.SSasymp()
-        result = nlmer(model, NLME_DATA, x_var="time", y_var="y", group_var="subject")
+        result = fit_nlme()
 
         vcov = result.vcov()
         assert np.all(np.diag(vcov) >= 0)
@@ -216,8 +214,7 @@ class TestNlmerVcov:
 
 class TestNlmerConfint:
     def test_confint_wald(self) -> None:
-        model = nlme.SSasymp()
-        result = nlmer(model, NLME_DATA, x_var="time", y_var="y", group_var="subject")
+        result = fit_nlme()
 
         ci = result.confint(method="Wald", level=0.95)
         assert "Asym" in ci
@@ -231,15 +228,7 @@ class TestNlmerConfint:
                 assert upper > result.phi[result.model.param_names.index(name)]
 
     def test_confint_bootstrap(self) -> None:
-        model = nlme.SSasymp()
-        result = nlmer(
-            model,
-            NLME_DATA,
-            x_var="time",
-            y_var="y",
-            group_var="subject",
-            random_params=["Asym"],
-        )
+        result = fit_nlme()
 
         ci = result.confint(method="boot", n_boot=20, seed=42)
         assert "Asym" in ci
@@ -248,16 +237,14 @@ class TestNlmerConfint:
             assert lower < upper
 
     def test_confint_specific_params(self) -> None:
-        model = nlme.SSasymp()
-        result = nlmer(model, NLME_DATA, x_var="time", y_var="y", group_var="subject")
+        result = fit_nlme()
 
         ci = result.confint(parm=["Asym"], method="Wald")
         assert "Asym" in ci
         assert "R0" not in ci
 
     def test_confint_invalid_method_raises(self) -> None:
-        model = nlme.SSasymp()
-        result = nlmer(model, NLME_DATA, x_var="time", y_var="y", group_var="subject")
+        result = fit_nlme()
 
         with pytest.raises(ValueError, match="Unknown method"):
             result.confint(method="invalid")
@@ -265,8 +252,7 @@ class TestNlmerConfint:
 
 class TestNlmerInfluence:
     def test_hatvalues(self) -> None:
-        model = nlme.SSasymp()
-        result = nlmer(model, NLME_DATA, x_var="time", y_var="y", group_var="subject")
+        result = fit_nlme()
 
         h = result.hatvalues()
         assert len(h) == len(NLME_DATA)
@@ -274,16 +260,14 @@ class TestNlmerInfluence:
         assert np.all(h < 1)
 
     def test_cooks_distance(self) -> None:
-        model = nlme.SSasymp()
-        result = nlmer(model, NLME_DATA, x_var="time", y_var="y", group_var="subject")
+        result = fit_nlme()
 
         cooks_d = result.cooks_distance()
         assert len(cooks_d) == len(NLME_DATA)
         assert np.all(cooks_d >= 0)
 
     def test_influence_dict(self) -> None:
-        model = nlme.SSasymp()
-        result = nlmer(model, NLME_DATA, x_var="time", y_var="y", group_var="subject")
+        result = fit_nlme()
 
         infl = result.influence()
         assert "hat" in infl
@@ -294,50 +278,43 @@ class TestNlmerInfluence:
 
 class TestNlmerGetME:
     def test_getME_phi(self) -> None:
-        model = nlme.SSasymp()
-        result = nlmer(model, NLME_DATA, x_var="time", y_var="y", group_var="subject")
+        result = fit_nlme()
 
         phi = result.getME("phi")
         assert np.allclose(phi, result.phi)
 
     def test_getME_theta(self) -> None:
-        model = nlme.SSasymp()
-        result = nlmer(model, NLME_DATA, x_var="time", y_var="y", group_var="subject")
+        result = fit_nlme()
 
         theta = result.getME("theta")
         assert np.allclose(theta, result.theta)
 
     def test_getME_sigma(self) -> None:
-        model = nlme.SSasymp()
-        result = nlmer(model, NLME_DATA, x_var="time", y_var="y", group_var="subject")
+        result = fit_nlme()
 
         sigma = result.getME("sigma")
         assert sigma == result.sigma
 
     def test_getME_b(self) -> None:
-        model = nlme.SSasymp()
-        result = nlmer(model, NLME_DATA, x_var="time", y_var="y", group_var="subject")
+        result = fit_nlme()
 
         b = result.getME("b")
         assert np.allclose(b, result.b)
 
     def test_getME_n_obs(self) -> None:
-        model = nlme.SSasymp()
-        result = nlmer(model, NLME_DATA, x_var="time", y_var="y", group_var="subject")
+        result = fit_nlme()
 
         n = result.getME("n_obs")
         assert n == len(NLME_DATA)
 
     def test_getME_n_groups(self) -> None:
-        model = nlme.SSasymp()
-        result = nlmer(model, NLME_DATA, x_var="time", y_var="y", group_var="subject")
+        result = fit_nlme()
 
         n_groups = result.getME("n_groups")
         assert n_groups == 8
 
     def test_getME_invalid_raises(self) -> None:
-        model = nlme.SSasymp()
-        result = nlmer(model, NLME_DATA, x_var="time", y_var="y", group_var="subject")
+        result = fit_nlme()
 
         with pytest.raises(ValueError, match="Unknown component"):
             result.getME("invalid_name")
@@ -345,15 +322,13 @@ class TestNlmerGetME:
 
 class TestNlmerIsSingular:
     def test_is_singular_normal_fit(self) -> None:
-        model = nlme.SSasymp()
-        result = nlmer(model, NLME_DATA, x_var="time", y_var="y", group_var="subject")
+        result = fit_nlme()
 
         assert isinstance(result.isSingular(), bool)
         assert result.is_singular() == result.isSingular()
 
     def test_is_singular_with_tolerance(self) -> None:
-        model = nlme.SSasymp()
-        result = nlmer(model, NLME_DATA, x_var="time", y_var="y", group_var="subject")
+        result = fit_nlme()
 
         result_strict = result.isSingular(tol=1e-2)
         result_loose = result.isSingular(tol=1e-10)
@@ -363,8 +338,7 @@ class TestNlmerIsSingular:
 
 class TestNlmerAccessors:
     def test_root_accessor_functions(self) -> None:
-        model = nlme.SSasymp()
-        result = nlmer(model, NLME_DATA, x_var="time", y_var="y", group_var="subject")
+        result = fit_nlme()
 
         assert fixef(result) == result.fixef()
         assert set(ranef(result)) == {"subject"}
@@ -372,22 +346,19 @@ class TestNlmerAccessors:
         assert np.allclose(getME(result, "phi"), result.phi)
 
     def test_nobs(self) -> None:
-        model = nlme.SSasymp()
-        result = nlmer(model, NLME_DATA, x_var="time", y_var="y", group_var="subject")
+        result = fit_nlme()
 
         assert result.nobs() == len(NLME_DATA)
 
     def test_ngrps(self) -> None:
-        model = nlme.SSasymp()
-        result = nlmer(model, NLME_DATA, x_var="time", y_var="y", group_var="subject")
+        result = fit_nlme()
 
         ngrps = result.ngrps()
         assert "subject" in ngrps
         assert ngrps["subject"] == 8
 
     def test_model_frame(self) -> None:
-        model = nlme.SSasymp()
-        result = nlmer(model, NLME_DATA, x_var="time", y_var="y", group_var="subject")
+        result = fit_nlme()
 
         mf = result.model_frame()
         assert isinstance(mf, pd.DataFrame)
@@ -396,19 +367,15 @@ class TestNlmerAccessors:
 
 class TestNlmerWeightsOffset:
     def test_weights_default(self) -> None:
-        model = nlme.SSasymp()
-        result = nlmer(model, NLME_DATA, x_var="time", y_var="y", group_var="subject")
+        result = fit_nlme()
 
         w = result.weights()
         assert len(w) == len(NLME_DATA)
         assert np.allclose(w, 1.0)
 
     def test_weights_specified(self) -> None:
-        model = nlme.SSasymp()
         weights = np.random.uniform(0.5, 1.5, len(NLME_DATA))
-        result = nlmer(
-            model, NLME_DATA, x_var="time", y_var="y", group_var="subject", weights=weights
-        )
+        result = fit_nlme(weights=weights)
 
         w = result.weights()
         assert np.allclose(w, weights)
@@ -417,19 +384,15 @@ class TestNlmerWeightsOffset:
         assert np.allclose(result.residuals("pearson"), expected_pearson)
 
     def test_offset_default(self) -> None:
-        model = nlme.SSasymp()
-        result = nlmer(model, NLME_DATA, x_var="time", y_var="y", group_var="subject")
+        result = fit_nlme()
 
         off = result.offset()
         assert len(off) == len(NLME_DATA)
         assert np.allclose(off, 0.0)
 
     def test_offset_specified(self) -> None:
-        model = nlme.SSasymp()
         offset = np.random.randn(len(NLME_DATA)) * 0.1
-        result = nlmer(
-            model, NLME_DATA, x_var="time", y_var="y", group_var="subject", offset=offset
-        )
+        result = fit_nlme(offset=offset)
 
         off = result.offset()
         assert np.allclose(off, offset)

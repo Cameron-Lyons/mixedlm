@@ -78,14 +78,15 @@ pub fn check_cholesky(input: CholeskyInput) {
             assert_eq!(canonical.values()[entry], expected[row]);
         }
     }
-    let symbolic = if input.amd {
-        sparse_chol::SymbolicCholeskyCache::new_amd(&indices, &indptr, n)
+    let ordering = if input.amd {
+        sparse_chol::FillOrdering::Amd
     } else {
-        sparse_chol::SymbolicCholeskyCache::new(&indices, &indptr, n)
-    }
-    .expect("a valid positive definite sparse matrix must have a symbolic factor");
+        sparse_chol::FillOrdering::Natural
+    };
+    let symbolic = sparse_chol::SymbolicCholeskyCache::new(&indices, &indptr, n, ordering)
+        .expect("a valid positive definite sparse matrix must have a symbolic factor");
     let factor = symbolic
-        .factor(&data, &indices, &indptr)
+        .factor(&data)
         .expect("a strictly diagonally dominant matrix must factor");
     let expected = Array2::from_shape_fn((n, 2), |(row, column)| {
         value_at(&input.solution, row * 2 + column)

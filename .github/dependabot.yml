@@ -1,6 +1,6 @@
 version: 2
 updates:
-  - package-ecosystem: "pip"
+  - package-ecosystem: "uv"
     directory: "/"
     schedule:
       interval: "weekly"
@@ -15,9 +15,15 @@ updates:
       dev-dependencies:
         patterns:
           - "pytest*"
+          - "hypothesis"
           - "ruff"
           - "mypy"
-          - "maturin"
+          - "bandit"
+          - "pip-audit"
+      docs-dependencies:
+        patterns:
+          - "mkdocs*"
+          - "pymdown-extensions"
 
   - package-ecosystem: "cargo"
     directory: "/"

@@ -1,6 +1,9 @@
 use numpy::ndarray::Array2;
 use numpy::{PyArray1, PyArray2, PyArrayLike1, PyArrayLike2};
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
+
+use crate::sparse_chol::FillOrdering;
 
 mod blocked_chol;
 mod covariance;
@@ -21,7 +24,7 @@ fn owned_array2<'py>(
     shape: (usize, usize),
 ) -> PyResult<Py<PyArray2<f64>>> {
     let array = Array2::from_shape_vec(shape, values)
-        .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
+        .map_err(|error| PyValueError::new_err(error.to_string()))?;
     Ok(PyArray2::from_owned_array(py, array).into())
 }
 
@@ -31,7 +34,7 @@ fn checked_i64_vec_to_usize(values: &[i64], field_name: &str) -> PyResult<Vec<us
         .enumerate()
         .map(|(idx, &value)| {
             usize::try_from(value).map_err(|_| {
-                pyo3::exceptions::PyValueError::new_err(format!(
+                PyValueError::new_err(format!(
                     "{field_name}[{idx}] must be non-negative, got {value}"
                 ))
             })
@@ -39,11 +42,18 @@ fn checked_i64_vec_to_usize(values: &[i64], field_name: &str) -> PyResult<Vec<us
         .collect()
 }
 
-#[pyclass]
+/// Every sparse Cholesky entry point accepts the same ordering names.
+fn fill_ordering(name: &str) -> PyResult<FillOrdering> {
+    match name {
+        "amd" => Ok(FillOrdering::Amd),
+        "natural" => Ok(FillOrdering::Natural),
+        _ => Err(PyValueError::new_err("ordering must be 'amd' or 'natural'")),
+    }
+}
+
+#[pyclass(frozen)]
 pub struct SparseCholeskySymbolic {
     inner: sparse_chol::SymbolicCholeskyCache,
-    indices: Vec<usize>,
-    indptr: Vec<usize>,
 }
 
 #[pymethods]
@@ -57,33 +67,12 @@ impl SparseCholeskySymbolic {
         n: usize,
         ordering: &str,
     ) -> PyResult<Self> {
-        let indices_slice = indices.as_slice()?;
-        let indptr_slice = indptr.as_slice()?;
-
-        let indices_usize = checked_i64_vec_to_usize(indices_slice, "indices")?;
-        let indptr_usize = checked_i64_vec_to_usize(indptr_slice, "indptr")?;
-
-        let use_amd = match ordering {
-            "amd" => true,
-            "natural" => false,
-            _ => {
-                return Err(pyo3::exceptions::PyValueError::new_err(
-                    "ordering must be 'amd' or 'natural'",
-                ));
-            }
-        };
-        let cache = py.detach(|| {
-            if use_amd {
-                sparse_chol::SymbolicCholeskyCache::new_amd(&indices_usize, &indptr_usize, n)
-            } else {
-                sparse_chol::SymbolicCholeskyCache::new(&indices_usize, &indptr_usize, n)
-            }
-        })?;
-        Ok(Self {
-            inner: cache,
-            indices: indices_usize,
-            indptr: indptr_usize,
-        })
+        let ordering = fill_ordering(ordering)?;
+        let indices = checked_i64_vec_to_usize(indices.as_slice()?, "indices")?;
+        let indptr = checked_i64_vec_to_usize(indptr.as_slice()?, "indptr")?;
+        let inner =
+            py.detach(|| sparse_chol::SymbolicCholeskyCache::new(&indices, &indptr, n, ordering))?;
+        Ok(Self { inner })
     }
 
     fn factor(
@@ -93,7 +82,7 @@ impl SparseCholeskySymbolic {
     ) -> PyResult<SparseCholeskyNumeric> {
         // Detached numerical work must own every Python-backed input buffer.
         let data = data.as_slice()?.to_vec();
-        let numeric = py.detach(|| self.inner.factor(&data, &self.indices, &self.indptr))?;
+        let numeric = py.detach(|| self.inner.factor(&data))?;
         Ok(SparseCholeskyNumeric { inner: numeric })
     }
 
@@ -107,7 +96,7 @@ impl SparseCholeskySymbolic {
     }
 }
 
-#[pyclass]
+#[pyclass(frozen)]
 pub struct SparseCholeskyNumeric {
     inner: sparse_chol::NumericFactorization,
 }
@@ -133,6 +122,7 @@ impl SparseCholeskyNumeric {
 }
 
 #[pyfunction]
+#[pyo3(signature = (a_data, a_indices, a_indptr, a_shape, b, *, ordering = "amd"))]
 fn sparse_cholesky_solve<'py>(
     py: Python<'py>,
     a_data: PyArrayLike1<'py, f64>,
@@ -140,7 +130,9 @@ fn sparse_cholesky_solve<'py>(
     a_indptr: PyArrayLike1<'py, i64>,
     a_shape: (usize, usize),
     b: PyArrayLike2<'py, f64>,
+    ordering: &str,
 ) -> PyResult<Py<PyArray2<f64>>> {
+    let ordering = fill_ordering(ordering)?;
     let matrix = linalg::square_csc_from_scipy(
         a_data.as_slice()?,
         a_indices.as_slice()?,
@@ -149,25 +141,28 @@ fn sparse_cholesky_solve<'py>(
     )?;
     let shape = (b.as_array().nrows(), b.as_array().ncols());
     let rhs = b.as_array().iter().copied().collect();
-    let result = py.detach(|| linalg::sparse_cholesky_solve(&matrix, rhs, shape))?;
+    let result = py.detach(|| linalg::sparse_cholesky_solve(&matrix, rhs, shape, ordering))?;
     owned_array2(py, result, shape)
 }
 
 #[pyfunction]
+#[pyo3(signature = (a_data, a_indices, a_indptr, a_shape, *, ordering = "amd"))]
 fn sparse_cholesky_logdet<'py>(
     py: Python<'py>,
     a_data: PyArrayLike1<'py, f64>,
     a_indices: PyArrayLike1<'py, i64>,
     a_indptr: PyArrayLike1<'py, i64>,
     a_shape: (usize, usize),
+    ordering: &str,
 ) -> PyResult<f64> {
+    let ordering = fill_ordering(ordering)?;
     let matrix = linalg::square_csc_from_scipy(
         a_data.as_slice()?,
         a_indices.as_slice()?,
         a_indptr.as_slice()?,
         a_shape,
     )?;
-    py.detach(|| linalg::sparse_cholesky_logdet(&matrix))
+    py.detach(|| linalg::sparse_cholesky_logdet(&matrix, ordering))
 }
 
 #[pyfunction]

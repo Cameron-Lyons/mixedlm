@@ -1,16 +1,11 @@
 version: 2
 
+# The docs never import mixedlm, so install only the docs tooling instead of
+# building the Rust extension.
 build:
-  os: ubuntu-22.04
+  os: ubuntu-24.04
   tools:
     python: "3.12"
-
-mkdocs:
-  configuration: mkdocs.yml
-
-python:
-  install:
-    - method: pip
-      path: .
-      extra_requirements:
-        - docs
+  commands:
+    - python -m pip install "mkdocs>=1.5,<2" "mkdocs-material>=9.5"
+    - python -m mkdocs build --strict --site-dir "$READTHEDOCS_OUTPUT/html"

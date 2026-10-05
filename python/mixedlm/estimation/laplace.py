@@ -10,6 +10,7 @@ import numpy as np
 from numpy.typing import NDArray
 from scipy import linalg, optimize, sparse, special
 
+from mixedlm._parallel import resolve_n_jobs
 from mixedlm.estimation.optimizers import run_optimizer
 from mixedlm.estimation.pirls_control import validate_pirls_controls
 from mixedlm.estimation.reml import (
@@ -802,13 +803,9 @@ def _adaptive_gh_deviance_with_status(
             family,
         )
 
-    if n_jobs == -1:
-        import os
-
-        n_jobs = os.cpu_count() or 1
-
-    if n_jobs > 1 and n_levels_first > 2:
-        with ThreadPoolExecutor(max_workers=min(n_jobs, n_levels_first)) as executor:
+    workers = resolve_n_jobs(n_jobs, max_tasks=n_levels_first)
+    if workers > 1 and n_levels_first > 2:
+        with ThreadPoolExecutor(max_workers=workers) as executor:
             log_integral = sum(executor.map(integrate_group, range(n_levels_first)))
     else:
         log_integral = sum(integrate_group(g) for g in range(n_levels_first))

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from collections import deque
 from collections.abc import Callable, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor, wait
@@ -13,6 +12,7 @@ from numpy.typing import NDArray
 from scipy import linalg
 from scipy.optimize import minimize
 
+from mixedlm._parallel import resolve_n_jobs
 from mixedlm.estimation.pnls_control import validate_pnls_controls
 from mixedlm.nlme.models import (
     NonlinearModel,
@@ -209,7 +209,7 @@ def _nlmm_workspace(
     """Reuse immutable preparation and scope worker lifetime to one call or fit."""
     prior_weights = _as_prior_weights(weights, len(y))
     group_rows = _grouped_observation_indices(groups)
-    workers = (os.cpu_count() or 1) if n_jobs == -1 else n_jobs
+    workers = resolve_n_jobs(n_jobs)
     use_parallel = workers > 1 and len(group_rows) >= workers
     with ThreadPoolExecutor(max_workers=workers) if use_parallel else nullcontext() as executor:
         yield _NLMMWorkspace(

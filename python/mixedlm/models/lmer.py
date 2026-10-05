@@ -112,6 +112,7 @@ class LmerResult(MerResultMixin):
     at_boundary: bool = False
     message: str = ""
     function_evals: int = 0
+    optimizer: str = ""
 
     @property
     def fe_params(self) -> NDArray[np.floating]:
@@ -1721,6 +1722,7 @@ class LmerResult(MerResultMixin):
         )
 
         start = kwargs.pop("start", self.theta)
+        kwargs.setdefault("method", "L-BFGS-B")
         opt_result = optimizer.optimize(start=start, **kwargs)
 
         return LmerResult(
@@ -1738,6 +1740,7 @@ class LmerResult(MerResultMixin):
             at_boundary=opt_result.at_boundary,
             message=opt_result.message,
             function_evals=opt_result.function_evals,
+            optimizer=kwargs["method"],
         )
 
     def refitML(self, **kwargs) -> LmerResult:

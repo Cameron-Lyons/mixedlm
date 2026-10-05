@@ -117,7 +117,7 @@ def _build_scipy_options(
         options["tol"] = xtol
 
     if optimizer.startswith("nloptwrap_"):
-        options["ftol"] = ftol
+        options["ftol_abs"] = ftol
         options["xtol"] = xtol
 
     overrides = dict(opt_ctrl)
@@ -149,17 +149,22 @@ class LmerControl:
     optimizer : str, default "COBYQA"
         Optimization algorithm to use. Options:
         - "COBYQA": Constrained Optimization BY Quadratic Approximations -
-          default, fastest and most reliable
+          default. Derivative-free and precise; its per-iteration overhead
+          dominates the fit time of small models.
         - "bobyqa": Deprecated compatibility alias for "COBYQA"
-        - "L-BFGS-B": Limited-memory BFGS with bounds
+        - "L-BFGS-B": Limited-memory BFGS with bounds; often much faster,
+          but finite-difference gradients limit its precision
         - "BFGS": BFGS without bounds
         - "Nelder-Mead": Simplex algorithm
         - "Powell": Powell's method
         - "trust-constr": Trust-region constrained
+        - "nloptwrap_BOBYQA" and other "nloptwrap_" names: NLopt algorithms,
+          when the optional nlopt package is installed
     maxiter : int, default 1000
         Maximum number of iterations for the optimizer.
     ftol : float, default 1e-8
-        Function tolerance for convergence.
+        Function tolerance for convergence. NLopt optimizers use it as an
+        absolute deviance tolerance, like lme4's ``nloptwrap``.
     gtol : float, default 1e-5
         Gradient tolerance for convergence.
     xtol : float, default 1e-8
@@ -197,6 +202,9 @@ class LmerControl:
         For COBYQA, supports SciPy's ``initial_tr_radius``, ``final_tr_radius``,
         ``maxfev``, and ``scale`` options. Legacy ``rhobeg``, ``rhoend``,
         ``maxfun``, and ``scaling_within_bounds`` names are also accepted.
+        NLopt optimizers accept ``initial_step`` (default 0.5, limited to a
+        quarter of any finite bound range), a relative ``ftol``, ``ftol_abs``,
+        and ``xtol_abs``.
 
     Examples
     --------
@@ -282,17 +290,21 @@ class GlmerControl:
     optimizer : str, default "COBYQA"
         Optimization algorithm to use. Options:
         - "COBYQA": Constrained Optimization BY Quadratic Approximations -
-          default, fastest and most reliable
+          default. Derivative-free, so it tolerates the approximate inner
+          PIRLS solve that can stop finite-difference gradient methods early.
         - "bobyqa": Deprecated compatibility alias for "COBYQA"
         - "L-BFGS-B": Limited-memory BFGS with bounds
         - "BFGS": BFGS without bounds
         - "Nelder-Mead": Simplex algorithm
         - "Powell": Powell's method
         - "trust-constr": Trust-region constrained
+        - "nloptwrap_BOBYQA" and other "nloptwrap_" names: NLopt algorithms,
+          when the optional nlopt package is installed
     maxiter : int, default 1000
         Maximum iterations per optimization stage; n_iter sums both stages.
     ftol : float, default 1e-8
-        Function tolerance for convergence.
+        Function tolerance for convergence. NLopt optimizers use it as an
+        absolute deviance tolerance, like lme4's ``nloptwrap``.
     gtol : float, default 1e-5
         Gradient tolerance for convergence.
     xtol : float, default 1e-8
@@ -333,6 +345,9 @@ class GlmerControl:
         For COBYQA, supports SciPy's ``initial_tr_radius``, ``final_tr_radius``,
         ``maxfev``, and ``scale`` options. Legacy ``rhobeg``, ``rhoend``,
         ``maxfun``, and ``scaling_within_bounds`` names are also accepted.
+        NLopt optimizers accept ``initial_step`` (default 0.5, limited to a
+        quarter of any finite bound range), a relative ``ftol``, ``ftol_abs``,
+        and ``xtol_abs``.
 
     Examples
     --------

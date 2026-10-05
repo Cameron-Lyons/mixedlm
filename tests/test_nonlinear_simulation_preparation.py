@@ -39,7 +39,7 @@ def test_bootstrap_prepares_groups_and_covariance_once(jobs, random_params):
         return summarize_response(result, response, index=index)
 
     with (
-        patch.object(bootstrap, "ProcessPoolExecutor", ImmediateExecutor),
+        patch.object(bootstrap, "process_pool", ImmediateExecutor),
         patch.object(bootstrap, "_nlmer_bootstrap_refit", side_effect=record),
         patch.object(_NlmerSimulation, "prepare", wraps=_NlmerSimulation.prepare) as prepare,
         patch.object(
@@ -66,7 +66,7 @@ def test_bootstrap_refreshes_preparation_after_result_changes(jobs):
         return summarize_response(result, response, index=index)
 
     with (
-        patch.object(bootstrap, "ProcessPoolExecutor", ImmediateExecutor),
+        patch.object(bootstrap, "process_pool", ImmediateExecutor),
         patch.object(bootstrap, "_nlmer_bootstrap_refit", side_effect=record),
     ):
         bootstrap.bootstrap_nlmer(result, n_boot=3, seed=72, n_jobs=jobs)
@@ -175,7 +175,7 @@ def test_custom_simulation_overrides_are_used(override, jobs):
         patch.object(
             _NlmerSimulation, "prepare", side_effect=AssertionError("override bypassed")
         ) as prepare,
-        patch.object(bootstrap, "ProcessPoolExecutor", ImmediateExecutor),
+        patch.object(bootstrap, "process_pool", ImmediateExecutor),
         patch.object(bootstrap, "_nlmer_bootstrap_refit", side_effect=record),
     ):
         actual = bootstrap.bootstrap_nlmer(result, n_boot=3, seed=24, n_jobs=jobs)

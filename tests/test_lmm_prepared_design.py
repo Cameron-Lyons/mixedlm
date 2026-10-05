@@ -1,10 +1,7 @@
 """Prepared designs preserve the likelihood and isolate repeated responses."""
 
 import gc
-import multiprocessing
-from concurrent.futures import ProcessPoolExecutor
 from dataclasses import replace
-from functools import partial
 from unittest.mock import patch
 
 import numpy as np
@@ -305,15 +302,10 @@ def test_serial_bootstrap_prepares_design_once_and_matches_fresh_refits():
         assert_array_equal(getattr(actual, name), getattr(expected, name))
 
 
-def test_spawn_bootstrap_creates_native_state_in_workers():
+def test_worker_process_bootstrap_creates_native_state_in_workers():
     result = fitted_model()
     serial = bootstrap.bootstrap_lmer(result, n_boot=4, seed=56)
-    with patch.object(
-        bootstrap,
-        "ProcessPoolExecutor",
-        partial(ProcessPoolExecutor, mp_context=multiprocessing.get_context("spawn")),
-    ):
-        parallel = bootstrap.bootstrap_lmer(result, n_boot=4, seed=56, n_jobs=2)
+    parallel = bootstrap.bootstrap_lmer(result, n_boot=4, seed=56, n_jobs=2)
     assert serial.n_failed == parallel.n_failed == 0
     for name in ("beta_samples", "theta_samples", "sigma_samples"):
         assert_array_equal(getattr(serial, name), getattr(parallel, name))
