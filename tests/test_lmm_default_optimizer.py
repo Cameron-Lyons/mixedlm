@@ -95,7 +95,10 @@ def test_evaluation_limits_bound_each_stage(limit):
     result = optimizer.optimize(method="auto", options={limit: 8})
 
     assert result.optimizer == "COBYQA" and not result.converged
-    assert "after L-BFGS-B: STOP: TOTAL NO. OF F,G EVALUATIONS EXCEEDS LIMIT" in result.message
+    # The fallback message records the gradient stage's limit; SciPy versions word it differently.
+    stage_message = result.message.upper()
+    assert "AFTER L-BFGS-B: STOP: TOTAL NO. OF F" in stage_message
+    assert "EVALUATIONS EXCEEDS LIMIT" in stage_message
     assert result.function_evals <= 2 * (8 + 1)
 
 
