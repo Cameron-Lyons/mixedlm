@@ -6,28 +6,12 @@ import pytest
 from mixedlm import bootCI
 from mixedlm.inference.bootstrap import BootstrapResult, NlmerBootstrapResult
 
+from tests._inference_results import bootstrap_with_failures
+
 
 @pytest.fixture
-def bootstrap_result() -> BootstrapResult:
-    return BootstrapResult(
-        n_boot=5,
-        beta_samples=np.array(
-            [
-                [0.8, 1.7],
-                [0.9, 1.9],
-                [1.1, 2.2],
-                [1.3, 2.4],
-                [np.nan, 2.1],
-            ]
-        ),
-        theta_samples=np.array([[0.3], [0.4], [0.5], [0.6], [np.inf]]),
-        sigma_samples=np.array([0.8, 0.9, 1.0, 1.1, 1.2]),
-        fixed_names=["intercept", "slope"],
-        original_beta=np.array([1.0, 2.0]),
-        original_theta=np.array([0.45]),
-        original_sigma=1.0,
-        n_failed=1,
-    )
+def bootstrap_result():
+    return bootstrap_with_failures()
 
 
 def test_boot_ci_percentile_matches_finite_quantiles(bootstrap_result: BootstrapResult) -> None:

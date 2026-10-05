@@ -10,11 +10,14 @@ from mixedlm.estimation.reml import _build_lambda
 from numpy.testing import assert_allclose, assert_array_equal
 from scipy import sparse
 
-from tests.test_glmm_final_state import mode_problem
-from tests.test_lmm_gradient_contractions import observation_gradient
-from tests.test_lmm_prepared_design import native_arguments, observation_likelihood
-from tests.test_lmm_reml_contractions import fixed_effect_problem
-from tests.test_lmm_stability import decimal_mode_likelihood
+from tests._glmm_oracles import mode_problem
+from tests._lmm_oracles import (
+    decimal_mode_likelihood,
+    fixed_effect_problem,
+    native_arguments,
+    observation_gradient,
+    observation_likelihood,
+)
 
 
 @pytest.mark.parametrize(

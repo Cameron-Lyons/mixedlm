@@ -1,4 +1,4 @@
-"""Raw LMM calls share checked preparation and preserve valid gradients."""
+"""Native LMM entry points share checked preparation and preserve valid gradients."""
 
 from dataclasses import replace
 
@@ -7,14 +7,14 @@ import pytest
 from mixedlm import _rust
 from numpy.testing import assert_allclose, assert_array_equal
 
-from tests.test_lmm_prepared_design import (
+from tests._lmm_oracles import (
     matrices_fixture,
     native_arguments,
     observation_likelihood,
     parameters,
 )
 
-APIS = ["profiled_deviance", "profiled_deviance_cached", "profiled_deviance_with_gradient"]
+APIS = ["deviance", "deviance_with_gradient", "evaluate"]
 
 
 def likelihood_arguments(kind="correlated"):
@@ -24,13 +24,11 @@ def likelihood_arguments(kind="correlated"):
     return arguments
 
 
-def evaluate(api, arguments):
-    if api == "profiled_deviance_cached":
-        # Use supplied products so this entry point exercises its cache branch.
-        matrices = matrices_fixture("fixed" if arguments["z_shape"][1] == 0 else "correlated")
-        cache = (matrices.Z.T @ matrices.Z.multiply(matrices.weights[:, None])).toarray().ravel()
-        return getattr(_rust, api)(**arguments, ztwz_cache=cache)
-    return getattr(_rust, api)(**arguments)
+def evaluate(api, arguments, reml=True):
+    arguments = dict(arguments)
+    y, theta = arguments.pop("y"), arguments.pop("theta")
+    response = _rust.LmmDesign(**arguments).with_response(y)
+    return getattr(response, api)(theta, reml)
 
 
 @pytest.mark.parametrize("api", APIS)
@@ -62,7 +60,7 @@ def evaluate(api, arguments):
         ("z_indptr", lambda a: a[:-1], "indptr"),
     ],
 )
-def test_raw_calls_reject_malformed_inputs(api, field, change, message):
+def test_native_calls_reject_malformed_inputs(api, field, change, message):
     arguments = likelihood_arguments()
     arguments[field] = change(arguments[field])
     with pytest.raises(ValueError, match=message):
@@ -72,7 +70,7 @@ def test_raw_calls_reject_malformed_inputs(api, field, change, message):
 @pytest.mark.parametrize("api", APIS)
 @pytest.mark.parametrize("field", ["theta", "y", "x", "z_data", "weights", "offset"])
 @pytest.mark.parametrize("value", [np.nan, np.inf, -np.inf])
-def test_raw_calls_reject_nonfinite_values_with_valid_shapes(api, field, value):
+def test_native_calls_reject_nonfinite_values_with_valid_shapes(api, field, value):
     arguments = likelihood_arguments()
     arguments[field].flat[0] = value
     with pytest.raises(ValueError, match="finite"):
@@ -82,7 +80,7 @@ def test_raw_calls_reject_nonfinite_values_with_valid_shapes(api, field, value):
 @pytest.mark.parametrize("api", APIS)
 @pytest.mark.parametrize("kind", ["fixed", "correlated"])
 @pytest.mark.parametrize("extra_columns", [0, 1])
-def test_raw_reml_calls_reject_nonpositive_residual_degrees_of_freedom(api, kind, extra_columns):
+def test_native_reml_calls_reject_nonpositive_residual_degrees_of_freedom(api, kind, extra_columns):
     arguments = likelihood_arguments(kind)
     n = len(arguments["y"])
     arguments["x"] = np.eye(n, n + extra_columns)
@@ -113,7 +111,7 @@ def test_gradient_rejects_overflowing_structure_dimensions(field):
     arguments = likelihood_arguments()
     arguments[field] = [int(np.iinfo(np.uintp).max)]
     with pytest.raises(ValueError, match="overflow"):
-        _rust.profiled_deviance_with_gradient(**arguments)
+        evaluate("deviance_with_gradient", arguments)
 
 
 @pytest.mark.parametrize("kind", ["fixed", "no_fixed", "crossed"])
@@ -136,13 +134,10 @@ def test_gradient_preserves_strided_inputs_and_matches_observation_likelihood(ki
     # Keep the noncontiguous arrays instead of the fixture's owned copies.
     arguments.update(x=matrices.X, weights=matrices.weights, offset=matrices.offset)
     theta = parameters(matrices)
-    value, gradient = _rust.profiled_deviance_with_gradient(
-        theta=theta, y=matrices.y, reml=reml, **arguments
-    )
+    response = _rust.LmmDesign(**arguments).with_response(matrices.y)
+    value, gradient = response.deviance_with_gradient(theta, reml)
     assert_allclose(value, observation_likelihood(matrices, theta, reml), rtol=2e-13, atol=2e-12)
-    assert_array_equal(
-        value, _rust.LmmDesign(**arguments).with_response(matrices.y).deviance(theta, reml)
-    )
+    assert_array_equal(value, response.deviance(theta, reml))
     expected = []
     for index in range(len(theta)):
         step = np.zeros_like(theta)
@@ -162,6 +157,7 @@ def test_gradient_preserves_strided_inputs_and_matches_observation_likelihood(ki
 def test_gradient_preserves_factorization_failure_result(kind, reml):
     arguments = likelihood_arguments(kind)
     arguments["x"][:] = 0
-    value, gradient = _rust.profiled_deviance_with_gradient(**arguments, reml=reml)
-    assert value == 1e10
+    value, gradient = evaluate("deviance_with_gradient", arguments, reml)
+    assert value == 1e10 == evaluate("deviance", arguments, reml)
+    assert evaluate("evaluate", arguments, reml) is None
     assert_array_equal(gradient, np.zeros_like(arguments["theta"]))

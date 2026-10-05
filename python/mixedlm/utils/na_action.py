@@ -48,10 +48,6 @@ class NAInfo:
     def n_omitted(self) -> int:
         return len(self.omitted_indices)
 
-    @property
-    def n_complete(self) -> int:
-        return self.n_original - self.n_omitted
-
     def expand_to_original(
         self, values: NDArray[np.floating], fill_value: float = np.nan
     ) -> NDArray[np.floating]:

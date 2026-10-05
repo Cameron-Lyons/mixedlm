@@ -1,43 +1,19 @@
 use std::sync::Arc;
 
+use faer::linalg::matmul::matmul;
 use faer::linalg::solvers::{Llt, Solve};
-use faer::{ColRef, Mat, MatRef, Side};
+use faer::{Accum, ColRef, Mat, MatMut, MatRef, Par, Side};
 use numpy::PyArray1;
-use numpy::ndarray::{ArrayView1, ArrayView2};
+use numpy::ndarray::ArrayView1;
 use pyo3::PyResult;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
-use crate::blocked_chol::{BlockedCholesky, BlockedMatrix};
+use crate::blocked_chol::{BlockedCholesky, LevelCholesky, SparseCholesky, SparseLdl};
 pub use crate::covariance::RandomEffectStructure;
 use crate::covariance::{CovarianceFactor, build_lambda_blocks};
-use crate::csc::CscMatrix;
+use crate::csc::{CscMatrix, LevelTiles, SCALAR_WIDTH};
 use crate::linalg::LinalgError;
-
-fn validate_prior_weights(weights: ArrayView1<'_, f64>, n: usize) -> PyResult<(Vec<f64>, f64)> {
-    if weights.len() != n {
-        return Err(PyValueError::new_err(format!(
-            "weights has length {}, expected {n}",
-            weights.len()
-        )));
-    }
-
-    let mut values = Vec::with_capacity(n);
-    let mut logdet = 0.0;
-    for &weight in weights {
-        if !weight.is_finite() {
-            return Err(PyValueError::new_err(
-                "weights must contain only finite values",
-            ));
-        }
-        if weight <= 0.0 {
-            return Err(PyValueError::new_err("weights must be strictly positive"));
-        }
-        values.push(weight);
-        logdet += weight.ln();
-    }
-    Ok((values, logdet))
-}
 
 fn random_effect_structures(
     n_levels: Vec<usize>,
@@ -72,6 +48,7 @@ fn csc_from_scipy(
 
 /// A covariance parameter selects one entry of a repeated factor block.
 struct LambdaDerivative {
+    /// Index of the structure and of its first random effect.
     structure: usize,
     offset: usize,
     n_levels: usize,
@@ -106,65 +83,6 @@ impl LambdaDerivative {
         result
     }
 
-    fn crossproduct_actions<const PRODUCT: bool>(
-        &self,
-        ztwz_lambda: &Mat<f64>,
-        inverse: &Mat<f64>,
-        rhs: &Mat<f64>,
-    ) -> (f64, Mat<f64>) {
-        // D = dLambda' A + A' dLambda, where A = Z'WZ Lambda.
-        // Each selected row contributes to both sides of this symmetric update.
-        // Contract it directly instead of allocating the q-by-q derivative.
-        let q = ztwz_lambda.nrows();
-        let mut trace = 0.0;
-        let mut product = Mat::zeros(q, if PRODUCT { rhs.ncols() } else { 0 });
-        for column in 0..q {
-            for level in 0..self.n_levels {
-                let offset = self.offset + level * self.n_terms;
-                let source = offset + self.row;
-                let target = offset + self.column;
-                let value = ztwz_lambda[(source, column)];
-                if value != 0.0 {
-                    trace += value * (inverse[(column, target)] + inverse[(target, column)]);
-                    for right in 0..if PRODUCT { rhs.ncols() } else { 0 } {
-                        product[(target, right)] += value * rhs[(column, right)];
-                        product[(column, right)] += value * rhs[(target, right)];
-                    }
-                }
-            }
-        }
-        (trace, product)
-    }
-
-    fn level_crossproduct_actions<const PRODUCT: bool>(
-        &self,
-        ztwz_lambda: &Mat<f64>,
-        inverse: &Mat<f64>,
-        rhs: &Mat<f64>,
-    ) -> (f64, Mat<f64>) {
-        let mut trace = 0.0;
-        let mut product = Mat::zeros(rhs.nrows(), if PRODUCT { rhs.ncols() } else { 0 });
-        // Visit nonzero contributions in the same column order as the full contraction.
-        for level in 0..self.n_levels {
-            let local_offset = level * self.n_terms;
-            let target = self.offset + local_offset + self.column;
-            for column in 0..self.n_terms {
-                let value = ztwz_lambda[(local_offset + self.row, column)];
-                if value != 0.0 {
-                    trace += value
-                        * (inverse[(local_offset + column, self.column)]
-                            + inverse[(local_offset + self.column, column)]);
-                    let global_column = self.offset + local_offset + column;
-                    for right in 0..if PRODUCT { rhs.ncols() } else { 0 } {
-                        product[(target, right)] += value * rhs[(global_column, right)];
-                        product[(global_column, right)] += value * rhs[(target, right)];
-                    }
-                }
-            }
-        }
-        (trace, product)
-    }
-
     #[cfg(test)]
     fn crossproduct_derivative(&self, ztwz_lambda: &Mat<f64>) -> Mat<f64> {
         // d(Lambda' Z'WZ Lambda) = dLambda' (Z'WZ Lambda) + its transpose.
@@ -188,7 +106,7 @@ impl LambdaDerivative {
 fn lambda_derivatives(structures: &[RandomEffectStructure]) -> Vec<LambdaDerivative> {
     let mut derivatives = Vec::new();
     let mut offset = 0;
-    for (structure_index, structure) in structures.iter().enumerate() {
+    for (index, structure) in structures.iter().enumerate() {
         for row in 0..structure.n_terms {
             let columns = if structure.correlated {
                 0..row + 1
@@ -197,7 +115,7 @@ fn lambda_derivatives(structures: &[RandomEffectStructure]) -> Vec<LambdaDerivat
             };
             for column in columns {
                 derivatives.push(LambdaDerivative {
-                    structure: structure_index,
+                    structure: index,
                     offset,
                     n_levels: structure.n_levels,
                     n_terms: structure.n_terms,
@@ -223,7 +141,7 @@ impl<'a> ModeGradient<'a> {
         mode: &'a Mat<f64>,
         conditional: &'a Mat<f64>,
         factor: &CovarianceFactor,
-        chol: &BlockedCholesky,
+        chol: &PrecisionFactor,
     ) -> Self {
         // The coefficient of du is u - Lambda' Z'W residual. Solve its adjoint
         // once so every parameter can contract with the mode equation's RHS.
@@ -310,140 +228,153 @@ impl FixedEffectGradient {
     }
 }
 
-enum GradientCrossproducts {
-    Dense {
-        product: Mat<f64>,
-        inverse: Mat<f64>,
-    },
-    Levels {
-        products: Vec<Mat<f64>>,
-        inverses: Vec<Mat<f64>>,
-    },
+/// A = Z'WZ Lambda as an operator, without forming the square product.
+struct GradientCrossproducts<'a> {
+    crossproducts: &'a LevelTiles,
+    factor: &'a CovarianceFactor,
 }
 
-impl GradientCrossproducts {
-    fn new(design: &PreparedLmmDesign, factor: &CovarianceFactor, chol: &BlockedCholesky) -> Self {
-        if design.independent_level_blocks
-            && let Some(inverses) = chol.independent_level_inverses()
-        {
-            return Self::Levels {
-                products: match &design.ztwz {
-                    DesignCrossproducts::Levels(blocks) => {
-                        factor.right_apply_stacked_level_crossproducts(blocks)
-                    }
-                    DesignCrossproducts::Dense(matrix) => {
-                        factor.right_apply_level_crossproducts(matrix.as_ref())
-                    }
-                },
-                inverses,
-            };
-        }
-        let DesignCrossproducts::Dense(matrix) = &design.ztwz else {
-            unreachable!("independent crossproducts retain independent Cholesky blocks");
-        };
-        let inverse = chol.inverse();
-        Self::Dense {
-            product: factor.right_apply(matrix.as_ref()),
-            inverse,
-        }
-    }
-
+impl GradientCrossproducts<'_> {
     fn apply(&self, rhs: MatRef<'_, f64>) -> Mat<f64> {
-        match self {
-            Self::Dense { product, .. } => product * rhs,
-            Self::Levels { products, .. } => {
-                let mut result = Mat::zeros(rhs.nrows(), rhs.ncols());
-                let mut offset = 0;
-                for product in products {
-                    let width = product.ncols();
-                    if width == 1 {
-                        // A random-intercept block is diagonal across levels.
-                        for column in 0..rhs.ncols() {
-                            for row in 0..product.nrows() {
-                                result[(offset + row, column)] =
-                                    product[(row, 0)] * rhs[(offset + row, column)];
-                            }
-                        }
-                    } else if width > 1 && width < 16 {
-                        // Avoid dense-kernel dispatch for the small blocks used
-                        // by grouped intercepts and slopes.
-                        for column in 0..rhs.ncols() {
-                            for local in (0..product.nrows()).step_by(width) {
-                                for row in 0..width {
-                                    let mut value = 0.0;
-                                    for source in 0..width {
-                                        value += product[(local + row, source)]
-                                            * rhs[(offset + local + source, column)];
-                                    }
-                                    result[(offset + local + row, column)] = value;
-                                }
-                            }
-                        }
-                    } else if width >= 16 {
-                        for local in (0..product.nrows()).step_by(width) {
-                            faer::linalg::matmul::matmul(
-                                result.subrows_mut(offset + local, width),
-                                faer::Accum::Replace,
-                                product.subrows(local, width),
-                                rhs.subrows(offset + local, width),
-                                1.0,
-                                faer::get_global_parallelism(),
-                            );
-                        }
-                    }
-                    offset += product.nrows();
+        self.crossproducts
+            .symmetric_product(&self.factor.apply_matrix(rhs))
+    }
+
+    /// dV rhs = E'(A rhs) + A'(E rhs) for the selection E = dLambda.
+    fn derivative_product(&self, derivative: &LambdaDerivative, rhs: &Mat<f64>) -> Mat<f64> {
+        let mut product = derivative.apply::<true>(&self.apply(rhs.as_ref()));
+        let selected = self
+            .crossproducts
+            .symmetric_product(&derivative.apply::<false>(rhs));
+        product += self.factor.transpose_apply(selected.as_ref());
+        product
+    }
+}
+
+/// tr(V^-1 dV) for each covariance parameter, from V^-1 on the tile pattern.
+/// With S = Z'WZ, A = S Lambda and E = dLambda, tr(V^-1 (E'A + A'E)) =
+/// 2 tr(A V^-1 E') sums one entry of each of the parameter's level blocks on
+/// the diagonal of A V^-1. Those blocks only need V^-1 where S couples levels.
+fn covariance_traces(
+    tiles: &LevelTiles,
+    lambda: &[Mat<f64>],
+    inverse: &[f64],
+    derivatives: &[LambdaDerivative],
+) -> Vec<f64> {
+    // Diagonal level blocks of A V^-1, summed over each structure's levels.
+    let mut sums: Vec<Vec<f64>> = lambda
+        .iter()
+        .map(|factor| vec![0.0; factor.nrows() * factor.nrows()])
+        .collect();
+    let mut product = Vec::new();
+    if tiles.block_diagonal() {
+        for ((width, span, _), (factor, sum)) in tiles.runs().zip(lambda.iter().zip(&mut sums)) {
+            let (crossproducts, selected) = (&tiles.values()[span.clone()], &inverse[span]);
+            if width == 1 {
+                let trace: f64 = crossproducts.iter().zip(selected).map(|(s, v)| s * v).sum();
+                sum[0] = factor[(0, 0)] * trace;
+                continue;
+            }
+            let size = width * width;
+            for (crossproduct, selected) in crossproducts
+                .chunks_exact(size)
+                .zip(selected.chunks_exact(size))
+            {
+                add_tile_trace(sum, crossproduct, factor, selected, &mut product);
+            }
+        }
+    } else {
+        for column in 0..tiles.n_levels() {
+            let width = tiles.width(column);
+            let lambda_column = &lambda[tiles.block(column)];
+            for tile in tiles.column(column) {
+                let row = tiles.row(tile);
+                let lambda_row = &lambda[tiles.block(row)];
+                let (crossproduct, selected) = (tiles.tile(tile), &inverse[tiles.span(tile)]);
+                let sum = &mut sums[tiles.block(column)];
+                add_tile_trace(sum, crossproduct, lambda_row, selected, &mut product);
+                if row == column {
+                    continue;
                 }
-                result
+                // The row's block gains G Lambda_column Z' through the mirrored tile.
+                let height = tiles.width(row);
+                product.clear();
+                for j in 0..height {
+                    product.extend((0..width).map(|a| {
+                        (0..=a)
+                            .map(|b| lambda_column[(a, b)] * selected[j + b * height])
+                            .sum::<f64>()
+                    }));
+                }
+                let sum = &mut sums[tiles.block(row)];
+                for j in 0..height {
+                    for i in 0..height {
+                        sum[i + j * height] += (0..width)
+                            .map(|a| crossproduct[i + a * height] * product[a + j * width])
+                            .sum::<f64>();
+                    }
+                }
             }
         }
     }
+    derivatives
+        .iter()
+        .map(|derivative| {
+            2.0 * sums[derivative.structure]
+                [derivative.row + derivative.column * derivative.n_terms]
+        })
+        .collect()
+}
 
-    fn actions<const PRODUCT: bool>(
-        &self,
-        derivative: &LambdaDerivative,
-        rhs: &Mat<f64>,
-    ) -> (f64, Mat<f64>) {
-        match self {
-            Self::Dense { product, inverse } => {
-                derivative.crossproduct_actions::<PRODUCT>(product, inverse, rhs)
-            }
-            Self::Levels { products, inverses } => derivative
-                .level_crossproduct_actions::<PRODUCT>(
-                    &products[derivative.structure],
-                    &inverses[derivative.structure],
-                    rhs,
-                ),
+/// Add G' Lambda Z to a column level's block, for tiles G of S and Z of V^-1
+/// and the row level's factor Lambda.
+fn add_tile_trace(
+    block: &mut [f64],
+    crossproduct: &[f64],
+    lambda: &Mat<f64>,
+    selected: &[f64],
+    product: &mut Vec<f64>,
+) {
+    let height = lambda.nrows();
+    let width = crossproduct.len() / height;
+    if height.max(width) >= SCALAR_WIDTH {
+        let mut product = Mat::zeros(height, width);
+        let selected = MatRef::from_column_major_slice(selected, height, width);
+        matmul(
+            product.as_mut(),
+            Accum::Replace,
+            lambda,
+            selected,
+            1.0,
+            Par::Seq,
+        );
+        let crossproduct = MatRef::from_column_major_slice(crossproduct, height, width);
+        let block = MatMut::from_column_major_slice_mut(block, width, width);
+        matmul(
+            block,
+            Accum::Add,
+            crossproduct.transpose(),
+            &product,
+            1.0,
+            Par::Seq,
+        );
+        return;
+    }
+    product.clear();
+    for j in 0..width {
+        product.extend((0..height).map(|a| {
+            (0..=a)
+                .map(|b| lambda[(a, b)] * selected[b + j * height])
+                .sum::<f64>()
+        }));
+    }
+    for j in 0..width {
+        for i in 0..width {
+            block[i + j * width] += (0..height)
+                .map(|a| crossproduct[a + i * height] * product[a + j * height])
+                .sum::<f64>();
         }
     }
-}
-
-fn independent_level_blocks(
-    ztwz: &Mat<f64>,
-    structures: &[RandomEffectStructure],
-    independent_levels: &[bool],
-) -> bool {
-    if independent_levels.iter().any(|independent| !independent) {
-        return false;
-    }
-    let mut offset = 0;
-    for structure in structures {
-        let end = offset + structure.n_levels * structure.n_terms;
-        if (offset..end).any(|column| {
-            (0..offset).any(|row| ztwz[(row, column)] != 0.0 || ztwz[(column, row)] != 0.0)
-        }) {
-            return false;
-        }
-        offset = end;
-    }
-    true
-}
-
-fn compute_ztwz_sparse(z: &CscMatrix, weights: &[f64]) -> Mat<f64> {
-    z.weighted_crossproduct(weights)
-}
-
-fn mat_from_flat_array(data: &[f64], q: usize) -> Mat<f64> {
-    Mat::from_fn(q, q, |i, j| data[i * q + j])
 }
 
 fn compute_ztwy_sparse(z: &CscMatrix, w: &[f64], y: &[f64], q: usize) -> Mat<f64> {
@@ -486,59 +417,201 @@ fn compute_ztwx_sparse(z: &CscMatrix, w: &[f64], x: &Mat<f64>, q: usize, p: usiz
 fn marginal_residual(x: &Mat<f64>, beta: &Mat<f64>, y: &[f64]) -> Vec<f64> {
     let mut residual = y.to_vec();
     if x.ncols() != 0 {
-        faer::linalg::matmul::matmul(
+        // A matrix-vector product is memory bound; thread dispatch only adds latency.
+        matmul(
             faer::ColMut::from_slice_mut(&mut residual).as_mat_mut(),
-            faer::Accum::Add,
+            Accum::Add,
             x,
             beta,
             -1.0,
-            faer::get_global_parallelism(),
+            Par::Seq,
         );
     }
     residual
 }
 
-enum DesignCrossproducts {
-    Dense(Mat<f64>),
-    Levels(Vec<Mat<f64>>),
+fn structure_blocks(structures: &[RandomEffectStructure]) -> Vec<(usize, usize)> {
+    structures.iter().map(|s| (s.n_levels, s.n_terms)).collect()
+}
+
+fn structure_parameters(structure: &RandomEffectStructure) -> usize {
+    if structure.correlated {
+        structure.n_terms * (structure.n_terms + 1) / 2
+    } else {
+        structure.n_terms
+    }
+}
+
+/// Coupled structures are eliminated with the most random-effect columns first,
+/// ties going to more levels and then to caller order. Each structure's levels
+/// are mutually independent, so a random crossing leaves only the smaller
+/// structures for the blocked factorization's dense Schur complement, and a
+/// nested factor with its parent's terms adds no fill. Inputs and outputs keep
+/// caller order.
+struct StructureOrder {
+    /// Caller structure, parameter and random-effect column for each internal one.
+    structures: Vec<usize>,
+    parameters: Vec<usize>,
+    columns: Vec<usize>,
+}
+
+impl StructureOrder {
+    fn new(structures: &[RandomEffectStructure]) -> Option<Self> {
+        let mut order: Vec<usize> = (0..structures.len()).collect();
+        order.sort_by_key(|&index| {
+            let structure = structures[index];
+            std::cmp::Reverse((structure.n_levels * structure.n_terms, structure.n_levels))
+        });
+        if order
+            .iter()
+            .enumerate()
+            .all(|(position, &index)| position == index)
+        {
+            return None;
+        }
+        let (mut parameter_starts, mut column_starts) = (vec![0], vec![0]);
+        for structure in structures {
+            parameter_starts
+                .push(parameter_starts.last().unwrap() + structure_parameters(structure));
+            column_starts
+                .push(column_starts.last().unwrap() + structure.n_levels * structure.n_terms);
+        }
+        let ranges = |starts: &[usize]| {
+            order
+                .iter()
+                .flat_map(|&index| starts[index]..starts[index + 1])
+                .collect()
+        };
+        Some(Self {
+            parameters: ranges(&parameter_starts),
+            columns: ranges(&column_starts),
+            structures: order,
+        })
+    }
+
+    /// Gather caller values into elimination order.
+    fn gather(caller: &[f64], positions: &[usize]) -> Vec<f64> {
+        positions.iter().map(|&position| caller[position]).collect()
+    }
+
+    /// Return values in elimination order to their caller positions.
+    fn scatter(internal: &[f64], positions: &[usize]) -> Vec<f64> {
+        let mut caller = vec![0.0; internal.len()];
+        for (&position, &value) in positions.iter().zip(internal) {
+            caller[position] = value;
+        }
+        caller
+    }
+}
+
+/// Dense Schur complements narrower than this are not worth a sparse analysis.
+const SPARSE_MIN_DIMENSION: usize = 64;
+
+/// Dense Schur kernels are taken to run this many times more operations per
+/// second than simplicial elimination. With this ratio, measured random,
+/// partial and regular crossings each picked their faster factorization.
+const DENSE_SPEEDUP: usize = 4;
+
+/// Z'WZ as level tiles in elimination order, with the factorization chosen for
+/// its fill. Leading independent levels are eliminated one tile at a time and
+/// the rest densely, unless a sparse factorization of the whole system needs
+/// much less work. Random crossings fill the dense Schur complement anyway;
+/// nested and regularly crossed factors leave it nearly empty.
+struct DesignCrossproducts {
+    tiles: LevelTiles,
+    leading: usize,
+    sparse: Option<SparseCholesky>,
 }
 
 impl DesignCrossproducts {
-    fn from_cache(values: &[f64], q: usize, structures: &[RandomEffectStructure]) -> Self {
-        if q == 0 {
-            return Self::Levels(Vec::new());
+    fn new(tiles: LevelTiles) -> Self {
+        let leading = tiles.independent_prefix();
+        let dense = tiles.dimension() - tiles.start(leading);
+        let sparse = if dense >= SPARSE_MIN_DIMENSION {
+            // Compare with the m^3 / 3 operations of the dense Cholesky factor.
+            let dense_flops = dense.saturating_pow(3) / 3;
+            SparseCholesky::new(&tiles, dense_flops / DENSE_SPEEDUP)
+        } else {
+            None
+        };
+        Self {
+            tiles,
+            leading,
+            sparse,
         }
-        let mut levels = Vec::with_capacity(q);
-        let mut block = 0;
-        for structure in structures {
-            for _ in 0..structure.n_levels {
-                levels.extend(std::iter::repeat_n(block, structure.n_terms));
-                block += 1;
+    }
+
+    fn factor(&self, lambda: &[Mat<f64>]) -> Result<PrecisionFactor<'_>, LinalgError> {
+        let values = self.tiles.penalized(lambda);
+        if self.tiles.block_diagonal() {
+            return LevelCholesky::factor(&self.tiles, values).map(PrecisionFactor::Levels);
+        }
+        match &self.sparse {
+            Some(analysis) => analysis.factor(&values).map(PrecisionFactor::Sparse),
+            None => BlockedCholesky::factor(&self.tiles, self.leading, values)
+                .map(PrecisionFactor::Blocked),
+        }
+    }
+
+    /// Order of the dense Schur complement, if the blocked factorization is used.
+    fn dense_dimension(&self) -> usize {
+        if self.sparse.is_some() {
+            0
+        } else {
+            self.tiles.dimension() - self.tiles.start(self.leading)
+        }
+    }
+}
+
+/// Factor of V = Lambda' Z'WZ Lambda + I from the design's chosen elimination.
+enum PrecisionFactor<'a> {
+    Levels(LevelCholesky<'a>),
+    Blocked(BlockedCholesky<'a>),
+    Sparse(SparseLdl<'a>),
+}
+
+impl PrecisionFactor<'_> {
+    fn logdet(&self) -> f64 {
+        match self {
+            Self::Levels(chol) => chol.logdet(),
+            Self::Blocked(chol) => chol.logdet(),
+            Self::Sparse(factor) => factor.logdet(),
+        }
+    }
+
+    /// Whiten a right-hand side: the result's crossproduct is b' V^-1 b.
+    fn solve_lower(&self, b: &Mat<f64>) -> Mat<f64> {
+        let mut result = b.clone();
+        match self {
+            Self::Levels(chol) => chol.solve_in_place::<false>(&mut result),
+            Self::Blocked(chol) => chol.solve_lower_in_place(&mut result),
+            Self::Sparse(factor) => factor.solve_lower_in_place(&mut result),
+        }
+        result
+    }
+
+    fn solve(&self, b: &Mat<f64>) -> Mat<f64> {
+        let mut result = b.clone();
+        match self {
+            Self::Levels(chol) => {
+                chol.solve_in_place::<false>(&mut result);
+                chol.solve_in_place::<true>(&mut result);
             }
-        }
-        for (row, entries) in values.chunks_exact(q).enumerate() {
-            if entries
-                .iter()
-                .enumerate()
-                .any(|(column, &value)| levels[row] != levels[column] && value != 0.0)
-            {
-                return Self::Dense(mat_from_flat_array(values, q));
+            Self::Blocked(chol) => {
+                chol.solve_lower_in_place(&mut result);
+                chol.solve_upper_in_place(&mut result);
             }
+            Self::Sparse(factor) => factor.solve_in_place(&mut result),
         }
-        let mut offset = 0;
-        let blocks = structures
-            .iter()
-            .map(|structure| {
-                let width = structure.n_terms;
-                let dimension = structure.n_levels * width;
-                let block = Mat::from_fn(dimension, width, |row, column| {
-                    values[(offset + row) * q + offset + row / width * width + column]
-                });
-                offset += dimension;
-                block
-            })
-            .collect();
-        Self::Levels(blocks)
+        result
+    }
+
+    fn selected_inverse(&self) -> Vec<f64> {
+        match self {
+            Self::Levels(chol) => chol.selected_inverse(),
+            Self::Blocked(chol) => chol.selected_inverse(),
+            Self::Sparse(factor) => factor.selected_inverse(),
+        }
     }
 }
 
@@ -553,10 +626,10 @@ struct PreparedLmmDesign {
     logdet_weights: f64,
     xtwx: Mat<f64>,
     ztwx: Mat<f64>,
-    ztwz: DesignCrossproducts,
-    independent_levels: Vec<bool>,
-    independent_level_blocks: bool,
+    crossproducts: DesignCrossproducts,
+    /// Structures in elimination order, with the map back to caller order.
     structures: Vec<RandomEffectStructure>,
+    order: Option<StructureOrder>,
     n_theta: usize,
 }
 
@@ -567,7 +640,6 @@ impl PreparedLmmDesign {
         weights: Vec<f64>,
         offset: Vec<f64>,
         structures: Vec<RandomEffectStructure>,
-        cached_ztwz: Option<&[f64]>,
     ) -> Result<Self, &'static str> {
         let (n, p, q) = (x.nrows(), x.ncols(), z.ncols());
         if n == 0 || z.nrows() != n || weights.len() != n || offset.len() != n {
@@ -613,32 +685,39 @@ impl PreparedLmmDesign {
         if columns != q {
             return Err("random-effect structures do not match the design column count");
         }
+        let blocks = structure_blocks(&structures);
+        let independent = z.weighted_repeated_block_crossproducts(&weights, &blocks);
+        let (z, structures, order, tiles) = match independent {
+            Some(stacked) => {
+                let tiles = LevelTiles::from_level_blocks(&blocks, &stacked);
+                (z, structures, None, tiles)
+            }
+            None => {
+                let order = StructureOrder::new(&structures);
+                let (z, structures) = match &order {
+                    Some(order) => (
+                        z.select_columns(&order.columns),
+                        order
+                            .structures
+                            .iter()
+                            .map(|&index| structures[index])
+                            .collect(),
+                    ),
+                    None => (z, structures),
+                };
+                let blocks = structure_blocks(&structures);
+                // Rows spanning levels only through stored or cancelling zeros
+                // leave no couplings; such levels are again eliminated blockwise.
+                let tiles = z.weighted_level_crossproduct(&weights, &blocks);
+                (z, structures, order, tiles)
+            }
+        };
+        let crossproducts = DesignCrossproducts::new(tiles);
         let sqrt_weights: Vec<f64> = weights.iter().map(|w| w.sqrt()).collect();
         let logdet_weights = weights.iter().map(|w| w.ln()).sum();
         let wx = Mat::from_fn(n, p, |i, j| sqrt_weights[i] * x[(i, j)]);
         let xtwx = wx.transpose() * &wx;
         let ztwx = compute_ztwx_sparse(&z, &weights, &x, q, p);
-        let ztwz = if let Some(values) = cached_ztwz {
-            if q.checked_mul(q) != Some(values.len()) || values.iter().any(|v| !v.is_finite()) {
-                return Err("cached Z'WZ must contain q * q finite values");
-            }
-            DesignCrossproducts::from_cache(values, q, &structures)
-        } else {
-            let blocks: Vec<_> = structures.iter().map(|s| (s.n_levels, s.n_terms)).collect();
-            if let Some(blocks) = z.weighted_repeated_block_crossproducts(&weights, &blocks) {
-                DesignCrossproducts::Levels(blocks)
-            } else {
-                DesignCrossproducts::Dense(compute_ztwz_sparse(&z, &weights))
-            }
-        };
-        let (independent_levels, independent_level_blocks) = match &ztwz {
-            DesignCrossproducts::Levels(_) => (vec![true; structures.len()], true),
-            DesignCrossproducts::Dense(matrix) => {
-                let levels = BlockedMatrix::independent_levels(matrix, &structures);
-                let all = independent_level_blocks(matrix, &structures, &levels);
-                (levels, all)
-            }
-        };
         Ok(Self {
             x,
             wx,
@@ -649,31 +728,29 @@ impl PreparedLmmDesign {
             logdet_weights,
             xtwx,
             ztwx,
-            ztwz,
-            independent_levels,
-            independent_level_blocks,
+            crossproducts,
             structures,
+            order,
             n_theta,
         })
     }
 
-    fn blocked_v(&self, lambda: &[Mat<f64>]) -> BlockedMatrix {
-        match &self.ztwz {
-            DesignCrossproducts::Levels(blocks) => {
-                BlockedMatrix::from_independent_level_crossproducts(
-                    blocks,
-                    lambda,
-                    &self.structures,
-                    true,
-                )
-            }
-            DesignCrossproducts::Dense(matrix) => BlockedMatrix::from_lambda_ztwz_with_pattern(
-                matrix,
-                lambda,
-                &self.structures,
-                true,
-                &self.independent_levels,
-            ),
+    /// Covariance parameters in elimination order.
+    fn internal_theta<'t>(&self, theta: &'t [f64]) -> std::borrow::Cow<'t, [f64]> {
+        match &self.order {
+            Some(order) => StructureOrder::gather(theta, &order.parameters).into(),
+            None => theta.into(),
+        }
+    }
+
+    fn engine(&self) -> &'static str {
+        let crossproducts = &self.crossproducts;
+        if crossproducts.tiles.block_diagonal() {
+            "levels"
+        } else if crossproducts.sparse.is_some() {
+            "sparse"
+        } else {
+            "blocked"
         }
     }
 
@@ -757,16 +834,23 @@ impl PreparedLmmResponse {
             return (self.deviance(theta, reml), Vec::new());
         }
 
-        let lambda_blocks = build_lambda_blocks(theta, structures);
+        let theta = design.internal_theta(theta);
+        let lambda_blocks = build_lambda_blocks(&theta, structures);
 
-        let blocked_v = design.blocked_v(&lambda_blocks);
-        let chol_v = match BlockedCholesky::factor(blocked_v) {
+        let chol_v = match design.crossproducts.factor(&lambda_blocks) {
             Ok(c) => c,
             Err(_) => return (1e10, vec![0.0; n_theta]),
         };
 
         let logdet_v = chol_v.logdet();
 
+        let derivatives = lambda_derivatives(structures);
+        let traces = covariance_traces(
+            &design.crossproducts.tiles,
+            &lambda_blocks,
+            &chol_v.selected_inverse(),
+            &derivatives,
+        );
         let factor = CovarianceFactor::from_blocks(lambda_blocks, structures);
         let cu = factor.transpose_apply(ztwy.as_ref());
         let cu_star = chol_v.solve_lower(&cu);
@@ -811,7 +895,10 @@ impl PreparedLmmResponse {
             dev += logdet_xtvinvx;
         }
 
-        let gradient_products = GradientCrossproducts::new(design, &factor, &chol_v);
+        let gradient_products = GradientCrossproducts {
+            crossproducts: &design.crossproducts.tiles,
+            factor: &factor,
+        };
         let fixed_gradient = if reml && p > 0 {
             let projection = chol_v.solve(&lambdat_ztwx);
             let weighted = chol_xtvinvx
@@ -836,31 +923,30 @@ impl PreparedLmmResponse {
             .then(|| mode_gradient.project(&zt_w_resid, &gradient_products));
         let mut gradient = Vec::with_capacity(n_theta);
 
-        for derivative in lambda_derivatives(structures) {
+        for (derivative, &d_logdet_v) in derivatives.iter().zip(&traces) {
             // Holding beta fixed is valid at its optimum. Both forms remain
             // valid for singular factors and avoid marginal quadratic forms.
-            let (d_logdet_v, d_pwrss) = if let Some(projected) = &projected_mode {
-                let (trace, _) = gradient_products.actions::<false>(&derivative, &u_star);
-                (trace, projected.derivative(&derivative))
+            let d_pwrss = if let Some(projected) = &projected_mode {
+                projected.derivative(derivative)
             } else {
-                let (trace, products) = gradient_products.actions::<true>(&derivative, &u_star);
                 let mut dc = derivative.apply::<true>(&zt_w_resid);
-                for row in 0..q {
-                    dc[(row, 0)] -= products[(row, 0)];
-                }
-                (trace, mode_gradient.derivative(&derivative, &dc))
+                dc -= gradient_products.derivative_product(derivative, &u_star);
+                mode_gradient.derivative(derivative, &dc)
             };
 
             let mut grad_k = d_logdet_v + denom / pwrss * d_pwrss;
 
             if let Some(fixed_gradient) = &fixed_gradient {
-                grad_k += fixed_gradient.derivative(&derivative);
+                grad_k += fixed_gradient.derivative(derivative);
             }
 
             gradient.push(grad_k);
         }
 
-        (dev, gradient)
+        match &design.order {
+            Some(order) => (dev, StructureOrder::scatter(&gradient, &order.parameters)),
+            None => (dev, gradient),
+        }
     }
 
     fn evaluate<const ESTIMATES: bool>(&self, theta: &[f64], reml: bool) -> Option<LmmEvaluation> {
@@ -925,10 +1011,10 @@ impl PreparedLmmResponse {
             ));
         }
 
-        let lambda_blocks = build_lambda_blocks(theta, structures);
+        let theta = design.internal_theta(theta);
+        let lambda_blocks = build_lambda_blocks(&theta, structures);
 
-        let blocked_v = design.blocked_v(&lambda_blocks);
-        let chol_v = BlockedCholesky::factor(blocked_v).ok()?;
+        let chol_v = design.crossproducts.factor(&lambda_blocks).ok()?;
 
         let logdet_v = chol_v.logdet();
 
@@ -984,7 +1070,11 @@ impl PreparedLmmResponse {
             },
             if ESTIMATES { sigma2.sqrt() } else { 0.0 },
             if ESTIMATES {
-                (0..q).map(|i| random[i]).collect()
+                let random: Vec<f64> = (0..q).map(|i| random[i]).collect();
+                match &design.order {
+                    Some(order) => StructureOrder::scatter(&random, &order.columns),
+                    None => random,
+                }
             } else {
                 Vec::new()
             },
@@ -1049,13 +1139,34 @@ impl LmmDesign {
         // the caller may change input values or layouts while Python is detached.
         drop((x, z_data, z_indices, z_indptr, weights, offset));
         let inner = py
-            .detach(|| {
-                PreparedLmmDesign::new(x_owned, z, weights_owned, offset_owned, structures, None)
-            })
+            .detach(|| PreparedLmmDesign::new(x_owned, z, weights_owned, offset_owned, structures))
             .map_err(PyValueError::new_err)?;
         Ok(Self {
             inner: Arc::new(inner),
         })
+    }
+
+    /// The factorization used for this design: "levels" when random-effect
+    /// levels are independent, otherwise "blocked" or "sparse" for coupled designs.
+    #[getter]
+    fn engine(&self) -> &'static str {
+        self.inner.engine()
+    }
+
+    /// Order of the dense Schur complement the blocked factorization forms
+    /// after eliminating independent levels; zero for the other engines.
+    #[getter]
+    fn dense_dimension(&self) -> usize {
+        self.inner.crossproducts.dense_dimension()
+    }
+
+    /// Caller structure indices in the order their levels are eliminated.
+    #[getter]
+    fn elimination_order(&self) -> Vec<usize> {
+        match &self.inner.order {
+            Some(order) => order.structures.clone(),
+            None => (0..self.inner.structures.len()).collect(),
+        }
     }
 
     fn with_response(&self, y: numpy::PyArrayLike1<'_, f64>) -> PyResult<LmmResponse> {
@@ -1132,257 +1243,44 @@ impl LmmResponse {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn prepare_lmm_response(
-    y: ArrayView1<'_, f64>,
-    x_data: ArrayView2<'_, f64>,
-    z_data: &[f64],
-    z_indices: &[i64],
-    z_indptr: &[i64],
-    z_shape: (usize, usize),
-    weights: ArrayView1<'_, f64>,
-    offset: ArrayView1<'_, f64>,
-    structures: Vec<RandomEffectStructure>,
-    ztwz_cache: Option<&[f64]>,
-) -> PyResult<PreparedLmmResponse> {
-    let x = Mat::from_fn(x_data.nrows(), x_data.ncols(), |i, j| x_data[[i, j]]);
-    let z = csc_from_scipy(z_data, z_indices, z_indptr, z_shape)?;
-    let design = Arc::new(
-        PreparedLmmDesign::new(
-            x,
-            z,
-            weights.to_vec(),
-            offset.to_vec(),
-            structures,
-            ztwz_cache,
-        )
-        .map_err(PyValueError::new_err)?,
-    );
-    design.with_response(y).map_err(PyValueError::new_err)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn profiled_deviance_impl(
-    theta: &[f64],
-    y: ArrayView1<'_, f64>,
-    x_data: ArrayView2<'_, f64>,
-    z_data: &[f64],
-    z_indices: &[i64],
-    z_indptr: &[i64],
-    z_shape: (usize, usize),
-    weights: ArrayView1<'_, f64>,
-    offset: ArrayView1<'_, f64>,
-    structures: Vec<RandomEffectStructure>,
-    reml: bool,
-    ztwz_cache: Option<&[f64]>,
-) -> PyResult<f64> {
-    let response = prepare_lmm_response(
-        y, x_data, z_data, z_indices, z_indptr, z_shape, weights, offset, structures, ztwz_cache,
-    )?;
-    response
-        .validate_parameters(theta, reml)
-        .map_err(PyValueError::new_err)?;
-    Ok(response.deviance(theta, reml))
-}
-
-#[pyfunction]
-pub fn compute_ztwz<'py>(
-    py: Python<'py>,
-    z_data: numpy::PyArrayLike1<'py, f64>,
-    z_indices: numpy::PyArrayLike1<'py, i64>,
-    z_indptr: numpy::PyArrayLike1<'py, i64>,
-    z_shape: (usize, usize),
-    weights: numpy::PyArrayLike1<'py, f64>,
-) -> PyResult<Py<PyArray1<f64>>> {
-    let z = csc_from_scipy(
-        z_data.as_slice()?,
-        z_indices.as_slice()?,
-        z_indptr.as_slice()?,
-        z_shape,
-    )?;
-    let (w, _) = validate_prior_weights(weights.as_array(), z_shape.0)?;
-    let q = z_shape.1;
-
-    let ztwz = compute_ztwz_sparse(&z, &w);
-
-    let mut flat_data = Vec::with_capacity(q * q);
-    for i in 0..q {
-        for j in 0..q {
-            flat_data.push(ztwz[(i, j)]);
-        }
-    }
-
-    Ok(PyArray1::from_vec(py, flat_data).into())
-}
-
-#[pyfunction]
-#[pyo3(signature = (
-    theta,
-    y,
-    x,
-    z_data,
-    z_indices,
-    z_indptr,
-    z_shape,
-    weights,
-    offset,
-    n_levels,
-    n_terms,
-    correlated,
-    reml = true,
-    ztwz_cache = None
-))]
-#[allow(clippy::too_many_arguments)]
-pub fn profiled_deviance_cached<'py>(
-    theta: numpy::PyArrayLike1<'py, f64>,
-    y: numpy::PyArrayLike1<'py, f64>,
-    x: numpy::PyArrayLike2<'py, f64>,
-    z_data: numpy::PyArrayLike1<'py, f64>,
-    z_indices: numpy::PyArrayLike1<'py, i64>,
-    z_indptr: numpy::PyArrayLike1<'py, i64>,
-    z_shape: (usize, usize),
-    weights: numpy::PyArrayLike1<'py, f64>,
-    offset: numpy::PyArrayLike1<'py, f64>,
-    n_levels: Vec<usize>,
-    n_terms: Vec<usize>,
-    correlated: Vec<bool>,
-    reml: bool,
-    ztwz_cache: Option<numpy::PyArrayLike1<'py, f64>>,
-) -> PyResult<f64> {
-    let structures = random_effect_structures(n_levels, n_terms, correlated)?;
-
-    let ztwz_data = ztwz_cache.as_ref().map(|arr| arr.as_slice()).transpose()?;
-
-    profiled_deviance_impl(
-        theta.as_slice()?,
-        y.as_array(),
-        x.as_array(),
-        z_data.as_slice()?,
-        z_indices.as_slice()?,
-        z_indptr.as_slice()?,
-        z_shape,
-        weights.as_array(),
-        offset.as_array(),
-        structures,
-        reml,
-        ztwz_data,
-    )
-}
-
-#[pyfunction]
-#[pyo3(signature = (
-    theta,
-    y,
-    x,
-    z_data,
-    z_indices,
-    z_indptr,
-    z_shape,
-    weights,
-    offset,
-    n_levels,
-    n_terms,
-    correlated,
-    reml = true
-))]
-#[allow(clippy::too_many_arguments)]
-pub fn profiled_deviance<'py>(
-    theta: numpy::PyArrayLike1<'py, f64>,
-    y: numpy::PyArrayLike1<'py, f64>,
-    x: numpy::PyArrayLike2<'py, f64>,
-    z_data: numpy::PyArrayLike1<'py, f64>,
-    z_indices: numpy::PyArrayLike1<'py, i64>,
-    z_indptr: numpy::PyArrayLike1<'py, i64>,
-    z_shape: (usize, usize),
-    weights: numpy::PyArrayLike1<'py, f64>,
-    offset: numpy::PyArrayLike1<'py, f64>,
-    n_levels: Vec<usize>,
-    n_terms: Vec<usize>,
-    correlated: Vec<bool>,
-    reml: bool,
-) -> PyResult<f64> {
-    let structures = random_effect_structures(n_levels, n_terms, correlated)?;
-
-    profiled_deviance_impl(
-        theta.as_slice()?,
-        y.as_array(),
-        x.as_array(),
-        z_data.as_slice()?,
-        z_indices.as_slice()?,
-        z_indptr.as_slice()?,
-        z_shape,
-        weights.as_array(),
-        offset.as_array(),
-        structures,
-        reml,
-        None,
-    )
-}
-
-#[pyfunction]
-#[pyo3(signature = (
-    theta,
-    y,
-    x,
-    z_data,
-    z_indices,
-    z_indptr,
-    z_shape,
-    weights,
-    offset,
-    n_levels,
-    n_terms,
-    correlated,
-    reml = true
-))]
-#[allow(clippy::too_many_arguments)]
-pub fn profiled_deviance_with_gradient<'py>(
-    py: Python<'py>,
-    theta: numpy::PyArrayLike1<'py, f64>,
-    y: numpy::PyArrayLike1<'py, f64>,
-    x: numpy::PyArrayLike2<'py, f64>,
-    z_data: numpy::PyArrayLike1<'py, f64>,
-    z_indices: numpy::PyArrayLike1<'py, i64>,
-    z_indptr: numpy::PyArrayLike1<'py, i64>,
-    z_shape: (usize, usize),
-    weights: numpy::PyArrayLike1<'py, f64>,
-    offset: numpy::PyArrayLike1<'py, f64>,
-    n_levels: Vec<usize>,
-    n_terms: Vec<usize>,
-    correlated: Vec<bool>,
-    reml: bool,
-) -> PyResult<(f64, Py<PyArray1<f64>>)> {
-    let structures = random_effect_structures(n_levels, n_terms, correlated)?;
-
-    let response = prepare_lmm_response(
-        y.as_array(),
-        x.as_array(),
-        z_data.as_slice()?,
-        z_indices.as_slice()?,
-        z_indptr.as_slice()?,
-        z_shape,
-        weights.as_array(),
-        offset.as_array(),
-        structures,
-        None,
-    )?;
-
-    let theta = theta.as_slice()?;
-    response
-        .validate_parameters(theta, reml)
-        .map_err(PyValueError::new_err)?;
-    let (dev, grad) = response.deviance_with_gradient(theta, reml);
-
-    Ok((dev, PyArray1::from_vec(py, grad).into()))
-}
-
 #[cfg(test)]
 mod prepared_tests {
     use super::*;
     use numpy::ndarray::ArrayView1;
 
+    fn structure(n_levels: usize, n_terms: usize, correlated: bool) -> RandomEffectStructure {
+        RandomEffectStructure {
+            n_levels,
+            n_terms,
+            correlated,
+        }
+    }
+
+    fn assert_close(actual: f64, expected: f64) {
+        assert!(
+            (actual - expected).abs() <= 1e-10 * expected.abs().max(1.0),
+            "{actual} != {expected}"
+        );
+    }
+
+    /// Tile a dense crossproduct, optionally forcing the sparse factorization.
+    fn tiled(
+        crossproduct: &Mat<f64>,
+        structures: &[RandomEffectStructure],
+        sparse: bool,
+    ) -> DesignCrossproducts {
+        let tiles = LevelTiles::lower_from_entries(&structure_blocks(structures), |i, j| {
+            crossproduct[(i, j)]
+        });
+        let mut crossproducts = DesignCrossproducts::new(tiles);
+        crossproducts.sparse = sparse
+            .then(|| SparseCholesky::new(&crossproducts.tiles, usize::MAX))
+            .flatten();
+        crossproducts
+    }
+
     #[test]
-    fn independent_design_storage_scales_with_level_width_and_preserves_cached_blocks() {
+    fn independent_design_storage_scales_with_level_width() {
         let levels = if cfg!(miri) { 8 } else { 2048 };
         let z = CscMatrix::try_from_usize(&[], &[], &vec![0; levels + 1], (4, levels)).unwrap();
         let design = PreparedLmmDesign::new(
@@ -1390,85 +1288,70 @@ mod prepared_tests {
             z,
             vec![1.0; 4],
             vec![0.0; 4],
-            vec![RandomEffectStructure {
-                n_levels: levels,
-                n_terms: 1,
-                correlated: true,
-            }],
-            None,
+            vec![structure(levels, 1, true)],
         )
         .unwrap();
-        let DesignCrossproducts::Levels(blocks) = &design.ztwz else {
-            panic!("independent design should use compact storage")
-        };
-        assert_eq!(blocks[0].shape(), (levels, 1));
-        assert_eq!(
-            blocks
-                .iter()
-                .map(|block| block.nrows() * block.ncols())
-                .sum::<usize>(),
-            levels
-        );
+        assert_eq!(design.engine(), "levels");
+        assert_eq!(design.crossproducts.tiles.n_values(), levels);
+        assert_eq!(design.crossproducts.dense_dimension(), 0);
+    }
 
-        let structures = [
-            RandomEffectStructure {
-                n_levels: 2,
-                n_terms: 2,
-                correlated: true,
-            },
-            RandomEffectStructure {
-                n_levels: 2,
-                n_terms: 1,
-                correlated: false,
-            },
-        ];
-        let q = 6;
-        let mut values = vec![0.0; q * q];
-        for i in 0..q {
-            values[i * q + i] = 2.0 + i as f64;
-        }
-        // Cached matrices need not be symmetric: preserve both orientations.
-        values[1] = 0.2;
-        values[q] = 0.4;
-        let DesignCrossproducts::Levels(blocks) =
-            DesignCrossproducts::from_cache(&values, q, &structures)
-        else {
-            panic!("cached independent blocks should remain compact")
+    #[test]
+    fn crossproducts_keep_level_blocks_and_tiny_couplings() {
+        // The second structure has more columns, so coupled designs reorder.
+        let structures = vec![structure(1, 2, true), structure(5, 1, false)];
+        let q = 7;
+        // Row j loads column j; each extra row loads a pair of columns.
+        let design = |pairs: &[(usize, usize, f64)]| {
+            let n = q + pairs.len();
+            let mut columns: Vec<Vec<(usize, f64)>> =
+                (0..q).map(|column| vec![(column, 1.0)]).collect();
+            for (index, &(left, right, value)) in pairs.iter().enumerate() {
+                columns[left].push((q + index, 1.0));
+                columns[right].push((q + index, value));
+            }
+            let (mut values, mut rows, mut offsets) = (Vec::new(), Vec::new(), vec![0]);
+            for (row, value) in columns.into_iter().flat_map(|column| {
+                offsets.push(offsets.last().unwrap() + column.len());
+                column
+            }) {
+                rows.push(row);
+                values.push(value);
+            }
+            let z = CscMatrix::try_from_usize(&values, &rows, &offsets, (n, q)).unwrap();
+            let x = Mat::full(n, 1, 1.0);
+            PreparedLmmDesign::new(x, z, vec![1.0; n], vec![0.0; n], structures.clone()).unwrap()
         };
-        assert_eq!(blocks[0].shape(), (4, 2));
-        assert_eq!(blocks[1].shape(), (2, 1));
-        assert_eq!(blocks[0][(0, 1)], 0.2);
-        assert_eq!(blocks[0][(1, 0)], 0.4);
-        for (row, column) in [(0, 2), (2, 0), (0, 4), (4, 0)] {
-            let mut coupled = values.clone();
-            coupled[row * q + column] = 1e-300;
-            let DesignCrossproducts::Dense(matrix) =
-                DesignCrossproducts::from_cache(&coupled, q, &structures)
-            else {
-                panic!("tiny cached couplings must remain dense")
-            };
-            assert_eq!(matrix[(row, column)], 1e-300);
+        let independent = design(&[(0, 1, 0.5)]);
+        assert_eq!(independent.engine(), "levels");
+        assert!(independent.order.is_none());
+        let tiles = &independent.crossproducts.tiles;
+        assert_eq!(tiles.tile(0), [2.0, 0.5, 0.5, 1.25]);
+        assert_eq!(tiles.n_values(), 4 + 5);
+        for pair in [(0, 2), (2, 0), (0, 4), (4, 0)] {
+            // A tiny coupling across levels keeps its own tile after reordering.
+            let design = design(&[(0, 1, 0.5), (pair.0, pair.1, 1e-300)]);
+            assert_eq!(design.engine(), "blocked");
+            assert_eq!(
+                design.order.as_ref().map(|order| order.structures.clone()),
+                Some(vec![1, 0])
+            );
+            let tiles = &design.crossproducts.tiles;
+            let coupling = (0..tiles.n_levels())
+                .flat_map(|level| tiles.column(level).skip(1))
+                .map(|tile| tiles.tile(tile))
+                .collect::<Vec<_>>();
+            assert_eq!(coupling.len(), 1);
+            assert!(coupling[0].contains(&1e-300));
         }
     }
 
     #[test]
     fn shared_mode_adjoint_retains_nonstationary_corrections() {
         let structures = [
-            RandomEffectStructure {
-                n_levels: 0,
-                n_terms: 1,
-                correlated: true,
-            },
-            RandomEffectStructure {
-                n_levels: 2,
-                n_terms: 3,
-                correlated: true,
-            },
-            RandomEffectStructure {
-                n_levels: 3,
-                n_terms: 2,
-                correlated: false,
-            },
+            structure(0, 1, true),
+            structure(2, 3, true),
+            structure(3, 2, false),
         ];
         let q = 12;
         let design = Mat::from_fn(17, q, |i, j| ((i + 3 * j) % 11) as f64 / 8.0 - 0.5);
@@ -1478,7 +1361,7 @@ mod prepared_tests {
         let mode = Mat::from_fn(q, 1, |i, _| (i % 5) as f64 / 4.0 - 0.5);
         let conditional = Mat::from_fn(q, 1, |i, _| (i % 7) as f64 / 8.0 + 0.25);
         let marginal = Mat::from_fn(q, 1, |i, _| (i % 3) as f64 / 2.0 - 0.25);
-        for independent in [false, true] {
+        for (independent, sparse) in [(false, false), (false, true), (true, false)] {
             let crossproduct = Mat::from_fn(q, q, |i, j| {
                 if independent && level(i) != level(j) {
                     0.0
@@ -1486,31 +1369,23 @@ mod prepared_tests {
                     coupled[(i, j)]
                 }
             });
+            let crossproducts = tiled(&crossproduct, &structures, sparse);
             for theta in [
                 [0.4, 0.8, -0.1, 0.7, 0.05, -0.2, 0.6, 0.3, 0.9],
                 [0.4, 0.0, -0.1, 0.7, 0.05, -0.2, 0.0, 0.3, 0.0],
                 [0.0; 9],
             ] {
                 let blocks = build_lambda_blocks(&theta, &structures);
-                let blocked =
-                    BlockedMatrix::from_lambda_ztwz(&crossproduct, &blocks, &structures, true);
-                let chol = BlockedCholesky::factor(blocked).unwrap();
+                let chol = crossproducts.factor(&blocks).unwrap();
                 let factor = CovarianceFactor::from_blocks(blocks, &structures);
                 let lambda = factor.to_dense();
                 let information =
                     Mat::<f64>::identity(q, q) + lambda.transpose() * &crossproduct * &lambda;
                 let dense_chol = Llt::new(information.as_ref(), Side::Lower).unwrap();
                 let shared = ModeGradient::new(&mode, &conditional, &factor, &chol);
-                let products = if independent {
-                    GradientCrossproducts::Levels {
-                        products: factor.right_apply_level_crossproducts(crossproduct.as_ref()),
-                        inverses: chol.independent_level_inverses().unwrap(),
-                    }
-                } else {
-                    GradientCrossproducts::Dense {
-                        product: &crossproduct * &lambda,
-                        inverse: chol.inverse(),
-                    }
+                let products = GradientCrossproducts {
+                    crossproducts: &crossproducts.tiles,
+                    factor: &factor,
                 };
                 let projected = shared.project(&marginal, &products);
                 let mut max_correction: f64 = 0.0;
@@ -1547,30 +1422,31 @@ mod prepared_tests {
         } else {
             &[0, 1, 3, 8, 17]
         };
-        let structures = [
-            RandomEffectStructure {
-                n_levels: 2,
-                n_terms: 3,
-                correlated: true,
-            },
-            RandomEffectStructure {
-                n_levels: 3,
-                n_terms: 2,
-                correlated: false,
-            },
-        ];
+        let structures = [structure(2, 3, true), structure(3, 2, false)];
         let q = 12;
+        let design = Mat::from_fn(15, q, |i, j| ((2 * i + 3 * j + 1) % 7) as f64 / 8.0 - 0.3);
+        let crossproduct = design.transpose() * &design;
+        let crossproducts = tiled(&crossproduct, &structures, false);
+        let theta = [0.8, -0.2, 0.6, 0.1, 0.3, 0.9, 0.7, 0.4];
+        let factor = CovarianceFactor::new(&theta, &structures);
+        let product = &crossproduct * factor.to_dense();
+        let products = GradientCrossproducts {
+            crossproducts: &crossproducts.tiles,
+            factor: &factor,
+        };
         for &p in fixed {
             let design = Mat::from_fn(p + 2, p, |i, j| ((i + 2 * j) % 5) as f64 / 8.0);
             let information = Mat::<f64>::identity(p, p) + design.transpose() * &design;
             let chol = Llt::new(information.as_ref(), Side::Lower).unwrap();
             let projection = Mat::from_fn(q, p, |i, j| ((3 * i + 5 * j) % 11) as f64 / 8.0 - 0.5);
             let ztwx = Mat::from_fn(q, p, |i, j| ((i + 2 * j + 1) % 13) as f64 / 16.0 - 0.25);
-            let product = Mat::from_fn(q, q, |i, j| ((i + 3 * j + 1) % 7) as f64 / 16.0 - 0.125);
-            let products = GradientCrossproducts::Dense {
-                product: product.clone(),
-                inverse: Mat::zeros(q, q),
-            };
+            let applied = products.apply(projection.as_ref());
+            let expected_applied = &product * &projection;
+            for j in 0..p {
+                for i in 0..q {
+                    assert_close(applied[(i, j)], expected_applied[(i, j)]);
+                }
+            }
             let weighted = chol.solve(&projection.transpose()).transpose().to_owned();
             let shared = FixedEffectGradient::new(&products, &projection, weighted, &ztwx);
             for derivative in lambda_derivatives(&structures) {
@@ -1581,208 +1457,122 @@ mod prepared_tests {
                     - projection.transpose() * &derivative_b;
                 let solved = chol.solve(&derivative_information);
                 let expected: f64 = (0..p).map(|i| solved[(i, i)]).sum();
-                let actual = shared.derivative(&derivative);
-                assert!((actual - expected).abs() < 1e-11 * expected.abs().max(1.0));
+                assert_close(shared.derivative(&derivative), expected);
             }
         }
     }
 
     #[test]
-    fn independent_level_contractions_match_full_products() {
-        let structures = [
-            RandomEffectStructure {
-                n_levels: 2,
-                n_terms: 0,
-                correlated: true,
-            },
-            RandomEffectStructure {
-                n_levels: 0,
-                n_terms: 1,
-                correlated: true,
-            },
-            RandomEffectStructure {
-                n_levels: 3,
-                n_terms: 2,
-                correlated: true,
-            },
-            RandomEffectStructure {
-                n_levels: 2,
-                n_terms: 3,
-                correlated: false,
-            },
-            RandomEffectStructure {
-                n_levels: 4,
-                n_terms: 1,
-                correlated: true,
-            },
-        ];
-        let q = 16;
-        let mut full_product = Mat::zeros(q, q);
-        let mut full_inverse = Mat::zeros(q, q);
-        let mut products = Vec::new();
-        let mut inverses = Vec::new();
-        let mut offset = 0;
-        for structure in &structures {
-            let width = structure.n_terms;
-            let dimension = structure.n_levels * width;
-            let product = Mat::from_fn(dimension, width, |i, j| (i + 3 * j) as f64 / 8.0 - 0.5);
-            // Deliberately nonsymmetric to verify both inverse orientations.
-            let inverse = Mat::from_fn(dimension, width, |i, j| (3 * i + j + 1) as f64 / 16.0);
-            for level in 0..structure.n_levels {
-                let local = level * width;
-                full_product
-                    .submatrix_mut(offset + local, offset + local, width, width)
-                    .copy_from(product.subrows(local, width));
-                full_inverse
-                    .submatrix_mut(offset + local, offset + local, width, width)
-                    .copy_from(inverse.subrows(local, width));
+    fn tile_traces_and_products_match_dense_derivatives() {
+        // Narrow tiles use scalar kernels; a 17-term structure uses dense ones.
+        for structures in [
+            vec![
+                structure(3, 2, true),
+                structure(2, 3, false),
+                structure(4, 1, true),
+            ],
+            vec![structure(2, 17, true), structure(3, 1, true)],
+        ] {
+            let level: Vec<usize> = structures
+                .iter()
+                .scan(0, |first, structure| {
+                    let levels = *first..*first + structure.n_levels;
+                    *first += structure.n_levels;
+                    Some(levels.flat_map(|level| std::iter::repeat_n(level, structure.n_terms)))
+                })
+                .flatten()
+                .collect();
+            let q = level.len();
+            let design = Mat::from_fn(23, q, |i, j| ((5 * i + 3 * j + 2) % 13) as f64 / 8.0 - 0.7);
+            let coupled = design.transpose() * &design;
+            let n_theta: usize = structures.iter().map(structure_parameters).sum();
+            let theta: Vec<f64> = (0..n_theta)
+                .map(|i| [0.9, -0.3, 0.5, 0.7, 0.2, 1.1, 0.6][i % 7] / (1 + i / 7) as f64)
+                .collect();
+            let blocks = build_lambda_blocks(&theta, &structures);
+            let factor = CovarianceFactor::from_blocks(blocks.clone(), &structures);
+            let lambda = factor.to_dense();
+            let rhs = Mat::from_fn(q, 3, |i, j| ((i + 4 * j) % 9) as f64 / 4.0 - 1.0);
+            for (independent, sparse) in [(true, false), (false, false), (false, true)] {
+                let crossproduct = Mat::from_fn(q, q, |i, j| {
+                    if independent && level[i] != level[j] {
+                        0.0
+                    } else {
+                        coupled[(i, j)]
+                    }
+                });
+                let crossproducts = tiled(&crossproduct, &structures, sparse);
+                assert_eq!(crossproducts.tiles.block_diagonal(), independent);
+                assert_eq!(crossproducts.sparse.is_some(), sparse);
+                let chol = crossproducts.factor(&blocks).unwrap();
+                let information =
+                    Mat::<f64>::identity(q, q) + lambda.transpose() * &crossproduct * &lambda;
+                let inverse = Llt::new(information.as_ref(), Side::Lower)
+                    .unwrap()
+                    .solve(Mat::<f64>::identity(q, q));
+                let selected = chol.selected_inverse();
+                let derivatives = lambda_derivatives(&structures);
+                let traces =
+                    covariance_traces(&crossproducts.tiles, &blocks, &selected, &derivatives);
+                let products = GradientCrossproducts {
+                    crossproducts: &crossproducts.tiles,
+                    factor: &factor,
+                };
+                for (derivative, &trace) in derivatives.iter().zip(&traces) {
+                    let entry = derivative.apply::<false>(&Mat::identity(q, q));
+                    let dv = entry.transpose() * &crossproduct * &lambda
+                        + lambda.transpose() * &crossproduct * &entry;
+                    let expected = (0..q)
+                        .map(|i| (0..q).map(|j| inverse[(i, j)] * dv[(j, i)]).sum::<f64>())
+                        .sum::<f64>();
+                    assert_close(trace, expected);
+                    let product = products.derivative_product(derivative, &rhs);
+                    let expected = &dv * &rhs;
+                    for j in 0..rhs.ncols() {
+                        for i in 0..q {
+                            assert_close(product[(i, j)], expected[(i, j)]);
+                        }
+                    }
+                }
             }
-            products.push(product);
-            inverses.push(inverse);
-            offset += dimension;
-        }
-        let compact = GradientCrossproducts::Levels { products, inverses };
-        for columns in [0, 1, 4, 17] {
-            let rhs = Mat::from_fn(q, columns, |i, j| ((2 * i + j) % 11) as f64 / 4.0);
-            assert_eq!(compact.apply(rhs.as_ref()), &full_product * &rhs);
-        }
-        for derivative in lambda_derivatives(&structures) {
-            for columns in [0, 1, 4, 17] {
-                let rhs = Mat::from_fn(q, columns, |i, j| ((2 * i + j) % 11) as f64 / 4.0);
-                let (trace, product) = compact.actions::<true>(&derivative, &rhs);
-                let (expected_trace, expected_product) =
-                    derivative.crossproduct_actions::<true>(&full_product, &full_inverse, &rhs);
-                assert_eq!(trace, expected_trace);
-                assert_eq!(product, expected_product);
-                let (trace_only, empty) = compact.actions::<false>(&derivative, &rhs);
-                assert_eq!(trace_only, trace);
-                assert_eq!(empty.shape(), (q, 0));
-            }
-        }
-    }
-
-    #[test]
-    fn compact_gradient_selection_depends_on_design_and_retains_tiny_couplings() {
-        let structures = vec![
-            RandomEffectStructure {
-                n_levels: 2,
-                n_terms: 2,
-                correlated: true,
-            },
-            RandomEffectStructure {
-                n_levels: 3,
-                n_terms: 1,
-                correlated: false,
-            },
-        ];
-        let q = 7;
-        let design = |crossproduct: &Mat<f64>| {
-            let rows = (0..q).collect::<Vec<_>>();
-            let offsets = (0..=q).collect::<Vec<_>>();
-            let z = CscMatrix::try_from_usize(&vec![1.0; q], &rows, &offsets, (q, q)).unwrap();
-            let cache = (0..q * q)
-                .map(|i| crossproduct[(i / q, i % q)])
-                .collect::<Vec<_>>();
-            PreparedLmmDesign::new(
-                Mat::full(q, 1, 1.0),
-                z,
-                vec![1.0; q],
-                vec![0.0; q],
-                structures.clone(),
-                Some(&cache),
-            )
-            .unwrap()
-        };
-        let mut crossproduct = Mat::<f64>::identity(q, q);
-        crossproduct[(0, 1)] = 0.2;
-        crossproduct[(1, 0)] = 0.2;
-        let independent = design(&crossproduct);
-        assert!(independent.independent_level_blocks);
-        let blocks = build_lambda_blocks(&[0.8, 0.1, 0.6, 0.5], &structures);
-        let blocked = BlockedMatrix::from_lambda_ztwz(&crossproduct, &blocks, &structures, true);
-        let chol = BlockedCholesky::factor(blocked).unwrap();
-        let factor = CovarianceFactor::from_blocks(blocks, &structures);
-        let GradientCrossproducts::Levels { products, inverses } =
-            GradientCrossproducts::new(&independent, &factor, &chol)
-        else {
-            panic!("independent levels should use compact products")
-        };
-        for values in [products, inverses] {
-            assert_eq!(values[0].shape(), (4, 2));
-            assert_eq!(values[1].shape(), (3, 1));
-            assert_eq!(
-                values.iter().map(|m| m.nrows() * m.ncols()).sum::<usize>(),
-                11
-            );
-        }
-        for (row, column) in [(0, 2), (2, 0), (0, 4), (4, 0)] {
-            let mut coupled = crossproduct.clone();
-            coupled[(row, column)] = 1e-300;
-            let coupled_design = design(&coupled);
-            assert!(!coupled_design.independent_level_blocks);
-            // Zero covariance parameters can hide design coupling in the factor.
-            let zero_blocks = build_lambda_blocks(&[0.0; 4], &structures);
-            let blocked =
-                BlockedMatrix::from_lambda_ztwz(&coupled, &zero_blocks, &structures, true);
-            let chol = BlockedCholesky::factor(blocked).unwrap();
-            let factor = CovarianceFactor::from_blocks(zero_blocks, &structures);
-            assert!(matches!(
-                GradientCrossproducts::new(&coupled_design, &factor, &chol),
-                GradientCrossproducts::Dense { .. }
-            ));
         }
     }
 
     #[test]
     fn coordinate_derivatives_match_full_matrix_products() {
         let structures = [
-            RandomEffectStructure {
-                n_levels: 0,
-                n_terms: 1,
-                correlated: true,
-            },
-            RandomEffectStructure {
-                n_levels: 2,
-                n_terms: 3,
-                correlated: true,
-            },
-            RandomEffectStructure {
-                n_levels: 2,
-                n_terms: 2,
-                correlated: false,
-            },
-            RandomEffectStructure {
-                n_levels: 1,
-                n_terms: 1,
-                correlated: true,
-            },
+            structure(0, 1, true),
+            structure(2, 3, true),
+            structure(2, 2, false),
+            structure(1, 1, true),
         ];
         let coordinates = [
-            (0, 0, 1, 0, 0),
-            (0, 2, 3, 0, 0),
-            (0, 2, 3, 1, 0),
-            (0, 2, 3, 1, 1),
-            (0, 2, 3, 2, 0),
-            (0, 2, 3, 2, 1),
-            (0, 2, 3, 2, 2),
-            (6, 2, 2, 0, 0),
-            (6, 2, 2, 1, 1),
-            (10, 1, 1, 0, 0),
+            (0, 0, 0, 1, 0, 0),
+            (1, 0, 2, 3, 0, 0),
+            (1, 0, 2, 3, 1, 0),
+            (1, 0, 2, 3, 1, 1),
+            (1, 0, 2, 3, 2, 0),
+            (1, 0, 2, 3, 2, 1),
+            (1, 0, 2, 3, 2, 2),
+            (2, 6, 2, 2, 0, 0),
+            (2, 6, 2, 2, 1, 1),
+            (3, 10, 1, 1, 0, 0),
         ];
         let derivatives = lambda_derivatives(&structures);
         assert_eq!(derivatives.len(), coordinates.len());
-        for (derivative, (offset, levels, width, row, column)) in
+        for (derivative, (structure, offset, levels, width, row, column)) in
             derivatives.iter().zip(coordinates)
         {
             assert_eq!(
                 (
+                    derivative.structure,
                     derivative.offset,
                     derivative.n_levels,
                     derivative.n_terms,
                     derivative.row,
                     derivative.column
                 ),
-                (offset, levels, width, row, column),
+                (structure, offset, levels, width, row, column),
             );
             let mut dense = Mat::<f64>::zeros(11, 11);
             for level in 0..levels {
@@ -1806,47 +1596,114 @@ mod prepared_tests {
                 derivative.bilinear(left.col(0), right.col(0)),
                 expected[(0, 0)]
             );
-            for sparse in [false, true] {
-                let product = Mat::from_fn(11, 11, |i, j| {
-                    if sparse && i / 3 != j / 3 {
-                        0.0
-                    } else {
-                        (i + 3 * j) as f64 - 5.0
-                    }
-                });
-                let term = dense.transpose() * &product;
-                assert_eq!(
-                    derivative.crossproduct_derivative(&product),
-                    &term + term.transpose()
-                );
-                let derivative_matrix = &term + term.transpose();
-                // Deliberately nonsymmetric: both inverse orientations contribute.
-                let inverse = Mat::from_fn(11, 11, |i, j| (2 * i + j) as f64 / 8.0);
-                let mut expected_trace = 0.0;
-                for i in 0..11 {
-                    for j in 0..11 {
-                        expected_trace += inverse[(i, j)] * derivative_matrix[(j, i)];
-                    }
-                }
-                for ncols in [0, 1, 4] {
-                    let rhs = Mat::from_fn(11, ncols, |i, j| (i + 3 * j) as f64 - 5.0);
-                    let (trace, actual) =
-                        derivative.crossproduct_actions::<true>(&product, &inverse, &rhs);
-                    assert_eq!(trace, expected_trace);
-                    assert_eq!(actual, &derivative_matrix * &rhs);
-                    let (trace_only, empty) =
-                        derivative.crossproduct_actions::<false>(&product, &inverse, &rhs);
-                    assert_eq!(trace_only, trace);
-                    assert_eq!(empty.shape(), (11, 0));
-                }
+            let product = Mat::from_fn(11, 11, |i, j| (i + 3 * j) as f64 - 5.0);
+            let term = dense.transpose() * &product;
+            assert_eq!(
+                derivative.crossproduct_derivative(&product),
+                &term + term.transpose()
+            );
+        }
+    }
+
+    /// Two-level nesting: each of nine fine levels lies in one of three coarse
+    /// levels. The fine structure has a correlated slope.
+    fn nested_design(fine_first: bool) -> (Arc<PreparedLmmDesign>, Vec<f64>) {
+        let n = 45;
+        let fine = |row: usize| row % 9;
+        let covariate = |row: usize| ((7 * row) % 11) as f64 / 5.0 - 1.0;
+        let (mut values, mut rows, mut offsets) = (Vec::new(), Vec::new(), vec![0]);
+        let mut fine_columns = Vec::new();
+        for level in 0..9 {
+            for term in 0..2 {
+                let column: Vec<_> = (0..n)
+                    .filter(|&row| fine(row) == level)
+                    .map(|row| (row, if term == 0 { 1.0 } else { covariate(row) }))
+                    .collect();
+                fine_columns.push(column);
             }
+        }
+        let coarse_columns: Vec<Vec<_>> = (0..3)
+            .map(|level| {
+                (0..n)
+                    .filter(|&row| fine(row) / 3 == level)
+                    .map(|row| (row, 1.0))
+                    .collect()
+            })
+            .collect();
+        let columns = if fine_first {
+            [fine_columns, coarse_columns].concat()
+        } else {
+            [coarse_columns, fine_columns].concat()
+        };
+        for column in columns {
+            for (row, value) in column {
+                rows.push(row);
+                values.push(value);
+            }
+            offsets.push(rows.len());
+        }
+        let z = CscMatrix::try_from_usize(&values, &rows, &offsets, (n, 21)).unwrap();
+        let x = Mat::from_fn(
+            n,
+            2,
+            |row, column| if column == 0 { 1.0 } else { covariate(row) },
+        );
+        let (fine, coarse) = (structure(9, 2, true), structure(3, 1, true));
+        let structures = if fine_first {
+            vec![fine, coarse]
+        } else {
+            vec![coarse, fine]
+        };
+        let weights = (0..n).map(|row| 0.5 + (row % 4) as f64 / 4.0).collect();
+        let design = PreparedLmmDesign::new(x, z, weights, vec![0.1; n], structures).unwrap();
+        let y = (0..n)
+            .map(|row| ((row * 13) % 17) as f64 / 3.0 + covariate(row))
+            .collect();
+        (Arc::new(design), y)
+    }
+
+    #[test]
+    fn elimination_order_preserves_caller_parameters_and_effects() {
+        let (formula_order, y) = nested_design(false);
+        let (sorted, _) = nested_design(true);
+        assert_eq!(
+            formula_order
+                .order
+                .as_ref()
+                .map(|order| order.structures.clone()),
+            Some(vec![1, 0])
+        );
+        assert!(sorted.order.is_none());
+        // The coarse factor couples each fine level to one parent: no fill.
+        assert_eq!(formula_order.crossproducts.leading, 9);
+        let first = formula_order.with_response(ArrayView1::from(&y)).unwrap();
+        let second = sorted.with_response(ArrayView1::from(&y)).unwrap();
+        // Caller theta lists the coarse intercept first, then the fine factor.
+        let (coarse, fine) = ([0.7], [0.9, -0.3, 0.4]);
+        let caller = [coarse.as_slice(), &fine].concat();
+        let internal = [fine.as_slice(), &coarse].concat();
+        for reml in [false, true] {
+            let expected = second.evaluate::<true>(&internal, reml).unwrap();
+            let actual = first.evaluate::<true>(&caller, reml).unwrap();
+            assert_eq!(actual.0, expected.0);
+            assert_eq!(actual.1, expected.1);
+            // Effects return in caller column order: coarse levels first.
+            assert_eq!(actual.3[..3], expected.3[18..]);
+            assert_eq!(actual.3[3..], expected.3[..18]);
+            let (deviance, gradient) = first.deviance_with_gradient(&caller, reml);
+            let (expected_deviance, expected_gradient) =
+                second.deviance_with_gradient(&internal, reml);
+            assert_eq!(deviance, expected_deviance);
+            assert_eq!(deviance, actual.0);
+            assert_eq!(gradient[0], expected_gradient[3]);
+            assert_eq!(gradient[1..], expected_gradient[..3]);
         }
     }
 
     fn intercept_design() -> Arc<PreparedLmmDesign> {
         let x = Mat::from_fn(4, 1, |_, _| 1.0);
         let z = CscMatrix::try_from_i64(&[], &[], &[0], (4, 0)).unwrap();
-        Arc::new(PreparedLmmDesign::new(x, z, vec![1.0; 4], vec![0.0; 4], vec![], None).unwrap())
+        Arc::new(PreparedLmmDesign::new(x, z, vec![1.0; 4], vec![0.0; 4], vec![]).unwrap())
     }
 
     #[test]

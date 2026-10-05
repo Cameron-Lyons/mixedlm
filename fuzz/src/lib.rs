@@ -65,14 +65,28 @@ pub fn check_cholesky(input: CholeskyInput) {
         }
         indptr.push(data.len());
     }
-    let symbolic = if input.amd {
-        sparse_chol::SymbolicCholeskyCache::new_amd(&indices, &indptr, n)
-    } else {
-        sparse_chol::SymbolicCholeskyCache::new(&indices, &indptr, n)
+    // Exercise the signed CSC boundary used by the Python solver as well as
+    // the raw symbolic cache. Its duplicate sums must match the generated
+    // lower triangle before any numerical factorization takes place.
+    let signed_indices: Vec<_> = indices.iter().map(|&row| row as i64).collect();
+    let signed_offsets: Vec<_> = indptr.iter().map(|&offset| offset as i64).collect();
+    let canonical = linalg::square_csc_from_scipy(&data, &signed_indices, &signed_offsets, (n, n))
+        .expect("a valid lower-triangular CSC matrix must cross the Python boundary");
+    for (column, expected) in matrix.iter().enumerate() {
+        for entry in canonical.col_offsets()[column]..canonical.col_offsets()[column + 1] {
+            let row = canonical.row_indices()[entry];
+            assert_eq!(canonical.values()[entry], expected[row]);
+        }
     }
-    .expect("a valid positive definite sparse matrix must have a symbolic factor");
+    let ordering = if input.amd {
+        sparse_chol::FillOrdering::Amd
+    } else {
+        sparse_chol::FillOrdering::Natural
+    };
+    let symbolic = sparse_chol::SymbolicCholeskyCache::new(&indices, &indptr, n, ordering)
+        .expect("a valid positive definite sparse matrix must have a symbolic factor");
     let factor = symbolic
-        .factor(&data, &indices, &indptr)
+        .factor(&data)
         .expect("a strictly diagonally dominant matrix must factor");
     let expected = Array2::from_shape_fn((n, 2), |(row, column)| {
         value_at(&input.solution, row * 2 + column)
@@ -82,7 +96,9 @@ pub fn check_cholesky(input: CholeskyInput) {
             .map(|position| matrix[row][position] * expected[(position, column)])
             .sum()
     });
-    let actual = factor.solve(rhs.view()).expect("valid right hand side");
+    let actual = factor
+        .solve_owned(rhs.iter().copied().collect(), rhs.dim())
+        .expect("valid right hand side");
     for (actual, expected) in actual.iter().zip(expected.iter()) {
         assert!(
             (actual - expected).abs() <= 1e-10,

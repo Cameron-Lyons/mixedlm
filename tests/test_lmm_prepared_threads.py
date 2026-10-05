@@ -13,12 +13,14 @@ import pytest
 from mixedlm import _rust
 from numpy.testing import assert_allclose, assert_array_equal
 
-from tests.test_lmm_prepared_design import (
+from tests._lmm_oracles import (
     matrices_fixture,
     native_arguments,
     observation_likelihood,
     parameters,
 )
+
+pytestmark = pytest.mark.installed_wheel
 
 
 @pytest.mark.parametrize(
@@ -82,8 +84,9 @@ def test_detached_singular_system_preserves_failure_value(reml, method, expected
 @pytest.mark.parametrize("change_layout", [False, True])
 @pytest.mark.parametrize("method", ["deviance", "evaluate"])
 def test_evaluation_releases_interpreter_lock_and_snapshots_parameters(change_layout, method):
-    # Isolate the long switch interval from the test runner. A large random-
-    # intercept problem gives the waiting thread time to run during one solve.
+    # Isolate the long switch interval from the test runner. A random crossing
+    # factors a dense 2500 x 2500 block on every call, so each solve lasts long
+    # enough (about 0.1 s) for the waiting thread to run while it is detached.
     script = textwrap.dedent("""
         import json
         import sys
@@ -94,15 +97,17 @@ def test_evaluation_releases_interpreter_lock_and_snapshots_parameters(change_la
 
         assert getattr(sys, "_is_gil_enabled", lambda: True)(), "This test requires the GIL"
         rng = np.random.default_rng(713)
-        n = 3_000_000
-        z = sparse.csc_matrix((np.ones(n), np.arange(n), np.array([0, n])), shape=(n, 1))
+        n, a, b = 100_000, 3000, 2500
+        rows = np.r_[np.arange(n), np.arange(n)]
+        columns = np.r_[rng.integers(a, size=n), a + rng.integers(b, size=n)]
+        z = sparse.csc_matrix((np.ones(2 * n), (rows, columns)), shape=(n, a + b))
         design = _rust.LmmDesign(
-            np.empty((n, 0)), z.data, z.indices.astype(np.int64),
+            np.ones((n, 1)), z.data, z.indices.astype(np.int64),
             z.indptr.astype(np.int64), z.shape, np.linspace(.5, 2, n),
-            np.sin(np.arange(n)) / 5, [1], [1], [True],
+            np.sin(np.arange(n)) / 5, [a, b], [1, 1], [True, True],
         )
         response = design.with_response(rng.normal(size=n))
-        theta = np.array([.8])
+        theta = np.array([.8, .6])
         likelihood = getattr(response, sys.argv[1])
         expected = likelihood(theta)
         objective = expected if sys.argv[1] == 'deviance' else expected[0]
@@ -130,7 +135,7 @@ def test_evaluation_releases_interpreter_lock_and_snapshots_parameters(change_la
         print(json.dumps({'progressed': progressed}))
     """)
     if change_layout:
-        script = script.replace("theta[:] = 2", "theta[:] = 2; theta.shape = ()")
+        script = script.replace("theta[:] = 2", "theta[:] = 2; theta.shape = (1, 2)")
     # Test GIL release explicitly, regardless of the parent's current GIL state.
     env = dict(
         os.environ,

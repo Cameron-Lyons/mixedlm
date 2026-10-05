@@ -1,17 +1,6 @@
-ci:
-  autoupdate_schedule: weekly
-  autofix_prs: true
-  autofix_commit_msg: "style: auto-fix from pre-commit.ci"
-  autoupdate_commit_msg: "chore: pre-commit autoupdate"
-
+# Local hooks run the ruff and Rust toolchain versions that CI uses: ruff comes
+# from uv.lock (`uv sync`), and clippy runs against Cargo.lock.
 repos:
-  - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.9.1
-    hooks:
-      - id: ruff
-        args: [--fix]
-      - id: ruff-format
-
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0
     hooks:
@@ -21,9 +10,27 @@ repos:
       - id: check-toml
       - id: check-added-large-files
 
-  - repo: https://github.com/doublify/pre-commit-rust
-    rev: v1.0
+  - repo: local
     hooks:
-      - id: fmt
-      - id: clippy
-        args: [--all-targets, --all-features, --, -D, warnings]
+      - id: ruff-check
+        name: ruff check
+        entry: uv run --no-sync ruff check --fix
+        language: system
+        types_or: [python, pyi]
+      - id: ruff-format
+        name: ruff format
+        entry: uv run --no-sync ruff format
+        language: system
+        types_or: [python, pyi]
+      - id: cargo-fmt
+        name: cargo fmt
+        entry: cargo fmt --all
+        language: system
+        types: [rust]
+        pass_filenames: false
+      - id: cargo-clippy
+        name: cargo clippy
+        entry: cargo clippy --locked --all-targets --all-features -- -D warnings
+        language: system
+        types: [rust]
+        pass_filenames: false

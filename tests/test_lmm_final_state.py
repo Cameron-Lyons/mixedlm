@@ -10,9 +10,8 @@ import pytest
 from mixedlm.estimation.reml import LMMOptimizer, _LMMCrossproducts, _profiled_deviance_core
 from numpy.testing import assert_allclose, assert_array_equal
 
-from tests.test_glmm_final_state import mode_problem
-from tests.test_lmm_prepared_design import matrices_fixture, parameters
-from tests.test_reml_profiled_deviance import _direct_profiled_likelihood
+from tests._glmm_oracles import mode_problem
+from tests._lmm_oracles import direct_profiled_likelihood, matrices_fixture, parameters
 
 
 @pytest.mark.parametrize(
@@ -29,7 +28,7 @@ def test_native_final_state_matches_independent_marginal_likelihood(kind, reml, 
     theta = parameters(matrices) * scale
     for y in (matrices.y, matrices.y[::-1] + 0.3 * matrices.weights):
         response = optimizer.with_response(y)
-        expected = _direct_profiled_likelihood(theta, replace(matrices, y=y), reml)
+        expected = direct_profiled_likelihood(theta, replace(matrices, y=y), reml)
         serial = response._final_evaluation(theta)
         for field, value in expected.items():
             assert_allclose(getattr(serial, field), value, rtol=2e-12, atol=2e-11)
@@ -130,6 +129,9 @@ def test_returned_estimates_do_not_modify_prepared_response():
         assert_array_equal(getattr(repeated, field), getattr(expected, field))
 
 
+# A duplicated column makes the fixed-effect information exactly singular; whether
+# SciPy warns about it, and with which message, depends on its version and rounding.
+@pytest.mark.filterwarnings("ignore::scipy.linalg.LinAlgWarning")
 @pytest.mark.parametrize("reml", [False, True])
 @pytest.mark.parametrize("duplicate", [False, True])
 def test_fixed_only_rank_deficient_design_retains_python_fallback(reml, duplicate):

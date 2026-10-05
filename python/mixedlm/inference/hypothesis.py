@@ -11,6 +11,7 @@ from numpy.typing import ArrayLike, NDArray
 from scipy import linalg, stats
 
 from mixedlm.utils.names import _check_unique_coefficient_names
+from mixedlm.utils.validation import _validate_confidence_level
 
 if TYPE_CHECKING:
     from mixedlm.models.glmer import GlmerResult
@@ -572,12 +573,7 @@ def linear_hypothesis(
     else:
         raise TypeError("model must be a fitted LmerResult or GlmerResult.")
 
-    try:
-        level = float(level)
-    except (TypeError, ValueError):
-        raise TypeError("level must be numeric.") from None
-    if not np.isfinite(level) or not 0 < level < 1:
-        raise ValueError("level must be strictly between 0 and 1.")
+    level = _validate_confidence_level(level)
 
     test_name = _normalise_test(test, is_lmm)
     if test_name == "F":

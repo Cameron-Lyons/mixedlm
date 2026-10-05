@@ -66,7 +66,16 @@ class Binomial(Family):
         )
         return float(np.sum((wt / n) * log_density))
 
-    def simulate(self, mu: NDArray[np.floating], rng: Any | None = None) -> NDArray[np.floating]:
+    def simulate(
+        self,
+        mu: NDArray[np.floating],
+        rng: Any | None = None,
+        *,
+        weights: NDArray[np.floating] | None = None,
+        trials: NDArray[np.floating] | None = None,
+    ) -> NDArray[np.floating]:
+        # Prior weights of binary responses are likelihood powers, not trials.
         rng = np.random if rng is None else rng
         mu = self.clamp_mu(mu, eps=1e-6)
-        return rng.binomial(1, mu).astype(np.float64)
+        n = 1 if trials is None else np.asarray(trials).astype(np.int64)
+        return rng.binomial(n, mu).astype(np.float64)

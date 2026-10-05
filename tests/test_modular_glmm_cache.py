@@ -11,7 +11,7 @@ from mixedlm.estimation import laplace
 from mixedlm.estimation.joint_glmm import JointGLMMObjective
 from numpy.testing import assert_array_equal
 
-from tests.test_glmm_serialization import CustomPoisson, make_object
+from tests._glmm_oracles import CustomPoisson, make_glmm_objective
 
 
 def fresh_value(devfun, parameters):
@@ -32,7 +32,7 @@ def test_repeated_joint_calls_prepare_once_and_match_fresh_solves(native, kind, 
     if native:
         pytest.importorskip("mixedlm._rust")
     monkeypatch.setattr(laplace, "_HAS_RUST", native)
-    devfun, parameters = make_object("modular_joint", kind, order)
+    devfun, parameters = make_glmm_objective("modular_joint", kind, order)
     with patch.object(
         devfun.optimizer, "joint_objective", wraps=devfun.optimizer.joint_objective
     ) as prepare:
@@ -51,7 +51,7 @@ def test_changed_settings_refresh_preparation_and_restore_original_values(native
     if native:
         pytest.importorskip("mixedlm._rust")
     monkeypatch.setattr(laplace, "_HAS_RUST", native)
-    devfun, parameters = make_object("modular_joint")
+    devfun, parameters = make_glmm_objective("modular_joint")
     changes = [
         (1, 100, 1e-10),
         (7, 100, 1e-10),
@@ -88,7 +88,7 @@ def test_changed_settings_refresh_preparation_and_restore_original_values(native
     ],
 )
 def test_invalid_changed_controls_do_not_reuse_or_damage_cached_objective(name, valid, invalid):
-    devfun, parameters = make_object("modular_joint")
+    devfun, parameters = make_glmm_objective("modular_joint")
     setattr(devfun.optimizer, name, valid)
     expected = devfun(parameters)
     cached = devfun._joint_cache
@@ -101,7 +101,7 @@ def test_invalid_changed_controls_do_not_reuse_or_damage_cached_objective(name, 
 
 
 def test_changed_order_still_rejects_unsupported_structures():
-    devfun, parameters = make_object("modular_joint", layout="crossed")
+    devfun, parameters = make_glmm_objective("modular_joint", layout="crossed")
     assert np.isfinite(devfun(parameters))
     devfun.optimizer.nAGQ = 7
     with pytest.raises(ValueError, match="one random-effect term"):
@@ -109,10 +109,10 @@ def test_changed_order_still_rejects_unsupported_structures():
 
 
 def test_replacing_optimizer_refreshes_joint_objective():
-    devfun, parameters = make_object("modular_joint")
+    devfun, parameters = make_glmm_objective("modular_joint")
     assert np.isfinite(devfun(parameters))
     cached = devfun._joint_cache
-    replacement, _ = make_object("modular_joint", kind="binomial")
+    replacement, _ = make_glmm_objective("modular_joint", kind="binomial")
     devfun.optimizer = replacement.optimizer
     devfun.parsed = replacement.parsed
     assert devfun(parameters) == fresh_value(devfun, parameters)
@@ -124,7 +124,7 @@ def test_replacing_optimizer_refreshes_joint_objective():
 @pytest.mark.parametrize("method", ["deepcopy", "pickle"])
 def test_warm_cache_survives_copying_with_shared_input_aliases(kind, method):
     family = CustomPoisson() if kind == "custom" else None
-    devfun, parameters = make_object("modular_joint", order=7, family=family)
+    devfun, parameters = make_glmm_objective("modular_joint", order=7, family=family)
     expected = devfun(parameters)
     restored = copy.deepcopy(devfun) if method == "deepcopy" else pickle.loads(pickle.dumps(devfun))
     assert restored._joint_cache[0] is restored.optimizer
@@ -138,7 +138,7 @@ def test_warm_cache_survives_copying_with_shared_input_aliases(kind, method):
 
 
 def test_legacy_deviance_state_without_cache_remains_callable():
-    devfun, parameters = make_object("modular_joint")
+    devfun, parameters = make_glmm_objective("modular_joint")
     expected = devfun(parameters)
     del devfun._joint_cache
     restored = pickle.loads(pickle.dumps(devfun))
@@ -147,7 +147,7 @@ def test_legacy_deviance_state_without_cache_remains_callable():
 
 
 def test_concurrent_calls_have_independent_modes_and_offsets():
-    devfun, parameters = make_object("modular_joint", order=7)
+    devfun, parameters = make_glmm_objective("modular_joint", order=7)
     values = [parameters * scale for scale in [1.0, 0.0, 1.8, 0.3]] * 3
     expected = [fresh_value(devfun, value) for value in values]
     with ThreadPoolExecutor(max_workers=4) as pool:
@@ -156,7 +156,7 @@ def test_concurrent_calls_have_independent_modes_and_offsets():
 
 
 def test_failed_parameter_evaluation_does_not_damage_cache():
-    devfun, parameters = make_object("modular_joint", order=7)
+    devfun, parameters = make_glmm_objective("modular_joint", order=7)
     expected = devfun(parameters)
     with pytest.raises(ValueError, match="joint parameters"):
         devfun(np.full_like(parameters, np.nan))

@@ -1,14 +1,31 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from dataclasses import replace
+from functools import partial
+from typing import TYPE_CHECKING, Any
+
+from mixedlm.inference.allfit import AllFitResult, _run_allfit
 
 if TYPE_CHECKING:
     import pandas as pd
 
-    from mixedlm.models.glmer import GlmerResult
+    from mixedlm.models.control import LmerControl
     from mixedlm.models.lmer import LmerResult
 
-from mixedlm.inference.allfit import AllFitResult
+
+def _fit_formula(
+    formula: str,
+    data: pd.DataFrame,
+    REML: bool,
+    control: LmerControl | None,
+    kwargs: dict[str, Any],
+    optimizer: str,
+) -> LmerResult:
+    from mixedlm.models.control import LmerControl
+    from mixedlm.models.lmer import lmer
+
+    control = replace(control if control is not None else LmerControl(), optimizer=optimizer)
+    return lmer(formula, data, REML=REML, control=control, verbose=0, **kwargs)
 
 
 def allFit(
@@ -17,6 +34,8 @@ def allFit(
     optimizers: list[str] | None = None,
     REML: bool = True,
     verbose: int = 0,
+    n_jobs: int = 1,
+    control: LmerControl | None = None,
     **kwargs,
 ) -> AllFitResult:
     """Fit a model with multiple optimizers and compare results.
@@ -39,7 +58,13 @@ def allFit(
     REML : bool, default True
         Use REML estimation.
     verbose : int, default 0
-        Verbosity level (0 = silent, 1 = show progress, 2 = show all output).
+        Verbosity level (0 = silent, 1 or more = report each optimizer's outcome).
+    n_jobs : int, default 1
+        Number of worker processes, or -1 for all available CPUs. Workers are
+        started without forking, so scripts need an ``if __name__ == "__main__":``
+        guard.
+    control : LmerControl, optional
+        Control settings shared by every fit; only the optimizer is replaced.
     **kwargs
         Additional arguments passed to lmer().
 
@@ -74,42 +99,9 @@ def allFit(
     lmer : Fit linear mixed-effects model
     lmerControl : Control parameters for optimization
     """
-    from mixedlm.models.control import lmerControl
-    from mixedlm.models.lmer import lmer
-
     if optimizers is None:
         optimizers = ["COBYQA", "Nelder-Mead", "L-BFGS-B"]
-
-    fits: dict[str, LmerResult | GlmerResult | None] = {}
-    errors: dict[str, str] = {}
-    warnings: dict[str, list[str]] = {}
-
     if verbose >= 1:
         print(f"Fitting model with {len(optimizers)} optimizers...")
-
-    for opt_name in optimizers:
-        if verbose >= 1:
-            print(f"  Trying {opt_name}...", end=" ")
-
-        try:
-            ctrl = lmerControl(optimizer=opt_name)
-            fit_result = lmer(formula, data, REML=REML, control=ctrl, verbose=0, **kwargs)
-            fits[opt_name] = fit_result
-            warnings[opt_name] = []
-            if not fit_result.converged:
-                warnings[opt_name].append("Did not converge")
-            if fit_result.isSingular():
-                warnings[opt_name].append("Singular fit")
-
-            if verbose >= 1:
-                status = "OK" if fit_result.converged else "FAILED"
-                print(f"{status} (deviance={fit_result.deviance:.4f}, iter={fit_result.n_iter})")
-
-        except Exception as e:
-            fits[opt_name] = None
-            errors[opt_name] = str(e)
-            warnings[opt_name] = []
-            if verbose >= 1:
-                print(f"ERROR: {e}")
-
-    return AllFitResult(fits=fits, errors=errors, warnings=warnings)
+    fit = partial(_fit_formula, formula, data, REML, control, kwargs)
+    return _run_allfit(fit, optimizers, n_jobs, verbose >= 1)

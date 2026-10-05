@@ -3,7 +3,7 @@
 ## Requirements
 
 - Python 3.10 or later
-- NumPy >= 1.21
+- NumPy >= 1.23.5
 - SciPy >= 1.14
 - pandas >= 1.4
 
@@ -43,8 +43,9 @@ This installs matplotlib >= 3.5.
 
 ### Additional Optimizers
 
-The default BOBYQA optimizer is included in the core package. Install the optimizer extra for
-nlopt-backed optimizers such as NEWUOA and SBPLX:
+The core package includes SciPy's optimizers. Install the optimizer extra for
+the NLopt algorithms, such as `nloptwrap_BOBYQA`, `nloptwrap_NEWUOA`, and
+`nloptwrap_SBPLX`:
 
 ```bash
 pip install mixedlm[optimizers]
@@ -63,7 +64,7 @@ pip install mixedlm[plots,optimizers]
 Clone the repository and install in development mode:
 
 ```bash
-git clone https://github.com/cameronlyons/mixedlm.git
+git clone https://github.com/Cameron-Lyons/mixedlm.git
 cd mixedlm
 pip install -e ".[dev]"
 ```
@@ -116,8 +117,21 @@ Some optimizers require optional dependencies:
 
 ```python
 # Check available optimizers
-from mixedlm.estimation.optimizers import AVAILABLE_OPTIMIZERS
-print(AVAILABLE_OPTIMIZERS)
+from mixedlm.estimation import available_optimizers
+print(available_optimizers())
 ```
 
-Install additional optimizers with `pip install mixedlm[optimizers]`.
+Install additional optimizers with `pip install mixedlm[optimizers]`. The list
+contains solver names; `"auto"`, the default `lmer()` optimizer, is a fitting
+policy and is always available.
+
+### Parallel calls fail in a script
+
+Functions that accept `n_jobs`, such as `bootMer()`, `allFit()`, and
+`cross_validate()`, start worker processes without forking. Each worker imports
+the calling script again, so a script that calls them at module level with
+`n_jobs` greater than one fails: workers report `RuntimeError: An attempt has
+been made to start a new process before the current process has finished its
+bootstrapping phase`, and the call raises `BrokenProcessPool`. Move the work
+under an `if __name__ == "__main__":` guard; see
+[parallel execution](../api/inference.md#parallel-execution).

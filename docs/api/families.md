@@ -9,9 +9,10 @@ Families define the distribution and link function for GLMMs. Access them via `m
 ```python
 import mixedlm as mlm
 
+cbpp = mlm.load_cbpp()
 model = mlm.glmer(
-    "y ~ x + (1 | g)",
-    data,
+    "incidence / size ~ period + (1 | herd)",
+    cbpp,
     family=mlm.families.Binomial()
 )
 ```
@@ -55,7 +56,7 @@ mlm.families.Binomial(link="logit")
 
 **Usage:**
 
-```python
+```py
 # Binary outcome
 model = mlm.glmer("success ~ x + (1 | g)", data, family=mlm.families.Binomial())
 
@@ -74,7 +75,7 @@ Polars categorical responses use the order of their observed categories,
 excluding labels shared with unrelated columns in the category pool.
 To choose a different success label, declare the factor order explicitly:
 
-```python
+```py
 import pandas as pd
 
 data["outcome"] = pd.Categorical(data["outcome"], categories=["Y", "N"])
@@ -140,7 +141,7 @@ mlm.families.NegativeBinomial(theta=1.0, link="log")
 
 **Usage:**
 
-```python
+```py
 # With known theta
 model = mlm.glmer(
     "count ~ x + (1 | g)",
@@ -246,6 +247,21 @@ summaries display `NA` for these quantities. A quasi family defines a mean and
 variance relationship without a probability density, so its normalized
 likelihood and information criteria raise `ValueError`.
 
+To use `simulate()`, `bootMer()`, or `powerSim()`, also implement
+`simulate(self, mu, rng=None, *, weights=None, trials=None)`, returning one draw
+per mean from the supplied NumPy random stream. `weights` are prior weights
+(precisions for families with a dispersion parameter) and `trials` are binomial
+trial counts. The older `simulate(self, mu, rng=None)` signature still works.
+Without this method, those functions raise `NotImplementedError` instead of
+inventing a response distribution. For the Poisson example:
+
+```python
+def simulate(self, mu, rng=None, *, weights=None, trials=None):
+    return rng.poisson(mu).astype(float)
+
+MyFamily.simulate = simulate
+```
+
 ### QuasiFamily
 
 For quasi-likelihood models with custom variance functions.
@@ -265,6 +281,9 @@ quasi_binom = QuasiFamily(Binomial(), phi=2.0)
 - `base_family`: Family whose link, variance, and deviance are wrapped
 - `phi`: Positive dispersion multiplier
 
+Quasi families define no response distribution, so `simulate()`, `bootMer()`,
+and `powerSim()` raise `NotImplementedError` for them.
+
 ## Family Components
 
 Each family provides:
@@ -274,7 +293,10 @@ Each family provides:
 The link function \(g(\mu)\).
 
 ```python
+import numpy as np
+
 fam = mlm.families.Binomial()
+mu = np.array([0.2, 0.5, 0.9])
 eta = fam.link(mu)  # log-odds
 ```
 
@@ -296,9 +318,11 @@ var = fam.variance(mu)
 
 ### deviance_residuals
 
-Deviance residuals for model diagnostics.
+Per-observation deviance contributions, like R's `dev.resids`; their sum is the
+deviance. An optional third argument supplies prior weights.
 
 ```python
+y = np.array([0.0, 1.0, 1.0])
 dev_resid = fam.deviance_residuals(y, mu)
 ```
 
@@ -347,15 +371,15 @@ import mixedlm as mlm
 
 # Logit (default)
 model_logit = mlm.glmer(
-    "y ~ x + (1 | g)",
-    data,
+    "incidence / size ~ period + (1 | herd)",
+    cbpp,
     family=mlm.families.Binomial(link="logit")
 )
 
 # Probit
 model_probit = mlm.glmer(
-    "y ~ x + (1 | g)",
-    data,
+    "incidence / size ~ period + (1 | herd)",
+    cbpp,
     family=mlm.families.Binomial(link="probit")
 )
 
@@ -366,22 +390,22 @@ print(f"Probit AIC: {model_probit.AIC()}")
 
 ### Overdispersed Counts
 
-```python
+```py
 # Check for overdispersion with Poisson
 pois_model = mlm.glmer(
     "count ~ x + (1 | g)",
     data,
     family=mlm.families.Poisson()
 )
+print(mlm.diagnostics.check_overdispersion(pois_model))
 
-# If overdispersed, use negative binomial
-nb_model = mlm.glmer_nb("count ~ x + (1 | g)", data)
-print(f"Estimated theta: {nb_model.family.theta}")
+# If overdispersed, use negative binomial with a chosen dispersion
+nb_model = mlm.glmer_nb("count ~ x + (1 | g)", data, theta=2.0)
 ```
 
 ### Quasi-Likelihood Dispersion
 
-```python
+```py
 from mixedlm.families import QuasiFamily
 
 # Double the variance of a Poisson model without changing its log link

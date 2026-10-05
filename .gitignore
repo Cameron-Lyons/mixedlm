@@ -26,6 +26,7 @@ wheels/
 *.egg
 
 .venv/
+.venv-*/
 venv/
 ENV/
 
@@ -37,9 +38,16 @@ ENV/
 .pytest_cache/
 .hypothesis/
 .coverage
+coverage.xml
+lcov.info
 htmlcov/
+.benchmarks/
+benchmark-results/
+benchmark_results.json
 
 .mypy_cache/
 
 *.whl
 site/
+sdist-source/
+.build-tmp/

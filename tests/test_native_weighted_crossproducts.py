@@ -8,29 +8,15 @@ import pytest
 from mixedlm import _rust
 from mixedlm.estimation.laplace import (
     _build_lambda,
+    _laplace_deviance_with_status,
     adaptive_gh_deviance,
-    laplace_deviance,
-    pirls,
 )
 from mixedlm.families import Binomial, Gaussian, Poisson
 from mixedlm.formula.parser import parse_formula
 from mixedlm.matrices.design import build_model_matrices
 from numpy.testing import assert_allclose
-from scipy import sparse
 
-
-def _noncanonical(z):
-    """Split each value between duplicates, reverse rows, and store explicit zeros."""
-    values, rows, offsets = [], [], [0]
-    for column in range(z.shape[1]):
-        for index in range(z.indptr[column + 1] - 1, z.indptr[column] - 1, -1):
-            values.extend([0.25 * z.data[index], 0.75 * z.data[index]])
-            rows.extend([z.indices[index], z.indices[index]])
-        if z.shape[0]:
-            values.append(0.0)
-            rows.append(column % z.shape[0])
-        offsets.append(len(values))
-    return sparse.csc_matrix((values, rows, offsets), shape=z.shape)
+from tests._sparse_systems import noncanonical_csc
 
 
 def _matrices(layout, weighted, noncanonical, family="gaussian"):
@@ -63,7 +49,7 @@ def _matrices(layout, weighted, noncanonical, family="gaussian"):
         offset=offset,
     )
     if noncanonical:
-        matrices = replace(matrices, Z=_noncanonical(matrices.Z.tocsc()))
+        matrices = replace(matrices, Z=noncanonical_csc(matrices.Z.tocsc()))
     theta = np.array(
         {
             "intercept": [0.6],
@@ -96,46 +82,6 @@ def _args(matrices, theta, family):
     )
 
 
-@pytest.mark.parametrize("shape", [(0, 0), (0, 4), (7, 0), (7, 9), (31, 18)])
-@pytest.mark.parametrize("noncanonical", [False, True])
-@pytest.mark.parametrize("weighted", [False, True])
-@pytest.mark.parametrize("zero_fraction", [0.0, 0.7])
-def test_crossproduct_matches_dense_reference(shape, noncanonical, weighted, zero_fraction):
-    rng = np.random.default_rng(913)
-    dense = rng.normal(size=shape)
-    dense[rng.random(shape) < zero_fraction] = 0.0
-    if all(shape) and zero_fraction:
-        dense[0, :] = 0.0
-        dense[:, -1] = 0.0
-    z = sparse.csc_matrix(dense)
-    if noncanonical:
-        z = _noncanonical(z)
-    weights = np.linspace(0.1, 2.0, shape[0]) if weighted else np.ones(shape[0])
-    actual = _rust.compute_ztwz(
-        z.data, z.indices.astype(np.int64), z.indptr.astype(np.int64), z.shape, weights
-    ).reshape(shape[1], shape[1])
-    assert_allclose(actual, dense.T @ (weights[:, None] * dense), rtol=1e-13, atol=1e-13)
-    assert_allclose(actual, actual.T, rtol=0, atol=0)
-
-
-@pytest.mark.parametrize("columns", [31, 32, 33])
-@pytest.mark.parametrize("density", [0.3, 0.6, 0.9, 0.99, 1.0])
-@pytest.mark.parametrize("noncanonical", [False, True])
-def test_partially_dense_crossproducts_at_row_layout_boundary(columns, density, noncanonical):
-    rng = np.random.default_rng(431)
-    dense = rng.normal(size=(96, columns))
-    dense[rng.random(dense.shape) > density] = 0.0
-    z = sparse.csc_matrix(dense)
-    if noncanonical:
-        z = _noncanonical(z)
-    weights = np.geomspace(0.2, 2.0, dense.shape[0])
-    actual = _rust.compute_ztwz(
-        z.data, z.indices.astype(np.int64), z.indptr.astype(np.int64), z.shape, weights
-    ).reshape(columns, columns)
-    assert_allclose(actual, dense.T @ (weights[:, None] * dense), rtol=2e-12, atol=2e-12)
-    assert_allclose(actual, actual.T, rtol=0, atol=0)
-
-
 @pytest.mark.parametrize("layout", ["intercept", "slopes", "crossed", "fixed", "dense"])
 @pytest.mark.parametrize("weighted", [False, True])
 @pytest.mark.parametrize("noncanonical", [False, True])
@@ -158,12 +104,8 @@ def test_gaussian_glmm_matches_dense_penalized_solve(layout, weighted, noncanoni
     logdet = np.linalg.slogdet(information[p:, p:])[1]
 
     args = _args(matrices, theta, "gaussian")
-    actual_beta, actual_random, deviance, converged = _rust.pirls(*args)
-    assert converged
-    assert_allclose(actual_beta, beta, rtol=1e-11, atol=1e-11)
-    assert_allclose(actual_random, random, rtol=1e-11, atol=1e-11)
-    assert deviance == pytest.approx(conditional, rel=1e-11, abs=1e-11)
-    laplace = _rust.laplace_deviance(*args)
+    laplace = _rust.glmm_deviance(*args, 1)
+    assert laplace[3]
     assert laplace[0] == pytest.approx(conditional + logdet, rel=1e-11, abs=1e-11)
     assert_allclose(laplace[1], beta, rtol=1e-11, atol=1e-11)
     assert_allclose(laplace[2], random, rtol=1e-11, atol=1e-11)
@@ -177,14 +119,10 @@ def test_changing_pirls_weights_match_python(layout, weighted, noncanonical, fam
     matrices, theta = _matrices(layout, weighted, noncanonical, family_name)
     family = Poisson() if family_name == "poisson" else Binomial()
     args = _args(matrices, theta, family_name)
-    actual = _rust.pirls(*args)
-    expected = pirls(matrices, family, theta, maxiter=100, tol=1e-9)
+    actual = _rust.glmm_deviance(*args, 1)
+    expected = _laplace_deviance_with_status(theta, matrices, family)
     assert actual[3] and expected[3]
     for left, right in zip(actual[:3], expected[:3], strict=True):
-        assert_allclose(left, right, rtol=1e-7, atol=1e-7)
-    actual = _rust.laplace_deviance(*args)
-    expected = laplace_deviance(theta, matrices, family)
-    for left, right in zip(actual, expected, strict=True):
         assert_allclose(left, right, rtol=1e-7, atol=1e-7)
 
 
@@ -193,7 +131,7 @@ def test_changing_pirls_weights_match_python(layout, weighted, noncanonical, fam
 def test_quadrature_with_weighted_noncanonical_design(family_name, noncanonical):
     matrices, theta = _matrices("intercept", True, noncanonical, family_name)
     family = {"gaussian": Gaussian, "poisson": Poisson, "binomial": Binomial}[family_name]()
-    actual = _rust.adaptive_gh_deviance(*_args(matrices, theta, family_name), 9)
+    actual = _rust.glmm_deviance(*_args(matrices, theta, family_name), 9)
     expected = adaptive_gh_deviance(theta, matrices, family, nAGQ=9)
-    for left, right in zip(actual, expected, strict=True):
+    for left, right in zip(actual[:3], expected, strict=True):
         assert_allclose(left, right, rtol=1e-7, atol=1e-7)

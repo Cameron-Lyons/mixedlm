@@ -6,67 +6,6 @@ from mixedlm.estimation.reml import LMMOptimizer
 
 
 class TestZTWZCache:
-    def test_ztwz_cache_consistency(self):
-        """Test that cached Z'WZ is computed correctly."""
-        from mixedlm._rust import compute_ztwz
-        from scipy import sparse
-
-        data = load_sleepstudy()
-        parsed = lFormula("Reaction ~ Days + (1 | Subject)", data)
-        matrices = parsed.matrices
-
-        z_csc = matrices.Z.tocsc()
-        z_data = np.ascontiguousarray(z_csc.data)
-        z_indices = np.ascontiguousarray(z_csc.indices.astype(np.int64))
-        z_indptr = np.ascontiguousarray(z_csc.indptr.astype(np.int64))
-        z_shape = (z_csc.shape[0], z_csc.shape[1])
-        weights = np.ascontiguousarray(matrices.weights)
-
-        ztwz_rust = compute_ztwz(z_data, z_indices, z_indptr, z_shape, weights)
-        q = z_shape[1]
-        ztwz_rust_mat = ztwz_rust.reshape((q, q))
-
-        sqrt_w = np.sqrt(weights)
-        WZ = sparse.diags(sqrt_w, format="csc") @ matrices.Z
-        ztwz_python = (WZ.T @ WZ).toarray()
-
-        assert np.allclose(ztwz_rust_mat, ztwz_python, rtol=1e-12, atol=1e-12), (
-            "Cached Z'WZ should match Python computation"
-        )
-
-    def test_ztwz_crossed_slopes_weights_and_empty_column(self):
-        from mixedlm._rust import compute_ztwz
-        from scipy import sparse
-
-        n = 60
-        group_a = np.arange(n) % 6
-        group_b = np.arange(n) % 5
-        slope = np.linspace(-2.0, 2.0, n)
-        rows = np.repeat(np.arange(n), 3)
-        columns = np.empty(3 * n, dtype=np.int64)
-        columns[0::3] = group_a
-        columns[1::3] = 6 + group_a
-        columns[2::3] = 12 + group_b
-        values = np.empty(3 * n, dtype=np.float64)
-        values[0::3] = 1.0
-        values[1::3] = slope
-        values[2::3] = 1.0
-        z_csc = sparse.csc_matrix((values, (rows, columns)), shape=(n, 18))
-        weights = np.linspace(0.25, 2.0, n)
-
-        ztwz_rust = compute_ztwz(
-            np.ascontiguousarray(z_csc.data),
-            np.ascontiguousarray(z_csc.indices.astype(np.int64)),
-            np.ascontiguousarray(z_csc.indptr.astype(np.int64)),
-            z_csc.shape,
-            np.ascontiguousarray(weights),
-        ).reshape(z_csc.shape[1], z_csc.shape[1])
-        ztwz_python = (z_csc.T @ sparse.diags(weights) @ z_csc).toarray()
-
-        assert np.allclose(ztwz_rust, ztwz_python, rtol=1e-12, atol=1e-12)
-        assert np.all(ztwz_rust[-1] == 0.0)
-        assert np.all(ztwz_rust[:, -1] == 0.0)
-
     def test_ztwz_cache_with_lmer(self):
         """Test that lmer with caching produces valid results."""
         data = load_sleepstudy()
@@ -82,11 +21,11 @@ class TestZTWZCache:
         assert "Days" in beta
 
     def test_ztwz_cache_deviance_consistency(self):
-        """Test that cached deviance matches uncached Rust deviance."""
-        from mixedlm._rust import profiled_deviance
+        """Test that the cached native deviance matches the Python profile."""
         from mixedlm.estimation.reml import (
             _profiled_deviance_rust_cached,
             _RustMatrixCache,
+            profiled_deviance,
         )
 
         data = load_sleepstudy()
@@ -94,30 +33,12 @@ class TestZTWZCache:
         matrices = parsed.matrices
 
         theta = np.array([0.9])
-
-        z_csc = matrices.Z.tocsc()
-        dev_uncached = profiled_deviance(
-            theta,
-            matrices.y,
-            matrices.X,
-            np.ascontiguousarray(z_csc.data),
-            np.ascontiguousarray(z_csc.indices.astype(np.int64)),
-            np.ascontiguousarray(z_csc.indptr.astype(np.int64)),
-            (z_csc.shape[0], z_csc.shape[1]),
-            matrices.weights,
-            matrices.offset,
-            [s.n_levels for s in matrices.random_structures],
-            [s.n_terms for s in matrices.random_structures],
-            [s.correlated for s in matrices.random_structures],
-            True,
-        )
-
         cache = _RustMatrixCache.from_matrices(matrices)
         dev_cached = _profiled_deviance_rust_cached(theta, cache, REML=True)
+        dev_python = profiled_deviance(theta, matrices, REML=True)
 
-        assert np.abs(dev_cached - dev_uncached) < 1e-12, (
-            f"Cached ({dev_cached}) and uncached ({dev_uncached}) "
-            f"Rust deviances should match exactly"
+        assert np.abs(dev_cached - dev_python) < 1e-9, (
+            f"Cached native ({dev_cached}) and Python ({dev_python}) deviances should match"
         )
 
     def test_ztwz_cache_multiple_calls(self):

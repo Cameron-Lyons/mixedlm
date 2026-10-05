@@ -4,6 +4,7 @@ from unittest.mock import patch
 
 import numpy as np
 import pytest
+from mixedlm import _parallel
 from mixedlm.estimation import nlmm
 from mixedlm.nlme.models import CustomModel
 
@@ -61,7 +62,7 @@ def test_weighted_nonlinear_evaluation_matches_joint_linear_solution(random_para
     data, factor = linear_problem(random_params)
     expected = linear_oracle(data, factor)
     inputs = {name: value.copy() for name, value in data.items() if isinstance(value, np.ndarray)}
-    with patch.object(nlmm.os, "cpu_count", return_value=2):
+    with patch.object(_parallel.os, "cpu_count", return_value=2):
         actual = nlmm.nlmm_deviance(factor[np.tril_indices(len(factor))], **data, n_jobs=jobs)
         pnls = nlmm.pnls_step(**data, Psi=factor @ factor.T, n_jobs=jobs)
     for value, reference in zip(actual, expected, strict=True):
@@ -103,7 +104,7 @@ def run_entry(entry, data, jobs):
 def test_worker_pool_and_group_preparation_are_scoped_to_call(entry, jobs, pools):
     data, _ = linear_problem()
     with (
-        patch.object(nlmm.os, "cpu_count", return_value=2),
+        patch.object(_parallel.os, "cpu_count", return_value=2),
         patch.object(
             nlmm, "_grouped_observation_indices", wraps=nlmm._grouped_observation_indices
         ) as group,

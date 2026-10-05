@@ -12,7 +12,7 @@ from mixedlm.models.shared_utils import _RandomEffectFactor
 from mixedlm.utils.names import _check_unique_coefficient_names
 
 if TYPE_CHECKING:
-    from mixedlm.estimation.reml import _LMMCrossproducts
+    from mixedlm.estimation.reml import LMMOptimizer, _LMMCrossproducts
     from mixedlm.models.lmer import LmerResult
 
 _NUMERICAL_EPS = 1e-6
@@ -60,6 +60,13 @@ def _weighted_crossproducts(result: LmerResult) -> _LMMCrossproducts:
     return _LMMCrossproducts.from_matrices(result.matrices)
 
 
+def _deviance_evaluator(result: LmerResult) -> LMMOptimizer:
+    """Profile the likelihood natively unless the covariance structure needs Python."""
+    from mixedlm.estimation.reml import LMMOptimizer
+
+    return LMMOptimizer(result.matrices, REML=result.REML)
+
+
 def _xt_vinv_x_from_theta(
     result: LmerResult,
     theta: NDArray[np.floating],
@@ -80,7 +87,9 @@ def _xt_vinv_x_from_theta(
     Lambda = _build_lambda(theta, result.matrices.random_structures)
     lambdat_ztz_lambda = Lambda.T @ crossproducts.ZtWZ @ Lambda
     v_factor = lambdat_ztz_lambda + sparse.eye(q, format="csc")
-    factor = _RandomEffectFactor(v_factor, jitter=_CHOLESKY_REGULARIZATION)
+    factor = _RandomEffectFactor(
+        v_factor, jitter=_CHOLESKY_REGULARIZATION, pattern=crossproducts.precision_pattern
+    )
 
     lambdat_ztx = Lambda.T @ crossproducts.ZtWX
     information = crossproducts.XtWX - factor.crossproduct(lambdat_ztx)
@@ -91,24 +100,30 @@ def _finite_difference_step(value: float) -> float:
     return _NUMERICAL_EPS * max(1.0, abs(value))
 
 
+def _information_from_theta(
+    result: LmerResult,
+    theta: NDArray[np.floating],
+    evaluator: LMMOptimizer,
+    sigma: float | None = None,
+) -> NDArray[np.floating]:
+    """Return X'V^-1X at theta, by default scaled by the profiled residual variance."""
+    profiled = evaluator._evaluate_core(theta)
+    if profiled is None:
+        # Regularize the failed factorization and retain the fitted scale.
+        return _xt_vinv_x_from_theta(result, theta, sigma=sigma)
+    # Profiling already computed this Schur complement; reuse it instead
+    # of rebuilding and factoring the random-effect system a second time.
+    information = profiled.fixed_information
+    scale = profiled.sigma if sigma is None else sigma
+    return (information + information.T) / (2.0 * scale**2)
+
+
 def _vcov_from_theta(
     result: LmerResult,
     theta: NDArray[np.floating],
-    crossproducts: _LMMCrossproducts,
+    evaluator: LMMOptimizer,
 ) -> NDArray[np.floating]:
-    from mixedlm.estimation.reml import _profiled_deviance_core
-
-    profiled = _profiled_deviance_core(
-        theta, result.matrices, REML=result.REML, crossproducts=crossproducts
-    )
-    if profiled is None:
-        information = _xt_vinv_x_from_theta(result, theta, crossproducts)
-    else:
-        # Profiling already computed this Schur complement; reuse it instead
-        # of rebuilding and factoring the random-effect system a second time.
-        information = profiled.fixed_information
-        information = (information + information.T) / (2.0 * profiled.sigma**2)
-    return _matrix_inverse(information)
+    return _matrix_inverse(_information_from_theta(result, theta, evaluator))
 
 
 def _discard_vcov_grad_cache_entry(
@@ -123,23 +138,14 @@ def _discard_vcov_grad_cache_entry(
 def _profiled_theta_covariance(
     result: LmerResult,
     theta: NDArray[np.float64],
-    crossproducts: _LMMCrossproducts | None = None,
+    evaluator: LMMOptimizer | None = None,
 ) -> NDArray[np.float64]:
     """Approximate covariance of relative covariance parameters from deviance curvature."""
-    from mixedlm.estimation.reml import _profiled_deviance_core
-
     n_theta = len(theta)
     if n_theta == 0:
         return np.zeros((0, 0), dtype=np.float64)
 
-    if crossproducts is None:
-        crossproducts = _weighted_crossproducts(result)
-
-    def evaluate(parameters: NDArray[np.float64]) -> float:
-        profiled = _profiled_deviance_core(
-            parameters, result.matrices, REML=result.REML, crossproducts=crossproducts
-        )
-        return 1e10 if profiled is None else profiled.deviance
+    evaluate = (evaluator or _deviance_evaluator(result)).objective
 
     steps = _HESSIAN_EPS * np.maximum(1.0, np.abs(theta))
     hessian = np.zeros((n_theta, n_theta), dtype=np.float64)
@@ -201,19 +207,19 @@ def _vcov_derivatives(
     ):
         return cached.gradients, cached.theta_covariance
 
-    crossproducts = _weighted_crossproducts(result)
+    evaluator = _deviance_evaluator(result)
     gradients: list[NDArray[np.floating]] = []
     for k, value in enumerate(theta):
         step = _finite_difference_step(float(value))
         theta_plus = theta.copy()
         theta_plus[k] += step
-        vcov_plus = _vcov_from_theta(result, theta_plus, crossproducts)
+        vcov_plus = _vcov_from_theta(result, theta_plus, evaluator)
 
         theta_minus = theta.copy()
         theta_minus[k] -= step
-        vcov_minus = _vcov_from_theta(result, theta_minus, crossproducts)
+        vcov_minus = _vcov_from_theta(result, theta_minus, evaluator)
         gradients.append((vcov_plus - vcov_minus) / (2.0 * step))
-    theta_covariance = _profiled_theta_covariance(result, theta, crossproducts)
+    theta_covariance = _profiled_theta_covariance(result, theta, evaluator)
 
     if len(_vcov_grad_cache) >= _VCOV_GRAD_CACHE_MAX_SIZE:
         _vcov_grad_cache.pop(next(iter(_vcov_grad_cache)))
@@ -337,7 +343,7 @@ def kenward_roger_df(
     n_theta = len(result.theta)
 
     absolute_theta = result.sigma * result.theta
-    crossproducts = _weighted_crossproducts(result)
+    evaluator = _deviance_evaluator(result)
 
     satt_result = satterthwaite_df(result)
     df_satt = satt_result.df
@@ -349,7 +355,7 @@ def kenward_roger_df(
             return np.zeros((p, p))
 
         relative_theta = absolute_theta_vec / result.sigma
-        XtVinvX = _xt_vinv_x_from_theta(result, relative_theta, crossproducts)
+        XtVinvX = _information_from_theta(result, relative_theta, evaluator, result.sigma)
         return XtVinvX - XtVinvX @ vcov @ XtVinvX
 
     base_hess = compute_hessian_contribution(absolute_theta)

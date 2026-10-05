@@ -168,10 +168,10 @@ def test_empty_fixed_likelihood_matches_weighted_marginal_covariance(
     optimizer = LMMOptimizer(matrices, REML=reml, use_rust=native)
 
     assert_allclose(optimizer.objective(theta), expected, rtol=1e-12)
-    beta, sigma, effects = optimizer._extract_estimates(theta)
-    assert beta.shape == (0,)
-    assert_allclose(sigma**2, sigma2, rtol=1e-12)
-    assert_allclose(effects, factor @ design.T @ solved, rtol=1e-12, atol=1e-12)
+    final = optimizer._final_evaluation(theta)
+    assert final.beta.shape == (0,)
+    assert_allclose(final.sigma**2, sigma2, rtol=1e-12)
+    assert_allclose(final.u, factor @ design.T @ solved, rtol=1e-12, atol=1e-12)
 
 
 def _count_data(kind):
@@ -221,7 +221,10 @@ def test_glmm_empty_fixed_laplace_matches_groupwise_modes(kind, native, monkeypa
         expected += deviance + mode**2 / scale**2 + np.log1p(scale**2 * information)
         modes.append(mode)
 
-    actual, beta, effects = laplace.laplace_deviance_fast(np.array([scale]), matrices, family)
+    actual, beta, effects, converged = laplace.glmm_deviance_with_status(
+        np.array([scale]), matrices, family
+    )
+    assert converged
 
     assert beta.shape == (0,)
     assert_allclose(effects, modes, rtol=1e-9, atol=1e-9)

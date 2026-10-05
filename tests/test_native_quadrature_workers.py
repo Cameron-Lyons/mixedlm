@@ -30,7 +30,7 @@ import numpy as np
 from scipy import sparse
 from mixedlm import _rust
 from mixedlm.estimation.laplace import _native_glmm_args
-from tests.test_glmm_final_state import mode_problem
+from tests._glmm_oracles import mode_problem
 
 results = {}
 for kind in ['gaussian', 'binomial', 'poisson']:

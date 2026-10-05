@@ -1,19 +1,9 @@
 from __future__ import annotations
 
 from collections.abc import Collection
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import Any
 
 from numpy.typing import NDArray
-
-if TYPE_CHECKING:
-    pass
-
-
-@runtime_checkable
-class DataFrameLike(Protocol):
-    @property
-    def columns(self) -> list[str]: ...
-    def __len__(self) -> int: ...
 
 
 def _polars_column_numpy(column: Any) -> NDArray:
@@ -73,14 +63,6 @@ def get_column_values(data: Any, name: str) -> NDArray:
         col = data.get_column(name)
         return _polars_column_numpy(col)
     return data[name].values
-
-
-def get_row_value(data: Any, col_name: str, row_idx: int) -> Any:
-    """Get a single value from a column at a specific row index."""
-    data = ensure_dataframe(data, columns=[col_name])
-    if _is_polars(data):
-        return data.get_column(col_name)[row_idx]
-    return data[col_name].iloc[row_idx]
 
 
 def get_unique_sorted(data: Any, col_name: str) -> list:
@@ -201,7 +183,9 @@ def concat_columns_as_string(
         if escape
         else str
     )
-    string_values = np.frompyfunc(stringify, 1, 1)(values)
+    # Object loops still check float error flags, which NaN values set spuriously.
+    with np.errstate(invalid="ignore"):
+        string_values = np.frompyfunc(stringify, 1, 1)(values)
     combine = np.frompyfunc(lambda left, right: left + separator + right, 2, 1)
     combined = string_values[:, 0]
     for column_index in range(1, string_values.shape[1]):

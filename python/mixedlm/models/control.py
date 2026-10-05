@@ -5,6 +5,8 @@ from typing import Any
 
 import numpy as np
 
+from mixedlm.estimation.reml import AUTO_OPTIMIZER
+
 _VALID_OPTIMIZERS = {
     "L-BFGS-B",
     "BFGS",
@@ -39,6 +41,7 @@ _VALID_RANKX_ACTIONS = {
 def _validate_common_control(
     *,
     optimizer: str,
+    valid_optimizers: set[str],
     maxiter: int,
     boundary_tol: float,
     restart_edge: bool,
@@ -49,10 +52,9 @@ def _validate_common_control(
     check_scaleX: str,
     check_rankX: str,
 ) -> None:
-    if optimizer not in _VALID_OPTIMIZERS:
+    if optimizer not in valid_optimizers:
         raise ValueError(
-            f"Unknown optimizer '{optimizer}'. "
-            f"Valid options: {', '.join(sorted(_VALID_OPTIMIZERS))}"
+            f"Unknown optimizer '{optimizer}'. Valid options: {', '.join(sorted(valid_optimizers))}"
         )
 
     if maxiter < 1:
@@ -117,7 +119,7 @@ def _build_scipy_options(
         options["tol"] = xtol
 
     if optimizer.startswith("nloptwrap_"):
-        options["ftol"] = ftol
+        options["ftol_abs"] = ftol
         options["xtol"] = xtol
 
     overrides = dict(opt_ctrl)
@@ -146,22 +148,40 @@ class LmerControl:
 
     Parameters
     ----------
-    optimizer : str, default "COBYQA"
+    optimizer : str, default "auto"
         Optimization algorithm to use. Options:
-        - "COBYQA": Constrained Optimization BY Quadratic Approximations -
-          default, fastest and most reliable
+        - "auto": L-BFGS-B with exact native gradients and fixed tight
+          tolerances (default). When it does not converge, ends with a large
+          gradient, or leaves a variance scale of a correlated term near zero
+          (any variance scale when ``restart_edge`` is False), COBYQA refits
+          from the same start and the lower deviance is kept. Without native
+          gradients (``use_rust=False``, no extension, or "cs"/"ar1"
+          covariances) COBYQA fits alone. The fit's ``optimizer`` attribute
+          records the method whose estimates were kept. "auto" is available
+          for ``lmer`` only.
+        - "COBYQA": Constrained Optimization BY Quadratic Approximations.
+          Derivative-free and precise; its per-iteration overhead dominates
+          the fit time of small models.
         - "bobyqa": Deprecated compatibility alias for "COBYQA"
-        - "L-BFGS-B": Limited-memory BFGS with bounds
+        - "L-BFGS-B": Limited-memory BFGS with bounds; often much faster,
+          but finite-difference gradients limit its precision unless
+          ``use_analytic_gradient`` is set
         - "BFGS": BFGS without bounds
         - "Nelder-Mead": Simplex algorithm
         - "Powell": Powell's method
         - "trust-constr": Trust-region constrained
+        - "SLSQP", "TNC", "COBYLA": Other SciPy methods
+        - "nloptwrap_BOBYQA", "nloptwrap_NEWUOA", "nloptwrap_PRAXIS",
+          "nloptwrap_SBPLX", "nloptwrap_COBYLA", "nloptwrap_NELDERMEAD":
+          NLopt algorithms, when the optional nlopt package is installed
     maxiter : int, default 1000
         Maximum number of iterations for the optimizer.
     ftol : float, default 1e-8
-        Function tolerance for convergence.
+        Function tolerance for convergence. NLopt optimizers use it as an
+        absolute deviance tolerance, like lme4's ``nloptwrap``. Not used by
+        "auto".
     gtol : float, default 1e-5
-        Gradient tolerance for convergence.
+        Gradient tolerance for convergence. Not used by "auto".
     xtol : float, default 1e-8
         Parameter tolerance for convergence.
     boundary_tol : float, default 1e-4
@@ -183,8 +203,7 @@ class LmerControl:
         Use prepared analytic gradients with the native backend and L-BFGS-B,
         BFGS, TNC, SLSQP, or trust-constr. False retains numerical derivatives.
         Python and structured-covariance fits retain numerical derivatives when
-        required. Benefits depend on the model and optimizer; large coupled
-        random-effect systems can make analytic gradients more expensive.
+        required. "auto" always uses analytic gradients where available.
     em_init : bool, default False
         Whether to use EM-REML algorithm for initialization before
         switching to direct optimization. Can improve convergence for
@@ -197,6 +216,11 @@ class LmerControl:
         For COBYQA, supports SciPy's ``initial_tr_radius``, ``final_tr_radius``,
         ``maxfev``, and ``scale`` options. Legacy ``rhobeg``, ``rhoend``,
         ``maxfun``, and ``scaling_within_bounds`` names are also accepted.
+        "auto" passes them to its COBYQA stage; an evaluation limit
+        (``maxfev`` or ``maxfun``) also bounds its L-BFGS-B stage.
+        NLopt optimizers accept ``initial_step`` (default 0.5, limited to a
+        quarter of any finite bound range), a relative ``ftol``, ``ftol_abs``,
+        and ``xtol_abs``.
 
     Examples
     --------
@@ -210,7 +234,7 @@ class LmerControl:
     >>> result = lmer("y ~ x + (x|group)", data, control=ctrl)
     """
 
-    optimizer: str = "COBYQA"
+    optimizer: str = AUTO_OPTIMIZER
     maxiter: int = 1000
     ftol: float = 1e-8
     gtol: float = 1e-5
@@ -237,6 +261,7 @@ class LmerControl:
             raise ValueError("use_analytic_gradient must be a boolean")
         _validate_common_control(
             optimizer=self.optimizer,
+            valid_optimizers=_VALID_OPTIMIZERS | {AUTO_OPTIMIZER},
             maxiter=self.maxiter,
             boundary_tol=self.boundary_tol,
             restart_edge=self.restart_edge,
@@ -282,17 +307,23 @@ class GlmerControl:
     optimizer : str, default "COBYQA"
         Optimization algorithm to use. Options:
         - "COBYQA": Constrained Optimization BY Quadratic Approximations -
-          default, fastest and most reliable
+          default. Derivative-free, so it tolerates the approximate inner
+          PIRLS solve that can stop finite-difference gradient methods early.
         - "bobyqa": Deprecated compatibility alias for "COBYQA"
         - "L-BFGS-B": Limited-memory BFGS with bounds
         - "BFGS": BFGS without bounds
         - "Nelder-Mead": Simplex algorithm
         - "Powell": Powell's method
         - "trust-constr": Trust-region constrained
+        - "SLSQP", "TNC", "COBYLA": Other SciPy methods
+        - "nloptwrap_BOBYQA", "nloptwrap_NEWUOA", "nloptwrap_PRAXIS",
+          "nloptwrap_SBPLX", "nloptwrap_COBYLA", "nloptwrap_NELDERMEAD":
+          NLopt algorithms, when the optional nlopt package is installed
     maxiter : int, default 1000
         Maximum iterations per optimization stage; n_iter sums both stages.
     ftol : float, default 1e-8
-        Function tolerance for convergence.
+        Function tolerance for convergence. NLopt optimizers use it as an
+        absolute deviance tolerance, like lme4's ``nloptwrap``.
     gtol : float, default 1e-5
         Gradient tolerance for convergence.
     xtol : float, default 1e-8
@@ -333,6 +364,9 @@ class GlmerControl:
         For COBYQA, supports SciPy's ``initial_tr_radius``, ``final_tr_radius``,
         ``maxfev``, and ``scale`` options. Legacy ``rhobeg``, ``rhoend``,
         ``maxfun``, and ``scaling_within_bounds`` names are also accepted.
+        NLopt optimizers accept ``initial_step`` (default 0.5, limited to a
+        quarter of any finite bound range), a relative ``ftol``, ``ftol_abs``,
+        and ``xtol_abs``.
 
     Examples
     --------
@@ -377,6 +411,7 @@ class GlmerControl:
             raise ValueError("nAGQ0initStep must be a boolean")
         _validate_common_control(
             optimizer=self.optimizer,
+            valid_optimizers=_VALID_OPTIMIZERS,
             maxiter=self.maxiter,
             boundary_tol=self.boundary_tol,
             restart_edge=self.restart_edge,
@@ -412,7 +447,7 @@ class GlmerControl:
 
 
 def lmerControl(
-    optimizer: str = "COBYQA",
+    optimizer: str = AUTO_OPTIMIZER,
     maxiter: int = 1000,
     ftol: float = 1e-8,
     gtol: float = 1e-5,

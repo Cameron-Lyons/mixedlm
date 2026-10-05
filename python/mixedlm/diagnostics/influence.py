@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from functools import cached_property
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -11,6 +13,20 @@ if TYPE_CHECKING:
 
     from mixedlm.models.glmer import GlmerResult
     from mixedlm.models.lmer import LmerResult
+
+
+def _cooks_distance(
+    residuals: NDArray[np.floating],
+    hat_values: NDArray[np.floating],
+    n_params: int,
+    sigma: float,
+) -> NDArray[np.floating]:
+    """Cook's distance ``r**2 / (p * sigma**2) * h / (1 - h)**2``; NaN when ``p == 0``."""
+    if n_params == 0:
+        # The normalization divides by the number of coefficients.
+        return np.full(len(residuals), np.nan)
+    h = np.clip(hat_values, 0, 1 - 1e-10)
+    return (residuals**2 / (n_params * sigma**2)) * (h / (1 - h) ** 2)
 
 
 @dataclass
@@ -31,7 +47,15 @@ class InfluenceResult:
     beta: NDArray[np.floating]
     vcov: NDArray[np.floating]
     model_type: str
-    _beta_sensitivity: NDArray[np.floating] | None = None
+    # Deferred because only coefficient-deletion measures need the n x p product.
+    _beta_sensitivity_factory: Callable[[], NDArray[np.floating]] | None = field(
+        default=None, repr=False
+    )
+
+    @cached_property
+    def _beta_sensitivity(self) -> NDArray[np.floating] | None:
+        factory = self._beta_sensitivity_factory
+        return None if factory is None else factory()
 
     @property
     def leverage(self) -> NDArray[np.floating]:
@@ -60,10 +84,7 @@ class InfluenceResult:
 
     @property
     def cooks_distance(self) -> NDArray[np.floating]:
-        p = len(self.beta)
-        h = np.clip(self.hat_values, 0, 1 - 1e-10)
-        r = self.residuals
-        return (r**2 / (p * self.sigma**2)) * (h / (1 - h) ** 2)
+        return _cooks_distance(self.residuals, self.hat_values, len(self.beta), self.sigma)
 
     @property
     def dffits(self) -> NDArray[np.floating]:
@@ -90,12 +111,14 @@ def influence(
 def _influence_lmer(model: LmerResult) -> InfluenceResult:
     projection = model._weighted_projection
     vcov = model.vcov()
-    information_inv = vcov / model.sigma**2
     residuals = projection.sqrt_weights * model.residuals(type="response", na_expand=False)
-    adjusted_X = projection.weighted_X
-    if projection.lambda_matrix is not None:
-        weighted_random = projection.weighted_Z @ projection.lambda_matrix
-        adjusted_X = adjusted_X - weighted_random @ projection.random_fixed_map
+
+    def beta_sensitivity() -> NDArray[np.floating]:
+        adjusted_X = projection.weighted_X
+        if projection.lambda_matrix is not None:
+            weighted_random = projection.weighted_Z @ projection.lambda_matrix
+            adjusted_X = adjusted_X - weighted_random @ projection.random_fixed_map
+        return adjusted_X @ (vcov / model.sigma**2)
 
     return InfluenceResult(
         hat_values=model.hatvalues(),
@@ -105,18 +128,13 @@ def _influence_lmer(model: LmerResult) -> InfluenceResult:
         beta=model.beta,
         vcov=vcov,
         model_type="lmer",
-        _beta_sensitivity=adjusted_X @ information_inv,
+        _beta_sensitivity_factory=beta_sensitivity,
     )
 
 
 def _influence_glmer(model: GlmerResult) -> InfluenceResult:
     projection = model._working_projection
     vcov = model.vcov()
-    adjusted_X = projection.weighted_X
-    if model.matrices.n_random:
-        weighted_random = projection.weighted_Z @ projection.Lambda
-        adjusted_X = adjusted_X - weighted_random @ projection.random_fixed_map
-
     mu = model.family.clamp_mu(model.fitted(type="response", na_expand=False))
     # Convert Pearson residuals to the final weighted working residual. This
     # retains the derivative's sign for decreasing links and the actual working
@@ -127,6 +145,13 @@ def _influence_glmer(model: GlmerResult) -> InfluenceResult:
         * np.sqrt(model.family.variance(mu) / model.matrices.weights)
     )
 
+    def beta_sensitivity() -> NDArray[np.floating]:
+        adjusted_X = projection.weighted_X
+        if model.matrices.n_random:
+            weighted_random = projection.weighted_Z @ projection.Lambda
+            adjusted_X = adjusted_X - weighted_random @ projection.random_fixed_map
+        return (adjusted_X @ vcov) * working_scale[:, None]
+
     return InfluenceResult(
         hat_values=model.hatvalues(),
         residuals=model.residuals(type="pearson", na_expand=False),
@@ -135,7 +160,7 @@ def _influence_glmer(model: GlmerResult) -> InfluenceResult:
         beta=model.beta,
         vcov=vcov,
         model_type="glmer",
-        _beta_sensitivity=(adjusted_X @ vcov) * working_scale[:, None],
+        _beta_sensitivity_factory=beta_sensitivity,
     )
 
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import warnings
 from abc import ABC, abstractmethod
 from typing import Any
 
@@ -319,7 +320,15 @@ class Family(ABC):
         return lower, upper
 
     def clip_mu(self, mu: NDArray[np.floating], eps: float = 1e-10) -> NDArray[np.floating]:
-        """Clamp response means in place for backwards compatibility."""
+        """Clamp response means in place.
+
+        Deprecated: use ``clamp_mu(mu, eps, out=mu)``.
+        """
+        warnings.warn(
+            "Family.clip_mu() is deprecated; use clamp_mu(mu, eps, out=mu)",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         return self.clamp_mu(mu, eps=eps, out=mu)
 
     def initialize_mu(self, y: NDArray[np.floating]) -> NDArray[np.floating]:
@@ -357,11 +366,27 @@ class Family(ABC):
         upper_bound = None if upper is None else upper - eps
         return np.clip(mu, lower_bound, upper_bound, out=out)
 
-    def simulate(self, mu: NDArray[np.floating], rng: Any | None = None) -> NDArray[np.floating]:
-        """Draw responses at the supplied means.
+    def simulate(
+        self,
+        mu: NDArray[np.floating],
+        rng: Any | None = None,
+        *,
+        weights: NDArray[np.floating] | None = None,
+        trials: NDArray[np.floating] | None = None,
+    ) -> NDArray[np.floating]:
+        """Draw responses from the conditional distribution at the means ``mu``.
 
-        The default provides a small Gaussian perturbation for custom families.
-        Built-in families override it with their corresponding distribution.
+        ``weights`` are prior weights, which act as precisions for families
+        with a dispersion parameter, and ``trials`` are binomial trial counts;
+        both broadcast against ``mu``. Binomial draws with ``trials`` are
+        success counts.
+
+        Families without a response distribution raise NotImplementedError.
+        Custom families implement this method to support ``simulate()``,
+        ``bootMer`` and ``powerSim``. An override that does not accept
+        ``weights`` and ``trials`` receives only the means.
         """
-        rng = np.random if rng is None else rng
-        return mu + rng.standard_normal(mu.shape) * 0.1
+        raise NotImplementedError(
+            f"{type(self).__name__} does not define a response distribution; "
+            "implement simulate(mu, rng) to use simulate(), bootMer or powerSim"
+        )

@@ -8,7 +8,7 @@ from mixedlm.estimation.laplace import _native_glmm_args
 from mixedlm.estimation.reml import _build_lambda
 from numpy.testing import assert_allclose
 
-from tests.test_glmm_final_state import mode_problem
+from tests._glmm_oracles import mode_problem
 
 native = pytest.importorskip("mixedlm._rust")
 
@@ -46,13 +46,16 @@ def test_first_mode_update_matches_dense_normal_equations(kind, layout, zero_cov
     final_mean = family.clamp_mu(
         family.link.inverse(matrices.offset + matrices.Z @ expected_random), eps=1e-10
     )
+    final_weights = np.maximum(matrices.weights * family.weights(final_mean), 1e-10)
+    final_precision = np.eye(matrices.n_random) + design.T @ (final_weights[:, None] * design)
     expected_deviance = (
         np.sum(family.deviance_resids(matrices.y, final_mean, matrices.weights))
         + spherical @ spherical
+        + np.linalg.slogdet(final_precision)[1]
     )
 
-    beta, random, deviance, converged = native.pirls(
-        *_native_glmm_args(theta, matrices, family), maxiter=1, tol=1e-12
+    deviance, beta, random, converged = native.glmm_deviance(
+        *_native_glmm_args(theta, matrices, family), 1, maxiter=1, tol=1e-12
     )
     assert beta == []
     assert_allclose(random, expected_random, rtol=1e-11, atol=1e-12)
@@ -105,8 +108,8 @@ def test_mode_update_with_short_and_odd_lengths_and_extreme_offsets(n, kind):
     # One random intercept makes the penalized normal equation scalar.
     precision = 1 + theta[0] ** 2 * np.sum(working_weights)
     expected_random = theta[0] ** 2 * np.dot(working_weights, working_response) / precision
-    beta, random, _, _ = native.pirls(
-        *_native_glmm_args(theta, matrices, family), maxiter=1, tol=1e-12
+    _, beta, random, _ = native.glmm_deviance(
+        *_native_glmm_args(theta, matrices, family), 1, maxiter=1, tol=1e-12
     )
     assert beta == []
     assert_allclose(random, [expected_random], rtol=1e-11, atol=1e-12)

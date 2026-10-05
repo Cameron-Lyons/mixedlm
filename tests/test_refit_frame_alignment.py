@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -48,14 +50,18 @@ def test_refit_update_cv_and_drop1_use_current_response(kind, backend):
     if kind == "lmer":
         fit_options = {
             "REML": False,
-            "control": lmerControl(check_conv=False, check_singular=False),
+            "control": lmerControl(
+                check_conv=False, check_singular=False, check_nlev_gtreq_5="ignore"
+            ),
         }
         fitter = lmer
         dropper = drop1_lmer
     else:
         fit_options = {
             "family": families.Poisson() if kind == "poisson" else families.Binomial(),
-            "control": glmerControl(check_conv=False, check_singular=False),
+            "control": glmerControl(
+                check_conv=False, check_singular=False, check_nlev_gtreq_5="ignore"
+            ),
         }
         fitter = glmer
         dropper = drop1_glmer
@@ -79,6 +85,7 @@ def test_refit_update_cv_and_drop1_use_current_response(kind, backend):
     assert_allclose(updated.theta, fresh.theta, rtol=1e-7, atol=1e-7)
     assert updated.logLik().value == pytest.approx(fresh.logLik().value, rel=1e-9)
 
+    # Two folds leave four training groups; the control above omits the level-count advice.
     cv_options = {
         "cv": 2,
         "group": "group",
@@ -91,7 +98,11 @@ def test_refit_update_cv_and_drop1_use_current_response(kind, backend):
     assert_allclose(refitted_cv.predictions, fresh_cv.predictions, rtol=1e-9, atol=1e-9)
     assert refitted_cv.scores == pytest.approx(fresh_cv.scores, rel=1e-9)
 
-    deletions = dropper(refitted, refitted.model_frame())
+    with warnings.catch_warnings():
+        # Without x the binary response shows no group variation, and GLMM deletions
+        # drop the fitted check_singular=False (see the xfail below).
+        warnings.filterwarnings("ignore", "Model is singular", UserWarning)
+        deletions = dropper(refitted, refitted.model_frame())
     assert deletions.terms == ["x", "z"]
     assert deletions.full_model_aic == pytest.approx(fresh.AIC(), rel=1e-7)
     for index, retained in enumerate(["z", "x"]):
@@ -107,3 +118,29 @@ def test_refit_update_cv_and_drop1_use_current_response(kind, backend):
         assert deletions.aic[index] == pytest.approx(reduced.AIC(), rel=1e-9)
         assert deletions.lrt[index] == pytest.approx(lrt, rel=1e-6)
         assert deletions.p_value[index] == pytest.approx(chi2.sf(lrt, 1), rel=1e-6)
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason="GLMM update() and drop1 rebuild glmerControl from the PIRLS settings only, "
+    "so check_singular=False is lost",
+)
+def test_glmm_update_and_drop1_keep_the_fitted_control():
+    rng = np.random.default_rng(0)
+    data = pd.DataFrame(
+        {
+            "y": rng.binomial(1, 0.5, 80),
+            "x": rng.normal(size=80),
+            "group": np.repeat(np.arange(8), 10),
+        }
+    )
+    control = glmerControl(check_singular=False)
+    model = glmer("y ~ x + (1 | group)", data, family=families.Binomial(), control=control)
+    assert_array_equal(model.theta, [0.0])
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model.update()
+        drop1_glmer(model, data)
+    assert [str(warning.message) for warning in caught] == []

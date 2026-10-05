@@ -15,13 +15,15 @@ print(model.fixef())
 ```
 
 The fitted coefficients, covariance parameters, and residual scale define the
-simulation alternative. Pilot estimates can be optimistic, so examine smaller
-plausible effects as well as the fitted effect.
+simulation alternative. The examples use small `nsim` values to run quickly;
+use several hundred simulations or more for reported estimates. Pilot estimates
+can be optimistic, so examine smaller plausible effects as well as the fitted
+effect.
 
 ## Estimate current power
 
 ```python
-power = mlm.powerSim(model, test="Days", nsim=200, seed=42)
+power = mlm.powerSim(model, test="Days", nsim=40, seed=42)
 print(f"Power: {power.power:.1%}")
 print(f"95% CI: [{power.ci_lower:.1%}, {power.ci_upper:.1%}]")
 print(f"Completed fits: {power.n_simulations}; failed: {power.n_failed}")
@@ -32,16 +34,21 @@ procedure, provide a callable that returns `True` when its test is significant.
 For example, a joint linear-hypothesis test can select multiple coefficients:
 
 ```python
+from mixedlm.inference import linear_hypothesis
+
+
 def days_test(fitted):
-    hypothesis = mlm.linear_hypothesis(fitted, {"Days": 1.0}, test="F")
+    hypothesis = linear_hypothesis(fitted, {"Days": 1.0}, test="F")
     return bool(hypothesis.p_value < 0.05)
 
-power = mlm.powerSim(model, test=days_test, nsim=100, seed=42)
+power = mlm.powerSim(model, test=days_test, nsim=20, seed=42)
 ```
 
 For this LMM, the F test above uses residual denominator degrees of freedom.
 The simulation confidence interval always has 95% coverage, independently of the
-significance threshold chosen for each test.
+significance threshold chosen for each test. The callable runs only on valid
+refits. Errors it raises propagate instead of being counted as failed
+simulations, and it must return a Boolean.
 
 ## Vary the number of subjects
 
@@ -50,8 +57,8 @@ curve = mlm.powerCurve(
     model,
     test="Days",
     along="Subject",
-    values=[10, 15, 18, 24, 30],
-    nsim=100,
+    values=[10, 18, 30],
+    nsim=10,
     seed=42,
 )
 for size, result in zip(curve.values, curve.results):
@@ -72,7 +79,7 @@ as supplied by the pilot templates.
 
 ```python
 within = mlm.powerCurve(
-    model, test="Days", along="within", values=[5, 10, 15, 20], nsim=100, seed=42
+    model, test="Days", along="within", values=[5, 10, 20], nsim=10, seed=42
 )
 ```
 
@@ -88,14 +95,14 @@ Use multipliers of the pilot effect:
 
 ```python
 effects = mlm.powerCurve(
-    model, test="Days", along="effect_size", values=[0.25, 0.5, 0.75, 1.0], nsim=100, seed=42
+    model, test="Days", along="effect_size", values=[0.25, 0.5, 1.0], nsim=10, seed=42
 )
 ```
 
 Or set absolute coefficient values:
 
 ```python
-effects = mlm.powerCurve(model, along="Days", values=[2, 4, 6, 8, 10], nsim=100, seed=42)
+effects = mlm.powerCurve(model, along="Days", values=[2, 6, 10], nsim=10, seed=42)
 ```
 
 When `along` names a coefficient and `test` is omitted, that coefficient is tested.
@@ -117,9 +124,9 @@ GLMM examples.
 
 The confidence interval describes Monte Carlo uncertainty conditional on valid
 refits. More simulations narrow it: use smaller runs while exploring designs and
-increase `nsim` for a final estimate. Unconverged or invalid fits are excluded and
-reported, so inspect `n_failed` at every curve point. If every fit fails, the power
-estimate and interval are `NaN`.
+increase `nsim` for a final estimate. Refits that fail, do not converge, or return
+invalid estimates are excluded and reported, so inspect `n_failed` at every curve
+point. If every fit fails, the power estimate and interval are `NaN`.
 
 The confidence interval does not include uncertainty in the pilot effect sizes or
 variance components. Sensitivity curves help assess that uncertainty. Power need

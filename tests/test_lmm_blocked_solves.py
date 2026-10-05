@@ -9,10 +9,15 @@ from mixedlm.estimation.reml import _profiled_deviance_core
 from numpy.testing import assert_allclose
 from scipy import linalg, sparse
 
-from tests.test_glmm_final_state import mode_problem
-from tests.test_lmm_gradient_contractions import observation_gradient
-from tests.test_lmm_prepared_design import native_arguments, observation_likelihood, parameters
-from tests.test_lmm_stability import dominant_random_effects, groupwise_likelihood
+from tests._glmm_oracles import mode_problem
+from tests._lmm_oracles import (
+    dominant_random_effects,
+    groupwise_likelihood,
+    native_arguments,
+    observation_gradient,
+    observation_likelihood,
+    parameters,
+)
 
 
 @pytest.mark.parametrize("layout", ["intercept", "mode_only", "slope", "crossed"])

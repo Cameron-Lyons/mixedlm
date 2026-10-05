@@ -4,13 +4,14 @@
 
 | Version | Supported          |
 | ------- | ------------------ |
-| 1.0.x   | :white_check_mark: |
-| 0.2.x   | :white_check_mark: |
-| 0.1.x   | :x:                |
+| 1.2.x   | :white_check_mark: |
+| < 1.2   | :x:                |
 
 ## Reporting a Vulnerability
 
-If you discover a security vulnerability in mixedlm, please report it by emailing the maintainers directly rather than opening a public issue.
+If you discover a security vulnerability in mixedlm, please report it privately through
+[GitHub's vulnerability reporting form](https://github.com/Cameron-Lyons/mixedlm/security/advisories/new)
+rather than opening a public issue.
 
 When reporting a vulnerability, please include:
 
@@ -25,9 +26,10 @@ We will acknowledge receipt within 48 hours and provide a detailed response with
 
 This project implements the following security measures:
 
-- **Dependency Scanning**: Automated weekly scans using pip-audit and cargo-audit
-- **Code Analysis**: CodeQL static analysis on all pushes and pull requests
-- **Security Linting**: Bandit security linter for Python code
-- **Dependency Review**: Automatic review of dependency changes in pull requests
-- **Pinned Action Versions**: All GitHub Actions use pinned versions to prevent supply chain attacks
-- **Dependabot**: Automated dependency updates with security patches
+- **Dependency Scanning**: pip-audit checks the locked Python runtime dependencies, including optional extras, and cargo-audit checks both Rust lockfiles
+- **Security Linting**: Bandit scans the Python sources
+- **Dependency Review**: Pull requests that add dependencies with high-severity advisories or disallowed licenses fail review
+- **Code Analysis**: CodeQL analyzes the workflows, Python, and Rust code on pull requests, pushes to `main`, and weekly
+- **Dependabot**: Weekly update pull requests for `uv.lock`, the Cargo lockfiles, and GitHub Actions
+
+The scans, linting, and dependency review run in every pull request's required CI checks, and the Security workflow repeats the scans weekly. GitHub Actions are referenced by version tags rather than commit SHAs, and Dependabot updates them.

@@ -1,5 +1,3 @@
-import warnings
-
 import numpy as np
 import pandas as pd
 import pytest
@@ -11,7 +9,7 @@ from mixedlm.models.glmer import GlmerResult
 from mixedlm.utils.variance import _conditional_variance_blocks
 from scipy import linalg, sparse
 
-from tests._lmer_data import CBPP, SLEEPSTUDY
+from tests._datasets import CBPP, CBPP_FORMULA, SLEEPSTUDY
 
 
 def _blocks_from_full_cov(cond_cov, structures, *, include_cov: bool = True):
@@ -69,13 +67,7 @@ def _assert_condvar_equal(actual, expected) -> None:
 
 def test_weighted_lmer_condvar_matches_dense_reference() -> None:
     weights = np.linspace(0.25, 2.0, len(SLEEPSTUDY))
-    with warnings.catch_warnings():
-        warnings.filterwarnings("ignore", message="Model is singular")
-        result = lmer(
-            "Reaction ~ Days + (Days | Subject)",
-            SLEEPSTUDY,
-            weights=weights,
-        )
+    result = lmer("Reaction ~ Days + (Days | Subject)", SLEEPSTUDY, weights=weights)
 
     expected = _dense_condvar_reference(result)
     _assert_condvar_equal(condVar(result), expected)
@@ -89,12 +81,8 @@ def test_weighted_lmer_condvar_matches_dense_reference() -> None:
 
 
 def test_weighted_glmer_condvar_matches_dense_reference() -> None:
-    result = glmer(
-        "y ~ period + (1 | herd)",
-        CBPP,
-        family=families.Binomial(),
-        weights=CBPP["size"].to_numpy(dtype=float),
-    )
+    # Binomial trial counts enter the working weights as prior weights.
+    result = glmer(CBPP_FORMULA, CBPP, family=families.Binomial())
 
     _assert_condvar_equal(condVar(result), _dense_condvar_reference(result))
 
@@ -131,6 +119,33 @@ def test_sparse_blocks_match_dense_reference_for_coupled_structures() -> None:
     )
 
     _assert_condvar_equal(actual, _blocks_from_full_cov(expected_cov, structures))
+
+
+@pytest.mark.parametrize("backend", ["dense", "sparse"])
+def test_existing_precision_factor_is_reused(backend, monkeypatch) -> None:
+    from mixedlm.models import shared_utils
+
+    monkeypatch.setattr(
+        shared_utils, "_SPARSE_PROJECTION_MIN_RANDOM", 0 if backend == "sparse" else np.inf
+    )
+    weights = np.linspace(0.25, 2.0, len(SLEEPSTUDY))
+    result = lmer("Reaction ~ Days + (Days | Subject)", SLEEPSTUDY, weights=weights)
+    projection = result._weighted_projection
+    monkeypatch.setattr(
+        shared_utils._RandomEffectFactor,
+        "_factorize",
+        lambda self: pytest.fail("the existing factorization must be reused"),
+    )
+
+    actual = _conditional_variance_blocks(
+        projection.random_factor,
+        projection.lambda_matrix,
+        result.matrices.random_structures,
+        scale=result.sigma**2,
+        include_cov=True,
+    )
+
+    _assert_condvar_equal(actual, _dense_condvar_reference(result))
 
 
 def test_large_condvar_extraction_never_densifies_full_system(monkeypatch) -> None:

@@ -33,19 +33,83 @@ mixedlm provides self-starting nonlinear models that automatically compute start
 | `SSgompertz` | \(y = A \cdot e^{-b_2 \cdot b_3^x}\) | Gompertz growth |
 | `SSbiexp` | \(y = A_1 e^{-e^{lrc_1} x} + A_2 e^{-e^{lrc_2} x}\) | Biexponential decay |
 
-## Asymptotic Regression
+Each model is a class. Pass an instance to `nlmer()` with the names of the
+predictor, response, and grouping columns.
 
-### Example: Growth to Asymptote
+## Example Data
+
+The examples below use simulated logistic growth curves for 20 subjects whose
+asymptotes vary around 100:
 
 ```python
+import numpy as np
+import pandas as pd
+
 import mixedlm as mlm
+from mixedlm.nlme import SSlogis
+
+rng = np.random.default_rng(42)
+n_subjects, n_times = 20, 15
+time = np.tile(np.linspace(0, 10, n_times), n_subjects)
+subject = np.repeat(np.arange(n_subjects), n_times)
+asym = 100 + rng.normal(0, 10, n_subjects)[subject]
+growth = asym / (1 + np.exp((5 - time) / 1.5)) + rng.normal(0, 3, time.size)
+
+data = pd.DataFrame({
+    "growth": growth,
+    "time": time,
+    "subject": [f"S{i:02d}" for i in subject],
+})
+```
+
+## Logistic Growth
+
+For S-shaped growth curves:
+
+```python
+model = mlm.nlmer(
+    SSlogis(),
+    data,
+    x_var="time",
+    y_var="growth",
+    group_var="subject",
+    random_params=["Asym"],
+)
+print(model.summary())
+```
+
+Parameters:
+
+- `Asym`: Upper asymptote
+- `xmid`: x-value at inflection point (50% of Asym)
+- `scal`: Scale parameter (steepness)
+
+### Interpreting Results
+
+```python
+# Fixed effects: population-level parameters
+model.fixef()
+# {'Asym': 99.8, 'xmid': 5.01, 'scal': 1.48}
+
+# Random effects: subject deviations, by grouping factor and parameter
+model.ranef()["subject"]["Asym"]
+
+# Variance components
+model.VarCorr()
+```
+
+Subjects with a positive `Asym` deviation level off above the population asymptote.
+
+## Asymptotic Regression
+
+For growth or decay towards an asymptote:
+
+```py
 from mixedlm.nlme import SSasymp
 
-# Example: weight gain approaching maximum
 model = mlm.nlmer(
-    "weight ~ SSasymp(time, Asym, R0, lrc) + (Asym | subject)",
-    data,
-    start=SSasymp.get_start(data, "weight", "time")
+    SSasymp(), data, x_var="time", y_var="weight", group_var="subject",
+    random_params=["Asym"],
 )
 ```
 
@@ -55,49 +119,16 @@ Parameters:
 - `R0`: Response at time 0
 - `lrc`: Log of the rate constant
 
-### Interpreting Results
-
-```python
-# Fixed effects: population-level parameters
-model.fixef()
-# {'Asym': 100.5, 'R0': 20.3, 'lrc': -2.1}
-
-# Random effects: subject deviations
-model.ranef()
-# Subjects with higher Asym have higher final weights
-```
-
-## Logistic Growth
-
-For S-shaped growth curves:
-
-```python
-from mixedlm.nlme import SSlogis
-
-model = mlm.nlmer(
-    "size ~ SSlogis(time, Asym, xmid, scal) + (Asym | subject)",
-    data,
-    start=SSlogis.get_start(data, "size", "time")
-)
-```
-
-Parameters:
-
-- `Asym`: Upper asymptote
-- `xmid`: x-value at inflection point (50% of Asym)
-- `scal`: Scale parameter (steepness)
-
 ## Michaelis-Menten Kinetics
 
 For enzyme kinetics and saturation curves:
 
-```python
+```py
 from mixedlm.nlme import SSmicmen
 
 model = mlm.nlmer(
-    "velocity ~ SSmicmen(conc, Vm, K) + (Vm | enzyme)",
-    data,
-    start=SSmicmen.get_start(data, "velocity", "conc")
+    SSmicmen(), data, x_var="conc", y_var="velocity", group_var="enzyme",
+    random_params=["Vm"],
 )
 ```
 
@@ -108,39 +139,28 @@ Parameters:
 
 ## Specifying Random Effects
 
+`random_params` lists the parameters that vary by group, by name or index. It
+defaults to all parameters.
+
 ### Random Effect on One Parameter
 
-Most common: random intercepts on the asymptote:
-
-```python
-model = mlm.nlmer(
-    "y ~ SSasymp(x, Asym, R0, lrc) + (Asym | group)",
-    data,
-    start=...
-)
-```
+Most common: a random asymptote, as in the fit above.
 
 ### Random Effects on Multiple Parameters
 
 ```python
-model = mlm.nlmer(
-    "y ~ SSasymp(x, Asym, R0, lrc) + (Asym + lrc | group)",
+model_2re = mlm.nlmer(
+    SSlogis(),
     data,
-    start=...
+    x_var="time",
+    y_var="growth",
+    group_var="subject",
+    random_params=["Asym", "xmid"],
 )
+print(model_2re.VarCorr())
 ```
 
-This allows both the asymptote and rate to vary by group.
-
-### Uncorrelated Random Effects
-
-```python
-model = mlm.nlmer(
-    "y ~ SSasymp(x, Asym, R0, lrc) + (Asym || group) + (lrc || group)",
-    data,
-    start=...
-)
-```
+This allows both the asymptote and the inflection point to vary by subject.
 
 ## Starting Values
 
@@ -148,36 +168,28 @@ Nonlinear optimization requires good starting values.
 
 ### Using Self-Starting Functions
 
-The `get_start` method computes starting values from data:
+Without `start`, `nlmer()` calls the model's `get_start(x, y)` method, which
+estimates starting values from the data, in `param_names` order:
 
 ```python
-from mixedlm.nlme import SSlogis
-
-start = SSlogis.get_start(data, y_col="response", x_col="time")
-# {'Asym': 100.0, 'xmid': 5.0, 'scal': 2.0}
+SSlogis().get_start(data["time"].to_numpy(), data["growth"].to_numpy())
+# array([107.5, 5., 2.5])
 ```
 
 ### Manual Starting Values
 
-Provide your own starting values:
+Provide your own starting values by parameter name:
 
 ```python
 model = mlm.nlmer(
-    "y ~ SSasymp(x, Asym, R0, lrc) + (Asym | group)",
+    SSlogis(),
     data,
-    start={'Asym': 100, 'R0': 10, 'lrc': -1}
+    x_var="time",
+    y_var="growth",
+    group_var="subject",
+    random_params=["Asym"],
+    start={"Asym": 100.0, "xmid": 5.0, "scal": 1.5},
 )
-```
-
-### Getting Starting Values from Linear Fit
-
-For some models, transform and fit linearly first:
-
-```python
-import numpy as np
-
-# For asymptotic model, if asymptote is known
-# log(Asym - y) is linear in x
 ```
 
 ## Model Results
@@ -214,6 +226,7 @@ model.fitted()
 
 # Population-level predictions for new data. The predictor column used during
 # fitting is remembered automatically.
+new_data = pd.DataFrame({"time": [0.0, 5.0, 10.0], "subject": ["S00", "S00", "new"]})
 model.predict(newdata=new_data)
 
 # Add fitted random effects for known groups; unseen groups use population values.
@@ -225,18 +238,20 @@ model.predict(newdata=new_data, group_var="subject")
 For confidence intervals on nonlinear parameters:
 
 ```python
-boot_result = mlm.bootstrap_nlmer(model, n_boot=500, seed=42, n_jobs=2)
+boot_result = mlm.bootstrap_nlmer(model, n_boot=50, seed=42)
 
 # Bootstrap CIs
 mlm.bootCI(boot_result, component="all")
 ```
 
-`bootMer(model, nsim=500, seed=42, n_jobs=2)` and
-`model.confint(n_boot=500, seed=42, n_jobs=2)` use the same parallel refits.
+Use several hundred or more replicates for reported intervals.
+`bootstrap_nlmer()`, `bootMer(model, nsim=500, seed=42, n_jobs=2)` and
+`model.confint(n_boot=500, seed=42, n_jobs=2)` accept `n_jobs` for parallel refits.
 Simulation preserves the serial draw sequence, and failed refits are excluded
 in both modes. Use `n_jobs=1` for small jobs where process startup would dominate.
-In scripts using process spawning, run parallel bootstrap inside an
-`if __name__ == "__main__":` guard; custom model classes must be importable.
+Worker processes start without forking, so run parallel bootstrap inside an
+`if __name__ == "__main__":` guard; custom model classes must be importable. See
+[parallel execution](../api/inference.md#parallel-execution).
 
 ## Custom Nonlinear Functions
 
@@ -272,17 +287,27 @@ class MyModel(NonlinearModel):
         return np.array([y.max() - y.min(), 0.1, y.min()])
 ```
 
-Then use it:
+Then use it, here on simulated decay curves for 12 groups:
 
 ```python
-model = mlm.nlmer(
+x = np.tile(np.linspace(0, 5, 10), 12)
+group = np.repeat(np.arange(12), 10)
+a = 10 + rng.normal(0, 1, 12)[group]
+decay = pd.DataFrame({
+    "x": x,
+    "y": a * np.exp(-0.8 * x) + 2 + rng.normal(0, 0.2, x.size),
+    "group": group,
+})
+
+decay_model = mlm.nlmer(
     MyModel(),
-    data,
+    decay,
     x_var="x",
     y_var="y",
     group_var="group",
     random_params=["a"],
 )
+decay_model.fixef()
 ```
 
 Custom models and subclasses use their Python prediction and gradient methods,
@@ -291,12 +316,9 @@ classes use the native fast path when available and their prediction and
 gradient methods are unchanged. Replacing either method on a built-in instance
 or class selects the Python path as well.
 
-Python fits reuse group and weight preparation across covariance evaluations.
-The low-level `NLMMOptimizer(..., n_jobs=2)` shares a worker pool across the fit
-when there are at least two groups. Threads are released when fitting finishes,
-including after a model error or interruption. The default `n_jobs=1` runs
-serially; threading is most useful for expensive group prediction and gradient
-functions and can add overhead for small models.
+The low-level `NLMMOptimizer(..., n_jobs=2)` evaluates groups on a thread pool
+during a Python fit. The default `n_jobs=1` runs serially; threading helps only
+for expensive prediction and gradient functions and adds overhead for small models.
 
 ## Convergence Issues
 
@@ -343,80 +365,86 @@ Poor starting values lead to convergence failure or local optima:
 ```python
 # Try different starting values
 for scale in [0.5, 1.0, 2.0]:
-    start = {'Asym': 100 * scale, 'R0': 10, 'lrc': -1}
+    start = {"Asym": 100 * scale, "xmid": 5.0, "scal": 1.5}
     try:
-        model = mlm.nlmer(..., start=start)
-        if mlm.convergence_ok(model):
-            break
-    except:
+        model = mlm.nlmer(
+            SSlogis(), data, x_var="time", y_var="growth", group_var="subject",
+            random_params=["Asym"], start=start,
+        )
+    except RuntimeError:
         continue
+    if mlm.convergence_ok(model):
+        break
 ```
 
 ### Model Complexity
 
 Start simple and add complexity:
 
-1. First: random intercept on one parameter
+1. First: a random effect on one parameter
 2. Then: add random effects on other parameters
-3. Finally: allow correlations if supported by data
 
 ### Optimizer Settings
 
-```python
-from mixedlm import NlmerControl
+`nlmer()` takes optimizer settings as keyword arguments: `method` and `maxiter`
+for the outer covariance optimization, and `pnls_maxiter` and `pnls_tol` for the
+inner parameter updates:
 
-control = NlmerControl(maxiter=500, tol=1e-6)
-model = mlm.nlmer(..., control=control)
+```python
+model = mlm.nlmer(
+    SSlogis(),
+    data,
+    x_var="time",
+    y_var="growth",
+    group_var="subject",
+    random_params=["Asym"],
+    method="L-BFGS-B",
+    maxiter=500,
+    pnls_maxiter=100,
+)
 ```
 
 ## Complete Example
 
 ```python
+import numpy as np
+import pandas as pd
+
 import mixedlm as mlm
 from mixedlm.nlme import SSlogis
-import numpy as np
 
-# Simulate growth data
-np.random.seed(42)
-n_subjects = 20
-times = np.tile(np.linspace(0, 10, 15), n_subjects)
-subjects = np.repeat(range(n_subjects), 15)
+# Simulate logistic growth with subject-specific asymptotes
+rng = np.random.default_rng(42)
+n_subjects, n_times = 20, 15
+times = np.tile(np.linspace(0, 10, n_times), n_subjects)
+subjects = np.repeat(np.arange(n_subjects), n_times)
+true_asym = 100 + rng.normal(0, 10, n_subjects)[subjects]
+growth = true_asym / (1 + np.exp((5 - times) / 1.5)) + rng.normal(0, 5, times.size)
 
-# True parameters with subject variation
-true_asym = 100 + np.random.normal(0, 10, n_subjects)[subjects]
-true_xmid = 5
-true_scal = 1.5
-
-y = true_asym / (1 + np.exp((true_xmid - times) / true_scal))
-y += np.random.normal(0, 5, len(y))
-
-import pandas as pd
 data = pd.DataFrame({
-    'growth': y,
-    'time': times,
-    'subject': [f'S{i}' for i in subjects]
+    "growth": growth,
+    "time": times,
+    "subject": [f"S{i:02d}" for i in subjects],
 })
 
-# Get starting values
-start = SSlogis.get_start(data, 'growth', 'time')
-print(f"Starting values: {start}")
-
-# Fit model
+# Fit with a random asymptote; starting values come from SSlogis().get_start()
 model = mlm.nlmer(
-    "growth ~ SSlogis(time, Asym, xmid, scal) + (Asym | subject)",
+    SSlogis(),
     data,
-    start=start
+    x_var="time",
+    y_var="growth",
+    group_var="subject",
+    random_params=["Asym"],
 )
+print("Converged:", model.converged)
 
-# Results
 print("\nFixed effects (population parameters):")
 print(model.fixef())
 
 print("\nVariance components:")
 print(model.VarCorr())
 
-# Subject-specific asymptotes
-ranef = model.ranef()
+# Subject-specific deviations from the population asymptote
 print("\nSubject deviations from population Asym:")
-print(ranef)
+print(model.ranef()["subject"]["Asym"])
 ```

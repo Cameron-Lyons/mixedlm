@@ -14,11 +14,12 @@ def _run_isolated(code: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def test_core_import_does_not_load_plotting_stack() -> None:
+def test_core_import_does_not_load_optional_dependencies() -> None:
     result = _run_isolated(
         """
         import sys
         import mixedlm
+        import mixedlm.estimation.optimizers
 
         assert "matplotlib" not in sys.modules
         assert "nlopt" not in sys.modules

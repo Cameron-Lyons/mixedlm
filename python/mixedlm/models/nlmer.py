@@ -4,7 +4,7 @@ import warnings
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from numbers import Integral
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, ClassVar, cast
 
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
@@ -20,6 +20,7 @@ from mixedlm.estimation.nlmm import (
     _grouped_observation_indices,
 )
 from mixedlm.models.lmer_types import LogLik
+from mixedlm.models.result_mixin import _ResultBase
 from mixedlm.nlme.models import NonlinearModel
 from mixedlm.utils.random import RandomSeed, RandomStream
 from mixedlm.utils.validation import _validate_confidence_level
@@ -115,7 +116,8 @@ class NlmerVarCorr:
 
 
 @dataclass
-class NlmerResult:
+class NlmerResult(_ResultBase):
+    _IS_NLMM: ClassVar[bool] = True
     model: NonlinearModel
     group_var: str
     phi: NDArray[np.floating]
@@ -299,30 +301,6 @@ class NlmerResult:
             REML=False,
         )
 
-    def AIC(self) -> float:
-        ll = self.logLik()
-        return -2 * ll.value + 2 * ll.df
-
-    def BIC(self) -> float:
-        ll = self.logLik()
-        return -2 * ll.value + ll.df * np.log(ll.nobs)
-
-    def extractAIC(self) -> tuple[float, float]:
-        """Extract AIC with effective degrees of freedom.
-
-        Returns the effective degrees of freedom and AIC value,
-        matching the interface of R's extractAIC function.
-
-        Returns
-        -------
-        tuple of (float, float)
-            (edf, AIC) where edf is the effective degrees of freedom.
-        """
-        ll = self.logLik()
-        edf = float(ll.df)
-        aic = float(-2 * ll.value + 2 * ll.df)
-        return (edf, aic)
-
     def as_function(
         self,
         type: str = "predict",
@@ -350,27 +328,6 @@ class NlmerResult:
             return predict_fn
         else:
             raise ValueError(f"Unknown type: {type}. Use 'predict'.")
-
-    def isGLMM(self) -> bool:
-        """Check if this is a generalized linear mixed model.
-
-        Always returns False for NlmerResult.
-        """
-        return False
-
-    def isLMM(self) -> bool:
-        """Check if this is a linear mixed model.
-
-        Always returns False for NlmerResult.
-        """
-        return False
-
-    def isNLMM(self) -> bool:
-        """Check if this is a nonlinear mixed model.
-
-        Always returns True for NlmerResult.
-        """
-        return True
 
     def npar(self) -> int:
         """Get the number of parameters in the model.
@@ -441,31 +398,6 @@ class NlmerResult:
         if self._data is not None:
             return self._data.copy()
         return pd.DataFrame({self._x_var: self.x, self._y_var: self.y, self.group_var: self.groups})
-
-    def tidy(
-        self,
-        effects: str | Sequence[str] = "fixed",
-        *,
-        conf_int: bool = False,
-        conf_level: float = 0.95,
-        ddf_method: str | None = "Satterthwaite",
-    ) -> pd.DataFrame:
-        """Return model components in an analysis-ready table."""
-        from mixedlm.inference.reporting import tidy
-
-        return tidy(
-            self,
-            effects=effects,
-            conf_int=conf_int,
-            conf_level=conf_level,
-            ddf_method=ddf_method,
-        )
-
-    def glance(self) -> pd.DataFrame:
-        """Return one row of model-level fit statistics."""
-        from mixedlm.inference.reporting import glance
-
-        return glance(self)
 
     def simulate(
         self,
@@ -861,21 +793,19 @@ class NlmerResult:
     def cooks_distance(self) -> NDArray[np.floating]:
         """Compute Cook's distance for each observation.
 
+        Uses the linear and generalized models' formula with the weighted
+        response residuals, the Jacobian leverages from ``hatvalues()`` and
+        the number of fixed-effect parameters.
+
         Returns
         -------
         NDArray
             Cook's distance for each observation.
         """
-        h = self.hatvalues()
+        from mixedlm.diagnostics.influence import _cooks_distance
+
         resid = self.residuals(type="pearson") * self.sigma
-        p = max(len(self.phi), 1)
-
-        h = np.clip(h, 0, _HAT_CLIP_MAX)
-        sigma2 = max(self.sigma**2, _HAT_FALLBACK_EPS)
-        denom = np.maximum((1 - h) ** 2, _HAT_FALLBACK_EPS)
-        cooks_d = (resid**2 / (p * sigma2)) * (h / denom)
-
-        return np.nan_to_num(cooks_d, nan=0.0, posinf=np.finfo(np.float64).max, neginf=0.0)
+        return _cooks_distance(resid, self.hatvalues(), len(self.phi), self.sigma)
 
     def influence(self) -> dict[str, NDArray[np.floating]]:
         """Compute influence diagnostics for the model.
@@ -977,18 +907,18 @@ class NlmerResult:
         Parameters
         ----------
         tol : float, default 1e-4
-            Tolerance for detecting near-zero variance components.
+            Tolerance on the standard deviations of the relative random-effect
+            covariance; correlations near zero are not singular.
 
         Returns
         -------
         bool
-            True if any variance component is near zero.
+            True if the random-effect covariance has an eigenvalue below tol**2.
         """
-        return bool(np.any(np.abs(self.theta) < tol))
-
-    def is_singular(self, tol: float = _DEFAULT_SINGULAR_TOL) -> bool:
-        """Return whether any variance component is near its boundary."""
-        return self.isSingular(tol=tol)
+        if not np.isfinite(tol) or tol < 0:
+            raise ValueError("tol must be a finite, non-negative number")
+        psi = _build_psi_matrix(self.theta, len(self.random_params))
+        return bool(np.min(np.linalg.eigvalsh(psi), initial=np.inf) < tol**2)
 
     def summary(self) -> str:
         lines = []
@@ -1022,9 +952,6 @@ class NlmerResult:
             lines.append("inner PNLS convergence: no")
 
         return "\n".join(lines)
-
-    def __str__(self) -> str:
-        return self.summary()
 
     def __repr__(self) -> str:
         return f"NlmerResult(model={self.model.name}, deviance={self.deviance:.4f})"

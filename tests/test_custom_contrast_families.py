@@ -9,7 +9,7 @@ import pytest
 from numpy.testing import assert_allclose, assert_array_equal
 from scipy import stats
 
-from tests.test_contrast_confidence import _means
+from tests._inference_results import identity_emmeans
 
 module = import_module("mixedlm.inference.emmeans")
 
@@ -28,7 +28,7 @@ def _pair_rows(n_means=4):
 @pytest.mark.parametrize("scaled", [False, True])
 @pytest.mark.parametrize("limit", [1, 17, 1_000_000])
 def test_custom_tukey_uses_mean_count_for_tests_and_intervals(monkeypatch, df, rows, scaled, limit):
-    means = _means(df)
+    means = identity_emmeans(df)
     coefficients = _pair_rows()[rows]
     scale = np.resize([-2.0, 0.5, 4.0], len(rows)) if scaled else np.ones(len(rows))
     coefficients *= scale[:, None]
@@ -69,7 +69,7 @@ def test_array_like_pairwise_coefficients_keep_the_same_inference(representation
         coefficients = coefficients.astype(np.int64)
     elif representation == "float32":
         coefficients = coefficients.astype(np.float32)
-    means = _means()
+    means = identity_emmeans()
 
     result = means.contrast(coefficients, adjust="tukey")
 
@@ -80,7 +80,7 @@ def test_array_like_pairwise_coefficients_keep_the_same_inference(representation
 
 
 def test_tukey_intervals_can_be_requested_after_unadjusted_custom_tests():
-    means = _means()
+    means = identity_emmeans()
     result = means.contrast(_pair_rows(), adjust="none", level=0.9)
 
     intervals = result.confint(adjust="tukey")
@@ -94,7 +94,7 @@ def test_tukey_intervals_can_be_requested_after_unadjusted_custom_tests():
 @pytest.mark.parametrize("df", [17.0, np.inf])
 @pytest.mark.parametrize("kind", ["pairs", "control", "single", "multiple", "empty"])
 def test_dunnett_approximation_counts_comparisons_not_means(df, kind):
-    means = _means(df)
+    means = identity_emmeans(df)
     if kind == "pairs":
         result = means.pairs(adjust="dunnett", level=0.9)
     elif kind == "control":
@@ -134,7 +134,7 @@ def test_non_pairwise_tukey_requests_fail_before_covariance_work(monkeypatch, co
     monkeypatch.setattr(module, "_rowwise_quadratic_form", unexpected)
 
     with pytest.raises(ValueError, match="Tukey adjustment requires pairwise"):
-        _means().contrast(coefficients, adjust="tukey")
+        identity_emmeans().contrast(coefficients, adjust="tukey")
 
 
 @pytest.mark.parametrize(
@@ -167,7 +167,7 @@ def test_invalid_custom_matrices_have_clear_errors(monkeypatch, coefficients, er
     monkeypatch.setattr(module, "_rowwise_quadratic_form", unexpected)
 
     with pytest.raises(error, match=message):
-        _means().contrast(coefficients)
+        identity_emmeans().contrast(coefficients)
 
 
 @pytest.mark.parametrize("limit", [1, 13, 1_000_000])
@@ -198,11 +198,11 @@ def test_late_nonfinite_coefficients_are_checked_after_a_nonpairwise_row(monkeyp
     monkeypatch.setattr(module, "_MAX_CONTRAST_ELEMENTS", 4)
 
     with pytest.raises(ValueError, match="finite"):
-        _means().contrast(coefficients)
+        identity_emmeans().contrast(coefficients)
 
 
 def test_valid_nonpairwise_lists_preserve_linear_combination_results():
-    means = _means()
+    means = identity_emmeans()
     coefficients = [[1.0, -0.5, -0.5, 0.0], [True, False, False, False]]
 
     result = means.contrast(coefficients, adjust="bonferroni")
@@ -216,7 +216,7 @@ def test_valid_nonpairwise_lists_preserve_linear_combination_results():
 
 @pytest.mark.parametrize("n_means", [0, 1, 4])
 def test_empty_custom_sets_keep_their_shape(n_means):
-    means = _means(n=n_means)
+    means = identity_emmeans(n=n_means)
 
     result = means.contrast(np.empty((0, n_means)), adjust="tukey")
 

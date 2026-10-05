@@ -58,10 +58,17 @@ class InverseGaussian(Family):
             )
         )
 
-    def simulate(self, mu: NDArray[np.floating], rng: Any | None = None) -> NDArray[np.floating]:
+    def simulate(
+        self,
+        mu: NDArray[np.floating],
+        rng: Any | None = None,
+        *,
+        weights: NDArray[np.floating] | None = None,
+        trials: NDArray[np.floating] | None = None,
+    ) -> NDArray[np.floating]:
         rng = np.random if rng is None else rng
         mu = np.minimum(self.clamp_mu(mu, eps=1e-6), 1e10)
-        return rng.wald(mu, 1.0)
+        return rng.wald(mu, 1.0 if weights is None else weights)
 
 
 class InverseGaussianCanonical(InverseGaussian):

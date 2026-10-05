@@ -72,7 +72,9 @@ def test_ggpredict_glmm_response_intervals_transform_link_scale() -> None:
     probabilities = 1.0 / (1.0 + np.exp(-(-0.4 + 1.2 * x)))
     y = rng.binomial(1, probabilities)
     data = pd.DataFrame({"y": y, "x": x, "group": groups})
-    model = glmer("y ~ x + (1 | group)", data, family=families.Binomial())
+    # The groups share one mean, so the variance estimate is on the boundary.
+    with pytest.warns(UserWarning, match="singular"):
+        model = glmer("y ~ x + (1 | group)", data, family=families.Binomial())
 
     response = ggpredict(model, "x", at={"x": [-1.0, 0.0, 1.0]})
     link = ggpredict(model, "x", at={"x": [-1.0, 0.0, 1.0]}, type="link")

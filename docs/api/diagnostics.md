@@ -2,14 +2,18 @@
 
 This page documents diagnostic functions for assessing model fit and identifying influential observations.
 
-Diagnostic functions are available via `mixedlm.diagnostics`:
+Diagnostic functions are available via `mixedlm.diagnostics`. The examples use a
+sleepstudy fit:
 
 ```python
 import mixedlm as mlm
 from mixedlm import diagnostics
 
-# Or access directly
-mlm.diagnostics.plot_diagnostics(model)
+data = mlm.load_sleepstudy()
+model = mlm.lmer("Reaction ~ Days + (Days | Subject)", data)
+
+# Or access through the package
+mlm.diagnostics.r2_nakagawa(model)
 ```
 
 ## Model Fit Metrics
@@ -25,9 +29,15 @@ print(r2.random_by_group)
 ```
 
 Random-slope variance is evaluated at every observation, retaining covariance and predictor
-values. Linear and nonlinear Gaussian models use the fitted residual variance. Generalized
-models use a link-scale residual approximation: lognormal for log links, link-specific
-theoretical variance for binomial models, or the delta method when requested.
+values. Linear and nonlinear Gaussian models average the observation-specific residual
+variance `sigma**2 / weights`; fixed and random contributions also give each fitted row
+equal representation. Rescaling all precision weights by a common factor leaves the
+diagnostic unchanged. Generalized models use a link-scale residual approximation:
+lognormal for log links, link-specific theoretical variance for binomial models, or the
+delta method when requested. Known offsets contribute to fixed prediction variance for
+every model type. Built-in log-link families evaluate the residual approximation in log
+space, so extreme fitted means do not overflow. Nonfinite fixed predictions raise an
+error instead of being omitted.
 
 ### icc
 
@@ -73,8 +83,13 @@ and does not form the random-effect covariance matrix.
 Compute a weighted Pearson chi-squared dispersion diagnostic for a fitted GLMM.
 
 ```python
+grouseticks = mlm.load_grouseticks()
+count_model = mlm.glmer(
+    "TICKS ~ YEAR + cHEIGHT + (1 | BROOD)", grouseticks, family=mlm.families.Poisson()
+)
+
 result = diagnostics.check_overdispersion(
-    model,
+    count_model,
     alpha=0.05,
     alternative="two-sided",
 )
@@ -113,7 +128,7 @@ Compare the observed number of zeros with the fitted distribution's expected
 number of zeros.
 
 ```python
-result = diagnostics.check_zero_inflation(model)
+result = diagnostics.check_zero_inflation(count_model)
 
 print(result.observed_zeros)
 print(result.expected_zeros)
@@ -144,16 +159,21 @@ distribution.
 
 ### plot_diagnostics
 
-Create a panel of diagnostic plots including residuals vs fitted, Q-Q plot, scale-location, and random effects.
+Create a panel of diagnostic plots: residuals vs fitted, normal Q-Q, scale-location, and
+residuals by group.
 
 ```python
-diagnostics.plot_diagnostics(model, data=None)
+fig = diagnostics.plot_diagnostics(model, which=None, figsize=None)
 ```
 
 **Parameters:**
 
-- `model`: Fitted mixed model
-- `data`: Optional data frame (required for some diagnostics)
+- `result`: Fitted linear or generalized mixed model
+- `which`: Panels to draw, from 1 (residuals vs fitted), 2 (Q-Q), 3 (scale-location),
+  and 4 (residuals by group); defaults to all four
+- `figsize`: Figure size, default `(12, 10)`
+
+**Returns:** The Matplotlib figure.
 
 ### plot_resid_fitted
 
@@ -181,10 +201,10 @@ diagnostics.plot_scale_location(model, ax=None)
 
 ### plot_ranef
 
-Plot random effects with confidence intervals.
+Plot random effects with conditional-variance intervals.
 
 ```python
-diagnostics.plot_ranef(model, ax=None)
+diagnostics.plot_ranef(model, group="Subject", ax=None)
 ```
 
 ### plot_resid_group
@@ -192,7 +212,7 @@ diagnostics.plot_ranef(model, ax=None)
 Residuals by group.
 
 ```python
-diagnostics.plot_resid_group(model, group, ax=None)
+diagnostics.plot_resid_group(model, group="Subject", ax=None)
 ```
 
 ## Influence Diagnostics
@@ -229,7 +249,10 @@ Compute Cook's distance for each observation.
 cd = diagnostics.cooks_distance(model)
 ```
 
-**Returns:** Array of Cook's distance values.
+**Returns:** Array of Cook's distance values. Models without fixed effects
+return NaN, because Cook's distance measures changes in the fixed coefficients.
+For models fitted with `na_action="exclude"`, influence values cover the fitted
+observations.
 
 **Interpretation:**
 
@@ -295,7 +318,7 @@ diagnostics.influence_plot(model, which="cooks", ax=None)
 
 ### influence_summary
 
-Print a summary of influential observations.
+Summarize the influence measures in a DataFrame.
 
 ```python
 summary = diagnostics.influence_summary(model)
@@ -344,12 +367,6 @@ idx = diagnostics.influential_obs(model, threshold="cooks")
 ### Basic Diagnostics
 
 ```python
-import mixedlm as mlm
-from mixedlm import diagnostics
-
-data = mlm.load_sleepstudy()
-model = mlm.lmer("Reaction ~ Days + (Days | Subject)", data)
-
 # Panel of diagnostic plots
 diagnostics.plot_diagnostics(model)
 ```
@@ -367,7 +384,6 @@ diagnostics.plot_scale_location(model, ax=axes[1, 0])
 diagnostics.plot_ranef(model, ax=axes[1, 1])
 
 plt.tight_layout()
-plt.show()
 ```
 
 ### Influence Analysis
@@ -418,11 +434,12 @@ print(f"High influence on Days: {data.index[large_influence].tolist()}")
 diagnostics.plot_ranef(model)
 
 # Check normality of random effects
+from scipy import stats
+
 ranef = model.ranef()
 for group, effects in ranef.items():
     print(f"\n{group}:")
-    for col in effects.columns:
-        from scipy import stats
-        stat, pval = stats.shapiro(effects[col])
-        print(f"  {col}: Shapiro-Wilk p = {pval:.4f}")
+    for term, values in effects.items():
+        stat, pval = stats.shapiro(values)
+        print(f"  {term}: Shapiro-Wilk p = {pval:.4f}")
 ```

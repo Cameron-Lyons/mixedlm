@@ -5,11 +5,14 @@ from collections.abc import Callable
 import numpy as np
 import pandas as pd
 import pytest
-from mixedlm import families, set_cov_type
+from mixedlm import families, lmer, load_sleepstudy, parse_formula, set_cov_type
 from mixedlm.matrices.design import build_model_matrices
 from mixedlm.models.glmer import GlmerResult
 from mixedlm.models.lmer import LmerResult
+from numpy.testing import assert_allclose
 from numpy.typing import NDArray
+
+from tests._lmm_oracles import observation_likelihood
 
 Result = LmerResult | GlmerResult
 
@@ -128,6 +131,26 @@ def test_structured_singularity_uses_covariance_eigenvalues(
     assert result.isSingular()
 
 
+@pytest.mark.xfail(
+    strict=True,
+    raises=pytest.fail.Exception,
+    reason="getME('Lind') assumes one theta per Lambda entry, so cs/ar1 indices run past theta",
+)
+@pytest.mark.parametrize("cov_type", ["cs", "ar1"])
+def test_lind_is_rejected_for_nonlinear_covariance_maps(
+    result_factory: Callable[[str, NDArray[np.floating]], Result],
+    cov_type: str,
+) -> None:
+    result = result_factory(cov_type, np.array([1.5, 0.4]))
+    factor = result.getME("Lambda").toarray()[:3, :3]
+
+    # Products such as sd * rho fill the factor, so no index map into
+    # theta = (sd, rho) reproduces Lambda as lme4's Lind contract requires.
+    assert_allclose(factor @ factor.T, 1.5**2 * _expected_correlation(cov_type, 0.4, q=3))
+    with pytest.raises((ValueError, NotImplementedError), match="Lind"):
+        result.getME("Lind")
+
+
 def test_singularity_tolerance_validation(
     result_factory: Callable[[str, NDArray[np.floating]], Result],
 ) -> None:
@@ -183,3 +206,44 @@ def test_covariance_reporting_does_not_expand_group_level_factors(
     cov = result.VarCorr().groups["group"].cov
 
     assert cov.shape == (3, 3)
+
+
+@pytest.mark.parametrize("cov_type", ["cs", "ar1"])
+def test_set_cov_type_marks_the_random_term(cov_type: str) -> None:
+    formula = set_cov_type(parse_formula("Reaction ~ Days + (Days | Subject)"), cov_type)
+
+    assert [(term.grouping, term.cov_type) for term in formula.random] == [("Subject", cov_type)]
+
+
+def test_set_cov_type_maps_each_grouping_factor() -> None:
+    formula = set_cov_type(
+        parse_formula("y ~ x + (1 | group1) + (1 | group2)"), {"group1": "cs", "group2": "ar1"}
+    )
+
+    assert {term.grouping: term.cov_type for term in formula.random} == {
+        "group1": "cs",
+        "group2": "ar1",
+    }
+
+
+def test_set_cov_type_rejects_unknown_structures() -> None:
+    with pytest.raises(ValueError, match="Invalid cov_type"):
+        set_cov_type(parse_formula("y ~ x + (1 | group)"), "invalid")
+
+
+def test_two_term_structures_fit_one_nested_model() -> None:
+    data = load_sleepstudy()
+    formula = "Reaction ~ Days + (Days | Subject)"
+    unstructured = lmer(formula, data)
+    compound = lmer(set_cov_type(formula, "cs"), data)
+    autoregressive = lmer(set_cov_type(formula, "ar1"), data)
+
+    assert compound.converged and autoregressive.converged
+    assert (len(unstructured.theta), len(compound.theta)) == (3, 2)
+    # With two terms both structures are one shared variance and one correlation.
+    assert autoregressive.deviance == pytest.approx(compound.deviance, rel=1e-9)
+    assert_allclose(autoregressive.theta, compound.theta, rtol=1e-5)
+    assert compound.deviance > unstructured.deviance
+    assert compound.deviance == pytest.approx(
+        observation_likelihood(compound.matrices, compound.theta, reml=True), rel=1e-10
+    )

@@ -4,15 +4,7 @@ A Python implementation of mixed-effects models inspired by R's [lme4](https://g
 
 ## Features
 
-- **Linear Mixed Models (LMM)** via `lmer()` - REML and ML estimation
-- **Generalized Linear Mixed Models (GLMM)** via `glmer()` - Laplace approximation and adaptive Gauss-Hermite quadrature
-- **Nonlinear Mixed Models (NLMM)** via `nlmer()` - Self-starting models
-- **lme4-style formula interface** - `(1 | group)`, `(x | group)`, `(x || group)`, nested and crossed effects
-- **Inference tools** - Linear hypotheses, profile likelihood, bootstrap, Satterthwaite/Kenward-Roger degrees of freedom
-- **Model comparison** - ANOVA (including Type III), drop1, allFit
-- **Model validation** - Case-level and whole-group cross-validation with weighted scoring
-- **Power analysis** - powerSim, powerCurve for sample size planning
-- **Diagnostics** - Dispersion and zero-inflation checks, influence measures, leverage, residual plots
+--8<-- "README.md:features"
 
 ## Quick Example
 
@@ -32,7 +24,7 @@ print(result.summary())
 result.fixef()      # Fixed effects
 result.ranef()      # Random effects (BLUPs)
 result.VarCorr()    # Variance components
-result.confint()    # Confidence intervals
+result.confint()    # Wald confidence intervals
 ```
 
 ## Why mixedlm?
@@ -83,7 +75,7 @@ Complete documentation of all functions and classes:
 
 - [Models](api/models.md) - `lmer`, `glmer`, `nlmer`, control classes
 - [Results](api/results.md) - Result objects and their methods
-- [Inference](api/inference.md) - Linear hypotheses, cross-validation, `anova`, `emmeans`, `bootMer`, profile likelihood
+- [Inference](api/inference.md) - Parallel execution, linear hypotheses, cross-validation, `anova`, `allFit`, `emmeans`, `bootMer`, profile likelihood
 - [Families](api/families.md) - Distribution families for GLMMs
 - [Diagnostics](api/diagnostics.md) - Dispersion, zero-inflation, influence measures, and plots
 - [Power](api/power.md) - `powerSim`, `powerCurve`, `extend`
@@ -92,7 +84,7 @@ Complete documentation of all functions and classes:
 
 ## License
 
-MIT License - see [LICENSE](https://github.com/cameronlyons/mixedlm/blob/main/LICENSE) for details.
+MIT License - see [LICENSE](https://github.com/Cameron-Lyons/mixedlm/blob/main/LICENSE) for details.
 
 ## Acknowledgments
 

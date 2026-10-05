@@ -41,25 +41,51 @@ subject_cv = mlm.cross_validate(
     group="Subject",
     metrics=["rmse", "mae", "r2"],
     random_state=123,
-    n_jobs=2,
 )
 
 print(subject_cv)
 print(subject_cv.fold_scores)
 ```
 
+Pass `n_jobs=-1` (or a worker count) to refit the folds in parallel worker
+processes. Results match a serial run. Scripts that do this must call
+`cross_validate()` under an `if __name__ == "__main__":` guard; see
+[parallel execution](../api/inference.md#parallel-execution).
+
 The grouped splitter assigns larger clusters first to the smallest available
 fold. This preserves groups while balancing the number of held-out observations.
 Use the same `random_state` when comparing models so they receive identical
 fold assignments.
 
+You can also construct the folds once and reuse them, or supply your own
+`(train_indices, test_indices)` pairs. Positions refer to the rows used for
+fitting, even if the dataframe has other index labels:
+
+```python
+folds = mlm.make_folds(len(data), cv=5, groups=data["Subject"], random_state=123)
+subject_cv = mlm.cross_validate(model, cv=folds, group="Subject")
+```
+
+Explicit test sets must cover every fitted row exactly once, and each train/test
+pair must be disjoint. Training sets can exclude additional rows for buffered
+holdouts. With `group`, the partitions must hold out whole clusters and exclude
+their observations from training. All partition checks happen before refitting.
+If you provide `data`, keep its modeled values and categorical encoding in the
+original row order so fitted weights and offsets remain aligned. Extra columns
+can supply an external holdout grouping.
+
 For GLMMs, the default metrics are weighted RMSE and mean unit deviance:
 
 ```python
+cbpp = mlm.load_cbpp()
+glmm_model = mlm.glmer(
+    "incidence / size ~ period + (1 | herd)", cbpp, family=mlm.families.Binomial()
+)
+
 glmm_cv = mlm.cross_validate(
     glmm_model,
     cv=5,
-    group="site",
+    group="herd",
     random_state=123,
 )
 ```
@@ -126,13 +152,28 @@ Use `linear_hypothesis` when the null cannot be expressed as a single formula
 term or nested-model comparison. It tests linear combinations of the fitted
 fixed effects without refitting the model.
 
+The examples use simulated data with two predictors:
+
 ```python
+import numpy as np
+import pandas as pd
+
 from mixedlm.inference import linear_hypothesis
 
-model = mlm.lmer("y ~ x + z + (1 | group)", data)
+rng = np.random.default_rng(1)
+group = np.repeat(np.arange(20), 10)
+x = rng.normal(size=group.size)
+z = rng.normal(size=group.size)
+xz_data = pd.DataFrame({
+    "y": 1 + 0.5 * x + 1.5 * z + rng.normal(0, 0.5, 20)[group] + rng.normal(size=group.size),
+    "x": x,
+    "z": z,
+    "group": group,
+})
+xz_model = mlm.lmer("y ~ x + z + (1 | group)", xz_data)
 
 # Test H0: beta_x - beta_z = 0
-equal_slopes = linear_hypothesis(model, {"x": 1, "z": -1})
+equal_slopes = linear_hypothesis(xz_model, {"x": 1, "z": -1})
 print(equal_slopes)
 ```
 
@@ -140,7 +181,7 @@ Non-zero null values and joint tests are supported:
 
 ```python
 joint = linear_hypothesis(
-    model,
+    xz_model,
     {
         "equal slopes": {"x": 1, "z": -1},
         "sum equals two": {"x": 1, "z": 1},
@@ -182,10 +223,11 @@ Profile CIs are based on the likelihood function shape and don't assume symmetry
 
 ### Bootstrap Intervals
 
-Most robust but computationally intensive:
+Most robust but computationally intensive. This quick example uses 50
+replicates; use 1000 or more for reported intervals:
 
 ```python
-ci = model.confint(method="boot", nsim=1000)
+ci = model.confint(method="boot", n_boot=50, seed=42)
 print(ci)
 ```
 
@@ -222,11 +264,13 @@ print(result)
 
 ### Type III ANOVA
 
-Test fixed effects in a single model:
+Test fixed effects in a single model. The cake data crosses two treatment
+factors, with replicates nested in recipes:
 
 ```python
-model = mlm.lmer("y ~ a * b + (1 | group)", data)
-result = mlm.anova_type3(model)
+cake = mlm.load_cake()
+cake_model = mlm.lmer("angle ~ recipe * temperature + (1 | recipe:replicate)", cake)
+result = mlm.anova_type3(cake_model)
 print(result)
 ```
 
@@ -237,7 +281,7 @@ Type III tests are marginal: each effect is tested controlling for all others.
 Assess each term's contribution:
 
 ```python
-result = model.drop1(data)
+result = cake_model.drop1(cake)
 print(result)
 ```
 
@@ -251,10 +295,8 @@ ML so that fixed-effect deletion likelihoods and AIC values are comparable.
 ### Computing Marginal Means
 
 ```python
-model = mlm.lmer("yield ~ treatment + block + (1 | field)", data)
-
-# Marginal means for treatment
-em = mlm.emmeans(model, "treatment")
+# Marginal means for each recipe, averaged over temperatures
+em = mlm.emmeans(cake_model, "recipe")
 print(em)
 ```
 
@@ -269,7 +311,7 @@ print(contrasts)
 ### Custom Contrasts
 
 ```python
-# Compare specific levels
+# Compare each recipe with the first (control) level
 contrasts = em.contrast("trt.vs.ctrl")
 print(contrasts)
 ```
@@ -291,8 +333,9 @@ Unknown adjustment names raise an error; names are case-insensitive.
 
 ### Computing Profiles
 
-Compute profiles for the fixed-effect coefficients. For LMMs, these hold
-`theta` fixed and recompute the other fixed effects and residual scale:
+Compute likelihood profiles for the fixed-effect coefficients. For LMMs, each
+constrained value re-optimizes the covariance parameters, the other fixed
+effects, and the residual scale by maximum likelihood:
 
 ```python
 profiles = model.profile()
@@ -336,8 +379,8 @@ print(ci)
 ```python
 from mixedlm import bootCI, bootMer
 
-# Bootstrap the model
-boot = bootMer(model, nsim=500, seed=42)
+# Bootstrap the model; use 1000 or more replicates for reported intervals
+boot = bootMer(model, nsim=50, seed=42)
 
 # Access bootstrap samples
 boot.beta_samples   # Fixed-effect estimates
@@ -346,6 +389,12 @@ boot.theta_samples  # Variance-parameter estimates
 # Bootstrap confidence intervals
 bootCI(boot, component="all")
 ```
+
+Large bootstraps can refit in parallel with `n_jobs`, for example
+`bootMer(model, nsim=1000, seed=42, n_jobs=-1)`. A fixed seed gives the same
+samples for every worker count. Run parallel work under an
+`if __name__ == "__main__":` guard, as described in
+[parallel execution](../api/inference.md#parallel-execution).
 
 ### Bootstrap for Specific Statistics
 
@@ -374,18 +423,22 @@ prediction_ci = np.quantile(prediction_samples, [0.025, 0.975])
 
 ### Is the Random Effect Needed?
 
-Compare models with and without the random effect:
+Compare the ML fit with an ordinary least squares fit of the same fixed effects:
 
 ```python
-# Without random effect (regular linear model)
-import scipy.stats as stats
-from scipy import optimize
+from scipy import stats
 
-# With random effect
-m1 = mlm.lmer("y ~ x + (1 | group)", data, REML=False)
+m1 = mlm.lmer("Reaction ~ Days + (1 | Subject)", data, REML=False)
 
-# Compare to fixed-effect only model using LRT
-# Note: test is on the boundary, so p-value should be halved
+# Maximized log-likelihood without the random intercept
+X = np.column_stack([np.ones(len(data)), data["Days"]])
+beta, *_ = np.linalg.lstsq(X, data["Reaction"], rcond=None)
+sigma2 = np.mean((data["Reaction"] - X @ beta) ** 2)
+loglik_ols = -0.5 * len(data) * (np.log(2 * np.pi * sigma2) + 1)
+
+lrt = 2 * (m1.logLik().value - loglik_ols)
+# The null variance is on the boundary, so halve the chi-square p-value
+p_value = 0.5 * stats.chi2.sf(lrt, df=1)
 ```
 
 ### Testing Variance Components
@@ -398,17 +451,22 @@ Check if results are sensitive to optimizer choice:
 
 ```python
 all_results = model.allFit(data)
-print(all_results.summary())
+print(all_results.summary)
+print(all_results.is_consistent())
 ```
 
-If different optimizers give very different results, the model may be problematic.
+The default list contains every installed solver from
+`mixedlm.estimation.available_optimizers()`, and the refits keep the model's other
+control settings. `is_consistent()` checks whether the converged fits reach the
+same deviance. If different optimizers give very different results, the model may
+be problematic. Pass `n_jobs` to run the refits in worker processes.
 
 ## Checking Convergence
 
 ```python
 conv = mlm.checkConv(model)
 
-if not conv.ok:
+if not conv.converged:
     print("Convergence issues detected:")
     for msg in conv.messages:
         print(f"  - {msg}")
@@ -430,9 +488,9 @@ model = mlm.lmer("Reaction ~ Days + (Days | Subject)", data)
 print("=== Model Summary ===")
 print(model.summary())
 
-# 2. Profile confidence intervals
-print("\n=== Profile CIs ===")
-profiles = model.profile()
+# 2. Profile confidence interval for the Days effect
+print("\n=== Profile CI ===")
+profiles = model.profile(which="Days")
 print(confint_profile(profiles))
 
 # 3. Compare to simpler model
@@ -441,13 +499,13 @@ m_simple = mlm.lmer("Reaction ~ Days + (1 | Subject)", data, REML=False)
 m_full = mlm.lmer("Reaction ~ Days + (Days | Subject)", data, REML=False)
 print(mlm.anova(m_simple, m_full))
 
-# 4. Bootstrap CI for the Days effect
+# 4. Bootstrap CI for the Days effect (use 1000 or more replicates in practice)
 print("\n=== Bootstrap CI for Days Effect ===")
-boot = mlm.bootMer(model, nsim=200, seed=42)
+boot = mlm.bootMer(model, nsim=50, seed=42)
 boot_ci = mlm.bootCI(boot, parameters="Days")
 print(boot_ci[["parameter", "conf.low", "conf.high"]])
 
 # 5. Check convergence
 conv = mlm.checkConv(model)
-print(f"\n=== Convergence: {conv.ok} ===")
+print(f"\n=== Convergence: {conv.converged} ===")
 ```

@@ -16,6 +16,8 @@ from mixedlm.inference.cross_validation import (
     weighted_rmse,
 )
 
+pytestmark = pytest.mark.installed_wheel
+
 SCORERS = (weighted_mse, weighted_rmse, weighted_mae, weighted_r2)
 
 

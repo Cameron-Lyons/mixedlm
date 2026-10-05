@@ -1,13 +1,13 @@
 use faer::Mat;
 use numpy::ndarray::Array2;
-use numpy::{PyArray1, PyArray2, PyArrayLike1};
+use numpy::{PyArray2, PyArrayLike1};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use rand::prelude::*;
 use rayon::prelude::*;
 use std::sync::OnceLock;
 
-use crate::csc::validate_i64_parts;
+use crate::parallel;
 
 enum SimulationFactor {
     Diagonal(Vec<f64>),
@@ -290,14 +290,19 @@ fn simulate_re_batch_impl(
 
     let base_seed = seed.unwrap_or_else(|| rand::rng().random());
 
-    #[cfg(miri)]
-    let iter = results.chunks_mut(total_dim).enumerate();
-    #[cfg(not(miri))]
-    let iter = results.par_chunks_mut(total_dim).enumerate();
-    iter.for_each(|(i, result)| {
+    // Each draw has its own seed, so the result does not depend on the schedule.
+    let simulate = |(i, result): (usize, &mut [f64])| {
         let mut rng = rand::rngs::StdRng::seed_from_u64(base_seed.wrapping_add(i as u64));
         simulate_re_single(blocks, &mut rng, result);
-    });
+    };
+    if cfg!(miri) || parallel::rayon_threads() == 1 {
+        results.chunks_mut(total_dim).enumerate().for_each(simulate);
+    } else {
+        results
+            .par_chunks_mut(total_dim)
+            .enumerate()
+            .for_each(simulate);
+    }
     results
 }
 
@@ -357,60 +362,4 @@ pub fn simulate_re_batch<'py>(
         .map_err(|error| PyValueError::new_err(error.to_string()))?;
 
     Ok(PyArray2::from_owned_array(py, array).into())
-}
-
-#[pyfunction]
-#[pyo3(signature = (
-    u,
-    z_data,
-    z_indices,
-    z_indptr,
-    z_shape,
-    n_obs
-))]
-pub fn compute_zu<'py>(
-    py: Python<'py>,
-    u: PyArrayLike1<'py, f64>,
-    z_data: PyArrayLike1<'py, f64>,
-    z_indices: PyArrayLike1<'py, i64>,
-    z_indptr: PyArrayLike1<'py, i64>,
-    z_shape: (usize, usize),
-    n_obs: usize,
-) -> PyResult<Py<PyArray1<f64>>> {
-    let u_slice = u.as_slice()?;
-    let z_data_slice = z_data.as_slice()?;
-    let z_indices_slice = z_indices.as_slice()?;
-    let z_indptr_slice = z_indptr.as_slice()?;
-    if n_obs != z_shape.0 {
-        return Err(PyValueError::new_err(format!(
-            "n_obs must equal the design row count {}, got {n_obs}",
-            z_shape.0
-        )));
-    }
-    if u_slice.len() != z_shape.1 {
-        return Err(PyValueError::new_err(format!(
-            "u must contain exactly {} values, got {}",
-            z_shape.1,
-            u_slice.len()
-        )));
-    }
-    let (row_indices, col_offsets, _) =
-        validate_i64_parts(z_data_slice.len(), z_indices_slice, z_indptr_slice, z_shape)?;
-    // Detached computation must not borrow a Python array that another thread
-    // can mutate while the GIL is released.
-    let coefficients = u_slice.to_vec();
-    let values = z_data_slice.to_vec();
-    let result = py.detach(|| {
-        let mut result = vec![0.0; n_obs];
-        for (column, &coefficient) in coefficients.iter().enumerate() {
-            // Multiply before accumulating duplicate entries, in the original
-            // CSC order. Canonicalizing first can overflow or change cancellation.
-            for index in col_offsets[column]..col_offsets[column + 1] {
-                result[row_indices[index]] += values[index] * coefficient;
-            }
-        }
-        result
-    });
-
-    Ok(PyArray1::from_vec(py, result).into())
 }

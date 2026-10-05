@@ -1,59 +1,18 @@
 """Independent grouping structures retain full ML and REML covariance gradients."""
 
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import replace
 
-import numpy as np
 import pytest
 from mixedlm import _rust
 from mixedlm.estimation.reml import _profiled_deviance_core
-from mixedlm.matrices.design import RandomEffectStructure
 from numpy.testing import assert_allclose, assert_array_equal
-from scipy import sparse
 
-from tests.test_lmm_covariance_transforms import wide_problem
-from tests.test_lmm_gradient_contractions import observation_gradient
-from tests.test_lmm_prepared_design import native_arguments, observation_likelihood
-
-
-def separate_structures(widths, independent, variance, fixed):
-    left_width, right_width = widths
-    matrices, theta, _ = wide_problem(left_width, independent, variance == "singular", fixed)
-    rows = np.arange(matrices.n_obs)
-    left = matrices.Z.toarray()
-    left *= (rows[:, None] < matrices.n_obs // 2) & (
-        rows[:, None] % 2 == np.arange(left.shape[1]) // left_width
-    )
-    right = np.random.default_rng(710).normal(scale=0.15, size=(matrices.n_obs, 3 * right_width))
-    right *= (rows[:, None] >= matrices.n_obs // 2) & (
-        rows[:, None] % 3 == np.arange(right.shape[1]) // right_width
-    )
-    lower = np.diag(np.linspace(0.3, 0.7, right_width))
-    if independent:
-        lower[np.tril_indices(right_width, -1)] = -0.02
-    if variance == "singular":
-        lower[:, -1] = 0
-    theta = np.concatenate(
-        (theta, lower[np.tril_indices(right_width)] if independent else lower.diagonal())
-    )
-    if variance == "zero":
-        theta[:] = 0
-    other = RandomEffectStructure(
-        "other",
-        [f"z{i}" for i in range(right_width)],
-        3,
-        right_width,
-        independent,
-        {"a": 0, "b": 1, "c": 2},
-    )
-    design = sparse.csc_matrix(np.column_stack((left, right)))
-    matrices = replace(
-        matrices,
-        Z=design,
-        n_random=design.shape[1],
-        random_structures=[*matrices.random_structures, other],
-    )
-    return matrices, theta
+from tests._lmm_oracles import (
+    native_arguments,
+    observation_gradient,
+    observation_likelihood,
+    separate_structures,
+)
 
 
 @pytest.mark.parametrize("widths", [(1, 3), (3, 1), (15, 3), (16, 3), (17, 16)])

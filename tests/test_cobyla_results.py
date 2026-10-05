@@ -2,13 +2,13 @@
 
 import numpy as np
 import pytest
-from mixedlm import GlmerControl, glmer, lmer, lmerControl
+from mixedlm import GlmerControl, glmer, lmer, lmerControl, load_sleepstudy
 from mixedlm.estimation import optimizers
 from mixedlm.estimation.optimizers import run_optimizer
 from numpy.testing import assert_allclose
 
-from tests.test_joint_glmm_optimization import independent_deviance, model_data
-from tests.test_variance_boundary_restarts import linear_data
+from tests._glmm_oracles import independent_deviance, model_data
+from tests._lmm_oracles import linear_data, observation_space_reference
 
 
 @pytest.mark.parametrize("limit", [3, 4])
@@ -109,6 +109,34 @@ def test_public_lmm_cobyla_fit_matches_balanced_variance(native, reml):
     assert result.converged
     assert result.n_iter > 0
     assert_allclose(result.theta, [expected], atol=2e-6)
+
+
+def test_cobyla_returns_contiguous_parameters():
+    # SciPy's COBYLA returns a strided view, which native evaluators reject.
+    result = run_optimizer(
+        lambda x: np.sum((x - [1.0, -2.0, 0.5]) ** 2),
+        np.zeros(3),
+        "COBYLA",
+        [(0.0, None), (None, None), (None, None)],
+    )
+    assert result.x.flags.c_contiguous and result.x.dtype == np.float64
+    assert_allclose(result.x, [1.0, -2.0, 0.5], atol=1e-4)
+
+
+@pytest.fixture(scope="module")
+def sleepstudy_reference():
+    return observation_space_reference(load_sleepstudy(), slopes=True)
+
+
+@pytest.mark.parametrize("native", [False, True])
+def test_public_lmm_cobyla_fit_handles_correlated_slopes(native, sleepstudy_reference):
+    result = lmer(
+        "Reaction ~ Days + (Days | Subject)",
+        load_sleepstudy(),
+        control=lmerControl(optimizer="COBYLA", use_rust=native),
+    )
+    assert result.converged
+    assert_allclose(result.deviance, sleepstudy_reference["deviance"], rtol=0, atol=1e-4)
 
 
 @pytest.mark.parametrize("kind", ["poisson", "binomial"])

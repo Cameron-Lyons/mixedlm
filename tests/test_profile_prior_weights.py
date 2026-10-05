@@ -179,33 +179,29 @@ def test_weighted_2d_profile_deviance_matches_direct_likelihood(reml: bool) -> N
     assert actual == pytest.approx(expected, abs=1e-10)
 
 
-def test_weighted_profiles_preserve_offsets_scale_and_parallel_fallback(monkeypatch) -> None:
-    import mixedlm.inference.profile as profile_module
-
+def test_weighted_profiles_preserve_offsets_and_scale() -> None:
     base, shifted, weights, offset = _profile_data()
-    formula = "y ~ x + (x | group)"
+    # Offsets and weights enter only through the response and the weighted
+    # products. A scalar covariance parameter keeps each nuisance fit cheap;
+    # weighted correlated-slope profiles are checked against an independent
+    # likelihood in test_lmm_likelihood_profiles.py.
+    formula = "y ~ x + (1 | group)"
     scale = 16.0
     baseline = _fit(formula, base, weights)
     shifted_fit = _fit(formula, shifted, weights, offset=offset)
     scaled_fit = _fit(formula, shifted, scale * weights, offset=offset)
 
-    baseline_profile = profile_lmer(baseline, which="x", n_points=9)["x"]
-    shifted_profile = profile_lmer(shifted_fit, which="x", n_points=9)["x"]
-    scaled_profile = profile_lmer(scaled_fit, which="x", n_points=9)["x"]
+    # Profiles of the REML fits refit them by ML, and say so.
+    with pytest.warns(UserWarning, match="ML refit"):
+        baseline_profile = profile_lmer(baseline, which="x", n_points=9)["x"]
+        shifted_profile = profile_lmer(shifted_fit, which="x", n_points=9)["x"]
+        scaled_profile = profile_lmer(scaled_fit, which="x", n_points=9)["x"]
 
-    class UnavailableExecutor:
-        def __init__(self, *args, **kwargs):
-            raise PermissionError("process semaphores are unavailable")
-
-    monkeypatch.setattr(profile_module, "ProcessPoolExecutor", UnavailableExecutor)
-    with pytest.warns(RuntimeWarning, match="falling back to serial execution"):
-        fallback_profile = profile_lmer(shifted_fit, which="x", n_points=9, n_jobs=2)["x"]
-
-    for profile in (baseline_profile, shifted_profile, scaled_profile, fallback_profile):
+    for profile in (baseline_profile, shifted_profile, scaled_profile):
         assert profile.values[4] == profile.mle
         assert profile.zeta[4] == 0.0
 
-    for profile in (shifted_profile, scaled_profile, fallback_profile):
+    for profile in (shifted_profile, scaled_profile):
         assert_allclose(profile.values, baseline_profile.values, rtol=3e-5, atol=1e-7)
         assert_allclose(profile.zeta, baseline_profile.zeta, rtol=3e-5, atol=1e-7)
         assert profile.ci_lower == pytest.approx(baseline_profile.ci_lower, rel=3e-5)

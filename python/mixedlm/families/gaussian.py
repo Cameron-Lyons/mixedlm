@@ -33,6 +33,13 @@ class Gaussian(Family):
         # GLMM dispersion is fixed at one; prior weights are precisions.
         return float(np.sum(0.5 * (np.log(wt) - np.log(2 * np.pi) - wt * (y - mu) ** 2)))
 
-    def simulate(self, mu: NDArray[np.floating], rng: Any | None = None) -> NDArray[np.floating]:
+    def simulate(
+        self,
+        mu: NDArray[np.floating],
+        rng: Any | None = None,
+        *,
+        weights: NDArray[np.floating] | None = None,
+        trials: NDArray[np.floating] | None = None,
+    ) -> NDArray[np.floating]:
         rng = np.random if rng is None else rng
-        return rng.normal(mu, 1.0)
+        return rng.normal(mu, 1.0 if weights is None else 1 / np.sqrt(weights))

@@ -4,14 +4,28 @@ on:
   schedule:
     - cron: "0 0 * * 0"
   workflow_dispatch:
+  # CI calls this workflow for a short smoke run on every pull request.
+  workflow_call:
+    inputs:
+      max_total_time:
+        description: Seconds to fuzz each target
+        type: number
+        default: 60
 
 permissions:
   contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_HTTP_MULTIPLEXING: "false"
+  CARGO_NET_RETRY: "10"
 
 jobs:
   fuzz:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      MAX_TOTAL_TIME: ${{ inputs.max_total_time || 60 }}
     steps:
       - uses: actions/checkout@v7
 
@@ -33,18 +47,18 @@ jobs:
         with:
           workspaces: fuzz -> target
 
-      - name: Run fuzz tests
+      - name: Fuzz production sparse factorization and input validation
+        working-directory: fuzz
         run: |
-          cd fuzz
-          cargo test --locked --lib
           # Prebuilt cargo-fuzz may default to musl; ASAN needs the runner's GNU target.
-          cargo +nightly fuzz run fuzz_cholesky --target x86_64-unknown-linux-gnu -- -max_total_time=60
-          cargo +nightly fuzz run fuzz_csc --target x86_64-unknown-linux-gnu -- -max_total_time=60
+          cargo +nightly fuzz run fuzz_cholesky --target x86_64-unknown-linux-gnu -- -max_total_time="$MAX_TOTAL_TIME"
+          cargo +nightly fuzz run fuzz_csc --target x86_64-unknown-linux-gnu -- -max_total_time="$MAX_TOTAL_TIME"
           git diff --exit-code -- Cargo.lock
 
-      - name: Upload crash artifacts
-        uses: actions/upload-artifact@v7
+      - name: Upload reproducible fuzz failures
         if: failure()
+        uses: actions/upload-artifact@v7
         with:
           name: fuzz-crashes
           path: fuzz/artifacts/
+          if-no-files-found: ignore

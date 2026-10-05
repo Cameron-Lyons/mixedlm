@@ -3,8 +3,17 @@
 import numpy as np
 import pytest
 from mixedlm import _rust
-from numpy.testing import assert_allclose
+from numpy.testing import assert_allclose, assert_array_equal
 from scipy import linalg, sparse
+
+
+def _native_laplace(args):
+    """Evaluate the one-shot and prepared native entry points, which must agree exactly."""
+    actual = _rust.glmm_deviance(*args, 1)
+    prepared = _rust.GlmmProblem(*args[:8], *args[9:]).evaluate(args[8])
+    for value, reference in zip(prepared, actual, strict=True):
+        assert_array_equal(value, reference)
+    return actual
 
 
 def _fixture(layout, p, zero, noncanonical):
@@ -124,12 +133,8 @@ def test_native_sparse_system_matches_full_joint_gaussian_solution(layout, p, ze
     expected_deviance = np.dot(weights * residual, residual) + np.dot(solution[p:], solution[p:])
     logdet = np.linalg.slogdet(information[p:, p:])[1]
 
-    beta, random, deviance, converged = _rust.pirls(*args)
+    actual, beta, random, converged = _native_laplace(args)
     assert converged
-    assert_allclose(beta, expected_beta, rtol=1e-10, atol=2e-11)
-    assert_allclose(random, expected_random, rtol=1e-10, atol=2e-11)
-    assert deviance == pytest.approx(expected_deviance, rel=1e-11, abs=1e-10)
-    actual, beta, random = _rust.laplace_deviance(*args)
     assert actual == pytest.approx(expected_deviance + logdet, rel=1e-11, abs=1e-10)
     assert_allclose(beta, expected_beta, rtol=1e-10, atol=2e-11)
     assert_allclose(random, expected_random, rtol=1e-10, atol=2e-11)
@@ -154,23 +159,26 @@ def test_random_intercept_scaling_matches_closed_form(groups):
     expected = np.dot(weights * residual, residual) + np.dot(spherical, spherical)
     expected += np.log(information).sum()
 
-    actual, beta, random = _rust.laplace_deviance(
-        y,
-        np.empty((n, 0)),
-        z.data,
-        z.indices.astype(np.int64),
-        z.indptr.astype(np.int64),
-        z.shape,
-        weights,
-        offset,
-        np.array([theta]),
-        [groups],
-        [1],
-        [True],
-        "gaussian",
-        "identity",
+    actual, beta, random, converged = _native_laplace(
+        (
+            y,
+            np.empty((n, 0)),
+            z.data,
+            z.indices.astype(np.int64),
+            z.indptr.astype(np.int64),
+            z.shape,
+            weights,
+            offset,
+            np.array([theta]),
+            [groups],
+            [1],
+            [True],
+            "gaussian",
+            "identity",
+        )
     )
 
+    assert converged
     assert len(beta) == 0
     assert_allclose(random, expected_random, rtol=1e-12, atol=1e-12)
     assert actual == pytest.approx(expected, rel=1e-12, abs=1e-9)
@@ -237,7 +245,8 @@ def test_sparse_nongaussian_likelihood_matches_dense_optimizer(family, layout, z
     expected = response_deviance + np.dot(fit.x[p:], fit.x[p:])
     expected += np.linalg.slogdet(hessian[p:, p:])[1]
     native_args = (y, *args[1:12], family, "log" if family == "poisson" else "logit")
-    actual, beta, random = _rust.laplace_deviance(*native_args)
+    actual, beta, random, converged = _native_laplace(native_args)
+    assert converged
     assert_allclose(beta, fit.x[:p], rtol=2e-7, atol=2e-8)
     assert_allclose(random, covariance @ fit.x[p:], rtol=2e-7, atol=2e-8)
     assert actual == pytest.approx(expected, rel=2e-8, abs=2e-7)

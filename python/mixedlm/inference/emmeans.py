@@ -5,7 +5,6 @@ from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from functools import lru_cache
 from math import prod
-from numbers import Real
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -217,7 +216,7 @@ class ContrastResult:
         Grouped comparisons retain separate interval families. Quantiles are
         evaluated on demand.
         """
-        confidence = _validate_contrast_level(self.level if level is None else level)
+        confidence = _validate_confidence_level(self.level if level is None else level)
         requested = self.adjust if adjust is None else adjust
         if not isinstance(requested, str):
             raise TypeError("adjust must be a string naming an interval adjustment")
@@ -352,7 +351,7 @@ class Emmeans:
         adjust: str = "tukey",
         level: float = 0.95,
     ) -> ContrastResult:
-        level = _validate_contrast_level(level)
+        level = _validate_confidence_level(level)
         adjust = _normalize_adjustment(adjust)
         if self._by:
             return self._grouped_contrasts(lambda means: means.pairs(adjust=adjust, level=level))
@@ -428,7 +427,7 @@ class Emmeans:
         adjust: str = "dunnett",
         level: float = 0.95,
     ) -> ContrastResult:
-        level = _validate_contrast_level(level)
+        level = _validate_confidence_level(level)
         adjust = _normalize_adjustment(adjust)
         if self._by:
             return self._grouped_contrasts(
@@ -474,7 +473,7 @@ class Emmeans:
         adjust: str = "none",
         level: float = 0.95,
     ) -> ContrastResult:
-        level = _validate_contrast_level(level)
+        level = _validate_confidence_level(level)
         adjust = _normalize_adjustment(adjust)
         if self._by:
             return self._grouped_contrasts(
@@ -571,15 +570,6 @@ def _validate_custom_contrasts(C: ArrayLike, n_means: int) -> tuple[NDArray, int
             if pairwise:
                 pairwise = bool(np.all(np.count_nonzero(chunk, axis=1) == 2))
     return coefficients, n_means if pairwise else None
-
-
-def _validate_contrast_level(level: float) -> float:
-    if isinstance(level, bool | np.bool_) or not isinstance(level, Real):
-        raise TypeError("level must be a finite number strictly between 0 and 1")
-    value = float(level)
-    if not np.isfinite(value) or not 0 < value < 1:
-        raise ValueError("level must be a finite number strictly between 0 and 1")
-    return value
 
 
 @lru_cache(maxsize=128)
@@ -748,8 +738,6 @@ def emmeans(
     level = _validate_confidence_level(level)
     if type not in {"link", "response"}:
         raise ValueError("type must be 'link' or 'response'")
-    if not np.isfinite(level) or not 0 < level < 1:
-        raise ValueError("level must be a finite number strictly between 0 and 1")
     if by is not None and _by is not None:
         raise ValueError("Specify only one of by and _by")
     if _by is not None:

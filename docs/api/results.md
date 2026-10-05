@@ -1,6 +1,14 @@
 # Results
 
 This page documents the result objects returned by model fitting functions and their methods.
+The examples use a sleepstudy fit:
+
+```python
+import mixedlm as mlm
+
+data = mlm.load_sleepstudy()
+result = mlm.lmer("Reaction ~ Days + (Days | Subject)", data)
+```
 
 ## Tidy reporting
 
@@ -47,10 +55,16 @@ rows from several fits can be concatenated directly.
 The result object returned by `lmer()`.
 
 Fixed-effect covariance (`vcov()`), prediction standard errors, and leverage
-(`hatvalues()`) reuse a factored random-effect precision system. Large systems
-use sparse solves, and pointwise variances use bounded batches instead of a
-full dense observation-by-random-effect matrix. GLMM covariance and leverage
-use the same approach with the final working weights.
+(`hatvalues()`) share one factored random-effect precision system, so requesting
+several of them does not refactor the model. GLMMs use the final working weights.
+
+Besides the estimates (`beta`, `theta`, and `sigma`), a result records
+`optimizer`, the method whose estimates were kept, and `control`, the
+`LmerControl` used for fitting. `update()`, `drop1()`, and `allFit()` refit with
+that control; `refit()` and `refitML()` keep its `use_rust` setting and use the
+`"auto"` optimizer unless `method=` is given. The statsmodels-style aliases
+`fe_params`, `re_params`, `fittedvalues`, and `resid` are deprecated; use `beta`,
+`theta`, `fitted()`, and `residuals()`.
 
 ### Methods
 
@@ -94,12 +108,8 @@ Extract random effects (BLUPs).
 **Parameters:**
 
 - `condVar`: If True, return a `RanefResult` containing the random effects and
-  their per-level conditional variances. The calculation uses sparse block
-  extraction, so it does not materialize the full random-effect covariance
-  matrix. For GLMMs, it uses the final working weights (including prior weights)
-  and sparse random-effect information without computing the dense fixed-effect
-  projection. This sparse setup is reused if coefficient covariance or leverage
-  is requested later.
+  their per-level conditional variances, without forming the full random-effect
+  covariance matrix. GLMMs use the final working weights, including prior weights.
 
 **Returns:** A nested dictionary of random-effect arrays, or a `RanefResult`
 when `condVar=True`.
@@ -128,7 +138,7 @@ Compound-symmetry and AR(1) structures are reported on their exact fitted covari
 The same structured covariance is used by `rePCA()`, `isSingular()`, and the parameter bounds
 returned by `getME("lower")`:
 
-```python
+```py
 from mixedlm import lmer, set_cov_type
 
 formula = set_cov_type("y ~ time + (time | subject)", "ar1")
@@ -180,7 +190,7 @@ Extract residuals.
 
 #### predict
 
-```python
+```py
 lmm_result.predict(
     newdata=None,
     re_form=None,
@@ -245,10 +255,6 @@ matrices or calculating covariance. Confidence intervals use the link's
 response bounds, and a square-root inverse includes zero when the link-scale
 interval crosses zero. GLMM response-scale standard errors use the delta method.
 
-Fixed-coefficient covariance projections are evaluated in batches for both model
-types, bounding each temporary projection to one million elements (or one row
-when the fitted coefficient count exceeds that limit).
-
 Lazy query filters and ordering are preserved, so array offsets follow the
 resulting row order. The collected frame is reused for all prediction work in
 that call and is not cached on the fitted model. Intercept-only predictions with
@@ -279,6 +285,11 @@ values are unaffected. Repeated uncertainty calculations reuse the fitted weight
 factorization.
 
 ```python
+import pandas as pd
+
+newdata = pd.DataFrame({"Days": [0.0, 5.0], "Subject": ["308", "309"], "precision": [1.0, 0.5]})
+new_group_data = pd.DataFrame({"Days": [0.0, 5.0], "Subject": ["new", "new"]})
+
 mean_ci = result.predict(newdata, interval="confidence", level=0.95)
 future_pi = result.predict(newdata, interval="prediction", level=0.95)
 
@@ -329,8 +340,13 @@ next_batch = result.simulate(nsim=10, seed=rng)
 An integer seed preserves the previous draw sequence for the same backend and
 call shape. Batch sizes and native-backend availability can affect the sequence.
 Calling `np.random.seed()` separately no longer controls these simulations; pass
-`seed` explicitly instead. Custom family `simulate(mu, rng=...)` methods should
-use the supplied stream for their response draws.
+`seed` explicitly instead.
+
+GLMM responses are drawn by the family's
+`simulate(mu, rng=None, *, weights=None, trials=None)` method, which should use
+the supplied stream. Families without a response distribution, such as quasi
+families and custom families that do not implement `simulate()`, raise
+`NotImplementedError`; see [custom families](families.md#customfamily).
 
 Grouped-binomial GLMM simulations return success counts.
 
@@ -347,7 +363,7 @@ Compute confidence intervals.
 - `method`: CI method. Options: `"Wald"`, `"profile"`, `"boot"`.
 - `level`: Confidence level.
 
-**Returns:** DataFrame with lower and upper bounds.
+**Returns:** Dictionary mapping parameter names to `(lower, upper)` tuples.
 
 #### logLik
 
@@ -373,11 +389,12 @@ Compute information criteria.
 
 #### profile
 
-```python
-result.profile(which=None, n_points=20, level=0.95)
+```py
+result.profile(which=None, n_points=20, level=0.95, n_jobs=1)
 ```
 
-Compute fixed-effect likelihood profiles. LMM profiles re-optimize covariance
+Compute fixed-effect likelihood profiles; `which=None` profiles every fixed
+coefficient. LMM profiles re-optimize covariance
 parameters, other fixed coefficients, and residual scale using ML, including for
 REML inputs. The returned center records the ML estimate. GLMM profiles re-optimize nuisance
 fixed coefficients and covariance parameters using the fitted quadrature and
@@ -385,8 +402,10 @@ inner solver controls. The refined profile center can differ from the fitted
 coefficient, particularly for `nAGQ=0` fits, which are profiled using the joint
 Laplace likelihood. Default joint fits usually retain their center within
 optimization tolerance; the original result is unchanged. `n_points` must be at least
-3 and affects the plotted curve, not the interval endpoint accuracy. See
-[profile likelihood](inference.md#profile-likelihood) for convergence behavior.
+3 and affects the plotted curve, not the interval endpoint accuracy. LMM profiles
+accept `n_jobs` to profile coefficients in worker processes; GLMM profiles run
+serially. See [profile likelihood](inference.md#profile-likelihood) for
+convergence behavior.
 
 **Returns:** Dictionary mapping parameter names to `ProfileResult` objects.
 
@@ -401,36 +420,44 @@ For `joint_fit=False`, the callable retains the theta-only PIRLS objective.
 #### drop1
 
 ```python
-result.drop1(data)
+result.drop1(data, test="Chisq", n_jobs=1)
 ```
 
-Test single term deletions.
+Test single term deletions. LMM refits reuse the fitted control.
+`n_jobs` refits the reduced models in worker processes; see
+[parallel execution](inference.md#parallel-execution).
 
 **Returns:** Drop1Result with test statistics.
 
 #### allFit
 
 ```python
-result.allFit(data)
+result.allFit(data, optimizers=None, verbose=False, n_jobs=1)
 ```
 
-Fit model with multiple optimizers.
+Refit the model with each optimizer, keeping the other control settings. The
+default list is every solver from `mixedlm.estimation.available_optimizers()`.
+`n_jobs` runs the refits in worker processes.
 
-**Returns:** AllFitResult comparing optimizer results.
+**Returns:** AllFitResult comparing optimizer results. `summary` tabulates
+each fit, `best_fit()` returns the lowest-deviance fit, and `is_consistent()`
+checks whether the converged fits reach the same deviance.
 
 #### getME
 
 ```python
-result.getME(name)
+result.getME("theta")
 ```
 
 Extract model components.
 
 **Parameters:**
 
-- `name`: Component name. Options include `"X"`, `"Z"`, `"theta"`, `"Lambda"`, `"Zt"`, `"beta"`, `"b"`, `"u"`, etc.
+- `name`: Component name. Options include `"X"`, `"Z"`, `"theta"`, `"Lambda"`, `"Zt"`, `"beta"`, `"b"`, `"u"`, `"devcomp"`, etc.
 
-**Returns:** The requested component.
+**Returns:** The requested component. As in lme4, `"b"` holds the conditional
+modes of the random effects and `"u"` the spherical random effects, with
+`b = Lambda @ u`; for singular fits `u` is the minimum-norm solution.
 
 Requesting `"RZX"` materializes a dense random-effect Cholesky factor on demand.
 It retains the original coefficient order and is cached for subsequent calls.
@@ -453,7 +480,7 @@ The result object returned by `glmer()`. Has the same methods as LmerResult plus
 
 #### family
 
-```python
+```py
 result.family
 ```
 
@@ -465,7 +492,7 @@ The result object returned by `nlmer()`. Has similar methods to LmerResult.
 
 ### predict
 
-```python
+```py
 nlmm_result.predict(newdata=None, x_var=None, group_var=None, offset=None)
 ```
 
@@ -481,7 +508,7 @@ response mean after applying any group effects. New-data offsets default to
 zero and do not reuse the fitted observation offsets. Explicit offsets require
 `newdata`; complex, masked, missing, and infinite offsets are rejected.
 
-```python
+```py
 predictions = nlmm_result.predict(
     newdata,
     group_var="subject",
@@ -508,7 +535,7 @@ are `NaN`. Use `bootstrap_nlmer(result, n_boot=1000, seed=42)` or
 
 ### simulate
 
-```python
+```py
 import numpy as np
 
 draws = nlmm_result.simulate(nsim=100, seed=42)
@@ -529,11 +556,8 @@ draws return `(n_obs, nsim)`, and zero draws return `(n_obs, 0)`. Simulation
 preserves fitted offsets and inverse-weight residual variances. `use_re=False`,
 `re_form="NA"`, and `re_form="~0"` exclude random effects.
 
-For many groups, simulation prepares group rows with one stable ordering
-instead of repeatedly scanning all observations for every group. Multi-draw
-calls reuse these rows, the random-effect covariance transform, offsets, and residual scales.
-Fixed-only calls evaluate the nonlinear mean once. This setup is local to each
-call, so changes to a result are reflected in the next simulation.
+Each call prepares its own simulation setup, so changes to a result are
+reflected in the next simulation.
 
 ## VarCorr
 
@@ -560,11 +584,12 @@ Each `VarCorrGroup` entry contains:
 print(result.VarCorr())
 ```
 
-```
-Groups   Name        Variance  Std.Dev.  Corr
-Subject  (Intercept)  612.10    24.74
-         Days          35.07     5.92    0.07
-Residual              654.94    25.59
+```text
+Random effects:
+ Groups      Name           Variance   Std.Dev.   Corr
+ Subject     (Intercept)    612.0901    24.7405
+             Days            35.0717     5.9221   0.07
+ Residual                   654.9410    25.5918
 ```
 
 ## LogLik
@@ -591,9 +616,11 @@ result = mlm.lmer("Reaction ~ Days + (Days | Subject)", data)
 print(result.fixef())
 # {'(Intercept)': 251.405, 'Days': 10.467}
 
-# Random effects for first subject
+# Random effects for the first subjects
+import pandas as pd
+
 ranef = result.ranef()
-print(ranef['Subject'].head())
+print(pd.DataFrame(ranef["Subject"]).head())
 
 # Variance components
 print(result.VarCorr())
@@ -617,8 +644,8 @@ new_data = pd.DataFrame({
     'Subject': ['new_subj', 'new_subj', 'new_subj']
 })
 
-# Include random effects (will be 0 for new subjects)
-pred_cond = result.predict(newdata=new_data)
+# Include random effects; new subjects need allow_new_levels and get zero
+pred_cond = result.predict(newdata=new_data, allow_new_levels=True)
 
 # Exclude random effects (population average)
 pred_marg = result.predict(newdata=new_data, re_form="~0")
@@ -633,5 +660,5 @@ if result.is_singular():
 
 # Check convergence
 conv = mlm.checkConv(result)
-print(f"Converged: {conv.ok}")
+print(f"Converged: {conv.converged}")
 ```

@@ -46,7 +46,8 @@ The denominator requires derivatives of the covariance matrix with respect to va
 ```python
 import mixedlm as mlm
 
-model = mlm.lmer("y ~ x + (1 | g)", data)
+data = mlm.load_sleepstudy()
+model = mlm.lmer("Reaction ~ Days + (Days | Subject)", data)
 print(model.summary())  # Uses Satterthwaite by default
 
 # Direct access
@@ -115,11 +116,6 @@ df_kr = mlm.kenward_roger_df(model)
 ### Example: Sleep Study
 
 ```python
-import mixedlm as mlm
-
-data = mlm.load_sleepstudy()
-model = mlm.lmer("Reaction ~ Days + (Days | Subject)", data)
-
 # Compare methods
 print("=== Satterthwaite ===")
 print(model.summary(ddf_method="Satterthwaite"))
@@ -149,10 +145,10 @@ print("Kenward-Roger DF:", mlm.kenward_roger_df(model_small))
 
 Different fixed effects can have different DF:
 
-```python
+```py
 model = mlm.lmer("y ~ x1 + x2 + (1 | group)", data)
 df = mlm.satterthwaite_df(model)
-print(df)
+print(df.as_dict())
 # {'(Intercept)': 25.3, 'x1': 150.2, 'x2': 148.7}
 ```
 
@@ -186,7 +182,7 @@ If estimated DF is < 4, interpret results cautiously:
 
 ```python
 df = mlm.satterthwaite_df(model)
-for term, d in df.items():
+for term, d in df.as_dict().items():
     if d < 4:
         print(f"Warning: {term} has only {d:.1f} DF")
 ```

@@ -1,15 +1,14 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 import numpy as np
+import pandas as pd
 from numpy.typing import NDArray
 
 if TYPE_CHECKING:
-    import pandas as pd
-
     from mixedlm.estimation.joint_glmm import JointGLMMObjective
     from mixedlm.estimation.laplace import GLMMOptimizer
     from mixedlm.families.base import Family
@@ -19,13 +18,15 @@ if TYPE_CHECKING:
     from mixedlm.models.lmer import LmerResult
 
 from mixedlm.estimation.reml import (
+    AUTO_OPTIMIZER,
     LMMOptimizer,
     _build_lambda,
     _build_theta_bounds,
     _count_theta,
 )
 from mixedlm.formula.parser import parse_formula
-from mixedlm.matrices.design import ModelMatrices, build_model_matrices
+from mixedlm.formula.terms import InteractionTerm, PowerTerm, VariableTerm
+from mixedlm.matrices.design import ModelMatrices, build_model_matrices, build_random_matrix
 
 
 def _coerce_formula(formula: Formula | str) -> Formula:
@@ -290,6 +291,8 @@ class OptimizeResult:
     beta : NDArray, optional
         Jointly optimized fixed coefficients for GLMMs. None retains theta-only
         PIRLS extraction in mkGlmerMod and is the default for custom results.
+    optimizer : str
+        Optimization method, recorded on the fitted model for checkConv.
     """
 
     theta: NDArray[np.floating]
@@ -300,6 +303,7 @@ class OptimizeResult:
     nAGQ: int | None = None
     pirls_converged: bool | None = None
     beta: NDArray[np.floating] | None = None
+    optimizer: str = ""
 
 
 def lFormula(
@@ -576,7 +580,8 @@ def optimizeLmer(
     start : NDArray, optional
         Starting values for theta. If None, uses default.
     method : str, default "L-BFGS-B"
-        Optimization method (passed to scipy.optimize.minimize).
+        Optimization method (passed to scipy.optimize.minimize), or "auto" for
+        lmer's exact-gradient L-BFGS-B with a COBYQA fallback.
     maxiter : int, default 1000
         Base iteration limit, unless overridden by the control's optCtrl.
         TNC and COBYLA use this as their function evaluation limit.
@@ -638,16 +643,24 @@ def optimizeLmer(
             dev = objective(x)
             print(f"theta = {x}, deviance = {dev:.6f}")
 
-    result = run_optimizer(
-        objective,
-        start,
-        method=method,
-        bounds=bounds,
-        options=options,
-        callback=callback,
-        jac=gradient,
-        restart_edge=restart_edge,
-    )
+    if method == AUTO_OPTIMIZER and type(devfun).__call__ is LmerDevfun.__call__:
+        result, method = devfun.optimizer._optimize_auto(
+            start, bounds, options, callback, restart_edge
+        )
+    else:
+        if method == AUTO_OPTIMIZER:
+            # Custom callables have no exact gradient for the L-BFGS-B stage.
+            method = "COBYQA"
+        result = run_optimizer(
+            objective,
+            start,
+            method=method,
+            bounds=bounds,
+            options=options,
+            callback=callback,
+            jac=gradient,
+            restart_edge=restart_edge,
+        )
 
     return OptimizeResult(
         theta=result.x,
@@ -655,6 +668,7 @@ def optimizeLmer(
         converged=result.success,
         n_iter=result.nit,
         message=result.message if hasattr(result, "message") else "",
+        optimizer=method,
     )
 
 
@@ -729,6 +743,7 @@ def optimizeGlmer(
         n_iter=result.n_iter,
         message=message,
         nAGQ=optimizer.nAGQ,
+        optimizer=method,
     )
 
 
@@ -784,6 +799,8 @@ def mkLmerMod(
         REML=devfun.parsed.REML,
         converged=opt.converged,
         n_iter=opt.n_iter,
+        message=opt.message,
+        optimizer=opt.optimizer,
     )
 
 
@@ -857,6 +874,8 @@ def mkGlmerMod(
         joint_fit=opt.beta is not None,
         n_iter=opt.n_iter,
         nAGQ=nAGQ,
+        message=opt.message,
+        optimizer=opt.optimizer,
     )
 
 
@@ -893,6 +912,9 @@ class ReTrms:
     flist: dict[str, NDArray]
     cnms: dict[str, list[str]]
     nl: list[int]
+    # The source design lets mkNewReTrms encode new data exactly as mkReTrms did.
+    _formula: Formula | None = field(default=None, repr=False, compare=False)
+    _matrices: ModelMatrices | None = field(default=None, repr=False, compare=False)
 
 
 def mkReTrms(
@@ -992,6 +1014,8 @@ def mkReTrms(
         flist=flist,
         cnms=cnms,
         nl=nl,
+        _formula=parsed_formula,
+        _matrices=matrices,
     )
 
 
@@ -1001,7 +1025,7 @@ def simulate_formula(
     beta: NDArray[np.floating] | dict[str, float] | None = None,
     theta: NDArray[np.floating] | None = None,
     sigma: float = 1.0,
-    family: Family | None = None,
+    family: Family | str | None = None,
     nsim: int = 1,
     seed: int | None = None,
 ) -> pd.DataFrame | list[pd.DataFrame]:
@@ -1017,17 +1041,26 @@ def simulate_formula(
     formula : Formula or str
         Parsed formula or model formula with random effects (e.g., "y ~ x + (1|group)").
     data : pd.DataFrame
-        Data frame containing the predictor variables.
+        Data frame containing the predictor variables. The response column
+        may be absent; a grouped binomial ``successes / trials`` response
+        needs the trials column and receives simulated success counts.
     beta : array-like or dict, optional
-        Fixed effects coefficients. If dict, keys should be coefficient
-        names. If None, uses zeros.
+        Fixed effects coefficients. If dict, keys must be coefficient names;
+        omitted coefficients are zero. If None, uses zeros.
     theta : array-like, optional
         Variance component parameters (relative covariance factors).
         If None, uses ones.
     sigma : float, default 1.0
-        Residual standard deviation (for Gaussian family).
-    family : Family, optional
-        Distribution family. If None, uses Gaussian.
+        Positive residual scale, which also scales the random effects.
+        Gaussian responses have standard deviation ``sigma``; gamma and
+        inverse Gaussian responses have dispersion ``sigma**2``, that is,
+        shape ``1 / sigma**2``. Binomial, Poisson and negative binomial draws
+        do not use it.
+    family : Family or str, optional
+        Distribution family with a ``simulate()`` method, or one of
+        "gaussian", "binomial", "poisson", "gamma" and "inverse_gaussian"
+        (R spellings such as "Gamma" and "inverse.gaussian" also work).
+        If None, uses Gaussian.
     nsim : int, default 1
         Number of simulations to generate.
     seed : int, optional
@@ -1073,27 +1106,24 @@ def simulate_formula(
     lmer : Fit linear mixed models.
     LmerResult.simulate : Simulate from a fitted model.
     """
-    from mixedlm.families import (
-        Binomial,
-        Gamma,
-        Gaussian,
-        InverseGaussian,
-        NegativeBinomial,
-        Poisson,
-    )
+    from mixedlm.families import Binomial
+    from mixedlm.utils.simulation import simulate_glmm_response
 
     if nsim < 1:
         raise ValueError("nsim must be at least 1")
-    if not np.isfinite(sigma) or sigma < 0:
-        raise ValueError("sigma must be finite and non-negative")
+    if not np.isfinite(sigma) or sigma <= 0:
+        raise ValueError("sigma must be finite and positive")
 
+    family = _simulation_family(family)
     rng = np.random.default_rng(seed)
 
-    if family is None:
-        family = Gaussian()
-
-    parsed_formula = parse_formula(formula) if isinstance(formula, str) else formula
-    matrices = build_model_matrices(parsed_formula, data)
+    parsed_formula = _coerce_formula(formula)
+    response_name = parsed_formula.response
+    # The response is only an output here, so the predictors suffice.
+    frame = data if response_name in data.columns else data.assign(**{response_name: 0.0})
+    matrices = build_model_matrices(
+        parsed_formula, frame, grouped_binomial=isinstance(family, Binomial)
+    )
 
     p = matrices.n_fixed
     q = matrices.n_random
@@ -1101,10 +1131,12 @@ def simulate_formula(
     if beta is None:
         beta_vec: NDArray[np.floating] = np.zeros(p)
     elif isinstance(beta, dict):
-        beta_vec = np.zeros(p)
-        for i, name in enumerate(matrices.fixed_names):
-            if name in beta:
-                beta_vec[i] = beta[name]
+        unknown = sorted(set(beta) - set(matrices.fixed_names))
+        if unknown:
+            raise ValueError(
+                f"beta has unknown coefficient names {unknown}; available: {matrices.fixed_names}"
+            )
+        beta_vec = np.array([beta.get(name, 0.0) for name in matrices.fixed_names], dtype=float)
     else:
         beta_vec = np.asarray(beta, dtype=np.float64).reshape(-1)
 
@@ -1137,6 +1169,7 @@ def simulate_formula(
         raise ValueError("theta must contain only finite values")
 
     Lambda = _build_lambda(theta_vec, matrices.random_structures)
+    precision = matrices.weights / sigma**2
     results = []
 
     for _ in range(nsim):
@@ -1145,28 +1178,10 @@ def simulate_formula(
         random_effects = np.asarray(Lambda @ standard_random_effects).reshape(-1) * sigma
         eta += matrices.Z @ random_effects
 
-        mu = family.link.inverse(eta)
-
-        if isinstance(family, Binomial):
-            y = rng.binomial(1, np.clip(mu, 0, 1)).astype(float)
-        elif isinstance(family, Poisson):
-            y = rng.poisson(np.clip(mu, 0, 1e15)).astype(float)
-        elif isinstance(family, NegativeBinomial):
-            mu = np.clip(mu, 1e-10, 1e10)
-            y = rng.negative_binomial(family.theta, family.theta / (mu + family.theta)).astype(
-                float
-            )
-        elif isinstance(family, Gamma):
-            y = rng.gamma(1.0, np.clip(mu, 1e-10, 1e10)).astype(float)
-        elif isinstance(family, InverseGaussian):
-            y = rng.wald(np.clip(mu, 1e-10, 1e10), 1.0).astype(float)
-        elif isinstance(family, Gaussian):
-            y = rng.normal(mu, sigma)
-        else:
-            y = rng.normal(mu, sigma)
-
+        y = simulate_glmm_response(
+            family, family.link.inverse(eta), precision, trials=matrices.trials, rng=rng
+        )
         result_df = data.copy()
-        response_name = parsed_formula.response if parsed_formula.response else "y"
         result_df[response_name] = y
         results.append(result_df)
 
@@ -1175,8 +1190,47 @@ def simulate_formula(
     return results
 
 
+def _simulation_family(family: Family | str | None) -> Family:
+    """Return the family for a Family instance, None (Gaussian) or an R family name."""
+    from mixedlm import families
+
+    if family is None:
+        return families.Gaussian()
+    if not isinstance(family, str):
+        return family
+    constructors: dict[str, Callable[[], Family]] = {
+        "gaussian": families.Gaussian,
+        "binomial": families.Binomial,
+        "poisson": families.Poisson,
+        "gamma": families.Gamma,
+        "inverse_gaussian": families.InverseGaussian,
+    }
+    name = family.strip().lower().replace(".", "_")
+    if name not in constructors:
+        raise ValueError(
+            f"Unknown family {family!r}; choose a Family instance or one of: "
+            + ", ".join(constructors)
+        )
+    return constructors[name]()
+
+
+def _template_variables(formula: Formula) -> tuple[list[str], list[str]]:
+    """Return a formula's covariates and grouping factors in order of appearance."""
+    grouping_factors = list(
+        dict.fromkeys(g for rterm in formula.random for g in rterm.grouping_factors)
+    )
+    covariates: dict[str, None] = {}
+    random_terms = [term for rterm in formula.random for term in rterm.expr]
+    for term in [*formula.fixed.terms, *random_terms]:
+        if isinstance(term, VariableTerm | PowerTerm):
+            covariates[term.name] = None
+        elif isinstance(term, InteractionTerm):
+            covariates.update(dict.fromkeys(term.source_variables))
+    return [name for name in covariates if name not in grouping_factors], grouping_factors
+
+
 def mkDataTemplate(
-    formula: str,
+    formula: Formula | str,
     nlevs: dict[str, int] | None = None,
     balanced: bool = True,
 ) -> pd.DataFrame:
@@ -1187,19 +1241,22 @@ def mkDataTemplate(
 
     Parameters
     ----------
-    formula : str
+    formula : Formula or str
         Model formula with random effects (e.g., "y ~ x + (1|group)").
     nlevs : dict, optional
         Dictionary mapping grouping factor names to number of levels.
-        If not specified, uses 10 levels per factor.
+        Unlisted factors have 10 levels.
     balanced : bool, default True
-        If True, creates a balanced design. If False, creates an
-        unbalanced design with varying observations per group.
+        If True, creates one row for each combination of grouping-factor
+        levels. If False, creates twice as many rows as there are levels in
+        total; each level has at least one row and the remaining rows are
+        assigned to random levels.
 
     Returns
     -------
     pd.DataFrame
-        Template data frame with appropriate structure.
+        The response, then standard normal covariates, then grouping factors
+        with levels named ``<factor>1``, ``<factor>2``, and so on.
 
     Examples
     --------
@@ -1214,72 +1271,35 @@ def mkDataTemplate(
     >>> df.shape
     (50, 4)
     """
-    import re
+    parsed = _coerce_formula(formula)
+    covariates, grouping_factors = _template_variables(parsed)
+    level_counts = [(nlevs or {}).get(g, 10) for g in grouping_factors]
+    labels = [
+        np.array([f"{g}{i + 1}" for i in range(count)])
+        for g, count in zip(grouping_factors, level_counts, strict=True)
+    ]
+    n = int(np.prod(level_counts)) if balanced else 2 * sum(level_counts)
 
-    bar_pattern = r"\(([^|]+)\|([^)]+)\)"
-    matches = re.findall(bar_pattern, formula)
-
-    grouping_factors = [match[1].strip() for match in matches]
-
-    if nlevs is None:
-        nlevs = {g: 10 for g in grouping_factors}
-
-    lhs_rhs = formula.split("~")
-    response = lhs_rhs[0].strip()
-
-    rhs = lhs_rhs[1] if len(lhs_rhs) > 1 else ""
-    rhs_no_bars = re.sub(bar_pattern, "", rhs)
-    rhs_no_bars = re.sub(r"\s*\+\s*\+\s*", " + ", rhs_no_bars)
-    rhs_no_bars = rhs_no_bars.strip(" +")
-
-    fixed_vars = []
-    if rhs_no_bars:
-        terms = [t.strip() for t in rhs_no_bars.split("+")]
-        for term in terms:
-            if term and term != "1" and term != "0":
-                fixed_vars.append(term)
-
-    if balanced:
-        total_levels = 1
-        for g in grouping_factors:
-            total_levels *= nlevs.get(g, 10)
-        n = total_levels
-    else:
-        n = sum(nlevs.get(g, 10) for g in grouping_factors) * 2
-
-    data: dict[str, object] = {response: np.random.randn(n)}
-
-    for var in fixed_vars:
+    data: dict[str, object] = {parsed.response: np.random.randn(n)}
+    for var in covariates:
         data[var] = np.random.randn(n)
 
-    if balanced and len(grouping_factors) >= 2:
-        levels_list = [list(range(1, nlevs.get(g, 10) + 1)) for g in grouping_factors]
-        grids = np.meshgrid(*levels_list, indexing="ij")
-        for i, g in enumerate(grouping_factors):
-            data[g] = [f"{g}{v}" for v in grids[i].ravel()]
+    if balanced:
+        # One row for each combination of grouping-factor levels.
+        grids = np.meshgrid(*labels, indexing="ij")
+        for g, grid in zip(grouping_factors, grids, strict=True):
+            data[g] = grid.ravel()
     else:
-        for g in grouping_factors:
-            n_levels = nlevs.get(g, 10)
-            if balanced:
-                obs_per_level = max(1, n // n_levels)
-                levels = [f"{g}{i + 1}" for i in range(n_levels) for _ in range(obs_per_level)]
-                data[g] = levels[:n]
-            else:
-                obs_per_level_arr = np.random.randint(1, 5, n_levels)
-                levels = []
-                for i, count in enumerate(obs_per_level_arr.tolist()):
-                    levels.extend([f"{g}{i + 1}"] * count)
-                if len(levels) < n:
-                    levels.extend(levels[: n - len(levels)])
-                else:
-                    levels = levels[:n]
-                data[g] = levels
+        for g, levels in zip(grouping_factors, labels, strict=True):
+            # Every level gets one row; the remaining rows go to random levels.
+            extra = np.random.randint(len(levels), size=n - len(levels))
+            data[g] = levels[np.sort(np.concatenate([np.arange(len(levels)), extra]))]
 
     return pd.DataFrame(data)
 
 
 def mkParsTemplate(
-    formula: str,
+    formula: Formula | str,
     data: pd.DataFrame,
 ) -> dict[str, object]:
     """Generate a parameter structure template from formula and data.
@@ -1290,7 +1310,7 @@ def mkParsTemplate(
 
     Parameters
     ----------
-    formula : str
+    formula : Formula or str
         Model formula with random effects.
     data : pd.DataFrame
         Data frame containing the variables.
@@ -1300,7 +1320,11 @@ def mkParsTemplate(
     dict
         Dictionary with:
         - 'beta': dict of fixed effect names with None placeholders
-        - 'theta': list of theta parameter descriptions
+        - 'theta': one label per variance parameter, in theta order:
+          ``sd_<term>|<group>`` and ``cor_<term>_<term>|<group>`` for the
+          diagonal and off-diagonal relative Cholesky entries, or
+          ``sd|<group>`` and ``rho|<group>`` for compound-symmetry and AR(1)
+          scale and correlation
         - 'sigma': placeholder for residual SD
         - 'n_fixed': number of fixed effects
         - 'n_theta': number of variance parameters
@@ -1324,7 +1348,12 @@ def mkParsTemplate(
         terms = struct.term_names
         q = struct.n_terms
 
-        if struct.correlated:
+        if struct.cov_type in ("cs", "ar1"):
+            # A common relative scale, then one correlation for several terms.
+            theta_template.append(f"sd|{group}")
+            if q > 1:
+                theta_template.append(f"rho|{group}")
+        elif struct.correlated:
             for i in range(q):
                 for j in range(i + 1):
                     if i == j:
@@ -1345,7 +1374,7 @@ def mkParsTemplate(
 
 
 def mkMinimalData(
-    formula: str,
+    formula: Formula | str,
     n: int = 10,
 ) -> pd.DataFrame:
     """Create minimal test data from a formula.
@@ -1355,7 +1384,7 @@ def mkMinimalData(
 
     Parameters
     ----------
-    formula : str
+    formula : Formula or str
         Model formula with random effects.
     n : int, default 10
         Number of observations.
@@ -1363,7 +1392,8 @@ def mkMinimalData(
     Returns
     -------
     pd.DataFrame
-        Minimal data frame with required variables.
+        The response, then standard normal covariates in formula order, then
+        grouping factors with ``min(n, 5)`` levels assigned cyclically.
 
     Examples
     --------
@@ -1371,45 +1401,16 @@ def mkMinimalData(
     >>> list(df.columns)
     ['y', 'x', 'z', 'group']
     """
-    import re
+    parsed = _coerce_formula(formula)
+    covariates, grouping_factors = _template_variables(parsed)
 
-    lhs_rhs = formula.split("~")
-    response = lhs_rhs[0].strip()
-
-    bar_pattern = r"\(([^|]+)\|([^)]+)\)"
-    matches = re.findall(bar_pattern, formula)
-    grouping_factors = list(set(match[1].strip() for match in matches))
-
-    re_terms = set()
-    for terms_str, _ in matches:
-        for term in terms_str.split("+"):
-            term = term.strip()
-            if term and term != "1" and term != "0":
-                re_terms.add(term)
-
-    rhs = lhs_rhs[1] if len(lhs_rhs) > 1 else ""
-    rhs_no_bars = re.sub(bar_pattern, "", rhs)
-    rhs_no_bars = re.sub(r"\s*\+\s*\+\s*", " + ", rhs_no_bars)
-    rhs_no_bars = rhs_no_bars.strip(" +")
-
-    fixed_vars = set()
-    if rhs_no_bars:
-        for term in rhs_no_bars.split("+"):
-            term = term.strip()
-            if term and term != "1" and term != "0" and ":" not in term and "*" not in term:
-                fixed_vars.add(term)
-
-    all_numeric = fixed_vars | re_terms
-
-    data: dict[str, object] = {response: np.random.randn(n)}
-
-    for var in all_numeric:
+    data: dict[str, object] = {parsed.response: np.random.randn(n)}
+    for var in covariates:
         data[var] = np.random.randn(n)
 
+    n_levels = min(n, 5)
     for g in grouping_factors:
-        n_levels = min(n, 5)
-        levels = [f"{g}{i % n_levels + 1}" for i in range(n)]
-        data[g] = levels
+        data[g] = [f"{g}{i % n_levels + 1}" for i in range(n)]
 
     return pd.DataFrame(data)
 
@@ -1427,95 +1428,69 @@ def mkNewReTrms(
     Parameters
     ----------
     reTrms : ReTrms
-        Existing random effect terms from a fitted model.
+        Random effect terms from mkReTrms.
     newdata : pd.DataFrame
-        New data for which to create design matrices.
+        New data with the random-effect covariates and grouping factors.
 
     Returns
     -------
     ReTrms
-        New random effect terms for the new data.
+        Random effect terms for the new data. Columns of ``Zt`` keep the
+        coefficient order of ``reTrms``.
 
     Notes
     -----
-    If new data contains group levels not in the original data, the
-    corresponding rows in Z will be all zeros unless allow_new_levels
-    is handled by the caller.
+    Factor covariates are encoded with the original levels and contrasts.
+    Rows whose grouping-factor level is not in ``reTrms`` have no entries in
+    that term's columns.
 
     Examples
     --------
-    >>> # Fit a model and get ReTrms
     >>> reTrms = mkReTrms("y ~ x + (1|group)", train_data)
-    >>> # Create ReTrms for new data
     >>> new_reTrms = mkNewReTrms(reTrms, test_data)
     """
     from scipy import sparse
 
-    n_new = len(newdata)
-    total_re = sum(len(levels) * len(reTrms.cnms[g]) for g, levels in reTrms.flist.items())
+    formula, source = reTrms._formula, reTrms._matrices
+    if formula is None or source is None:
+        raise ValueError("reTrms must be created by mkReTrms")
 
-    Z_rows = []
-    Z_cols = []
-    Z_data = []
-
-    col_offset = 0
-    new_flist: dict[str, NDArray] = {}
-    new_nl: list[int] = []
-
-    for group_name in reTrms.flist:
-        original_levels = list(reTrms.flist[group_name])
-        term_names = reTrms.cnms[group_name]
-        n_terms = len(term_names)
-        n_levels = len(original_levels)
-
-        level_map = {lvl: i for i, lvl in enumerate(original_levels)}
-
-        new_flist[group_name] = np.array(original_levels)
-        new_nl.append(n_levels)
-
-        if group_name not in newdata.columns:
-            col_offset += n_levels * n_terms
-            continue
-
-        group_col = newdata[group_name].values
-
-        for row_idx, level in enumerate(group_col):
-            if level in level_map:
-                level_idx = level_map[level]
-                for t, term in enumerate(term_names):
-                    col_idx = col_offset + level_idx * n_terms + t
-                    if term == "(Intercept)" or term == "1":
-                        val = 1.0
-                    elif term in newdata.columns:
-                        val = float(newdata[term].iloc[row_idx])
-                    else:
-                        val = 1.0
-
-                    Z_rows.append(row_idx)
-                    Z_cols.append(col_idx)
-                    Z_data.append(val)
-
-        col_offset += n_levels * n_terms
-
-    if Z_rows:
-        Z = sparse.csr_matrix(
-            (Z_data, (Z_rows, Z_cols)),
-            shape=(n_new, total_re),
-            dtype=np.float64,
+    Z, structures = build_random_matrix(
+        formula, newdata, contrasts=source.contrasts, category_levels=source.category_levels
+    )
+    Z = Z.tocoo()
+    columns = np.full(Z.nnz, -1, dtype=np.int64)
+    new_offset = source_offset = 0
+    for fitted, new in zip(source.random_structures, structures, strict=True):
+        if new.term_names != fitted.term_names:
+            raise ValueError(
+                f"newdata produced different random-effect columns for '{fitted.grouping_factor}'"
+            )
+        new_levels = sorted(new.level_map, key=new.level_map.__getitem__)
+        source_levels = np.array([fitted.level_map.get(level, -1) for level in new_levels])
+        in_block = (Z.col >= new_offset) & (Z.col < new_offset + new.n_levels * new.n_terms)
+        level, term = np.divmod(Z.col[in_block] - new_offset, new.n_terms)
+        target = source_levels[level]
+        columns[in_block] = np.where(
+            target >= 0, source_offset + target * fitted.n_terms + term, -1
         )
-    else:
-        Z = sparse.csr_matrix((n_new, total_re), dtype=np.float64)
+        new_offset += new.n_levels * new.n_terms
+        source_offset += fitted.n_levels * fitted.n_terms
 
-    Zt = Z.T.tocsc()
-
-    return ReTrms(
+    known = columns >= 0
+    Zt = sparse.csc_matrix(
+        (Z.data[known], (columns[known], Z.row[known])),
+        shape=(source.n_random, Z.shape[0]),
+    )
+    return replace(
+        reTrms,
         Zt=Zt,
         theta=reTrms.theta.copy(),
         Lind=reTrms.Lind.copy(),
         Gp=list(reTrms.Gp),
-        flist=new_flist,
+        flist=dict(reTrms.flist),
         cnms=dict(reTrms.cnms),
-        nl=new_nl,
+        nl=list(reTrms.nl),
     )
 
 

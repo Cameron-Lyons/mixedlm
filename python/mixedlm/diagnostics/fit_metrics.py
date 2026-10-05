@@ -6,6 +6,8 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
+from mixedlm.models.shared_utils import dense_quadratic_form_diagonal
+
 
 @dataclass(frozen=True)
 class R2NakagawaResult:
@@ -85,7 +87,8 @@ def r2_nakagawa(model: Any, approximation: str = "lognormal") -> R2NakagawaResul
         Link-scale residual variance approximation for generalized models.
         Lognormal applies to log links, while binomial models use their
         link-specific theoretical variance. Other links fall back to the
-        delta method. Linear and nonlinear Gaussian models use ``sigma**2``.
+        delta method. Linear and nonlinear Gaussian models average the
+        observation-specific residual variance ``sigma**2 / weights``.
 
     Returns
     -------
@@ -160,7 +163,7 @@ def _linear_variance_components(model: Any) -> _VarianceComponents:
     return _VarianceComponents(
         fixed=fixed,
         random=random,
-        residual=float(model.sigma**2),
+        residual=_gaussian_residual_variance(model.sigma, model.matrices.weights),
         random_by_group=by_group,
         approximation="gaussian",
     )
@@ -193,6 +196,7 @@ def _nonlinear_variance_components(model: Any) -> _VarianceComponents:
     from mixedlm.estimation.nlmm import _build_psi_matrix
 
     fixed_predictions = np.asarray(model.model.predict(model.phi, model.x), dtype=np.float64)
+    fixed_predictions = fixed_predictions + model.offset(copy=False)
     fixed = _sample_variance(fixed_predictions)
     n_random = len(model.random_params)
     if n_random:
@@ -207,7 +211,7 @@ def _nonlinear_variance_components(model: Any) -> _VarianceComponents:
     return _VarianceComponents(
         fixed=fixed,
         random=random,
-        residual=float(model.sigma**2),
+        residual=_gaussian_residual_variance(model.sigma, model.weights(copy=False)),
         random_by_group=by_group,
         approximation="gaussian-delta",
     )
@@ -229,7 +233,7 @@ def _linear_predictor_variances(
             [np.asarray(block[:, term::n_terms].sum(axis=1)).reshape(-1) for term in range(n_terms)]
         )
         covariance_array = np.asarray(covariance, dtype=np.float64)
-        row_variance = np.sum((term_design @ covariance_array) * term_design, axis=1)
+        row_variance = dense_quadratic_form_diagonal(term_design, covariance_array)
         component = _nonnegative_mean(row_variance)
         by_group[structure.grouping_factor] = (
             by_group.get(structure.grouping_factor, 0.0) + component
@@ -283,16 +287,33 @@ def _distribution_specific_variance(
         if isinstance(family.link, CloglogLink):
             return dispersion * np.pi**2 / 6.0, "theoretical"
 
+    if approximation == "theoretical":
+        raise ValueError("The theoretical approximation is only available for binomial links")
+
+    if (
+        isinstance(family.link, LogLink)
+        and type(family.link).deriv is LogLink.deriv
+        and type(family.link).link is LogLink.link
+        and type(family.link).inverse is LogLink.inverse
+    ):
+        log_relative = _log_relative_variance(family, mu, weights)
+        if log_relative is not None:
+            if approximation == "lognormal":
+                return _nonnegative_mean(np.logaddexp(0.0, log_relative)), "lognormal"
+            with np.errstate(over="ignore"):
+                values = np.exp(log_relative)
+            if np.any(~np.isfinite(values)):
+                raise ValueError("Delta-method residual variance is not finite")
+            return _nonnegative_mean(values), "delta"
+
     conditional_variance = np.asarray(family.variance(mu), dtype=np.float64) / weights
     if np.any(~np.isfinite(conditional_variance)) or np.any(conditional_variance < 0.0):
         raise ValueError("Family variance must be finite and nonnegative")
 
-    if approximation == "theoretical":
-        raise ValueError("The theoretical approximation is only available for binomial links")
-
     if approximation == "lognormal" and isinstance(family.link, LogLink):
-        mu_squared = np.maximum(mu**2, np.finfo(np.float64).tiny)
-        values = np.log1p(conditional_variance / mu_squared)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            log_relative = np.log(conditional_variance) - 2 * np.log(mu)
+        values = np.logaddexp(0.0, log_relative)
         return _nonnegative_mean(values), "lognormal"
 
     derivative = np.asarray(family.link.deriv(mu), dtype=np.float64)
@@ -302,17 +323,72 @@ def _distribution_specific_variance(
     return _nonnegative_mean(values), "delta"
 
 
+def _log_relative_variance(
+    family: Any, mu: NDArray[np.float64], weights: NDArray[np.float64]
+) -> NDArray[np.float64] | None:
+    """Evaluate log(V(mu) / (weight * mu²)) without forming large powers."""
+    from mixedlm.families import Gamma, Gaussian, InverseGaussian, NegativeBinomial, Poisson
+    from mixedlm.families.custom import QuasiFamily
+
+    base_family = getattr(family, "base_family", family)
+    if family is not base_family and (
+        not isinstance(family, QuasiFamily) or type(family).variance is not QuasiFamily.variance
+    ):
+        return None
+    variance_method = type(base_family).variance
+    if variance_method not in (
+        Gaussian.variance,
+        Poisson.variance,
+        Gamma.variance,
+        InverseGaussian.variance,
+        NegativeBinomial.variance,
+    ):
+        # Custom variance overrides retain their own mean-variance contract.
+        return None
+    if np.any(mu <= 0):
+        raise ValueError("Log-link fitted means must be positive")
+    log_mu = np.log(mu)
+    if variance_method is Gaussian.variance:
+        values = -2 * log_mu
+    elif variance_method is Poisson.variance:
+        values = -log_mu
+    elif variance_method is Gamma.variance:
+        values = np.zeros_like(mu)
+    elif variance_method is InverseGaussian.variance:
+        values = log_mu
+    else:
+        values = np.logaddexp(-log_mu, -np.log(base_family.theta))
+    values -= np.log(weights)
+    if family is not base_family:
+        values += np.log(family.phi)
+    return values
+
+
 def _sample_variance(values: NDArray[np.float64]) -> float:
-    finite = values[np.isfinite(values)]
-    if len(finite) <= 1:
+    if np.any(~np.isfinite(values)):
+        raise ValueError("Fixed predictions must be finite")
+    if len(values) <= 1:
         return 0.0
-    return max(float(np.var(finite, ddof=1)), 0.0)
+    # Center first so a large common baseline does not erase small differences.
+    return max(float(np.var(values - values[0], ddof=1)), 0.0)
 
 
 def _nonnegative_mean(values: NDArray[np.float64]) -> float:
     if np.any(~np.isfinite(values)):
         raise ValueError("Variance contributions must be finite")
     return max(float(np.mean(values)), 0.0) if len(values) else 0.0
+
+
+def _gaussian_residual_variance(sigma: float, weights: NDArray[np.float64]) -> float:
+    weights = np.asarray(weights, dtype=np.float64)
+    if weights.ndim != 1 or np.any(~np.isfinite(weights)) or np.any(weights <= 0):
+        raise ValueError("Model weights must be finite and positive")
+    if not np.isfinite(sigma) or sigma < 0:
+        raise ValueError("Residual scale must be finite and nonnegative")
+    result = float(sigma**2 * np.mean(1.0 / weights))
+    if not np.isfinite(result):
+        raise ValueError("Residual variance exceeds the floating-point range")
+    return result
 
 
 def _safe_ratio(numerator: float, denominator: float) -> float:

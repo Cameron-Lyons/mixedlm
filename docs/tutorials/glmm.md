@@ -73,12 +73,14 @@ odds_ratios = {k: np.exp(v) for k, v in model.fixef().items()}
 
 ### Poisson GLMM
 
-For count data:
+For count data, such as the number of ticks on red grouse chicks, grouped by brood:
 
 ```python
-model = mlm.glmer(
-    "count ~ treatment + (1 | subject)",
-    data,
+grouseticks = mlm.load_grouseticks()
+
+pois_model = mlm.glmer(
+    "TICKS ~ YEAR + cHEIGHT + (1 | BROOD)",
+    grouseticks,
     family=mlm.families.Poisson()
 )
 ```
@@ -86,8 +88,7 @@ model = mlm.glmer(
 Coefficients are on the log scale. Exponentiate for rate ratios:
 
 ```python
-import numpy as np
-rate_ratios = {k: np.exp(v) for k, v in model.fixef().items()}
+rate_ratios = {k: np.exp(v) for k, v in pois_model.fixef().items()}
 ```
 
 ### Negative Binomial GLMM
@@ -95,26 +96,20 @@ rate_ratios = {k: np.exp(v) for k, v in model.fixef().items()}
 For overdispersed count data:
 
 ```python
-# With known dispersion parameter
-model = mlm.glmer(
-    "count ~ treatment + (1 | subject)",
-    data,
+# With a known dispersion parameter
+nb_model = mlm.glmer(
+    "TICKS ~ YEAR + cHEIGHT + (1 | BROOD)",
+    grouseticks,
     family=mlm.families.NegativeBinomial(theta=2.0)
 )
-
-# Or use glmer.nb to estimate theta
-model = mlm.glmer_nb(
-    "count ~ treatment + (1 | subject)",
-    data
-)
 ```
+
+`mlm.glmer_nb(formula, data, theta=2.0)` is shorthand for the same fit. Unlike
+lme4's `glmer.nb()`, it keeps `theta` fixed (default 1.0) rather than estimating it.
 
 ### Checking for Overdispersion
 
 ```python
-# Fit Poisson model
-pois_model = mlm.glmer("count ~ x + (1 | g)", data, family=mlm.families.Poisson())
-
 # Weighted Pearson chi-squared check
 dispersion = mlm.diagnostics.check_overdispersion(pois_model)
 print(dispersion)
@@ -122,7 +117,7 @@ print(dispersion)
 # Ratios above 1 indicate extra variation. If the result is significant,
 # consider a negative-binomial model or a missing model component.
 if dispersion.is_overdispersed:
-    nb_model = mlm.glmer_nb("count ~ x + (1 | g)", data)
+    print("Consider a negative-binomial model")
 ```
 
 The Pearson check is an approximation conditional on the fitted random effects.
@@ -153,8 +148,8 @@ The default method (`nAGQ=1`) uses Laplace approximation:
 
 ```python
 model = mlm.glmer(
-    "y ~ x + (1 | g)",
-    data,
+    "incidence / size ~ period + (1 | herd)",
+    cbpp,
     family=mlm.families.Binomial(),
     nAGQ=1  # default
 )
@@ -176,9 +171,9 @@ covariance optimization.
 For more accurate estimates, use adaptive quadrature:
 
 ```python
-model = mlm.glmer(
-    "y ~ x + (1 | g)",
-    data,
+agq_model = mlm.glmer(
+    "incidence / size ~ period + (1 | herd)",
+    cbpp,
     family=mlm.families.Binomial(),
     nAGQ=10  # 10 quadrature points
 )
@@ -218,16 +213,13 @@ families.InverseGaussian()
 
 ### Custom Families
 
-Create custom families for special cases:
+Wrap a family to scale its variance by a dispersion factor, or subclass
+`mlm.families.CustomFamily` for a new distribution (see the
+[Families API](../api/families.md)):
 
 ```python
-from mixedlm.families import CustomFamily
-
 # Quasi-binomial for overdispersed proportions
-quasi_binom = families.QuasiFamily(
-    variance_func="mu*(1-mu)",
-    link="logit"
-)
+quasi_binom = families.QuasiFamily(families.Binomial(), phi=1.5)
 ```
 
 ## Random Effects in GLMMs
@@ -237,14 +229,16 @@ quasi_binom = families.QuasiFamily(
 Most common for GLMMs:
 
 ```python
-model = mlm.glmer("y ~ x + (1 | group)", data, family=mlm.families.Binomial())
+model = mlm.glmer(
+    "incidence / size ~ period + (1 | herd)", cbpp, family=mlm.families.Binomial()
+)
 ```
 
 ### Random Slopes
 
 Random slopes in GLMMs can be difficult to estimate:
 
-```python
+```py
 # May have convergence issues
 model = mlm.glmer(
     "y ~ time + (time | subject)",
@@ -260,7 +254,7 @@ model = mlm.glmer(
 
 If the full model doesn't converge:
 
-```python
+```py
 model = mlm.glmer(
     "y ~ time + (time || subject)",
     data,
@@ -273,9 +267,9 @@ model = mlm.glmer(
 Use likelihood profiles when the shape of the likelihood matters:
 
 ```python
-intervals = model.confint(parm="x", method="profile")
-profiles = model.profile(which="x", n_points=20)
-profiles["x"].plot()
+intervals = model.confint(parm="period.1", method="profile")
+profiles = model.profile(which="period.1", n_points=20)
+profiles["period.1"].plot()
 ```
 
 Profiling re-optimizes the other coefficients and covariance parameters and
@@ -293,8 +287,10 @@ The default `model.confint()` continues to provide faster Wald intervals.
 
 ```python
 # Nested models
-m1 = mlm.glmer("y ~ x + (1 | g)", data, family=mlm.families.Binomial())
-m2 = mlm.glmer("y ~ x + z + (1 | g)", data, family=mlm.families.Binomial())
+m1 = mlm.glmer("incidence / size ~ 1 + (1 | herd)", cbpp, family=mlm.families.Binomial())
+m2 = mlm.glmer(
+    "incidence / size ~ period + (1 | herd)", cbpp, family=mlm.families.Binomial()
+)
 
 # Compare
 mlm.anova(m1, m2)
@@ -303,7 +299,7 @@ mlm.anova(m1, m2)
 ### Single Term Deletions
 
 ```python
-model.drop1(data)
+model.drop1(cbpp)
 ```
 
 ## Predictions
@@ -326,10 +322,10 @@ model.predict(type="response")
 
 ```python
 # Conditional: includes random effects for known groups
-model.predict(newdata=data)
+model.predict(newdata=cbpp)
 
 # Marginal: random effects set to zero
-model.predict(newdata=data, re_form="~0")
+model.predict(newdata=cbpp, re_form="~0")
 ```
 
 ## Convergence Issues
@@ -341,19 +337,19 @@ GLMMs are more prone to convergence issues than LMMs.
 1. **Start simple**: Random intercepts before random slopes
 2. **Use uncorrelated random effects**: `||` instead of `|`
 3. **Increase iterations**:
-   ```python
+   ```py
    control = mlm.GlmerControl(maxiter=2000, pirls_maxiter=100)
    model = mlm.glmer(..., control=control)
    ```
    `maxiter` controls the outer optimizer; `pirls_maxiter` controls the inner
    solve. Inspect `model.pirls_converged` to distinguish an inner failure.
 4. **Try different optimizers**:
-   ```python
+   ```py
    model.allFit(data)
    ```
 5. **Scale predictors**: Center and scale continuous variables
 6. **EM-REML initialization**: Use EM-REML to find better starting values:
-   ```python
+   ```py
    control = mlm.GlmerControl(em_init=True, em_maxiter=50)
    model = mlm.glmer(..., control=control)
    ```
@@ -405,5 +401,5 @@ print(ci)
 
 # Check convergence
 conv = mlm.checkConv(model)
-print(f"\nConverged: {conv.ok}")
+print(f"\nConverged: {conv.converged}")
 ```

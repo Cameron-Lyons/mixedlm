@@ -7,9 +7,7 @@ from mixedlm.matrices.design import ModelMatrices, RandomEffectStructure
 from numpy.testing import assert_allclose
 from scipy import sparse
 
-from tests.test_lmm_gradient_contractions import observation_gradient
-from tests.test_lmm_prepared_design import native_arguments
-from tests.test_reml_profiled_deviance import _direct_profiled_likelihood
+from tests._lmm_oracles import direct_profiled_likelihood, native_arguments, observation_gradient
 
 
 def shared_structure_problem(widths, correlated):
@@ -65,7 +63,7 @@ def test_three_structures_preserve_fill_in_likelihood_estimates_and_gradient(
 ):
     matrices, theta = shared_structure_problem(widths, correlated)
     response = _rust.LmmDesign(**native_arguments(matrices)).with_response(matrices.y)
-    expected = _direct_profiled_likelihood(theta, matrices, reml)
+    expected = direct_profiled_likelihood(theta, matrices, reml)
     actual = response.evaluate(theta, reml)
     for value, field in zip(actual[:4], ["deviance", "beta", "sigma", "u"], strict=True):
         assert_allclose(value, expected[field], rtol=2e-11, atol=2e-10)

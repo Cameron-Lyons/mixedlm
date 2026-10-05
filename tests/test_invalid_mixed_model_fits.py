@@ -19,6 +19,9 @@ from mixedlm.models import modular
 FORMULA = "y ~ x + (1 | g)"
 MODES = ["linear", "laplace_python", "laplace_native", "agq_python", "agq_native"]
 
+# Four groups keep these invalid-fit scenarios small; the level-count advice is not under test.
+pytestmark = pytest.mark.filterwarnings("ignore:Grouping factor 'g' has only 4 levels:UserWarning")
+
 
 @pytest.fixture
 def data():
@@ -167,7 +170,7 @@ def test_invalid_final_theta_is_rejected_before_backend(data, theta, mode):
         optimizer.optimize(start=np.ones(1))
 
 
-@pytest.mark.parametrize("method", ["optimize", "extract", "modular"])
+@pytest.mark.parametrize("method", ["optimize", "final_evaluation", "modular"])
 def test_failed_linear_factorization_does_not_fabricate_estimates(data, method):
     parsed = modular.lFormula(FORMULA, data)
     devfun = modular.mkLmerDevfun(parsed)
@@ -178,8 +181,8 @@ def test_failed_linear_factorization_does_not_fabricate_estimates(data, method):
     ):
         if method == "optimize":
             final_fit(optimizer, "linear")
-        elif method == "extract":
-            optimizer._extract_estimates(np.ones(1))
+        elif method == "final_evaluation":
+            optimizer._final_evaluation(np.ones(1))
         else:
             modular.mkLmerMod(devfun, modular.OptimizeResult(np.ones(1), 1e10, True, 0, ""))
 
@@ -232,7 +235,7 @@ def test_modular_glmm_reports_final_quadrature_deviance(data, n_agq):
     parsed = modular.glFormula(FORMULA, data, family=Poisson())
     devfun = modular.mkGlmerDevfun(parsed, nAGQ=n_agq)
     theta = np.ones(1)
-    expected = laplace.adaptive_gh_deviance_fast(theta, parsed.matrices, parsed.family, nAGQ=n_agq)
+    expected = laplace.glmm_deviance_with_status(theta, parsed.matrices, parsed.family, nAGQ=n_agq)
     actual = modular.mkGlmerMod(
         devfun, modular.OptimizeResult(theta, -999.0, True, 0, ""), nAGQ=n_agq
     )
@@ -243,7 +246,12 @@ def test_modular_glmm_reports_final_quadrature_deviance(data, n_agq):
 
 @pytest.mark.parametrize("kind", ["linear", "generalized"])
 def test_invalid_refits_raise_and_bootstrap_counts_failures(data, kind):
-    result = lmer(FORMULA, data) if kind == "linear" else glmer(FORMULA, data, family=Poisson())
+    if kind == "linear":
+        result = lmer(FORMULA, data)
+    else:
+        # These counts carry no extra-Poisson group variation.
+        with pytest.warns(UserWarning, match="singular"):
+            result = glmer(FORMULA, data, family=Poisson())
     target = (
         patch.object(reml.LMMOptimizer, "_evaluate_core", return_value=None)
         if kind == "linear"

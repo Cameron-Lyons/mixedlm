@@ -1,6 +1,15 @@
 # Utilities
 
-This page documents utility functions for working with mixed models.
+This page documents utility functions for working with mixed models. The examples
+use a sleepstudy fit:
+
+```python
+import mixedlm as mlm
+import numpy as np
+
+data = mlm.load_sleepstudy()
+model = mlm.lmer("Reaction ~ Days + (Days | Subject)", data)
+```
 
 ## lme4 Compatibility
 
@@ -11,8 +20,6 @@ Functions for compatibility with R's lme4 package.
 Extract residual standard deviation.
 
 ```python
-import mixedlm as mlm
-
 s = mlm.sigma(model)
 ```
 
@@ -78,23 +85,28 @@ X = mlm.getME(model, "X")
 - `"theta"`: Variance parameters
 - `"Lambda"`: Relative covariance factor
 - `"beta"`: Fixed effects
-- `"b"`: Random effects (spherical)
-- `"u"`: Random effects (conditional modes)
+- `"b"`: Conditional modes of the random effects
+- `"u"`: Spherical random effects, `b = Lambda @ u`
 
 ### fortify
 
-Add model diagnostics to data.
+Add fitted values and residuals to data.
 
 ```python
 augmented = mlm.fortify(model, data)
 ```
 
-**Returns:** DataFrame with added columns:
+**Returns:** A copy of the data with added columns:
 
-- `.fitted`: Fitted values
-- `.resid`: Residuals
-- `.hat`: Leverage values
-- `.cooksd`: Cook's distance
+- `.fitted`: Fitted values on the response scale. With `include_re=False`, these
+  are population-level predictions from the fixed effects and offset.
+- `.resid`: Residuals conditional on the random effects
+- `.fixed`: Fixed-effects linear predictor, including the offset
+- `.mu`: Conditional response-scale fitted values (GLMMs only)
+
+`data` can be the fitted observations or the original data including rows
+dropped for missing values; dropped rows receive NaN. Data of any other length
+raises `ValueError`. Without `data`, the stored model frame is used.
 
 ### devcomp
 
@@ -102,16 +114,29 @@ Get deviance components.
 
 ```python
 dc = mlm.devcomp(model)
+dc.cmp["pwrss"]  # Penalized weighted residual sum of squares
 ```
 
-**Returns:** DevComp object with deviance breakdown
+**Returns:** `DevComp` with the lme4 components, the same values as
+`model.getME("devcomp")`:
+
+- `cmp`: `ldL2` and `ldRX2` (log determinants of the random- and fixed-effect
+  factors), `wrss` (prior-weighted residual sum of squares, or the Pearson sum of
+  squares for GLMMs), `ussq` (squared length of the spherical random effects),
+  `pwrss` (`wrss + ussq`), `drsum` (GLMM deviance residual sum), `REML` (REML fits),
+  `dev` (ML fits), and `sigmaML` and `sigmaREML` (LMMs). Components a model does
+  not define are NaN.
+- `dims`: `n`, `p`, `q`, `nmp`, `nth`, `REML`, `useSc`, `nAGQ`, `q0`, `q1`, `qrx`,
+  and `ngrps`, the number of grouping factors.
+
+Nonlinear models raise `TypeError`.
 
 ### lmList
 
 Fit separate linear models for each group.
 
 ```python
-lm_dict = mlm.lmList("y ~ x | group", data)
+lm_dict = mlm.lmList("Reaction ~ Days | Subject", data)
 ```
 
 This uses the built-in formula encoder and NumPy least squares, including
@@ -126,10 +151,29 @@ an optional pooled fit
 Check if random effects are nested.
 
 ```python
-nested = mlm.isNested(data['classroom'], data['school'])
+pastes = mlm.load_pastes()
+nested = mlm.isNested(pastes["sample"], pastes["batch"])
 ```
 
 **Returns:** Boolean indicating if first factor is nested in second
+
+### dummy
+
+Build a coded matrix for one categorical variable.
+
+```python
+codes = mlm.dummy(["b", "a", "c", "a"], base="b")
+```
+
+Pandas categoricals keep their category order; other inputs use sorted unique
+values as levels. `contrasts` accepts `"treatment"` (the default), `"sum"`,
+`"helmert"`, and `"poly"`, matching the `contr_*` functions in
+`mixedlm.utils.contrasts`. `base` names the treatment-coding reference level or
+gives its index; negative indices count from the end, and unknown levels or
+indices raise `ValueError`.
+
+**Returns:** Array with one row per observation and one column per non-reference
+level.
 
 ## Variance Transformations
 
@@ -140,8 +184,6 @@ Functions for converting between variance parameterizations.
 Convert standard deviations and correlations to covariance matrix.
 
 ```python
-import numpy as np
-
 sd = np.array([2.0, 1.5])
 corr = np.array([[1.0, 0.3], [0.3, 1.0]])
 cov = mlm.sdcor2cov(sd, corr)
@@ -176,9 +218,9 @@ compound-symmetry, and AR(1) random effects.
 
 ```python
 components = mlm.vcconv(
-    result.theta,
-    result.matrices.random_structures,
-    sigma=result.sigma,  # Use 1.0 for a GLMM.
+    model.theta,
+    model.matrices.random_structures,
+    sigma=model.sigma,  # Use 1.0 for a GLMM.
     to="varcov",
 )
 ```
@@ -194,6 +236,59 @@ Covariance and correlation lists use
 upper-triangular row order: `(0, 1), (0, 2), ..., (1, 2), ...`. Independent terms
 have empty off-diagonal lists. Returning `theta` preserves the fitted parameter
 layout and does not apply `sigma`.
+
+## Sparse Cholesky
+
+The native `SparseCholeskySymbolic` class reuses symbolic analysis when a
+positive definite matrix changes values while keeping its CSC sparsity pattern.
+It uses approximate minimum degree (`ordering="amd"`) to reduce factor fill.
+Choose `ordering="natural"` to retain the original variable order during
+factorization. Solutions always follow the original row order.
+
+```python
+import scipy.sparse as sp
+
+from mixedlm import SparseCholeskySymbolic
+
+# A is a square scipy.sparse CSC matrix; rhs has shape (A.shape[0], n_rhs).
+A = sp.csc_matrix(np.array([[4.0, 1.0, 0.0], [1.0, 3.0, 1.0], [0.0, 1.0, 2.0]]))
+rhs = np.ones((3, 2))
+
+symbolic = SparseCholeskySymbolic(
+    A.indices.astype("int64"), A.indptr.astype("int64"), A.shape[0],
+    ordering="amd",
+)
+numeric = symbolic.factor(A.data.astype("float64"))
+solution = numeric.solve(rhs)
+logdet = numeric.logdet()
+factor_entries = symbolic.factor_nonzeros()  # Includes diagonal and fill.
+```
+
+The matrix's lower triangle defines the symmetric system. Full symmetric
+matrices and stored lower triangles are both accepted, including valid CSC
+columns with unsorted or duplicate entries. Numeric factorization reports a
+`ValueError` when the matrix is not positive definite.
+
+Analysis, factorization, solves, and determinants release the GIL, so factors
+can be shared across threads. Inputs are copied first; later changes to the
+caller's arrays do not affect work in progress. `solve` accepts strided
+right-hand sides and returns a new C-contiguous `float64` array.
+
+The one-shot `mixedlm._rust.sparse_cholesky_solve()` and
+`sparse_cholesky_logdet()` functions accept the same keyword-only `ordering`.
+`"natural"` skips AMD analysis, which helps for banded or block systems that are
+already well ordered:
+
+```python
+from mixedlm._rust import sparse_cholesky_logdet, sparse_cholesky_solve
+
+parts = (A.data, A.indices.astype("int64"), A.indptr.astype("int64"), A.shape)
+solution = sparse_cholesky_solve(*parts, rhs, ordering="natural")
+logdet = sparse_cholesky_logdet(*parts, ordering="natural")
+```
+
+`pytest tests/test_benchmark.py -k sparse_hub_ordering --benchmark-only` compares
+both orderings on a hub system whose fill depends on the ordering.
 
 ## EM-REML Initialization
 
@@ -240,13 +335,33 @@ Simulate responses before fitting, using the same variance-parameter ordering
 and covariance structures as the model optimizers.
 
 ```python
-formula = mlm.set_cov_type("y ~ x + (x | g)", "cs")
+formula = mlm.set_cov_type("Reaction ~ Days + (Days | Subject)", "cs")
 simulated = mlm.simulate_formula(
     formula,
     data,
-    beta={"(Intercept)": 1.0, "x": 0.5},
+    beta={"(Intercept)": 250.0, "Days": 10.0},
     theta=[0.8, 0.25],
     seed=42,
+)
+```
+
+The data needs the predictor and grouping columns; the response column may be
+absent. `family` accepts a `Family` instance or a name: `"gaussian"` (the
+default), `"binomial"`, `"poisson"`, `"gamma"`, or `"inverse_gaussian"`, with R
+spellings such as `"Gamma"` also accepted. Unknown names raise `ValueError`.
+`sigma` is the Gaussian residual standard deviation and the gamma and inverse
+Gaussian dispersion. Grouped `successes / trials` formulas draw success counts
+using the trials column. `quickSimulate()` accepts the same arguments in a
+shorter form:
+
+```python
+counts = mlm.quickSimulate(
+    "count ~ Days + (1 | Subject)",
+    data[["Days", "Subject"]],
+    beta={"(Intercept)": 1.0, "Days": 0.1},
+    theta=[0.5],
+    family="poisson",
+    seed=1,
 )
 ```
 
@@ -282,11 +397,6 @@ mlm.is_mixed_formula("y ~ x")            # False
 ### Extracting Model Information
 
 ```python
-import mixedlm as mlm
-
-data = mlm.load_sleepstudy()
-model = mlm.lmer("Reaction ~ Days + (Days | Subject)", data)
-
 # Residual SD
 print(f"Sigma: {mlm.sigma(model)}")
 
@@ -315,17 +425,15 @@ Lambda = mlm.getME(model, "Lambda")
 ### Adding Diagnostics to Data
 
 ```python
-# Fortify adds residuals, fitted values, etc.
+# Fortify adds fitted values and residuals
 augmented = mlm.fortify(model, data)
 print(augmented.columns.tolist())
-# [..., '.fitted', '.resid', '.hat', '.cooksd', ...]
+# ['Reaction', 'Days', 'Subject', '.fitted', '.resid', '.fixed']
 ```
 
 ### Variance Conversions
 
 ```python
-import numpy as np
-
 # Standard deviations and correlation
 sd = np.array([2.0, 1.5])
 corr = np.array([[1.0, 0.3], [0.3, 1.0]])
@@ -373,15 +481,15 @@ print(subject_fit["residuals"])
 ### Checking Nesting
 
 ```python
-# Check if group2 is nested within group1
-nested = mlm.isNested(data['classroom'], data['school'])
-print(f"Classrooms nested in schools: {nested}")
+# Check whether samples are nested within batches
+nested = mlm.isNested(pastes["sample"], pastes["batch"])
+print(f"Samples nested in batches: {nested}")
 ```
 
 ### Deviance Components
 
 ```python
 dc = mlm.devcomp(model)
-print(f"Deviance: {dc.deviance}")
-print(f"REML: {dc.REML}")
+print(f"REML criterion: {dc.cmp['REML']}")
+print(f"Observations: {dc.dims['n']}")
 ```

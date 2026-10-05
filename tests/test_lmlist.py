@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import pytest
-from mixedlm import lmList
+from mixedlm import lmList, load_sleepstudy
 
 
 @pytest.fixture
@@ -103,3 +103,25 @@ def test_missing_formula_values_keep_group_rows_aligned(grouped_data: pd.DataFra
     assert result["fits"]["G0"]["n"] == 17
     assert result["fits"]["G1"]["n"] == 18
     assert result["pooled"]["n"] == len(grouped_data) - 1
+
+
+@pytest.mark.parametrize("pool", [False, True])
+def test_sleepstudy_fits_match_per_subject_least_squares(pool: bool) -> None:
+    data = load_sleepstudy()
+    result = lmList("Reaction ~ Days", data, group="Subject", pool=pool)
+    expected = {
+        subject: np.polyfit(rows["Days"], rows["Reaction"], 1)[::-1]
+        for subject, rows in data.groupby("Subject")
+    }
+
+    assert set(result["fits"]) == set(expected)
+    for subject, coefficients in expected.items():
+        np.testing.assert_allclose(result["fits"][subject]["coef"], coefficients, rtol=1e-10)
+        np.testing.assert_allclose(
+            result["coef"].loc[subject, ["(Intercept)", "Days"]], coefficients, rtol=1e-10
+        )
+    if pool:
+        overall = np.polyfit(data["Days"], data["Reaction"], 1)[::-1]
+        np.testing.assert_allclose(result["pooled"]["coef"], overall, rtol=1e-10)
+    else:
+        assert "pooled" not in result

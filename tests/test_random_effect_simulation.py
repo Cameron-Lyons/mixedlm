@@ -2,16 +2,9 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-from scipy import sparse
+from mixedlm._rust import simulate_re_batch
 
-try:
-    from mixedlm._rust import compute_zu, simulate_re_batch
-
-    _HAS_RUST = True
-except ImportError:
-    _HAS_RUST = False
-
-pytestmark = pytest.mark.skipif(not _HAS_RUST, reason="Rust extension not available")
+pytestmark = pytest.mark.installed_wheel
 
 
 class TestRandomEffectSimulationValidation:
@@ -176,106 +169,3 @@ def test_python_sampler_rejects_invalid_theta_before_consuming_random_stream(str
     np.testing.assert_array_equal(
         actual_stream.standard_normal(5), reference_stream.standard_normal(5)
     )
-
-
-@pytest.mark.parametrize(
-    "data,indices,indptr,shape,u,n_obs,message",
-    [
-        ([1.0], [0], [0, 1], (2, 1), [1.0], 1, "n_obs must equal"),
-        ([1.0], [0], [0, 1], (2, 1), [], 2, "u must contain exactly"),
-        ([1.0], [0], [0, 1], (2, 1), [1.0, 2.0], 2, "u must contain exactly"),
-        ([1.0], [-1], [0, 1], (2, 1), [1.0], 2, "indices"),
-        ([1.0], [0], [0, -1], (2, 1), [1.0], 2, "indptr"),
-        ([1.0], [2], [0, 1], (2, 1), [1.0], 2, "row index"),
-        ([1.0], [0], [0], (2, 1), [1.0], 2, "indptr"),
-        ([1.0], [0], [0, 2], (2, 1), [1.0], 2, "indptr"),
-        ([1.0], [0], [1, 1], (2, 1), [1.0], 2, "indptr"),
-        ([1.0], [], [0, 0], (2, 1), [1.0], 2, "data has length"),
-        ([1.0], [0], [0, 1, 0, 1], (2, 3), [1.0] * 3, 2, "invalid range"),
-    ],
-)
-def test_sparse_random_product_rejects_invalid_buffers(
-    data, indices, indptr, shape, u, n_obs, message
-):
-    with pytest.raises(ValueError, match=message):
-        compute_zu(u, data, indices, indptr, shape, n_obs)
-
-
-def test_sparse_random_product_handles_unsorted_duplicates_and_empty_rows():
-    data = np.array([2.0, 3.0, -0.5, 1.5, 4.0])
-    indices = np.array([3, 1, 3, 0, 1], dtype=np.int64)
-    indptr = np.array([0, 3, 3, 5], dtype=np.int64)
-    design = sparse.csc_matrix((data, indices, indptr), shape=(5, 3))
-    coefficients = np.array([0.8, -0.3, 1.2])
-    actual = compute_zu(coefficients, data, indices, indptr, design.shape, 5)
-    np.testing.assert_allclose(actual, design @ coefficients, rtol=0, atol=1e-15)
-
-
-def test_sparse_random_product_multiplies_duplicates_before_their_sum_can_overflow():
-    data = np.array([1e308, 1e308])
-    indices = np.array([0, 0], dtype=np.int64)
-    indptr = np.array([0, 2], dtype=np.int64)
-    coefficients = np.array([1e-308])
-    design = sparse.csc_matrix((data, indices, indptr), shape=(1, 1))
-
-    actual = compute_zu(coefficients, data, indices, indptr, design.shape, 1)
-
-    assert np.isfinite(actual).all()
-    np.testing.assert_allclose(actual, [2.0], rtol=2e-16)
-    np.testing.assert_array_equal(actual, design @ coefficients)
-
-
-@pytest.mark.parametrize(
-    "data,indices,indptr,coefficients,expected",
-    [
-        ([1e16, 1.0, -1e16], [0, 0, 0], [0, 3], [0.1], [0.125, 0.0]),
-        ([1e16, -1e16, 1.0], [0, 0, 0], [0, 3], [0.1], [0.1, 0.0]),
-        # Unsorted row entries must retain each row's original accumulation order.
-        ([1e16, 2.0, 1.0, -1e16, 3.0], [0, 1, 0, 0, 1], [0, 5], [0.1], [0.125, 0.5]),
-        # Cancellation continues in CSC column order, including empty columns.
-        ([1e16, 1.0, -1e16, 1.0], [0, 0, 0, 0], [0, 3, 3, 4], [0.1, 0, 0.5], [0.625, 0]),
-    ],
-)
-def test_sparse_random_product_preserves_duplicate_and_column_accumulation_order(
-    data, indices, indptr, coefficients, expected
-):
-    data = np.array(data, dtype=np.float64)
-    indices = np.array(indices, dtype=np.int64)
-    indptr = np.array(indptr, dtype=np.int64)
-    coefficients = np.array(coefficients, dtype=np.float64)
-    original = [array.copy() for array in (data, indices, indptr, coefficients)]
-    design = sparse.csc_matrix((data, indices, indptr), shape=(2, len(coefficients)))
-
-    actual = compute_zu(coefficients, data, indices, indptr, design.shape, 2)
-
-    # SciPy's sparse product may fuse multiplication and addition on ARM,
-    # changing these cancellation-sensitive results. Build each row separately
-    # from COO entries and force the product to round before adding it instead.
-    entries = design.tocoo()
-    reference = np.zeros(design.shape[0])
-    for row in range(design.shape[0]):
-        total = 0.0
-        for entry_row, column, value in zip(entries.row, entries.col, entries.data, strict=True):
-            if entry_row == row:
-                product = float(value) * float(coefficients[column])
-                total += product
-        reference[row] = total
-
-    np.testing.assert_array_equal(actual, expected)
-    np.testing.assert_array_equal(actual, reference)
-    for array, saved in zip((data, indices, indptr, coefficients), original, strict=True):
-        np.testing.assert_array_equal(array, saved)
-
-
-@pytest.mark.parametrize("shape", [(0, 0), (3, 0), (0, 3)])
-def test_sparse_random_product_handles_empty_dimensions(shape):
-    design = sparse.csc_matrix(shape)
-    actual = compute_zu(
-        np.zeros(shape[1]),
-        design.data,
-        design.indices.astype(np.int64),
-        design.indptr.astype(np.int64),
-        shape,
-        shape[0],
-    )
-    np.testing.assert_array_equal(actual, np.zeros(shape[0]))

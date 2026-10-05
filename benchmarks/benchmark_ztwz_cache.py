@@ -1,4 +1,8 @@
-"""Benchmark Z'WZ caching performance improvement."""
+"""Compare native (Rust) and Python LMM objective evaluations.
+
+Both backends prepare the weighted design crossproducts (Z'WZ and related
+products) once per optimizer, so the timings compare the per-evaluation solves.
+"""
 
 import time
 
@@ -8,7 +12,7 @@ from mixedlm.estimation.reml import LMMOptimizer
 
 
 def benchmark_dataset(name: str, data, formula: str, n_evals: int = 100):
-    """Benchmark a specific dataset with and without caching."""
+    """Time repeated REML objective evaluations on both backends."""
     print(f"\n{'=' * 70}")
     print(f"Dataset: {name}")
     print(f"Formula: {formula}")
@@ -17,52 +21,54 @@ def benchmark_dataset(name: str, data, formula: str, n_evals: int = 100):
     print(f"Problem size: n={len(data)}, p={parsed.matrices.n_fixed}, q={parsed.matrices.n_random}")
 
     optimizer_rust = LMMOptimizer(parsed.matrices, REML=True, verbose=0, use_rust=True)
+    optimizer_python = LMMOptimizer(parsed.matrices, REML=True, verbose=0, use_rust=False)
+    if not optimizer_rust.use_rust:
+        raise RuntimeError("the native backend is not available for this model")
     theta_start = optimizer_rust.get_start_theta()
 
+    rust_value = optimizer_rust.objective(theta_start)
+    python_value = optimizer_python.objective(theta_start)
+    if not np.isclose(rust_value, python_value, rtol=1e-8, atol=1e-8):
+        raise AssertionError(f"objectives differ: Rust {rust_value!r}, Python {python_value!r}")
+
     start = time.perf_counter()
     for _ in range(n_evals):
-        _ = optimizer_rust.objective(theta_start)
+        optimizer_rust.objective(theta_start)
     time_rust = time.perf_counter() - start
 
-    optimizer_python = LMMOptimizer(parsed.matrices, REML=True, verbose=0, use_rust=False)
-
     start = time.perf_counter()
     for _ in range(n_evals):
-        _ = optimizer_python.objective(theta_start)
+        optimizer_python.objective(theta_start)
     time_python = time.perf_counter() - start
 
     speedup = time_python / time_rust
 
     print(f"\nResults ({n_evals} evaluations):")
-    print(
-        f"  Python (with cache): {time_python:.4f}s ({time_python / n_evals * 1000:.4f}ms per eval)"
-    )
-    print(f"  Rust (with cache): {time_rust:.4f}s ({time_rust / n_evals * 1000:.4f}ms per eval)")
+    print(f"  Python: {time_python:.4f}s ({time_python / n_evals * 1000:.4f}ms per eval)")
+    print(f"  Rust: {time_rust:.4f}s ({time_rust / n_evals * 1000:.4f}ms per eval)")
     print(f"  Speedup: {speedup:.2f}x")
 
     return speedup
 
 
 def main():
-    print("Benchmarking Z'WZ Caching Performance")
+    print("Rust vs Python LMM Objective")
     print("=" * 70)
 
-    speedups = []
-
-    data1 = load_sleepstudy()
-    speedup1 = benchmark_dataset(
-        "sleepstudy (small)", data1, "Reaction ~ Days + (1 | Subject)", n_evals=200
-    )
-    speedups.append(("sleepstudy", speedup1))
-
-    try:
-        data2 = load_insteval()
-        speedup2 = benchmark_dataset(
-            "InstEval (large)", data2, "y ~ service + (1 | s) + (1 | d)", n_evals=50
-        )
-        speedups.append(("InstEval", speedup2))
-    except Exception as e:
-        print(f"\nSkipping InstEval benchmark: {e}")
+    speedups = [
+        (
+            "sleepstudy",
+            benchmark_dataset(
+                "sleepstudy (small)", load_sleepstudy(), "Reaction ~ Days + (1 | Subject)", 200
+            ),
+        ),
+        (
+            "InstEval",
+            benchmark_dataset(
+                "InstEval (large)", load_insteval(), "y ~ service + (1 | s) + (1 | d)", 50
+            ),
+        ),
+    ]
 
     print(f"\n{'=' * 70}")
     print("Summary")

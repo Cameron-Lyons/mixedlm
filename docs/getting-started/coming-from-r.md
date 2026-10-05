@@ -24,12 +24,15 @@ This guide helps lme4 users transition to mixedlm. The API is designed to be as 
     ```python
     import mixedlm as mlm
 
+    sleepstudy = mlm.load_sleepstudy()
+    cbpp = mlm.load_cbpp()
+
     # Linear mixed model
     m = mlm.lmer("Reaction ~ Days + (Days | Subject)", sleepstudy)
 
     # Generalized linear mixed model
-    m = mlm.glmer("incidence / size ~ period + (1 | herd)",
-                  cbpp, family=mlm.families.Binomial())
+    gm = mlm.glmer("incidence / size ~ period + (1 | herd)",
+                   cbpp, family=mlm.families.Binomial())
     ```
 
 ### Extracting Results
@@ -74,7 +77,7 @@ This guide helps lme4 users transition to mixedlm. The API is designed to be as 
 
 === "Python (mixedlm)"
 
-    ```python
+    ```py
     m1 = mlm.lmer("y ~ x + (1 | g)", data)
     m2 = mlm.lmer("y ~ x + z + (1 | g)", data)
     mlm.anova(m1, m2)
@@ -95,7 +98,7 @@ This guide helps lme4 users transition to mixedlm. The API is designed to be as 
     ```python
     m.confint(method="profile")   # Profile
     m.confint(method="Wald")      # Wald
-    m.confint(method="boot")      # Bootstrap
+    m.confint(method="boot", n_boot=50)   # Bootstrap; use 1000+ for reports
     ```
 
 ### P-values with lmerTest
@@ -133,7 +136,7 @@ This guide helps lme4 users transition to mixedlm. The API is designed to be as 
 
 === "Python (mixedlm)"
 
-    ```python
+    ```py
     em = mlm.emmeans(m, "treatment")
     print(em)
     em.pairs()
@@ -146,16 +149,16 @@ This guide helps lme4 users transition to mixedlm. The API is designed to be as 
     ```r
     library(simr)
     powerSim(m, nsim = 100)
-    powerCurve(m, along = "n")
-    extend(m, along = "n", n = 100)
+    powerCurve(m, along = "Subject")
+    extend(m, along = "Subject", n = 30)
     ```
 
 === "Python (mixedlm)"
 
-    ```python
-    mlm.powerSim(m, data, nsim=100)
-    mlm.powerCurve(m, data, along="n", breaks=[50, 100, 200])
-    mlm.extend(m, data, along="n", n=100)
+    ```py
+    mlm.powerSim(m, test="Days", nsim=100)
+    mlm.powerCurve(m, test="Days", along="Subject", values=[10, 20, 30])
+    mlm.extend(m, along="Subject", n=30)
     ```
 
 ## Key Differences
@@ -183,7 +186,7 @@ glmer(cbind(successes, failures) ~ x + (1 | g), family = binomial)
 
 mixedlm uses division syntax:
 
-```python
+```py
 # Python
 mlm.glmer("successes / total ~ x + (1 | g)", data, family=mlm.families.Binomial())
 ```
@@ -197,7 +200,7 @@ R families are functions, mixedlm families are classes:
 glmer(..., family = binomial(link = "logit"))
 ```
 
-```python
+```py
 # Python
 mlm.glmer(..., family=mlm.families.Binomial(link="logit"))
 ```
@@ -206,7 +209,7 @@ mlm.glmer(..., family=mlm.families.Binomial(link="logit"))
 
 R uses data.frame. mixedlm works with both pandas and polars:
 
-```python
+```py
 # Works with pandas
 import pandas as pd
 df = pd.DataFrame(...)
@@ -231,14 +234,30 @@ Control arguments are similar:
 === "Python"
 
     ```python
-    mlm.LmerControl(optimizer="COBYQA", maxiter=10000)
+    mlm.LmerControl(optimizer="COBYQA", optCtrl={"maxfun": 10000})
     ```
+
+`lmer()` defaults to `optimizer="auto"`, which runs L-BFGS-B on exact gradients
+and falls back to COBYQA, a derivative-free trust-region method like BOBYQA,
+when needed. `glmer()` defaults to COBYQA. lme4's NLopt optimizers are available
+as `"nloptwrap_BOBYQA"`, `"nloptwrap_NELDERMEAD"`, and similar names with the
+`optimizers` extra; like lme4's `nloptwrap`, they stop on an absolute change in
+deviance. See [LmerControl](../api/models.md#lmercontrol).
+
+### Parallel Computation
+
+Where lme4 and its companions take `parallel=` or `ncpus=` arguments, mixedlm
+functions such as `bootMer()`, `drop1()`, `allFit()`, `profile()`, and
+`cross_validate()` take `n_jobs`, a number of worker processes or `-1` for all
+CPUs. Workers start without forking the Python process, so scripts must call
+these functions under an `if __name__ == "__main__":` guard. See
+[parallel execution](../api/inference.md#parallel-execution).
 
 ## Functions Not Yet Available
 
 These lme4/related functions are not yet implemented:
 
-- `plot.merMod` (use `mlm.plot_diagnostics` instead)
+- `plot.merMod` (use `mixedlm.diagnostics.plot_diagnostics` instead)
 
 ## Getting Help
 

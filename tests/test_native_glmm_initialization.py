@@ -13,24 +13,8 @@ from mixedlm.matrices.design import build_model_matrices
 native = pytest.importorskip("mixedlm._rust")
 
 
-def native_pirls(matrices, family, theta):
-    z = matrices.Z.tocsc()
-    return native.pirls(
-        matrices.y,
-        matrices.X,
-        z.data,
-        z.indices.astype(np.int64),
-        z.indptr.astype(np.int64),
-        z.shape,
-        matrices.weights,
-        matrices.offset,
-        theta,
-        [s.n_levels for s in matrices.random_structures],
-        [s.n_terms for s in matrices.random_structures],
-        [s.correlated for s in matrices.random_structures],
-        family.__class__.__name__.lower(),
-        family.link.name,
-    )
+def native_laplace(matrices, family, theta):
+    return native.glmm_deviance(*laplace._native_glmm_args(theta, matrices, family), 1)
 
 
 def poisson_matrices(mean, offset=0.0, weighted=False, formula="y ~ 1 + (1 | g)"):
@@ -48,15 +32,17 @@ def poisson_matrices(mean, offset=0.0, weighted=False, formula="y ~ 1 + (1 | g)"
 def test_poisson_pirls_converges_to_weighted_mean(mean, offset, weighted):
     matrices = poisson_matrices(mean, offset, weighted)
     theta = np.array([0.5])
-    beta, u, deviance, converged = native_pirls(matrices, Poisson(), theta)
+    deviance, beta, u, converged = native_laplace(matrices, Poisson(), theta)
     expected_mean = np.average(matrices.y, weights=matrices.weights)
     assert converged
     assert np.isfinite(deviance)
     np.testing.assert_allclose(beta, [np.log(expected_mean) - offset], rtol=1e-8, atol=1e-8)
     np.testing.assert_allclose(u, 0, atol=1e-8)
+    # Identical groups have no random effects; a Poisson log-link working weight is its mean.
+    information = np.bincount(np.repeat(np.arange(4), 3), weights=expected_mean * matrices.weights)
     expected = np.sum(
         Poisson().deviance_resids(matrices.y, np.full(12, expected_mean), matrices.weights)
-    )
+    ) + np.sum(np.log1p(theta[0] ** 2 * information))
     assert deviance == pytest.approx(expected, rel=1e-7, abs=1e-8)
 
 
@@ -65,8 +51,8 @@ def test_poisson_pirls_converges_to_weighted_mean(mean, offset, weighted):
 def test_poisson_objectives_agree_with_python_at_large_counts(mean, order):
     matrices = poisson_matrices(mean, offset=4.0, weighted=True)
     theta = np.array([0.7])
-    actual = laplace.adaptive_gh_deviance_fast(theta, matrices, Poisson(), nAGQ=order)
-    expected = laplace.adaptive_gh_deviance(theta, matrices, Poisson(), nAGQ=order)
+    actual = laplace.glmm_deviance_with_status(theta, matrices, Poisson(), nAGQ=order)
+    expected = laplace._adaptive_gh_deviance_with_status(theta, matrices, Poisson(), nAGQ=order)
     for value, reference in zip(actual, expected, strict=True):
         np.testing.assert_allclose(value, reference, rtol=1e-7, atol=1e-8)
 
@@ -74,7 +60,7 @@ def test_poisson_objectives_agree_with_python_at_large_counts(mean, order):
 @pytest.mark.parametrize("mean", [200, 1000])
 def test_fixed_only_poisson_initialization(mean):
     matrices = poisson_matrices(mean, offset=-5.0, weighted=True, formula="y ~ 1")
-    beta, u, deviance, converged = native_pirls(matrices, Poisson(), np.array([]))
+    deviance, beta, u, converged = native_laplace(matrices, Poisson(), np.array([]))
     assert converged
     assert np.isfinite(deviance)
     assert len(u) == 0
@@ -101,8 +87,8 @@ def test_native_and_python_modes_agree_with_offsets_and_slopes(family, weighted)
         parse_formula("y ~ x + (x | g)"), data, weights=weights, offset=offset
     )
     theta = np.array([0.6, 0.1, 0.3])
-    actual = native_pirls(matrices, family, theta)
-    expected = laplace.pirls(matrices, family, theta)
+    actual = native_laplace(matrices, family, theta)
+    expected = laplace._laplace_deviance_with_status(theta, matrices, family)
     assert actual[3] and expected[3]
     for value, reference in zip(actual[:3], expected[:3], strict=True):
         np.testing.assert_allclose(value, reference, rtol=1e-6, atol=1e-7)
@@ -115,7 +101,7 @@ def test_nonfinite_results_are_not_reported_as_converged(field, value):
     invalid = getattr(matrices, field).copy()
     invalid[0] = value
     matrices = replace(matrices, **{field: invalid})
-    _, _, deviance, converged = native_pirls(matrices, Poisson(), np.array([0.5]))
+    deviance, _, _, converged = native_laplace(matrices, Poisson(), np.array([0.5]))
     assert not converged
     assert not np.isfinite(deviance)
 

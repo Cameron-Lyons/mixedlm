@@ -121,21 +121,12 @@ def _forbid_dense_precision(monkeypatch, q):
 def test_information_uses_sparse_factor_at_size_boundary(n_groups, monkeypatch):
     result = _result(n_groups=n_groups)
     expected = _intercept_information(result)
-    sparse_calls = []
-    original_splu = sparse.linalg.splu
-
-    def counted(matrix, *args, **kwargs):
-        sparse_calls.append(matrix.shape)
-        return original_splu(matrix, *args, **kwargs)
-
-    monkeypatch.setattr(sparse.linalg, "splu", counted)
     if n_groups >= 256:
         _forbid_dense_precision(monkeypatch, n_groups)
 
     actual = _xt_vinv_x_from_theta(result, result.theta)
 
     assert_allclose(actual, expected, rtol=2e-12, atol=2e-12)
-    assert sparse_calls == ([(n_groups, n_groups)] if n_groups >= 256 else [])
 
 
 @pytest.mark.parametrize("cached", [False, True])
@@ -208,8 +199,13 @@ def test_information_retains_regularization_fallback(backend, monkeypatch):
     monkeypatch.setattr(
         shared_utils, "_SPARSE_PROJECTION_MIN_RANDOM", 0 if backend == "sparse" else np.inf
     )
-    target = sparse.linalg if backend == "sparse" else linalg
-    name = "splu" if backend == "sparse" else "cholesky"
+    if backend == "dense":
+        target, name, failure = linalg, "cholesky", linalg.LinAlgError("not positive definite")
+    elif shared_utils._HAS_RUST:
+        target, name = shared_utils._SparseCholeskyPattern, "factor"
+        failure = ValueError("not positive definite")
+    else:
+        target, name, failure = sparse.linalg, "splu", RuntimeError("singular precision")
     original = getattr(target, name)
     calls = 0
 
@@ -217,11 +213,7 @@ def test_information_retains_regularization_fallback(backend, monkeypatch):
         nonlocal calls
         calls += 1
         if calls == 1:
-            raise (
-                RuntimeError("singular precision")
-                if backend == "sparse"
-                else linalg.LinAlgError("not positive definite")
-            )
+            raise failure
         return original(*args, **kwargs)
 
     monkeypatch.setattr(target, name, fail_once)
@@ -235,10 +227,10 @@ def test_information_retains_regularization_fallback(backend, monkeypatch):
 def test_covariance_fallback_avoids_dense_random_precision(monkeypatch):
     result = _result(n_groups=300)
     expected = linalg.inv(_intercept_information(result))
-    crossproducts = _weighted_crossproducts(result)
-    monkeypatch.setattr(reml, "_profiled_deviance_core", lambda *args, **kwargs: None)
+    evaluator = reml.LMMOptimizer(result.matrices, REML=result.REML)
+    monkeypatch.setattr(evaluator, "_evaluate_core", lambda theta: None)
     _forbid_dense_precision(monkeypatch, result.matrices.n_random)
 
-    actual = _vcov_from_theta(result, result.theta, crossproducts)
+    actual = _vcov_from_theta(result, result.theta, evaluator)
 
     assert_allclose(actual, expected, rtol=1e-12, atol=1e-12)

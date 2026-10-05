@@ -1,3 +1,5 @@
+"""Prediction, missing-data handling, influence, rePCA and contrast codings."""
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -6,31 +8,23 @@ from mixedlm import (
     glmer,
     lmer,
 )
-from mixedlm.models.control import LmerControl
+from numpy.testing import assert_allclose, assert_array_equal
+from scipy.special import expit
 
-from tests._lmer_data import CBPP, SLEEPSTUDY
+from tests._datasets import CBPP, SLEEPSTUDY, grouped_data
 
 
 class TestPredict:
-    def test_lmer_predict_no_newdata(self):
-        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
-        pred = result.predict()
-        fitted = result.fitted()
+    def test_lmer_predictions_without_or_with_the_fitted_data(self, sleepstudy_lmm):
+        assert_allclose(sleepstudy_lmm.predict(), sleepstudy_lmm.fitted())
+        assert_allclose(sleepstudy_lmm.predict(newdata=SLEEPSTUDY), sleepstudy_lmm.fitted())
+        new_data = SLEEPSTUDY.drop(columns="Reaction")
+        assert_allclose(sleepstudy_lmm.predict(newdata=new_data), sleepstudy_lmm.fitted())
 
-        assert np.allclose(pred, fitted)
+    def test_lmer_predict_fixed_only(self, sleepstudy_lmm):
+        pred_fixed = sleepstudy_lmm.predict(newdata=SLEEPSTUDY, re_form="NA")
 
-    def test_lmer_predict_same_data(self):
-        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
-        pred = result.predict(newdata=SLEEPSTUDY)
-        fitted = result.fitted()
-
-        assert np.allclose(pred, fitted)
-
-    def test_lmer_predict_fixed_only(self):
-        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
-        pred_fixed = result.predict(newdata=SLEEPSTUDY, re_form="NA")
-
-        fixef = result.fixef()
+        fixef = sleepstudy_lmm.fixef()
         expected_fixed = fixef["(Intercept)"] + fixef["Days"] * SLEEPSTUDY["Days"].values
         assert np.allclose(pred_fixed, expected_fixed)
 
@@ -54,41 +48,38 @@ class TestPredict:
         assert np.allclose(with_se.fit, expected)
         assert np.allclose(with_interval.fit, expected)
 
-    def test_lmer_predict_new_levels_error(self):
-        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
-
+    def test_lmer_predict_new_levels_error(self, sleepstudy_lmm):
         new_data = pd.DataFrame({"Reaction": [300.0], "Days": [5.0], "Subject": ["999"]})
 
         with pytest.raises(ValueError, match="New level"):
-            result.predict(newdata=new_data)
+            sleepstudy_lmm.predict(newdata=new_data)
 
-    def test_lmer_predict_new_levels_allowed(self):
-        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
-
+    def test_lmer_predict_new_levels_allowed(self, sleepstudy_lmm):
         new_data = pd.DataFrame({"Reaction": [300.0], "Days": [5.0], "Subject": ["999"]})
 
-        pred = result.predict(newdata=new_data, allow_new_levels=True)
-        fixef = result.fixef()
+        pred = sleepstudy_lmm.predict(newdata=new_data, allow_new_levels=True)
+        fixef = sleepstudy_lmm.fixef()
         expected = fixef["(Intercept)"] + fixef["Days"] * 5.0
 
         assert np.isclose(pred[0], expected)
 
-    def test_lmer_predict_random_slope(self):
-        ctrl = LmerControl(optimizer="L-BFGS-B")
-        result = lmer("Reaction ~ Days + (Days | Subject)", SLEEPSTUDY, control=ctrl)
+    def test_lmer_predict_adds_the_subject_intercept_and_slope(self, sleepstudy_slopes_lmm):
+        new_data = pd.DataFrame({"Days": [5.0], "Subject": ["308"]})
+        ranef = sleepstudy_slopes_lmm.ranef()["Subject"]
+        fixef = sleepstudy_slopes_lmm.fixef()
 
-        subject = SLEEPSTUDY["Subject"].iloc[0]
-        new_data = pd.DataFrame({"Reaction": [300.0], "Days": [5.0], "Subject": [subject]})
+        pred = sleepstudy_slopes_lmm.predict(newdata=new_data)
 
-        pred = result.predict(newdata=new_data)
-        pred_fixed = result.predict(newdata=new_data, re_form="NA")
+        expected = (
+            fixef["(Intercept)"]
+            + ranef["(Intercept)"][0]
+            + 5.0 * (fixef["Days"] + ranef["Days"][0])
+        )
+        assert pred[0] == pytest.approx(expected)
 
-        assert pred[0] != pred_fixed[0]
-
-    def test_lmer_predict_new_levels_se_fit_random_slope(self):
-        ctrl = LmerControl(optimizer="L-BFGS-B")
-        result = lmer("Reaction ~ Days + (Days | Subject)", SLEEPSTUDY, control=ctrl)
-
+    def test_new_level_standard_errors_include_the_random_effect_covariance(
+        self, sleepstudy_slopes_lmm
+    ):
         new_data = pd.DataFrame(
             {
                 "Reaction": [300.0, 320.0],
@@ -96,141 +87,80 @@ class TestPredict:
                 "Subject": ["new_subject_a", "new_subject_b"],
             }
         )
-
-        pred = result.predict(newdata=new_data, allow_new_levels=True, se_fit=True)
-        pred_fixed = result.predict(newdata=new_data, re_form="NA")
-
-        assert pred.se_fit is not None
-        assert np.all(np.isfinite(pred.se_fit))
-        assert np.all(pred.se_fit > 0)
-        assert np.allclose(pred.fit, pred_fixed)
-
-    def test_glmer_predict_no_newdata(self):
-        result = glmer("y ~ period + (1 | herd)", CBPP, family=families.Binomial())
-        pred = result.predict()
-        fitted = result.fitted()
-
-        assert np.allclose(pred, fitted)
-
-    def test_glmer_predict_same_data(self):
-        result = glmer("y ~ period + (1 | herd)", CBPP, family=families.Binomial())
-        pred = result.predict(newdata=CBPP)
-        fitted = result.fitted()
-
-        assert np.allclose(pred, fitted)
-
-    def test_glmer_predict_fixed_only(self):
-        result = glmer(
-            "y ~ period + (1 | herd)",
-            CBPP,
-            family=families.Binomial(),
-            weights=CBPP["size"].to_numpy(dtype=float),
+        X = np.column_stack((np.ones(2), new_data["Days"]))
+        covariance = sleepstudy_slopes_lmm.vcov() + sleepstudy_slopes_lmm.VarCorr().get_cov(
+            "Subject"
         )
-        pred_fixed = result.predict(newdata=CBPP, re_form="NA")
-        pred_full = result.predict(newdata=CBPP)
 
-        assert not np.allclose(pred_fixed, pred_full)
+        pred = sleepstudy_slopes_lmm.predict(newdata=new_data, allow_new_levels=True, se_fit=True)
+        pred_fixed = sleepstudy_slopes_lmm.predict(newdata=new_data, re_form="NA")
 
-    def test_glmer_predict_fixed_only_without_newdata(self):
-        result = glmer(
-            "y ~ period + (1 | herd)",
-            CBPP,
-            family=families.Binomial(),
-            weights=CBPP["size"].to_numpy(dtype=float),
-        )
-        expected_link = result.matrices.X @ result.beta + result.matrices.offset
-        expected_response = result.family.link.inverse(expected_link)
+        assert_allclose(pred.fit, pred_fixed)
+        assert_allclose(pred.se_fit, np.sqrt(np.einsum("ij,jk,ik->i", X, covariance, X)))
 
-        assert not np.allclose(result.fitted(type="link"), expected_link)
+    def test_glmer_predictions_on_link_and_response_scales(self, cbpp_glmm):
+        X, Z, b = cbpp_glmm.getME("X"), cbpp_glmm.getME("Z"), cbpp_glmm.getME("b")
+
+        assert_allclose(cbpp_glmm.predict(), cbpp_glmm.fitted())
+        assert_allclose(cbpp_glmm.predict(newdata=CBPP), expit(X @ cbpp_glmm.beta + Z @ b))
+        assert_allclose(cbpp_glmm.predict(newdata=CBPP, type="link"), X @ cbpp_glmm.beta + Z @ b)
+        assert_allclose(cbpp_glmm.predict(newdata=CBPP, re_form="NA"), expit(X @ cbpp_glmm.beta))
+        new_data = CBPP.drop(columns="incidence")
+        assert_allclose(cbpp_glmm.predict(newdata=new_data), cbpp_glmm.fitted())
+
+    def test_glmer_predict_fixed_only_without_newdata(self, cbpp_glmm):
+        expected_link = cbpp_glmm.matrices.X @ cbpp_glmm.beta + cbpp_glmm.matrices.offset
+        expected_response = cbpp_glmm.family.link.inverse(expected_link)
+
+        assert not np.allclose(cbpp_glmm.fitted(type="link"), expected_link)
         for re_form in ("NA", "~0"):
-            assert np.allclose(result.predict(type="link", re_form=re_form), expected_link)
+            assert np.allclose(cbpp_glmm.predict(type="link", re_form=re_form), expected_link)
             assert np.allclose(
-                result.predict(type="response", re_form=re_form),
+                cbpp_glmm.predict(type="response", re_form=re_form),
                 expected_response,
             )
-        with_se = result.predict(type="link", re_form="NA", se_fit=True)
-        with_interval = result.predict(type="response", re_form="~0", interval="confidence")
+        with_se = cbpp_glmm.predict(type="link", re_form="NA", se_fit=True)
+        with_interval = cbpp_glmm.predict(type="response", re_form="~0", interval="confidence")
         assert np.allclose(with_se.fit, expected_link)
         assert np.allclose(with_interval.fit, expected_response)
 
-    def test_glmer_predict_link_scale(self):
-        result = glmer("y ~ period + (1 | herd)", CBPP, family=families.Binomial())
-        pred_response = result.predict(newdata=CBPP, type="response")
-        pred_link = result.predict(newdata=CBPP, type="link")
-
-        assert np.all(pred_response >= 0) and np.all(pred_response <= 1)
-        assert not np.all(pred_link >= 0) or not np.all(pred_link <= 1)
-
-    def test_glmer_predict_new_levels_allowed(self):
-        np.random.seed(42)
-        n_groups = 10
-        n_per_group = 20
-        n = n_groups * n_per_group
-
-        group = np.repeat(np.arange(n_groups), n_per_group)
-        x = np.random.randn(n)
-        group_effects = np.random.randn(n_groups) * 0.3
-        eta = -0.5 + 0.5 * x + group_effects[group]
-        p = 1 / (1 + np.exp(-eta))
-        y = np.random.binomial(1, p)
-
-        data = pd.DataFrame({"y": y, "x": x, "group": [str(g) for g in group]})
-        result = glmer("y ~ x + (1 | group)", data, family=families.Binomial())
-
+    def test_glmer_predict_new_levels_allowed(self, grouped_glmm):
         new_data = pd.DataFrame({"y": [0], "x": [0.5], "group": ["999"]})
-        pred = result.predict(newdata=new_data, allow_new_levels=True)
 
-        assert len(pred) == 1
-        assert 0 <= pred[0] <= 1
+        pred = grouped_glmm.predict(newdata=new_data, allow_new_levels=True)
 
-    def test_lmer_predict_newdata_does_not_require_response(self):
-        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
-        new_data = SLEEPSTUDY.drop(columns="Reaction")
+        assert_allclose(pred, [expit(grouped_glmm.beta[0] + 0.5 * grouped_glmm.beta[1])])
 
-        predicted = result.predict(newdata=new_data)
-
-        assert np.allclose(predicted, result.fitted())
-
-    def test_glmer_predict_newdata_does_not_require_response(self):
-        result = glmer("y ~ period + (1 | herd)", CBPP, family=families.Binomial())
-        new_data = CBPP.drop(columns="y")
-
-        predicted = result.predict(newdata=new_data)
-
-        assert np.allclose(predicted, result.fitted())
-
-    def test_lmer_predict_accepts_array_and_scalar_offsets(self):
-        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+    def test_lmer_predict_accepts_array_and_scalar_offsets(self, sleepstudy_lmm):
         new_data = SLEEPSTUDY.loc[:4, ["Days"]]
-        baseline = result.predict(new_data, re_form="NA")
+        baseline = sleepstudy_lmm.predict(new_data, re_form="NA")
         offset = np.linspace(-0.5, 0.5, len(new_data))
 
-        predicted = result.predict(new_data, re_form="NA", offset=offset)
-        scalar_predicted = result.predict(new_data, re_form="NA", offset=1.25)
+        predicted = sleepstudy_lmm.predict(new_data, re_form="NA", offset=offset)
+        scalar_predicted = sleepstudy_lmm.predict(new_data, re_form="NA", offset=1.25)
 
         assert np.allclose(predicted, baseline + offset)
         assert np.allclose(scalar_predicted, baseline + 1.25)
 
-    def test_glmer_predict_accepts_offset_column_on_link_scale(self):
-        result = glmer("y ~ period + (1 | herd)", CBPP, family=families.Binomial())
+    def test_glmer_predict_accepts_offset_column_on_link_scale(self, cbpp_glmm):
         new_data = CBPP.loc[:4, ["period"]].copy()
         offset = np.linspace(-0.4, 0.6, len(new_data))
         new_data["log_exposure"] = offset
 
-        baseline = result.predict(
+        baseline = cbpp_glmm.predict(
             new_data,
             type="link",
             re_form="NA",
             interval="confidence",
         )
-        shifted = result.predict(
+        shifted = cbpp_glmm.predict(
             new_data,
             type="link",
             re_form="NA",
             interval="confidence",
             offset="log_exposure",
         )
-        response = result.predict(
+        response = cbpp_glmm.predict(
             new_data,
             type="response",
             re_form="NA",
@@ -243,7 +173,7 @@ class TestPredict:
         assert np.allclose(shifted.se_fit, baseline.se_fit)
         assert np.allclose(shifted.lower, baseline.lower + offset)
         assert np.allclose(shifted.upper, baseline.upper + offset)
-        assert np.allclose(response, result.family.link.inverse(shifted.fit))
+        assert np.allclose(response, cbpp_glmm.family.link.inverse(shifted.fit))
 
     @pytest.mark.parametrize(
         ("offset", "message"),
@@ -254,25 +184,21 @@ class TestPredict:
             (["low", "medium", "high"], "numeric values"),
         ],
     )
-    def test_predict_rejects_invalid_offsets(self, offset, message):
-        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+    def test_predict_rejects_invalid_offsets(self, sleepstudy_lmm, offset, message):
         new_data = SLEEPSTUDY.loc[:2, ["Days"]]
 
         with pytest.raises(ValueError, match=message):
-            result.predict(new_data, re_form="NA", offset=offset)
+            sleepstudy_lmm.predict(new_data, re_form="NA", offset=offset)
 
-    def test_predict_rejects_missing_offset_column(self):
-        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+    def test_predict_rejects_missing_offset_column(self, sleepstudy_lmm):
         new_data = SLEEPSTUDY.loc[:2, ["Days"]]
 
         with pytest.raises(ValueError, match="missing offset column 'exposure'"):
-            result.predict(new_data, re_form="NA", offset="exposure")
+            sleepstudy_lmm.predict(new_data, re_form="NA", offset="exposure")
 
-    def test_predict_rejects_offset_without_newdata(self):
-        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
-
+    def test_predict_rejects_offset_without_newdata(self, sleepstudy_lmm):
         with pytest.raises(ValueError, match="only be supplied with newdata"):
-            result.predict(offset=1.0)
+            sleepstudy_lmm.predict(offset=1.0)
 
     def test_predict_categorical_subset_uses_fitted_levels(self):
         data = pd.DataFrame(
@@ -348,630 +274,227 @@ class TestPredict:
         with pytest.raises(ValueError, match="New level.*'C'.*treatment"):
             result.predict(new_data)
 
-    def test_predict_reports_missing_fixed_effect_variables(self):
-        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+    def test_predict_reports_missing_fixed_effect_variables(self, sleepstudy_lmm):
         new_data = pd.DataFrame({"Subject": ["308"]})
 
         with pytest.raises(ValueError, match="missing fixed-effect variable.*'Days'"):
-            result.predict(new_data)
+            sleepstudy_lmm.predict(new_data)
 
 
 class TestNAAction:
-    def test_lmer_na_omit(self) -> None:
-        np.random.seed(42)
-        n_groups = 10
-        n_per_group = 20
-        n = n_groups * n_per_group
-
-        group = np.repeat(np.arange(n_groups), n_per_group)
-        x = np.random.randn(n)
-        group_effects = np.random.randn(n_groups) * 0.5
-        y = 2.0 + 1.5 * x + group_effects[group] + np.random.randn(n) * 0.5
-
-        data = pd.DataFrame({"y": y, "x": x, "group": [str(g) for g in group]})
+    @staticmethod
+    def data_with_missing_values(family="gaussian"):
+        data = grouped_data(family)
         data.loc[0, "y"] = np.nan
         data.loc[5, "x"] = np.nan
+        return data
+
+    def test_omit_matches_a_fit_to_the_complete_rows(self) -> None:
+        data = self.data_with_missing_values()
         data.loc[10, "group"] = np.nan
 
         result = lmer("y ~ x + (1 | group)", data, na_action="omit")
 
-        assert result.matrices.n_obs == n - 3
-        assert len(result.fitted()) == n - 3
-        assert len(result.residuals()) == n - 3
-        assert result.converged
+        complete = lmer("y ~ x + (1 | group)", data.dropna())
+        assert result.matrices.n_obs == 197
+        assert len(result.fitted()) == len(result.residuals()) == 197
+        assert_allclose(result.beta, complete.beta)
+        assert_allclose(result.fitted(), complete.fitted())
 
-    def test_lmer_na_exclude(self) -> None:
-        np.random.seed(42)
-        n_groups = 10
-        n_per_group = 20
-        n = n_groups * n_per_group
-
-        group = np.repeat(np.arange(n_groups), n_per_group)
-        x = np.random.randn(n)
-        group_effects = np.random.randn(n_groups) * 0.5
-        y = 2.0 + 1.5 * x + group_effects[group] + np.random.randn(n) * 0.5
-
-        data = pd.DataFrame({"y": y, "x": x, "group": [str(g) for g in group]})
-        data.loc[0, "y"] = np.nan
-        data.loc[5, "x"] = np.nan
+    def test_exclude_pads_fitted_values_and_residuals_with_nan(self) -> None:
+        data = self.data_with_missing_values()
 
         result = lmer("y ~ x + (1 | group)", data, na_action="exclude")
 
-        assert result.matrices.n_obs == n - 2
+        omitted = lmer("y ~ x + (1 | group)", data, na_action="omit")
+        missing = np.isin(np.arange(200), [0, 5])
+        assert result.matrices.n_obs == 198
+        for values, complete in (
+            (result.fitted(), omitted.fitted()),
+            (result.residuals(), omitted.residuals()),
+        ):
+            assert len(values) == 200
+            assert_array_equal(np.isnan(values), missing)
+            assert_allclose(values[~missing], complete)
 
-        fitted_vals = result.fitted()
-        assert len(fitted_vals) == n
-        assert np.isnan(fitted_vals[0])
-        assert np.isnan(fitted_vals[5])
-        assert not np.isnan(fitted_vals[1])
-
-        resid = result.residuals()
-        assert len(resid) == n
-        assert np.isnan(resid[0])
-        assert np.isnan(resid[5])
-
-    def test_lmer_na_fail(self) -> None:
-        np.random.seed(42)
-        n = 50
-        group = np.repeat(np.arange(5), 10)
-        x = np.random.randn(n)
-        y = 2.0 + 1.5 * x + np.random.randn(n) * 0.5
-
-        data = pd.DataFrame({"y": y, "x": x, "group": [str(g) for g in group]})
-        data.loc[0, "y"] = np.nan
-
+    def test_fail_rejects_missing_values(self) -> None:
         with pytest.raises(ValueError, match="Missing values"):
-            lmer("y ~ x + (1 | group)", data, na_action="fail")
+            lmer("y ~ x + (1 | group)", self.data_with_missing_values(), na_action="fail")
 
-    def test_lmer_no_na(self) -> None:
-        np.random.seed(42)
-        n_groups = 10
-        n_per_group = 20
-        n = n_groups * n_per_group
+    def test_complete_data_is_unchanged(self, grouped_lmm) -> None:
+        result = lmer("y ~ x + (1 | group)", grouped_data(), na_action="omit")
 
-        group = np.repeat(np.arange(n_groups), n_per_group)
-        x = np.random.randn(n)
-        group_effects = np.random.randn(n_groups) * 0.5
-        y = 2.0 + 1.5 * x + group_effects[group] + np.random.randn(n) * 0.5
+        assert result.matrices.n_obs == 200
+        assert_allclose(result.beta, grouped_lmm.beta)
 
-        data = pd.DataFrame({"y": y, "x": x, "group": [str(g) for g in group]})
+    def test_glmer_omit_and_exclude(self) -> None:
+        data = self.data_with_missing_values("binomial")
+        missing = np.isin(np.arange(200), [0, 5])
 
-        result = lmer("y ~ x + (1 | group)", data, na_action="omit")
+        omitted = glmer("y ~ x + (1 | group)", data, family=families.Binomial(), na_action="omit")
+        excluded = glmer(
+            "y ~ x + (1 | group)", data, family=families.Binomial(), na_action="exclude"
+        )
 
-        assert result.matrices.n_obs == n
-        assert len(result.fitted()) == n
-
-    def test_glmer_na_omit(self) -> None:
-        np.random.seed(42)
-        n_groups = 10
-        n_per_group = 20
-        n = n_groups * n_per_group
-
-        group = np.repeat(np.arange(n_groups), n_per_group)
-        x = np.random.randn(n)
-        group_effects = np.random.randn(n_groups) * 0.3
-        eta = -0.5 + 0.5 * x + group_effects[group]
-        p = 1 / (1 + np.exp(-eta))
-        y = np.random.binomial(1, p).astype(float)
-
-        data = pd.DataFrame({"y": y, "x": x, "group": [str(g) for g in group]})
-        data.loc[0, "y"] = np.nan
-        data.loc[5, "x"] = np.nan
-
-        result = glmer("y ~ x + (1 | group)", data, family=families.Binomial(), na_action="omit")
-
-        assert result.matrices.n_obs == n - 2
-        assert result.converged
-
-    def test_glmer_na_exclude(self) -> None:
-        np.random.seed(42)
-        n_groups = 10
-        n_per_group = 20
-        n = n_groups * n_per_group
-
-        group = np.repeat(np.arange(n_groups), n_per_group)
-        x = np.random.randn(n)
-        group_effects = np.random.randn(n_groups) * 0.3
-        eta = -0.5 + 0.5 * x + group_effects[group]
-        p = 1 / (1 + np.exp(-eta))
-        y = np.random.binomial(1, p).astype(float)
-
-        data = pd.DataFrame({"y": y, "x": x, "group": [str(g) for g in group]})
-        data.loc[0, "y"] = np.nan
-        data.loc[5, "x"] = np.nan
-
-        result = glmer("y ~ x + (1 | group)", data, family=families.Binomial(), na_action="exclude")
-
-        assert result.matrices.n_obs == n - 2
-
-        fitted_vals = result.fitted()
-        assert len(fitted_vals) == n
-        assert np.isnan(fitted_vals[0])
-        assert np.isnan(fitted_vals[5])
-        assert not np.isnan(fitted_vals[1])
+        complete = glmer("y ~ x + (1 | group)", data.dropna(), family=families.Binomial())
+        assert omitted.matrices.n_obs == excluded.matrices.n_obs == 198
+        assert_allclose(omitted.beta, complete.beta)
+        fitted = excluded.fitted()
+        assert len(fitted) == 200
+        assert_array_equal(np.isnan(fitted), missing)
+        assert_allclose(fitted[~missing], omitted.fitted())
 
 
 class TestInfluenceDiagnostics:
-    def test_lmer_hatvalues(self) -> None:
-        np.random.seed(42)
-        n_groups = 10
-        n_per_group = 20
-        n = n_groups * n_per_group
+    def test_lmm_hat_values_are_the_diagonal_of_the_smoother(self, grouped_lmm) -> None:
+        X = grouped_lmm.getME("X")
+        ZL = (grouped_lmm.getME("Z") @ grouped_lmm.getME("Lambda")).toarray()
+        design = np.hstack((X, ZL))
+        penalized = design.T @ design
+        penalized[2:, 2:] += np.eye(ZL.shape[1])
+        hat = design @ np.linalg.solve(penalized, design.T)
 
-        group = np.repeat(np.arange(n_groups), n_per_group)
-        x = np.random.randn(n)
-        group_effects = np.random.randn(n_groups) * 0.5
-        y = 2.0 + 1.5 * x + group_effects[group] + np.random.randn(n) * 0.5
+        assert_allclose(hat @ grouped_lmm.getME("y"), grouped_lmm.fitted())
+        assert_allclose(grouped_lmm.hatvalues(), np.diag(hat))
 
-        data = pd.DataFrame({"y": y, "x": x, "group": [str(g) for g in group]})
-        result = lmer("y ~ x + (1 | group)", data)
+    def test_lmm_influence_measures_follow_their_definitions(self, grouped_lmm) -> None:
+        h = grouped_lmm.hatvalues()
+        residuals = grouped_lmm.residuals()
+        sigma = grouped_lmm.sigma
+        rss = np.sum(residuals**2)
+        loo_variance = (rss - residuals**2 / (1 - h)) / (200 - 2 - 1)
 
-        h = result.hatvalues()
+        influence = grouped_lmm.influence()
 
-        assert len(h) == n
-        assert np.all(h >= 0)
-        assert np.all(h < 1)
-        assert np.sum(h) > 0
+        cooks = residuals**2 / (2 * sigma**2) * h / (1 - h) ** 2
+        assert_allclose(grouped_lmm.cooks_distance(), cooks)
+        assert_allclose(influence["hat"], h)
+        assert_allclose(influence["cooks_d"], cooks)
+        assert_allclose(influence["std_resid"], residuals / (sigma * np.sqrt(1 - h)))
+        assert_allclose(influence["student_resid"], residuals / np.sqrt(loo_variance * (1 - h)))
 
-    def test_lmer_cooks_distance(self) -> None:
-        np.random.seed(42)
-        n_groups = 10
-        n_per_group = 20
-        n = n_groups * n_per_group
+    def test_glmm_influence_uses_pearson_residuals_and_unit_scale(self, cbpp_glmm) -> None:
+        h = cbpp_glmm.hatvalues()
+        pearson = cbpp_glmm.residuals(type="pearson")
 
-        group = np.repeat(np.arange(n_groups), n_per_group)
-        x = np.random.randn(n)
-        group_effects = np.random.randn(n_groups) * 0.5
-        y = 2.0 + 1.5 * x + group_effects[group] + np.random.randn(n) * 0.5
+        influence = cbpp_glmm.influence()
 
-        data = pd.DataFrame({"y": y, "x": x, "group": [str(g) for g in group]})
-        result = lmer("y ~ x + (1 | group)", data)
-
-        cooks_d = result.cooks_distance()
-
-        assert len(cooks_d) == n
-        assert np.all(cooks_d >= 0)
-        assert np.all(np.isfinite(cooks_d))
-
-    def test_lmer_influence(self) -> None:
-        np.random.seed(42)
-        n_groups = 10
-        n_per_group = 20
-        n = n_groups * n_per_group
-
-        group = np.repeat(np.arange(n_groups), n_per_group)
-        x = np.random.randn(n)
-        group_effects = np.random.randn(n_groups) * 0.5
-        y = 2.0 + 1.5 * x + group_effects[group] + np.random.randn(n) * 0.5
-
-        data = pd.DataFrame({"y": y, "x": x, "group": [str(g) for g in group]})
-        result = lmer("y ~ x + (1 | group)", data)
-
-        infl = result.influence()
-
-        assert "hat" in infl
-        assert "cooks_d" in infl
-        assert "std_resid" in infl
-        assert "student_resid" in infl
-
-        assert len(infl["hat"]) == n
-        assert len(infl["cooks_d"]) == n
-        assert len(infl["std_resid"]) == n
-        assert len(infl["student_resid"]) == n
-
-    def test_lmer_hatvalues_sum_constraint(self) -> None:
-        np.random.seed(42)
-        n_groups = 10
-        n_per_group = 20
-        n = n_groups * n_per_group
-
-        group = np.repeat(np.arange(n_groups), n_per_group)
-        x = np.random.randn(n)
-        group_effects = np.random.randn(n_groups) * 0.5
-        y = 2.0 + 1.5 * x + group_effects[group] + np.random.randn(n) * 0.5
-
-        data = pd.DataFrame({"y": y, "x": x, "group": [str(g) for g in group]})
-        result = lmer("y ~ x + (1 | group)", data)
-
-        h = result.hatvalues()
-
-        assert np.sum(h) > 0
-        assert np.mean(h) > 0
-        assert np.mean(h) < 1
-
-    def test_glmer_hatvalues(self) -> None:
-        np.random.seed(42)
-        n_groups = 10
-        n_per_group = 20
-        n = n_groups * n_per_group
-
-        group = np.repeat(np.arange(n_groups), n_per_group)
-        x = np.random.randn(n)
-        group_effects = np.random.randn(n_groups) * 0.3
-        eta = -0.5 + 0.5 * x + group_effects[group]
-        p = 1 / (1 + np.exp(-eta))
-        y = np.random.binomial(1, p).astype(float)
-
-        data = pd.DataFrame({"y": y, "x": x, "group": [str(g) for g in group]})
-        result = glmer("y ~ x + (1 | group)", data, family=families.Binomial())
-
-        h = result.hatvalues()
-
-        assert len(h) == n
-        assert np.all(h >= 0)
-        assert np.all(h < 1)
-
-    def test_glmer_cooks_distance(self) -> None:
-        np.random.seed(42)
-        n_groups = 10
-        n_per_group = 20
-        n = n_groups * n_per_group
-
-        group = np.repeat(np.arange(n_groups), n_per_group)
-        x = np.random.randn(n)
-        group_effects = np.random.randn(n_groups) * 0.3
-        eta = -0.5 + 0.5 * x + group_effects[group]
-        p = 1 / (1 + np.exp(-eta))
-        y = np.random.binomial(1, p).astype(float)
-
-        data = pd.DataFrame({"y": y, "x": x, "group": [str(g) for g in group]})
-        result = glmer("y ~ x + (1 | group)", data, family=families.Binomial())
-
-        cooks_d = result.cooks_distance()
-
-        assert len(cooks_d) == n
-        assert np.all(cooks_d >= 0)
-        assert np.all(np.isfinite(cooks_d))
-
-    def test_glmer_influence(self) -> None:
-        np.random.seed(42)
-        n_groups = 10
-        n_per_group = 20
-        n = n_groups * n_per_group
-
-        group = np.repeat(np.arange(n_groups), n_per_group)
-        x = np.random.randn(n)
-        group_effects = np.random.randn(n_groups) * 0.3
-        eta = -0.5 + 0.5 * x + group_effects[group]
-        p = 1 / (1 + np.exp(-eta))
-        y = np.random.binomial(1, p).astype(float)
-
-        data = pd.DataFrame({"y": y, "x": x, "group": [str(g) for g in group]})
-        result = glmer("y ~ x + (1 | group)", data, family=families.Binomial())
-
-        infl = result.influence()
-
-        assert "hat" in infl
-        assert "cooks_d" in infl
-        assert "pearson_resid" in infl
-        assert "deviance_resid" in infl
-
-        assert len(infl["hat"]) == n
-        assert len(infl["cooks_d"]) == n
+        cooks = pearson**2 / 4 * h / (1 - h) ** 2
+        assert np.all((h > 0) & (h < 1))
+        assert_allclose(influence["hat"], h)
+        assert_allclose(influence["cooks_d"], cooks)
+        assert_allclose(cbpp_glmm.cooks_distance(), cooks)
+        assert_allclose(influence["pearson_resid"], pearson)
+        assert_allclose(influence["deviance_resid"], cbpp_glmm.residuals(type="deviance"))
 
 
 class TestRePCA:
-    def test_repca_basic(self) -> None:
-        np.random.seed(42)
-        n_groups = 10
-        n_per_group = 20
-        n = n_groups * n_per_group
+    def test_correlated_terms_are_the_singular_values_of_the_scaled_factor(
+        self, sleepstudy_slopes_lmm
+    ) -> None:
+        theta, sigma = sleepstudy_slopes_lmm.theta, sleepstudy_slopes_lmm.sigma
+        block = np.array([[theta[0], 0.0], [theta[1], theta[2]]])
+        sdev = sigma * np.linalg.svd(block, compute_uv=False)
 
-        group = np.repeat(np.arange(n_groups), n_per_group)
-        x = np.random.randn(n)
-        group_int = np.random.randn(n_groups) * 0.5
-        group_slope = np.random.randn(n_groups) * 0.3
-        y = 2.0 + 1.5 * x + group_int[group] + group_slope[group] * x + np.random.randn(n) * 0.5
+        pca = sleepstudy_slopes_lmm.rePCA()
 
-        data = pd.DataFrame({"y": y, "x": x, "group": [str(g) for g in group]})
-        result = lmer("y ~ x + (x | group)", data)
-
-        pca = result.rePCA()
-
-        assert "group" in pca.groups
-        group_pca = pca["group"]
-        assert group_pca.n_terms == 2
-        assert len(group_pca.sdev) == 2
-        assert len(group_pca.proportion) == 2
-        assert len(group_pca.cumulative) == 2
-
-        assert np.all(group_pca.sdev >= 0)
-        assert np.all(group_pca.proportion >= 0)
-        assert np.all(group_pca.proportion <= 1)
-        assert np.isclose(group_pca.cumulative[-1], 1.0, atol=1e-6) or group_pca.cumulative[-1] == 0
-
-    def test_repca_single_term(self) -> None:
-        np.random.seed(42)
-        n_groups = 10
-        n_per_group = 20
-        n = n_groups * n_per_group
-
-        group = np.repeat(np.arange(n_groups), n_per_group)
-        x = np.random.randn(n)
-        group_effects = np.random.randn(n_groups) * 0.5
-        y = 2.0 + 1.5 * x + group_effects[group] + np.random.randn(n) * 0.5
-
-        data = pd.DataFrame({"y": y, "x": x, "group": [str(g) for g in group]})
-        result = lmer("y ~ x + (1 | group)", data)
-
-        pca = result.rePCA()
-
-        assert pca["group"].n_terms == 1
-        assert len(pca["group"].sdev) == 1
-        assert pca["group"].sdev[0] >= 0
-
-    def test_repca_is_singular(self) -> None:
-        np.random.seed(42)
-        n_groups = 10
-        n_per_group = 20
-        n = n_groups * n_per_group
-
-        group = np.repeat(np.arange(n_groups), n_per_group)
-        x = np.random.randn(n)
-        group_effects = np.random.randn(n_groups) * 0.5
-        y = 2.0 + 1.5 * x + group_effects[group] + np.random.randn(n) * 0.5
-
-        data = pd.DataFrame({"y": y, "x": x, "group": [str(g) for g in group]})
-        result = lmer("y ~ x + (1 | group)", data)
-
-        pca = result.rePCA()
-        singular = pca.is_singular()
-
-        assert isinstance(singular, dict)
-        assert "group" in singular
-        assert isinstance(singular["group"], (bool, np.bool_))
-
-    def test_repca_str_output(self) -> None:
-        np.random.seed(42)
-        n_groups = 10
-        n_per_group = 20
-        n = n_groups * n_per_group
-
-        group = np.repeat(np.arange(n_groups), n_per_group)
-        x = np.random.randn(n)
-        group_effects = np.random.randn(n_groups) * 0.5
-        y = 2.0 + 1.5 * x + group_effects[group] + np.random.randn(n) * 0.5
-
-        data = pd.DataFrame({"y": y, "x": x, "group": [str(g) for g in group]})
-        result = lmer("y ~ x + (x | group)", data)
-
-        pca = result.rePCA()
+        subject = pca["Subject"]
+        assert list(pca.groups) == ["Subject"]
+        assert subject.n_terms == 2
+        assert_allclose(subject.sdev, sdev)
+        assert_allclose(subject.proportion, sdev**2 / np.sum(sdev**2))
+        assert_allclose(subject.cumulative, np.cumsum(sdev**2) / np.sum(sdev**2))
+        assert pca.is_singular() == {"Subject": False}
         output = str(pca)
+        for text in ("Random effect PCA", "Subject", "PC1", "PC2"):
+            assert text in output
 
-        assert "Random effect PCA" in output
-        assert "group" in output
-        assert "PC1" in output
-        assert "PC2" in output
+    def test_single_terms_report_the_random_effect_sd(self, sleepstudy_lmm, cbpp_glmm) -> None:
+        assert_allclose(
+            sleepstudy_lmm.rePCA()["Subject"].sdev, sleepstudy_lmm.sigma * sleepstudy_lmm.theta
+        )
+        assert_allclose(cbpp_glmm.rePCA()["herd"].sdev, cbpp_glmm.theta)
+        assert cbpp_glmm.rePCA()["herd"].n_terms == 1
 
-    def test_glmer_repca(self) -> None:
-        np.random.seed(42)
-        n_groups = 10
-        n_per_group = 20
-        n = n_groups * n_per_group
-
-        group = np.repeat(np.arange(n_groups), n_per_group)
-        x = np.random.randn(n)
-        group_effects = np.random.randn(n_groups) * 0.3
-        eta = -0.5 + 0.5 * x + group_effects[group]
-        p = 1 / (1 + np.exp(-eta))
-        y = np.random.binomial(1, p).astype(float)
-
-        data = pd.DataFrame({"y": y, "x": x, "group": [str(g) for g in group]})
-        result = glmer("y ~ x + (1 | group)", data, family=families.Binomial())
-
-        pca = result.rePCA()
-
-        assert "group" in pca.groups
-        assert pca["group"].n_terms == 1
+    def test_boundary_fits_are_singular(self, singular_cbpp_glmm) -> None:
+        assert singular_cbpp_glmm.rePCA().is_singular() == {"herd": True}
 
 
-class TestDotplot:
-    def test_dotplot_basic(self) -> None:
-        pytest.importorskip("matplotlib")
+@pytest.fixture(scope="module")
+def four_level_data():
+    rng = np.random.default_rng(42)
+    group = np.repeat(np.array(list("ABCD")), 30)
+    subject = np.repeat(np.arange(12), 10)
+    y = np.repeat([0.0, 1.0, 4.0, 9.0], 30) + rng.normal(0.0, 1.0, 12)[subject]
+    y += rng.standard_normal(120)
+    return pd.DataFrame({"y": y, "group": group, "subject": subject.astype(str)})
 
-        np.random.seed(42)
-        n_groups = 10
-        n_per_group = 20
-        n = n_groups * n_per_group
 
-        group = np.repeat(np.arange(n_groups), n_per_group)
-        x = np.random.randn(n)
-        group_effects = np.random.randn(n_groups) * 0.5
-        y = 2.0 + 1.5 * x + group_effects[group] + np.random.randn(n) * 0.5
-
-        data = pd.DataFrame({"y": y, "x": x, "group": [str(g) for g in group]})
-        result = lmer("y ~ x + (1 | group)", data)
-
-        import matplotlib
-
-        matplotlib.use("Agg")
-
-        fig = result.dotplot()
-        assert fig is not None
-
-        import matplotlib.pyplot as plt
-
-        plt.close(fig)
-
-    def test_dotplot_multiple_terms(self) -> None:
-        pytest.importorskip("matplotlib")
-
-        np.random.seed(42)
-        n_groups = 10
-        n_per_group = 20
-        n = n_groups * n_per_group
-
-        group = np.repeat(np.arange(n_groups), n_per_group)
-        x = np.random.randn(n)
-        group_int = np.random.randn(n_groups) * 0.5
-        group_slope = np.random.randn(n_groups) * 0.3
-        y = 2.0 + 1.5 * x + group_int[group] + group_slope[group] * x + np.random.randn(n) * 0.5
-
-        data = pd.DataFrame({"y": y, "x": x, "group": [str(g) for g in group]})
-        result = lmer("y ~ x + (x | group)", data)
-
-        import matplotlib
-
-        matplotlib.use("Agg")
-
-        fig = result.dotplot()
-        assert fig is not None
-
-        import matplotlib.pyplot as plt
-
-        plt.close(fig)
-
-    def test_dotplot_specific_term(self) -> None:
-        pytest.importorskip("matplotlib")
-
-        np.random.seed(42)
-        n_groups = 10
-        n_per_group = 20
-        n = n_groups * n_per_group
-
-        group = np.repeat(np.arange(n_groups), n_per_group)
-        x = np.random.randn(n)
-        group_int = np.random.randn(n_groups) * 0.5
-        group_slope = np.random.randn(n_groups) * 0.3
-        y = 2.0 + 1.5 * x + group_int[group] + group_slope[group] * x + np.random.randn(n) * 0.5
-
-        data = pd.DataFrame({"y": y, "x": x, "group": [str(g) for g in group]})
-        result = lmer("y ~ x + (x | group)", data)
-
-        import matplotlib
-
-        matplotlib.use("Agg")
-
-        fig = result.dotplot(term="(Intercept)")
-        assert fig is not None
-
-        import matplotlib.pyplot as plt
-
-        plt.close(fig)
-
-    def test_glmer_dotplot(self) -> None:
-        pytest.importorskip("matplotlib")
-
-        np.random.seed(42)
-        n_groups = 10
-        n_per_group = 20
-        n = n_groups * n_per_group
-
-        group = np.repeat(np.arange(n_groups), n_per_group)
-        x = np.random.randn(n)
-        group_effects = np.random.randn(n_groups) * 0.3
-        eta = -0.5 + 0.5 * x + group_effects[group]
-        p = 1 / (1 + np.exp(-eta))
-        y = np.random.binomial(1, p).astype(float)
-
-        data = pd.DataFrame({"y": y, "x": x, "group": [str(g) for g in group]})
-        result = glmer("y ~ x + (1 | group)", data, family=families.Binomial())
-
-        import matplotlib
-
-        matplotlib.use("Agg")
-
-        fig = result.dotplot()
-        assert fig is not None
-
-        import matplotlib.pyplot as plt
-
-        plt.close(fig)
+def level_codes(result, data, factor, levels):
+    """Return the fixed-effect columns for the first row of each factor level."""
+    X = result.getME("X")
+    return np.array([X[np.flatnonzero(data[factor] == level)[0], 1:] for level in levels])
 
 
 class TestContrasts:
-    def test_treatment_contrasts_default(self) -> None:
-        np.random.seed(42)
-        n = 120
-        group = np.repeat(["A", "B", "C", "D"], n // 4)
-        subject = np.repeat(np.arange(12), n // 12)
-        effects = np.array([0, 1, 2, 3])[np.searchsorted(["A", "B", "C", "D"], group)]
-        y = np.random.randn(n) + effects
+    @pytest.mark.parametrize(
+        ("contrast", "codes"),
+        [
+            (None, [[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]]),
+            ("sum", [[1, 0, 0], [0, 1, 0], [0, 0, 1], [-1, -1, -1]]),
+            # R's contr.helmert with unit-length columns.
+            (
+                "helmert",
+                np.array([[-1, -1, -1], [1, -1, -1], [0, 2, -1], [0, 0, 3]])
+                / np.sqrt([2.0, 6.0, 12.0]),
+            ),
+            # R's contr.poly(4): orthonormal linear, quadratic and cubic trends.
+            (
+                "poly",
+                np.column_stack(
+                    (
+                        np.array([-3, -1, 1, 3]) / np.sqrt(20),
+                        np.array([1, -1, -1, 1]) / 2,
+                        np.array([-1, 3, -3, 1]) / np.sqrt(20),
+                    )
+                ),
+            ),
+        ],
+        ids=["treatment", "sum", "helmert", "poly"],
+    )
+    def test_codings_match_r_and_leave_fitted_values_unchanged(
+        self, four_level_data, contrast, codes
+    ) -> None:
+        contrasts = None if contrast is None else {"group": contrast}
 
-        data = pd.DataFrame({"y": y, "group": group, "subject": [str(s) for s in subject]})
+        result = lmer("y ~ group + (1 | subject)", four_level_data, contrasts=contrasts)
 
-        result = lmer("y ~ group + (1 | subject)", data)
+        treatment = lmer("y ~ group + (1 | subject)", four_level_data)
+        assert result.matrices.fixed_names == ["(Intercept)", "group.1", "group.2", "group.3"]
+        assert_allclose(level_codes(result, four_level_data, "group", "ABCD"), codes, atol=1e-12)
+        assert_allclose(result.fitted(), treatment.fitted(), atol=1e-6)
 
-        fixed_names = result.matrices.fixed_names
-        assert "(Intercept)" in fixed_names
-        assert any("group" in name for name in fixed_names)
-        assert len(fixed_names) == 4
+    def test_custom_contrast_matrix(self, four_level_data) -> None:
+        data = four_level_data[four_level_data["group"] != "D"]
+        custom = np.array([[-1, -1], [1, 0], [0, 1]], dtype=np.float64)
 
-    def test_sum_contrasts(self) -> None:
-        np.random.seed(42)
-        n = 120
-        group = np.repeat(["A", "B", "C", "D"], n // 4)
-        subject = np.repeat(np.arange(12), n // 12)
-        effects = np.array([0, 1, 2, 3])[np.searchsorted(["A", "B", "C", "D"], group)]
-        y = np.random.randn(n) + effects
+        result = lmer("y ~ group + (1 | subject)", data, contrasts={"group": custom})
 
-        data = pd.DataFrame({"y": y, "group": group, "subject": [str(s) for s in subject]})
+        assert result.matrices.fixed_names == ["(Intercept)", "group.1", "group.2"]
+        assert_allclose(level_codes(result, data, "group", "ABC"), custom)
 
-        result = lmer("y ~ group + (1 | subject)", data, contrasts={"group": "sum"})
-
-        fixed_names = result.matrices.fixed_names
-        assert len(fixed_names) == 4
-        assert "(Intercept)" in fixed_names
-
-    def test_helmert_contrasts(self) -> None:
-        np.random.seed(42)
-        n = 120
-        group = np.repeat(["A", "B", "C", "D"], n // 4)
-        subject = np.repeat(np.arange(12), n // 12)
-        effects = np.array([0, 1, 2, 3])[np.searchsorted(["A", "B", "C", "D"], group)]
-        y = np.random.randn(n) + effects
-
-        data = pd.DataFrame({"y": y, "group": group, "subject": [str(s) for s in subject]})
-
-        result = lmer("y ~ group + (1 | subject)", data, contrasts={"group": "helmert"})
-
-        fixed_names = result.matrices.fixed_names
-        assert len(fixed_names) == 4
-        assert result.converged
-
-    def test_poly_contrasts(self) -> None:
-        np.random.seed(42)
-        n = 120
-        group = np.repeat(["A", "B", "C", "D"], n // 4)
-        subject = np.repeat(np.arange(12), n // 12)
-        effects = np.array([0, 1, 4, 9])[np.searchsorted(["A", "B", "C", "D"], group)]
-        y = np.random.randn(n) + effects
-
-        data = pd.DataFrame({"y": y, "group": group, "subject": [str(s) for s in subject]})
-
-        result = lmer("y ~ group + (1 | subject)", data, contrasts={"group": "poly"})
-
-        fixed_names = result.matrices.fixed_names
-        assert len(fixed_names) == 4
-        assert result.converged
-
-    def test_custom_contrast_matrix(self) -> None:
-        np.random.seed(42)
-        n = 90
-        group = np.repeat(["A", "B", "C"], n // 3)
-        subject = np.repeat(np.arange(9), n // 9)
-        y = np.random.randn(n) + np.array([0, 1, 2])[np.searchsorted(["A", "B", "C"], group)]
-
-        data = pd.DataFrame({"y": y, "group": group, "subject": [str(s) for s in subject]})
-
-        custom_contrasts = np.array([[-1, -1], [1, 0], [0, 1]], dtype=np.float64)
-
-        result = lmer("y ~ group + (1 | subject)", data, contrasts={"group": custom_contrasts})
-
-        fixed_names = result.matrices.fixed_names
-        assert len(fixed_names) == 3
-        assert result.converged
-
-    def test_glmer_contrasts(self) -> None:
-        np.random.seed(42)
-        n = 120
-        group = np.repeat(["A", "B", "C"], n // 3)
-        subject = np.repeat(np.arange(12), n // 12)
-        eta = np.array([-1.0, 0.0, 1.0])[np.searchsorted(["A", "B", "C"], group)]
-        p = 1 / (1 + np.exp(-eta))
-        y = np.random.binomial(1, p).astype(float)
-
-        data = pd.DataFrame({"y": y, "group": group, "subject": [str(s) for s in subject]})
+    def test_glmer_sum_contrasts(self) -> None:
+        rng = np.random.default_rng(42)
+        group = np.repeat(np.array(list("ABC")), 40)
+        subject = np.repeat(np.arange(12), 10)
+        eta = np.repeat([-1.0, 0.0, 1.0], 40) + rng.normal(0.0, 1.0, 12)[subject]
+        data = pd.DataFrame(
+            {
+                "y": rng.binomial(1, expit(eta)).astype(float),
+                "group": group,
+                "subject": subject.astype(str),
+            }
+        )
 
         result = glmer(
             "y ~ group + (1 | subject)",
@@ -980,41 +503,30 @@ class TestContrasts:
             contrasts={"group": "sum"},
         )
 
-        fixed_names = result.matrices.fixed_names
-        assert len(fixed_names) == 3
-        assert "(Intercept)" in fixed_names
+        assert result.matrices.fixed_names == ["(Intercept)", "group.1", "group.2"]
+        assert_allclose(level_codes(result, data, "group", "ABC"), [[1, 0], [0, 1], [-1, -1]])
 
-    def test_contrasts_different_effects(self) -> None:
+    def test_contrast_helpers(self) -> None:
         from mixedlm.utils.contrasts import contr_sum, contr_treatment
 
-        n = 3
-        treatment_matrix = contr_treatment(n)
-        sum_matrix = contr_sum(n)
+        assert_array_equal(contr_treatment(3), [[0, 0], [1, 0], [0, 1]])
+        assert_array_equal(contr_sum(3), [[1, 0], [0, 1], [-1, -1]])
 
-        assert treatment_matrix.shape == (3, 2)
-        assert sum_matrix.shape == (3, 2)
-        assert not np.allclose(treatment_matrix, sum_matrix)
-
-        assert np.allclose(treatment_matrix[0, :], [0, 0])
-        assert np.allclose(sum_matrix[-1, :], [-1, -1])
-
-    def test_contrasts_with_interactions(self) -> None:
-        np.random.seed(42)
-        n = 240
-        group1 = np.tile(np.repeat(["A", "B"], n // 4), 2)
-        group2 = np.repeat(["X", "Y"], n // 2)
-        subject = np.repeat(np.arange(24), n // 24)
-        y = np.random.randn(n)
-
-        data = pd.DataFrame(
-            {"y": y, "group1": group1, "group2": group2, "subject": [str(s) for s in subject]}
-        )
+    def test_interactions_multiply_the_main_effect_codes(self) -> None:
+        rng = np.random.default_rng(42)
+        group1 = np.tile(np.repeat(["A", "B"], 60), 2)
+        group2 = np.repeat(["X", "Y"], 120)
+        subject = np.repeat(np.arange(24), 10)
+        y = rng.normal(0.0, 1.0, 24)[subject] + rng.standard_normal(240)
+        data = pd.DataFrame({"y": y, "g1": group1, "g2": group2, "subject": subject.astype(str)})
 
         result = lmer(
-            "y ~ group1 * group2 + (1 | subject)",
+            "y ~ g1 * g2 + (1 | subject)",
             data,
-            contrasts={"group1": "sum", "group2": "treatment"},
+            contrasts={"g1": "sum", "g2": "treatment"},
         )
 
-        assert result.converged
-        assert "(Intercept)" in result.matrices.fixed_names
+        X = result.getME("X")
+        g1_code = np.where(group1 == "A", 1.0, -1.0)
+        g2_code = (group2 == "Y").astype(float)
+        assert_allclose(X, np.column_stack((np.ones(240), g1_code, g2_code, g1_code * g2_code)))

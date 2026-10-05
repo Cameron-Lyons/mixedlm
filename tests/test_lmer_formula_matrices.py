@@ -1,13 +1,13 @@
 import numpy as np
 import pandas as pd
-from mixedlm import (
-    parse_formula,
-)
+import pytest
+from mixedlm import findbars, is_mixed_formula, nobars, parse_formula, subbars
+from mixedlm.formula.parser import update_formula
 from mixedlm.formula.terms import InteractionTerm, VariableTerm
 from mixedlm.matrices import build_model_matrices
 from mixedlm.utils.dataframe import concat_columns_as_string
 
-from tests._lmer_data import SLEEPSTUDY
+from tests._datasets import SLEEPSTUDY
 
 
 class TestFormulaParser:
@@ -295,3 +295,106 @@ class TestModelMatrices:
         assert matrices.fixed_names == ["(Intercept)", "fixed + value"]
         assert matrices.random_structures[0].grouping_factor == "`group/id`"
         assert matrices.Z.shape == (4, 2)
+
+
+class TestUpdateFormula:
+    @pytest.mark.parametrize(
+        ("original", "change", "expected"),
+        [
+            ("y ~ x + (1 | group)", ". ~ . + z", "y ~ x + z + (1 | group)"),
+            ("y ~ x + z + (1 | group)", ". ~ . - z", "y ~ x + (1 | group)"),
+            ("y ~ x + (1 | group)", "z ~ .", "z ~ x + (1 | group)"),
+            ("y ~ x + (1 | group)", ". ~ a + b + (1 | subject)", "y ~ a + b + (1 | subject)"),
+        ],
+    )
+    def test_dot_formulas(self, original, change, expected) -> None:
+        assert str(update_formula(parse_formula(original), change)) == expected
+
+    def test_adds_and_removes_quoted_names(self) -> None:
+        from mixedlm.formula.terms import VariableTerm
+
+        old = parse_formula("`response value` ~ x + (1 | `group id`)")
+        added = update_formula(old, ". ~ . + `new + value`")
+        removed = update_formula(added, ". ~ . - `new + value`")
+
+        assert VariableTerm("new + value") in added.fixed.terms
+        assert str(added) == ("`response value` ~ x + `new + value` + (1 | `group id`)")
+        assert removed == old
+
+
+class TestFormulaUtilities:
+    @pytest.mark.parametrize(
+        ("formula", "expected"),
+        [
+            ("y ~ x + (1 | group)", "y ~ x"),
+            ("y ~ x + z + (x | group) + (1 | subject)", "y ~ x + z"),
+            ("y ~ x * z + (1 | group)", "y ~ x + z + x:z"),
+        ],
+    )
+    def test_nobars_keeps_the_fixed_part(self, formula, expected) -> None:
+        fixed = nobars(formula)
+
+        assert str(fixed) == expected
+        assert fixed.random == ()
+        assert fixed.fixed.has_intercept
+
+    def test_nobars_with_formula_object(self) -> None:
+        original = parse_formula("y ~ x + (1 | group)")
+        f = nobars(original)
+
+        assert len(f.random) == 0
+        assert f.response == original.response
+        assert f.fixed == original.fixed
+
+    def test_findbars_simple(self) -> None:
+        bars = findbars("y ~ x + (1 | group)")
+
+        assert len(bars) == 1
+        assert bars[0].grouping == "group"
+        assert bars[0].has_intercept
+
+    def test_findbars_multiple(self) -> None:
+        bars = findbars("y ~ x + (x | group) + (1 | subject)")
+
+        assert [bar.grouping for bar in bars] == ["group", "subject"]
+
+    def test_findbars_with_formula_object(self) -> None:
+        bars = findbars(parse_formula("y ~ x + (x | group)"))
+
+        assert len(bars) == 1
+        assert bars[0].grouping == "group"
+
+    def test_findbars_no_random(self) -> None:
+        assert len(findbars("y ~ x + z")) == 0
+
+    def test_findbars_uncorrelated(self) -> None:
+        bars = findbars("y ~ x + (x || group)")
+
+        assert len(bars) == 1
+        assert not bars[0].correlated
+
+    def test_findbars_nested(self) -> None:
+        bars = findbars("y ~ x + (1 | group/subgroup)")
+
+        assert len(bars) == 2
+        assert bars[0].grouping_factors == ("group",)
+        assert bars[1].is_nested
+        assert bars[1].grouping_factors == ("group", "subgroup")
+
+    @pytest.mark.parametrize(
+        ("formula", "expected"),
+        [
+            ("y ~ x + (1 | group)", "y ~ x + group"),
+            ("y ~ x + (x | group)", "y ~ x + group + group:x"),
+        ],
+    )
+    def test_subbars_replaces_bars_with_fixed_terms(self, formula, expected) -> None:
+        assert subbars(formula) == expected
+
+    def test_is_mixed_formula(self) -> None:
+        assert is_mixed_formula("y ~ x + (1 | group)")
+        assert is_mixed_formula("y ~ x + (x | group) + (1 | subject)")
+        assert is_mixed_formula(parse_formula("y ~ x + (1 | group)"))
+        assert not is_mixed_formula("y ~ x")
+        assert not is_mixed_formula("y ~ x + z")
+        assert not is_mixed_formula(parse_formula("y ~ x + z"))

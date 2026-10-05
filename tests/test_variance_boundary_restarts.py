@@ -22,14 +22,7 @@ from mixedlm.models.control import GlmerControl, LmerControl, glmerControl, lmer
 from numpy.testing import assert_allclose, assert_array_equal
 from scipy import optimize, special, stats
 
-
-def linear_data(signal=0.7):
-    return pd.DataFrame(
-        {
-            "y": np.tile([-1.0, -1.0, 1.0, 1.0], 6) + np.repeat(np.tile([-signal, signal], 3), 4),
-            "g": np.repeat(np.arange(6), 4),
-        }
-    )
+from tests._lmm_oracles import linear_data
 
 
 @pytest.mark.parametrize("native", [False, True])

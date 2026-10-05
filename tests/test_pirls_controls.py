@@ -1,5 +1,6 @@
 """Fitting controls govern the inner solve through every likelihood route."""
 
+from functools import partial
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -58,9 +59,6 @@ def test_likelihood_controls_change_inner_status_and_estimates(family_name, rand
         complete = laplace.glmm_deviance_with_status(
             theta, matrices, family, order, pirls_maxiter=100, pirls_tol=1e-12
         )
-        legacy = laplace.adaptive_gh_deviance_fast(
-            theta, matrices, family, order, pirls_maxiter=1, pirls_tol=1e-12
-        )
         objective = laplace.GLMMOptimizer(
             matrices, family, nAGQ=order, pirls_maxiter=1, pirls_tol=1e-12
         ).objective(theta)
@@ -68,8 +66,6 @@ def test_likelihood_controls_change_inner_status_and_estimates(family_name, rand
     assert loose[3] is True
     assert complete[3] is True
     assert np.max(np.abs(limited[1] - complete[1])) > 1e-5
-    for actual, expected in zip(limited[:3], legacy, strict=True):
-        assert_array_equal(actual, expected)
     assert objective == limited[0]
     # Tolerance controls stopping, rather than changing an individual PIRLS update.
     for actual, expected in zip(limited[:3], loose[:3], strict=True):
@@ -189,18 +185,12 @@ def test_native_entry_points_forward_options_to_the_same_inner_solve(order):
     _, _, matrices, family, theta = fixture()
     args = laplace._native_glmm_args(theta, matrices, family)
     status = _rust.glmm_deviance(*args, order, maxiter=1, tol=1e-12)
-    agq = _rust.adaptive_gh_deviance(*args, order, maxiter=1, tol=1e-12)
-    beta, random, _, converged = _rust.pirls(*args, maxiter=1, tol=1e-12)
-    assert not converged
+    prepared = laplace._prepare_native_glmm(matrices, family).evaluate(
+        theta, order, maxiter=1, tol=1e-12
+    )
     assert not status[3]
-    assert_array_equal(beta, status[1])
-    assert_array_equal(random, status[2])
-    for actual, expected in zip(status[:3], agq, strict=True):
+    for actual, expected in zip(prepared, status, strict=True):
         assert_array_equal(actual, expected)
-    if order == 1:
-        actual = _rust.laplace_deviance(*args, maxiter=1, tol=1e-12)
-        for left, right in zip(actual, status[:3], strict=True):
-            assert_array_equal(left, right)
 
 
 @pytest.mark.parametrize("value", [0, -1, 1.5, True, np.nan, np.inf, "2", 1j, [1]])
@@ -233,17 +223,17 @@ def test_invalid_tolerances_are_rejected_before_fitting(value):
             laplace.glmm_deviance_with_status(theta, matrices, family, pirls_tol=value)
 
 
-@pytest.mark.parametrize(
-    "function", ["pirls", "laplace_deviance", "adaptive_gh_deviance", "glmm_deviance"]
-)
+@pytest.mark.parametrize("prepared", [False, True])
 @pytest.mark.parametrize("options", [{"maxiter": 0}, {"tol": 0}, {"tol": np.nan}, {"tol": np.inf}])
-def test_native_entry_points_reject_invalid_controls(function, options):
+def test_native_entry_points_reject_invalid_controls(prepared, options):
     _, _, matrices, family, theta = fixture()
-    args = laplace._native_glmm_args(theta, matrices, family)
-    if function in {"adaptive_gh_deviance", "glmm_deviance"}:
-        args += (7,)
+    if prepared:
+        evaluate = partial(laplace._prepare_native_glmm(matrices, family).evaluate, theta, 7)
+    else:
+        args = laplace._native_glmm_args(theta, matrices, family)
+        evaluate = partial(_rust.glmm_deviance, *args, 7)
     with pytest.raises(ValueError, match="must be"):
-        getattr(_rust, function)(*args, **options)
+        evaluate(**options)
 
 
 def test_numpy_scalar_controls_and_omitted_limit_are_supported():
@@ -316,11 +306,16 @@ def test_objective_reconstruction_and_model_update_retain_inner_controls(backend
 @pytest.mark.parametrize("backend", ["python", "native"])
 @pytest.mark.parametrize("n_jobs", [1, 2])
 def test_cross_validation_inherits_controls_and_accepts_explicit_override(backend, n_jobs):
+    from concurrent.futures import ThreadPoolExecutor
+
+    from mixedlm.inference import cross_validation
     from mixedlm.inference.cross_validation import cross_validate
 
     with (
         patch.object(laplace, "_HAS_RUST", backend == "native"),
         patch.object(laplace, "run_optimizer", side_effect=stopped_optimizer),
+        # Threads keep the patched solver and its warnings in this process.
+        patch.object(cross_validation, "process_pool", ThreadPoolExecutor),
     ):
         data, result = fitted_with_controls()
         with pytest.warns(UserWarning, match="inner PIRLS solver"):
@@ -355,7 +350,7 @@ def test_bootstrap_uses_fitted_controls_in_serial_and_worker_paths(n_jobs):
         _, result = fitted_with_controls(1e6)
         with (
             patch.object(laplace, "GLMMOptimizer", side_effect=record_optimizer),
-            patch.object(bootstrap, "ProcessPoolExecutor", ThreadPoolExecutor),
+            patch.object(bootstrap, "process_pool", ThreadPoolExecutor),
         ):
             samples = bootstrap.bootstrap_glmer(result, n_boot=3, seed=25, n_jobs=n_jobs)
     assert samples.n_failed == 0
@@ -382,8 +377,8 @@ def test_model_comparisons_retain_inner_controls(workflow, n_jobs):
         data, result = fitted_with_controls(1e6)
         with (
             patch.object(GlmerMod, "fit", record_fit),
-            patch.object(allfit, "ProcessPoolExecutor", ThreadPoolExecutor),
-            patch.object(drop1, "ProcessPoolExecutor", ThreadPoolExecutor),
+            patch.object(allfit, "process_pool", ThreadPoolExecutor),
+            patch.object(drop1, "process_pool", ThreadPoolExecutor),
         ):
             if workflow == "allfit":
                 comparison = allfit.allfit_glmer(

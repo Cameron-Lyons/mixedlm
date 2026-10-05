@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from collections import deque
 from collections.abc import Callable, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor, wait
@@ -13,6 +12,7 @@ from numpy.typing import NDArray
 from scipy import linalg
 from scipy.optimize import minimize
 
+from mixedlm._parallel import resolve_n_jobs
 from mixedlm.estimation.pnls_control import validate_pnls_controls
 from mixedlm.nlme.models import (
     NonlinearModel,
@@ -209,7 +209,7 @@ def _nlmm_workspace(
     """Reuse immutable preparation and scope worker lifetime to one call or fit."""
     prior_weights = _as_prior_weights(weights, len(y))
     group_rows = _grouped_observation_indices(groups)
-    workers = (os.cpu_count() or 1) if n_jobs == -1 else n_jobs
+    workers = resolve_n_jobs(n_jobs)
     use_parallel = workers > 1 and len(group_rows) >= workers
     with ThreadPoolExecutor(max_workers=workers) if use_parallel else nullcontext() as executor:
         yield _NLMMWorkspace(
@@ -543,37 +543,6 @@ def _nlmm_deviance(
     deviance = n * (1.0 + np.log(2.0 * np.pi * sigma_sq)) + laplace_correction
 
     return deviance, phi_new, b_new, np.sqrt(sigma_sq), converged
-
-
-def _nlmm_deviance_rust(
-    theta: NDArray[np.floating],
-    y: NDArray[np.floating],
-    x: NDArray[np.floating],
-    groups: NDArray[np.integer],
-    model: NonlinearModel,
-    phi: NDArray[np.floating],
-    b: NDArray[np.floating],
-    random_params: list[int],
-    sigma: float,
-    weights: NDArray[np.floating],
-    *,
-    pnls_maxiter: int | None = None,
-    pnls_tol: float = _PNLS_TOL,
-) -> tuple[float, NDArray[np.floating], NDArray[np.floating], float]:
-    return _nlmm_deviance_rust_with_status(
-        theta,
-        y,
-        x,
-        groups,
-        model,
-        phi,
-        b,
-        random_params,
-        sigma,
-        weights,
-        pnls_maxiter=pnls_maxiter,
-        pnls_tol=pnls_tol,
-    )[:4]
 
 
 def _nlmm_deviance_rust_with_status(

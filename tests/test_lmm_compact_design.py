@@ -5,33 +5,17 @@ from dataclasses import replace
 import numpy as np
 import pytest
 from mixedlm import _rust
-from mixedlm.matrices.design import ModelMatrices, RandomEffectStructure
-from numpy.testing import assert_allclose, assert_array_equal
-from scipy import sparse
+from numpy.testing import assert_allclose
 
-from tests.test_lmm_gradient_contractions import observation_gradient
-from tests.test_lmm_prepared_design import native_arguments, observation_likelihood
-from tests.test_lmm_reml_contractions import fixed_effect_problem
-
-
-def large_intercepts(levels, fixed):
-    n = 3 * levels
-    rows = np.arange(n)
-    groups = rows % levels
-    offset = 0.1 * np.cos(rows)
-    matrices = ModelMatrices(
-        y=offset + 0.3 + 0.4 * np.sin(groups) + 0.1 * np.sin(rows * 0.137),
-        X=np.ones((n, 1)) if fixed else np.empty((n, 0)),
-        Z=sparse.csc_matrix((np.ones(n), (rows, groups)), shape=(n, levels)),
-        fixed_names=["Intercept"] if fixed else [],
-        random_structures=[RandomEffectStructure("g", ["Intercept"], levels, 1, True, {})],
-        n_obs=n,
-        n_fixed=int(fixed),
-        n_random=levels,
-        weights=np.geomspace(0.5, 2.0, n),
-        offset=offset,
-    )
-    return matrices, groups
+from tests._lmm_oracles import (
+    fixed_effect_problem,
+    grouped_slope_oracle,
+    large_intercepts,
+    large_slopes,
+    native_arguments,
+    observation_gradient,
+    observation_likelihood,
+)
 
 
 def grouped_intercept_oracle(matrices, groups, theta, reml):
@@ -52,66 +36,6 @@ def grouped_intercept_oracle(matrices, groups, theta, reml):
     if reml and matrices.n_fixed:
         value += np.log(information)
         gradient -= np.sum(2 * theta * (totals / precision) ** 2) / information
-    return value, gradient, beta, np.sqrt(pwrss / df)
-
-
-def large_slopes(levels, width):
-    matrices, groups = large_intercepts(levels, True)
-    terms = np.random.default_rng(714).normal(scale=0.3, size=(matrices.n_obs, width))
-    terms[:, 0] = 1.0
-    columns = groups[:, None] * width + np.arange(width)
-    z = sparse.csc_matrix(
-        (terms.ravel(), (np.repeat(np.arange(matrices.n_obs), width), columns.ravel())),
-        shape=(matrices.n_obs, levels * width),
-    )
-    structure = replace(
-        matrices.random_structures[0], n_terms=width, term_names=[f"x{i}" for i in range(width)]
-    )
-    matrices = replace(matrices, Z=z, n_random=z.shape[1], random_structures=[structure])
-    lower = np.diag(np.linspace(0.3, 0.7, width))
-    lower[np.tril_indices(width, -1)] = 0.03
-    return matrices, terms, lower[np.tril_indices(width)]
-
-
-def grouped_slope_oracle(matrices, terms, theta, reml):
-    """Independent three-observation covariance systems, with no q-by-q array."""
-    levels, width = matrices.random_structures[0].n_levels, terms.shape[1]
-    design = terms.reshape(3, levels, width).transpose(1, 0, 2)
-    lower = np.zeros((width, width))
-    lower[np.tril_indices(width)] = theta
-    transformed = design @ lower
-    covariance = transformed @ transformed.transpose(0, 2, 1)
-    diagonal = np.arange(3)
-    covariance[:, diagonal, diagonal] += 1 / matrices.weights.reshape(3, levels).T
-    precision = np.linalg.inv(covariance)
-    y = (matrices.y - matrices.offset).reshape(3, levels).T
-    information = precision.sum()
-    beta = np.sum(np.einsum("gij,gj->gi", precision, y)) / information
-    residual = y - beta
-    projected = np.einsum("gij,gj->gi", precision, residual)
-    pwrss = np.sum(residual * projected)
-    df = matrices.n_obs - int(reml)
-    sign, logdet = np.linalg.slogdet(covariance)
-    assert_array_equal(sign, np.ones(levels))
-    value = df * (1 + np.log(2 * np.pi * pwrss / df)) + logdet.sum()
-    if reml:
-        value += np.log(information)
-    fixed_projection = precision.sum(axis=2)
-    gradient = []
-    for row, column in zip(*np.tril_indices(width), strict=True):
-        basis = np.zeros((width, width))
-        basis[row, column] = 1.0
-        changed = design @ basis
-        derivative = changed @ transformed.transpose(0, 2, 1)
-        derivative += derivative.transpose(0, 2, 1).copy()
-        score = np.einsum("gij,gji->", precision, derivative)
-        score -= df / pwrss * np.einsum("gi,gij,gj->", projected, derivative, projected)
-        if reml:
-            score -= (
-                np.einsum("gi,gij,gj->", fixed_projection, derivative, fixed_projection)
-                / information
-            )
-        gradient.append(score)
     return value, gradient, beta, np.sqrt(pwrss / df)
 
 
@@ -162,24 +86,10 @@ def test_many_independent_levels_match_groupwise_likelihood(levels, fixed, reml,
 @pytest.mark.parametrize("diagonal", [False, True])
 @pytest.mark.parametrize("variance", ["regular", "singular", "zero"])
 @pytest.mark.parametrize("reml", [False, True])
-def test_compact_preparation_matches_explicit_cached_products(
-    widths, coupled, diagonal, variance, reml
-):
+def test_compact_preparation_matches_observation_system(widths, coupled, diagonal, variance, reml):
     matrices, theta = fixed_effect_problem(widths, 3, coupled, diagonal, variance)
-    arguments = native_arguments(matrices)
-    cache = _rust.compute_ztwz(
-        **{
-            name: arguments[name]
-            for name in ["z_data", "z_indices", "z_indptr", "z_shape", "weights"]
-        }
-    )
-    unchanged = cache.copy()
-    response = _rust.LmmDesign(**arguments).with_response(matrices.y)
+    response = _rust.LmmDesign(**native_arguments(matrices)).with_response(matrices.y)
     value, gradient = response.deviance_with_gradient(theta, reml)
-    cached = _rust.profiled_deviance_cached(
-        **arguments, y=matrices.y, theta=theta, reml=reml, ztwz_cache=cache
-    )
-    assert cached == value
-    assert_array_equal(cache, unchanged)
+    assert value == response.deviance(theta, reml)
     assert_allclose(value, observation_likelihood(matrices, theta, reml), rtol=2e-12, atol=2e-10)
     assert_allclose(gradient, observation_gradient(matrices, theta, reml), rtol=2e-10, atol=2e-9)

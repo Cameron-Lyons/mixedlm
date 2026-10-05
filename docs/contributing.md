@@ -15,7 +15,7 @@ Thank you for your interest in contributing to mixedlm!
 1. Clone the repository:
 
 ```bash
-git clone https://github.com/cameronlyons/mixedlm.git
+git clone https://github.com/Cameron-Lyons/mixedlm.git
 cd mixedlm
 ```
 
@@ -47,6 +47,9 @@ skipping because an optional package is absent.
 pip install pre-commit
 pre-commit install
 ```
+
+The hooks run ruff from the project's `.venv` through `uv run --no-sync`, so they
+use the same ruff version as CI; they also need `uv` and a Rust toolchain.
 
 ## Running Tests
 
@@ -98,6 +101,13 @@ later factorizations.
 Saved results contain summary statistics. Add `--benchmark-save-data` only when
 individual timing samples are needed; collecting every sample across the full
 benchmark suite can produce very large artifacts.
+
+The main test commands skip `tests/test_benchmark.py`. To run its correctness
+checks once without timing, as pull-request CI does, use:
+
+```bash
+pytest tests/test_benchmark.py --benchmark-disable
+```
 
 ### Rebuilding the Native Backend
 
@@ -153,23 +163,36 @@ with offsets, random slopes, independent terms, and crossed groups. It compares
 both backends with independently assembled observation-space Gaussian
 likelihoods, checks affine response transformations and response-cache
 independence, and verifies public fitted values against generalized least
-squares. Hypothesis statistics show the number of examples exercised.
+squares. Hypothesis statistics show the number of examples exercised. On pull
+requests the benchmark job runs each benchmark once with `--benchmark-disable`
+to check its results; pushes to `main` record timings as a workflow artifact.
 
-The required fuzz smoke job compiles the production CSC and sparse Cholesky
-modules, checks their mathematical oracles with deterministic tests, then fuzzes
-both targets with address sanitization for ten seconds each. A separate weekly
-job runs each target for sixty seconds. `fuzz/Cargo.lock` locks this standalone
-crate's dependencies. Sparse solves use known generated solutions and an
-independent scalar log-determinant calculation; CSC validation and weighted
-products use a dense reference. Run the deterministic checks locally with:
+The test suite includes `tests/test_docs_examples.py`, which runs the fenced
+`python` examples in `README.md` and `docs/` in order, one namespace per page, and
+checks that `mixedlm` imports and `mlm.<name>` references in every Python block
+resolve. Tag a fragment that is not meant to run, such as one using placeholder
+data, as `py` instead of `python`; it renders the same way.
+
+The standalone fuzz crate (`fuzz/`, locked by `fuzz/Cargo.lock`) checks the
+production CSC and sparse Cholesky modules against mathematical oracles: sparse
+solves use known generated solutions and an independent scalar log-determinant
+calculation, and CSC validation and weighted products use a dense reference. Its
+deterministic tests, formatting, and clippy run in the stable Rust jobs:
 
 ```bash
 cargo test --locked --manifest-path fuzz/Cargo.toml --lib
 ```
 
+The fuzz smoke job then fuzzes both targets with address sanitization for ten
+seconds each, using the same `fuzz.yml` workflow that runs each target for sixty
+seconds every week. Miri runs the Rust unit tests weekly and on demand in
+`miri.yml`; a full run takes 25 to 40 minutes, so it is not part of pull-request CI.
+
 The Python 3.12 job enforces 87% combined line/branch coverage, based on the
 measured complete feature suite. Other Python jobs report coverage without this
-floor because they exercise different optional-feature combinations.
+floor because they exercise different optional-feature combinations. The Python
+3.12 and Rust coverage reports are uploaded to Codecov with the repository's
+`CODECOV_TOKEN` secret; an upload failure does not fail CI.
 
 A separate Python 3.10 job runs the core suite with NumPy 1.23.5, SciPy 1.14.0,
 and pandas 1.4.0. NumPy 1.23.5 is SciPy 1.14's effective lower bound. This job
@@ -181,9 +204,15 @@ by the complete feature run. The minimum job sets `OPENBLAS_CORETYPE=Nehalem`
 to avoid a [known CPU-dispatch bug in NumPy 1.23.5's bundled OpenBLAS](https://github.com/numpy/numpy/issues/24903)
 on newer x86 CPUs while retaining a kernel supported by the wheel's CPU baseline.
 
-Each wheel is installed and exercised on its target operating system and CPU,
+Wheels and the source distribution are built by `wheels.yml`, which both CI and
+the release workflow call, so published artifacts pass the same checks. Each
+wheel is installed and exercised on its target operating system and CPU,
 including Linux ARM. The source distribution is rebuilt and installed in a
-fresh environment as well. `tools/check_wheel.py` verifies installed-package locations,
+fresh environment as well. Every wheel runs the test modules marked
+`installed_wheel` (`pytest -m installed_wheel tests/`) against the installed
+artifact; add `pytestmark = pytest.mark.installed_wheel` to a module whose
+numerical or threading behavior should be checked on every platform.
+`tools/check_wheel.py` verifies installed-package locations,
 metadata, packaged datasets, LMM and grouped-binomial fits, sparse solves and
 log-determinants against NumPy, and concurrent use of a shared native factor.
 Before those numerical checks, `tools/native_build.py` compares each installed
@@ -204,7 +233,13 @@ editable installations. Release jobs require these checks before uploading
 artifacts for publication. Actionlint validates workflow structure and
 expressions on every pull request.
 The `Required CI checks` job aggregates every CI job and fails if any failed,
-was cancelled, or was skipped, so branch protection can require one stable check.
+was cancelled, or was skipped, so a branch ruleset can require this one stable
+check; merges are blocked only when the repository settings require it.
+This includes the reusable security workflow: Bandit source scanning, dependency
+audits for the core and optional runtime features and both Rust lockfiles, and
+dependency review on pull requests. The scanners' versions are locked in the
+`security` dependency group of `uv.lock`. The security workflow also has a weekly
+schedule, so new advisories are reported without a code change.
 
 ## Code Style
 
@@ -216,8 +251,8 @@ This project uses:
 Run the linters:
 
 ```bash
-ruff check python/ tests/ tools/
-ruff format python/ tests/ tools/
+ruff check python/ tests/ tools/ benchmarks/
+ruff format python/ tests/ tools/ benchmarks/
 mypy python/ tools/ --ignore-missing-imports
 ```
 
@@ -260,9 +295,9 @@ git checkout -b feature/my-feature
 3. Run the test suite and linters:
 
 ```bash
-pytest
-ruff check python/
-mypy python/mixedlm/
+pytest --ignore=tests/test_benchmark.py --strict-config --strict-markers
+ruff check python/ tests/ tools/ benchmarks/
+mypy python/ tools/ --ignore-missing-imports
 ```
 
 4. Commit your changes with a descriptive message

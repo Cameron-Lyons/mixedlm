@@ -103,3 +103,49 @@ def test_glmm_dfbeta_matches_deleted_final_working_system(family_name):
 
     assert_allclose(full, model.beta, rtol=0, atol=1e-8)
     assert_allclose(influence(model).dfbeta, expected, rtol=1e-6, atol=2e-9)
+
+
+def test_zero_variance_fit_matches_weighted_least_squares_case_deletion():
+    rng = np.random.default_rng(5)
+    groups = np.repeat(np.arange(6), 5)
+    x = rng.normal(size=len(groups))
+    weights = np.linspace(0.5, 2.0, len(groups))
+    X = np.column_stack((np.ones(len(groups)), x))
+    # Noise orthogonal to the fixed and group columns makes zero variance optimal.
+    design = np.column_stack((X, groups[:, None] == np.arange(6))) * np.sqrt(weights)[:, None]
+    noise = rng.normal(size=len(groups)) * np.sqrt(weights)
+    basis = np.linalg.qr(design)[0]
+    noise -= basis @ (basis.T @ noise)
+    y = 1.0 + 0.5 * x + noise / np.sqrt(weights)
+    data = pd.DataFrame({"y": y, "x": x, "g": groups})
+    with pytest.warns(UserWarning, match="singular"):
+        model = lmer("y ~ x + (1 | g)", data, weights=weights)
+    assert_allclose(model.theta, [0.0], atol=0)
+
+    def wls(keep):
+        sqrt_w = np.sqrt(weights[keep])
+        return np.linalg.lstsq(sqrt_w[:, None] * X[keep], sqrt_w * y[keep], rcond=None)[0]
+
+    beta = wls(np.ones(len(y), dtype=bool))
+    deltas = beta - np.array([wls(np.arange(len(y)) != row) for row in range(len(y))])
+    information = X.T @ (weights[:, None] * X)
+    n, p = X.shape
+    s2 = weights @ (y - X @ beta) ** 2 / (n - p)
+    leverage = weights * np.einsum("ij,ij->i", X @ np.linalg.inv(information), X)
+    diagnostics = influence(model)
+
+    assert_allclose(model.beta, beta, rtol=1e-10)
+    assert_allclose(diagnostics.hat_values, leverage, rtol=1e-10)
+    # Both measures delete each case from the fit. Deletion diagnostics hold variance
+    # components fixed, so DFFITS scales by the full-fit sigma rather than the
+    # leave-one-out s_(i) that lm's dffits() uses.
+    assert_allclose(
+        diagnostics.cooks_distance,
+        np.einsum("ij,jk,ik->i", deltas, information, deltas) / (p * s2),
+        rtol=1e-10,
+    )
+    assert_allclose(
+        diagnostics.dffits,
+        np.sqrt(weights) * np.einsum("ij,ij->i", X, deltas) / np.sqrt(s2 * leverage),
+        rtol=1e-10,
+    )

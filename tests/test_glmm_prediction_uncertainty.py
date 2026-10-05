@@ -11,6 +11,8 @@ from mixedlm.models.glmer import GlmerResult
 from mixedlm.models.lmer import LmerResult
 from scipy import linalg, sparse, stats
 
+pytestmark = pytest.mark.installed_wheel
+
 
 def _model(family, *, weighted=False, crossed=False, structured=False):
     x = np.tile([-0.8, -0.1, 0.5, 1.2], 6)

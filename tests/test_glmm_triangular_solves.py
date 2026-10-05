@@ -10,7 +10,7 @@ from scipy import sparse
 @pytest.mark.parametrize("p", [0, 1, 4, 17])
 @pytest.mark.parametrize("q", [0, 1, 33, 129])
 @pytest.mark.parametrize("scale", [0.0, 0.7])
-def test_native_pirls_and_laplace_match_joint_gaussian_system(p, q, scale):
+def test_native_laplace_matches_joint_gaussian_system(p, q, scale):
     rng = np.random.default_rng(637 + 13 * p + q)
     n = max(80, 2 * (p + q))
     x = rng.normal(size=(n, p))
@@ -58,13 +58,8 @@ def test_native_pirls_and_laplace_match_joint_gaussian_system(p, q, scale):
         "gaussian",
         "identity",
     )
-    beta, random, deviance, converged = _rust.pirls(*args)
+    laplace, beta, random, converged = _rust.glmm_deviance(*args, 1)
     assert converged
-    assert_allclose(beta, expected_beta, rtol=2e-11, atol=2e-12)
-    assert_allclose(random, expected_random, rtol=2e-11, atol=2e-12)
-    assert deviance == pytest.approx(expected_deviance, rel=2e-12, abs=2e-12)
-
-    laplace, beta, random = _rust.laplace_deviance(*args)
     assert_allclose(beta, expected_beta, rtol=2e-11, atol=2e-12)
     assert_allclose(random, expected_random, rtol=2e-11, atol=2e-12)
     assert laplace == pytest.approx(expected_laplace, rel=2e-12, abs=2e-12)

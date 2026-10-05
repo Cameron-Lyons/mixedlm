@@ -45,7 +45,10 @@ def make_matrices(kind="gaussian", pattern="mixed", n_groups=4, n_per_group=6):
 def evaluate(matrices, family, native=False, order=15, n_jobs=1, theta=0.7):
     if native:
         pytest.importorskip("mixedlm._rust")
-        return laplace.adaptive_gh_deviance_fast(np.array([theta]), matrices, family, nAGQ=order)
+        deviance, beta, u, _ = laplace.glmm_deviance_with_status(
+            np.array([theta]), matrices, family, nAGQ=order
+        )
+        return deviance, beta, u
     return laplace.adaptive_gh_deviance(
         np.array([theta]), matrices, family, nAGQ=order, n_jobs=n_jobs
     )
@@ -183,3 +186,15 @@ def test_noncanonical_python_design_is_combined_without_mutation():
         np.testing.assert_array_equal(current, previous)
     for value, reference in zip(actual, expected, strict=True):
         np.testing.assert_allclose(value, reference, rtol=1e-10, atol=1e-10)
+
+
+@pytest.mark.parametrize("kind", ["gaussian", "poisson", "binomial"])
+def test_first_order_quadrature_is_the_laplace_approximation(kind):
+    matrices, family = make_matrices(kind)
+    theta = np.array([0.7])
+
+    actual = laplace.adaptive_gh_deviance(theta, matrices, family, nAGQ=1)
+    expected = laplace.laplace_deviance(theta, matrices, family)
+
+    for value, reference in zip(actual, expected, strict=True):
+        np.testing.assert_allclose(value, reference, rtol=1e-12, atol=1e-12)

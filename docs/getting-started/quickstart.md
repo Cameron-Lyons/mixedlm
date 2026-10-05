@@ -14,13 +14,13 @@ data = mlm.load_sleepstudy()
 print(data.head())
 ```
 
-```
-   Reaction  Days  Subject
-0  249.5600     0      308
-1  258.7047     1      308
-2  250.8006     2      308
-3  321.4398     3      308
-4  356.8519     4      308
+```text
+   Reaction  Days Subject
+0  249.5600   0.0     308
+1  258.7047   1.0     308
+2  250.8006   2.0     308
+3  321.4398   3.0     308
+4  356.8519   4.0     308
 ```
 
 This dataset contains reaction times measured over 10 days of sleep deprivation for 18 subjects.
@@ -46,23 +46,24 @@ The `summary()` method shows fixed effects with p-values:
 print(result.summary())
 ```
 
-```
+```text
 Linear mixed model fit by REML
-
-Formula: Reaction ~ Days + (Days | Subject)
+Formula: Reaction ~ Days + (1 + Days | Subject)
 
 Random effects:
- Groups   Name        Variance  Std.Dev.  Corr
- Subject  (Intercept)  612.10    24.74
-          Days          35.07     5.92    0.07
- Residual              654.94    25.59
-
-Number of obs: 180, groups: Subject, 18
+ Groups      Name           Variance   Std.Dev.   Corr
+ Subject     (Intercept)    612.0901    24.7405
+             Days            35.0717     5.9221   0.07
+ Residual                   654.9410    25.5918
+Number of obs: 180
+  groups:  Subject, 18
 
 Fixed effects:
-              Estimate  Std. Error    df  t value  Pr(>|t|)
-(Intercept)    251.405       6.825  17.0   36.838    <0.001
-Days            10.467       1.546  17.0    6.771    <0.001
+               Estimate   Std.Error        df   t value    Pr(>|t|)
+(Intercept)    251.4051      6.8246     17.00    36.838     < 2e-16 ***
+Days            10.4673      1.5458     17.00     6.771    3.26e-06 ***
+---
+Signif. codes: 0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1 ' ' 1
 ```
 
 ## Extracting Components
@@ -98,8 +99,8 @@ result.confint(method="Wald")
 # Profile likelihood intervals (more accurate)
 result.confint(method="profile")
 
-# Bootstrap intervals (most robust)
-result.confint(method="boot", nsim=500)
+# Bootstrap intervals (most robust; use 1000 or more replicates for reported results)
+result.confint(method="boot", n_boot=50, seed=42)
 ```
 
 ### Model Comparison
@@ -140,16 +141,12 @@ projected to the columns required by the formula before collection:
 ```python
 import polars as pl
 
-data_pl = pl.DataFrame({
-    "y": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
-    "x": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
-    "group": ["A", "A", "B", "B", "C", "C"],
-})
+data_pl = pl.DataFrame(data.to_dict(orient="list"))
 
-result = mlm.lmer("y ~ x + (1 | group)", data_pl)
-print(result.summary())
+result_pl = mlm.lmer("Reaction ~ Days + (Days | Subject)", data_pl)
+print(result_pl.fixef())
 
-lazy_result = mlm.lmer("y ~ x + (1 | group)", data_pl.lazy())
+lazy_result = mlm.lmer("Reaction ~ Days + (Days | Subject)", data_pl.lazy())
 ```
 
 ## Next Steps

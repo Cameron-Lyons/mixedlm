@@ -5,27 +5,14 @@ from importlib import import_module
 import numpy as np
 import pandas as pd
 import pytest
-from mixedlm.inference.emmeans import ContrastResult, EmmeanResult, Emmeans
+from mixedlm.inference.emmeans import ContrastResult
 from numpy.testing import assert_allclose, assert_array_equal
 from pandas.testing import assert_frame_equal
 from scipy import stats
 
+from tests._inference_results import identity_emmeans
+
 module = import_module("mixedlm.inference.emmeans")
-
-
-def _means(df=17.0, n=4):
-    beta = np.linspace(-0.7, 1.0, n)
-    covariance = np.diag(np.linspace(0.2, 0.5, n)) + 0.08
-    zeros = np.zeros(n)
-    return Emmeans(
-        EmmeanResult(beta, zeros, df, zeros, zeros, pd.DataFrame({"group": list(range(n))}), 0.95),
-        np.eye(n),
-        covariance,
-        beta,
-        df,
-        ["group"],
-        [list(range(n))],
-    )
 
 
 def _contrasts(means, kind, adjust="none", level=0.9):
@@ -44,7 +31,7 @@ def _contrasts(means, kind, adjust="none", level=0.9):
 @pytest.mark.parametrize("df", [17.0, np.inf])
 @pytest.mark.parametrize("adjust", ["none", "bonferroni", "holm", "fdr", "dunnett"])
 def test_contrast_intervals_use_the_requested_level_and_adjustment(kind, df, adjust):
-    result = _contrasts(_means(df), kind, adjust)
+    result = _contrasts(identity_emmeans(df), kind, adjust)
 
     interval = result.confint()
 
@@ -65,7 +52,7 @@ def test_contrast_intervals_use_the_requested_level_and_adjustment(kind, df, adj
 @pytest.mark.parametrize("df", [17.0, np.inf])
 @pytest.mark.parametrize("level", [0.8, 0.95])
 def test_tukey_intervals_invert_the_studentized_range_test(kind, df, level):
-    result = _contrasts(_means(df), kind, "tukey", level)
+    result = _contrasts(identity_emmeans(df), kind, "tukey", level)
 
     interval = result.confint()
 
@@ -79,7 +66,7 @@ def test_tukey_intervals_invert_the_studentized_range_test(kind, df, level):
 
 @pytest.mark.parametrize("df", [17.0, np.inf])
 def test_two_mean_tukey_intervals_match_pointwise_intervals(df):
-    result = _means(df, 2).pairs(level=0.9)
+    result = identity_emmeans(df, 2).pairs(level=0.9)
 
     tukey = result.confint()
     pointwise = result.confint(adjust="none")
@@ -90,7 +77,7 @@ def test_two_mean_tukey_intervals_match_pointwise_intervals(df):
 
 @pytest.mark.parametrize("kind", ["pairs", "control", "custom"])
 def test_interval_overrides_do_not_change_estimates_tests_or_defaults(kind):
-    result = _contrasts(_means(), kind, "holm", 0.9)
+    result = _contrasts(identity_emmeans(), kind, "holm", 0.9)
     original = [array.copy() for array in (result.estimate, result.se, result.p_value)]
 
     default = result.confint()
@@ -112,32 +99,32 @@ def test_interval_overrides_do_not_change_estimates_tests_or_defaults(kind):
 @pytest.mark.parametrize("level", [0.0, 1.0, -0.1, 2.0, np.nan, np.inf])
 def test_invalid_confidence_levels_are_rejected(kind, level):
     with pytest.raises(ValueError, match="level"):
-        _contrasts(_means(), kind, level=level)
+        _contrasts(identity_emmeans(), kind, level=level)
     with pytest.raises(ValueError, match="level"):
-        _contrasts(_means(), kind).confint(level=level)
+        _contrasts(identity_emmeans(), kind).confint(level=level)
 
 
 @pytest.mark.parametrize("level", [True, np.bool_(False), "0.9", [0.9], np.array([0.9]), 0.9j])
 def test_confidence_level_requires_a_real_scalar(level):
     with pytest.raises(TypeError, match="level"):
-        _means().pairs(level=level)
+        identity_emmeans().pairs(level=level)
     with pytest.raises(TypeError, match="level"):
-        _means().pairs().confint(level=level)
+        identity_emmeans().pairs().confint(level=level)
 
 
 @pytest.mark.parametrize("adjust", ["invalid", "", "tukye"])
 def test_unknown_interval_adjustment_is_rejected(adjust):
     with pytest.raises(ValueError, match="interval adjustment"):
-        _means().pairs().confint(adjust=adjust)
+        identity_emmeans().pairs().confint(adjust=adjust)
 
 
 def test_interval_adjustment_requires_a_name():
     with pytest.raises(TypeError, match="adjust"):
-        _means().pairs().confint(adjust=42)
+        identity_emmeans().pairs().confint(adjust=42)
 
 
 def test_interval_adjustment_aliases_report_the_actual_method():
-    result = _means().pairs()
+    result = identity_emmeans().pairs()
 
     interval = result.confint(adjust=" BH ")
 
@@ -148,8 +135,8 @@ def test_interval_adjustment_aliases_report_the_actual_method():
 
 def test_arbitrary_custom_contrasts_require_a_supported_interval_method():
     with pytest.raises(ValueError, match="Tukey adjustment requires pairwise"):
-        _contrasts(_means(), "custom", "tukey")
-    result = _contrasts(_means(), "custom", "bonferroni")
+        _contrasts(identity_emmeans(), "custom", "tukey")
+    result = _contrasts(identity_emmeans(), "custom", "bonferroni")
 
     with pytest.raises(ValueError, match="Tukey intervals require pairwise"):
         result.confint(adjust="tukey")
@@ -166,7 +153,7 @@ def test_intervals_are_lazy_and_reuse_scalar_quantiles(monkeypatch):
 
     monkeypatch.setattr(stats.studentized_range, "isf", quantile)
     try:
-        result = _means().pairs(level=0.9)
+        result = identity_emmeans().pairs(level=0.9)
         assert calls == []
         first = result.confint()
         assert_frame_equal(result.confint(), first)
@@ -181,7 +168,7 @@ def test_intervals_are_lazy_and_reuse_scalar_quantiles(monkeypatch):
 
 
 def test_returned_intervals_are_independent_of_result_arrays():
-    result = _means().pairs(adjust="none")
+    result = identity_emmeans().pairs(adjust="none")
     original = result.confint()
 
     modified = result.confint()
@@ -197,9 +184,9 @@ def test_returned_intervals_are_independent_of_result_arrays():
 @pytest.mark.parametrize("kind", ["control", "custom"])
 def test_empty_contrast_families_have_empty_interval_tables(kind):
     result = (
-        _means(n=1).contrast("trt.vs.ctrl")
+        identity_emmeans(n=1).contrast("trt.vs.ctrl")
         if kind == "control"
-        else _means().contrast(np.empty((0, 4)))
+        else identity_emmeans().contrast(np.empty((0, 4)))
     )
 
     interval = result.confint()
@@ -211,7 +198,7 @@ def test_empty_contrast_families_have_empty_interval_tables(kind):
 
 def test_exact_zero_contrast_has_a_point_interval():
     with np.errstate(invalid="ignore"):
-        result = _means().contrast(np.zeros((1, 4)))
+        result = identity_emmeans().contrast(np.zeros((1, 4)))
 
     interval = result.confint()
 
@@ -221,7 +208,7 @@ def test_exact_zero_contrast_has_a_point_interval():
 
 
 def test_extreme_confidence_level_does_not_round_the_tail_to_zero():
-    result = _means().pairs(adjust="bonferroni", level=np.nextafter(1.0, 0.0))
+    result = identity_emmeans().pairs(adjust="bonferroni", level=np.nextafter(1.0, 0.0))
 
     interval = result.confint()
 
@@ -250,8 +237,8 @@ def test_missing_values_remain_missing_and_count_in_the_interval_family():
 
 @pytest.mark.parametrize("adjust", ["none", "bonferroni", "tukey"])
 def test_different_sized_families_keep_separate_adjustments(adjust):
-    first = _means(n=2).pairs(adjust=adjust, level=0.9)
-    second = _means(n=4).pairs(adjust=adjust, level=0.9)
+    first = identity_emmeans(n=2).pairs(adjust=adjust, level=0.9)
+    second = identity_emmeans(n=4).pairs(adjust=adjust, level=0.9)
 
     def join(name):
         return np.concatenate([getattr(first, name), getattr(second, name)])

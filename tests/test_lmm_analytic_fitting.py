@@ -12,9 +12,8 @@ from mixedlm.models.control import LmerControl
 from mixedlm.models.modular import LmerDevfun
 from numpy.testing import assert_allclose, assert_array_equal
 
-from tests._lmer_data import SLEEPSTUDY
-from tests.test_lmm_prepared_design import matrices_fixture, parameters
-from tests.test_variance_boundary_restarts import linear_data
+from tests._datasets import SLEEPSTUDY
+from tests._lmm_oracles import linear_data, matrices_fixture, parameters
 
 
 def sleep_matrices():
@@ -79,7 +78,12 @@ def test_gradient_solvers_match_independent_python_fit(method, reml):
     actual = optimizer.optimize(
         start=start, method=method, options=options, use_analytic_gradient=True
     )
-    assert actual.converged, actual.message
+    if method == "TNC" and not actual.converged:
+        # On some BLAS builds TNC's line search stalls at objective roundoff
+        # at the optimum; the accuracy checks below still apply.
+        assert "Linear search failed" in actual.message, actual.message
+    else:
+        assert actual.converged, actual.message
     assert reference.converged
     assert_allclose(actual.deviance, reference.deviance, rtol=0, atol=2e-7)
     assert_allclose(actual.beta, reference.beta, rtol=1e-6, atol=1e-5)

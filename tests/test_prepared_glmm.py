@@ -11,8 +11,7 @@ from mixedlm.estimation.joint_glmm import JointGLMMObjective
 from mixedlm.families import Poisson
 from numpy.testing import assert_array_equal
 
-from tests.test_glmm_final_state import mode_problem
-from tests.test_native_glmm_inputs import arguments
+from tests._glmm_oracles import mode_problem, native_glmm_arguments
 
 native = pytest.importorskip("mixedlm._rust")
 
@@ -30,7 +29,7 @@ def assert_state_equal(actual, expected):
 @pytest.mark.parametrize("layout", ["intercept", "slope", "crossed", "fixed_only", "mode_only"])
 @pytest.mark.parametrize("maxiter", [1, 100])
 def test_reused_problem_matches_fresh_solves_including_zero_covariance(kind, layout, maxiter):
-    args = arguments(kind, layout)
+    args = native_glmm_arguments(kind, layout)
     problem = prepare(args)
     for scale in [1.0, 0.0, 1.7, 1.0]:
         current = dict(args, theta=args["theta"] * scale)
@@ -40,10 +39,25 @@ def test_reused_problem_matches_fresh_solves_including_zero_covariance(kind, lay
 
 
 @pytest.mark.parametrize("kind", ["gaussian", "binomial", "poisson"])
+@pytest.mark.parametrize("layout", ["slope", "crossed"])
+def test_reused_sparse_problem_matches_fresh_solves_across_design_patterns(kind, layout):
+    # 128 groups select the sparse random-effect system. A zero final variance
+    # removes design columns: slopes keep a smaller sparse pattern, while the
+    # crossed model becomes diagonal before returning to the original pattern.
+    matrices, family, theta = mode_problem(kind, layout, n_obs=1024, n_groups=128)
+    problem = laplace._prepare_native_glmm(matrices, family)
+    boundary = theta.copy()
+    boundary[-1] = 0.0
+    for current in [theta, boundary, theta, 1.6 * theta, boundary, 0.7 * theta]:
+        expected = native.glmm_deviance(*laplace._native_glmm_args(current, matrices, family), 1)
+        assert_state_equal(problem.evaluate(current), expected)
+
+
+@pytest.mark.parametrize("kind", ["gaussian", "binomial", "poisson"])
 @pytest.mark.parametrize("layout", ["intercept", "fixed_only", "mode_only"])
 @pytest.mark.parametrize("order", [1, 7])
 def test_offset_overrides_use_current_start_and_do_not_change_prepared_offset(kind, layout, order):
-    args = arguments(kind, layout)
+    args = native_glmm_arguments(kind, layout)
     problem = prepare(args)
     for change in [0.2, -0.3, 0.0]:
         backing = np.zeros(len(args["offset"]) * 2)
@@ -60,7 +74,7 @@ def test_offset_overrides_use_current_start_and_do_not_change_prepared_offset(ki
     "field", ["y", "x", "z_data", "z_indices", "z_indptr", "weights", "offset"]
 )
 def test_prepared_problem_owns_numpy_inputs(field):
-    args = arguments("poisson")
+    args = native_glmm_arguments("poisson")
     expected = native.glmm_deviance(**args, n_agq=1)
     problem = prepare(args)
     args[field][...] = 0
@@ -68,7 +82,7 @@ def test_prepared_problem_owns_numpy_inputs(field):
 
 
 def test_prepared_problem_owns_structure_lists():
-    args = arguments("poisson", "slope")
+    args = native_glmm_arguments("poisson", "slope")
     expected = native.glmm_deviance(**args, n_agq=1)
     problem = prepare(args)
     for field in ["n_levels", "n_terms", "correlated"]:
@@ -91,7 +105,7 @@ def test_prepared_problem_owns_structure_lists():
     ],
 )
 def test_failed_evaluation_does_not_damage_reusable_problem(options, message):
-    args = arguments("poisson")
+    args = native_glmm_arguments("poisson")
     problem = prepare(args)
     with pytest.raises(ValueError, match=message):
         problem.evaluate(**dict({"theta": args["theta"]}, **options))
@@ -100,13 +114,13 @@ def test_failed_evaluation_does_not_damage_reusable_problem(options, message):
 
 @pytest.mark.parametrize("layout", ["slope", "crossed"])
 def test_prepared_problem_rejects_unsupported_quadrature(layout):
-    args = arguments("poisson", layout)
+    args = native_glmm_arguments("poisson", layout)
     with pytest.raises(ValueError, match="one random-effect term with one coefficient"):
         prepare(args).evaluate(args["theta"], 7)
 
 
 def test_shared_problem_has_independent_concurrent_evaluations():
-    args = arguments("poisson")
+    args = native_glmm_arguments("poisson")
     problem = prepare(args)
     cases = [
         dict(args, theta=np.array([scale], dtype=float), offset=args["offset"] + scale)

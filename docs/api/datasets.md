@@ -226,7 +226,7 @@ Student age labels are semesters 2, 4, 6, and 8; lecture age labels are semester
 
 **Example usage:**
 
-```python
+```py
 model = mlm.lmer(
     "y ~ service + lectage + studage + (1 | s) + (1 | d) + (1 | dept:service)",
     data
@@ -333,7 +333,7 @@ response `r2` preserves its N/Y labels; Y is the success level.
 
 **Example usage:**
 
-```python
+```py
 model = mlm.glmer(
     "r2 ~ Anger + Gender + btype + situ + (1 | id) + (1 | item)",
     data,

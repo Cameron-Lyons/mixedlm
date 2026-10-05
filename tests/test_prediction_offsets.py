@@ -245,7 +245,7 @@ def test_nonlinear_offsets_do_not_modify_cached_model_predictions(monkeypatch):
 
 
 def test_nonlinear_fitted_offset_prediction_round_trip():
-    from tests.test_nlmer_methods import create_offset_nlme_data
+    from tests._nlmm_models import create_offset_nlme_data
 
     data = create_offset_nlme_data()
     offset = np.linspace(-2.0, 2.0, len(data))

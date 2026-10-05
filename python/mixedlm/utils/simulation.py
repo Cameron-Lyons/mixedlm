@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import inspect
+from collections.abc import Callable
 from typing import Any
 
 import numpy as np
@@ -7,10 +9,19 @@ from numpy.typing import NDArray
 
 from mixedlm.estimation.reml import _build_lambda_blocks, _count_theta
 from mixedlm.families.base import Family
-from mixedlm.families.gamma import Gamma
-from mixedlm.families.gaussian import Gaussian
-from mixedlm.families.inverse_gaussian import InverseGaussian
 from mixedlm.matrices.design import RandomEffectStructure
+
+
+def _accepts_sampling_inputs(simulate: Callable[..., Any]) -> bool:
+    """Whether a simulate hook takes the ``weights`` and ``trials`` keywords."""
+    try:
+        parameters = inspect.signature(simulate).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    names = {parameter.name for parameter in parameters}
+    return {"weights", "trials"} <= names or any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters
+    )
 
 
 def simulate_glmm_response(
@@ -21,26 +32,20 @@ def simulate_glmm_response(
     trials: NDArray[np.floating] | None = None,
     rng: Any | None = None,
 ) -> NDArray[np.floating]:
-    """Draw conditional responses with the fitted trials and precision weights."""
-    rng = np.random if rng is None else rng
-    if family.__class__.__name__ == "Binomial" and trials is not None:
-        mu = family.clamp_mu(mu, eps=1e-6)
-        counts = trials.astype(np.int64)
-        if mu.ndim > 1:
-            counts = counts[:, None]
-        return rng.binomial(counts, mu).astype(np.float64)
+    """Draw conditional responses with the fitted trials and precision weights.
 
-    precision = weights if mu.ndim == 1 else weights[:, None]
-    # Both subclass and instance overrides must retain control of their draws.
-    simulation_method = getattr(family.simulate, "__func__", None)
-    if isinstance(family, Gaussian) and simulation_method is Gaussian.simulate:
-        return rng.normal(mu, 1 / np.sqrt(precision))
-    if isinstance(family, Gamma) and simulation_method is Gamma.simulate:
-        mu = np.minimum(family.clamp_mu(mu, eps=1e-6), 1e10)
-        return rng.gamma(precision, mu / precision)
-    if isinstance(family, InverseGaussian) and simulation_method is InverseGaussian.simulate:
-        mu = np.minimum(family.clamp_mu(mu, eps=1e-6), 1e10)
-        return rng.wald(mu, precision)
+    Two-dimensional means hold one replicate per column. Grouped binomial
+    draws are success counts.
+    """
+    rng = np.random if rng is None else rng
+    if mu.ndim > 1:
+        weights = weights[:, None]
+        trials = None if trials is None else trials[:, None]
+    # Inspect the underlying function, which outlives the bound method.
+    if _accepts_sampling_inputs(getattr(family.simulate, "__func__", family.simulate)):
+        return family.simulate(mu, rng=rng, weights=weights, trials=trials)
+    # Overrides written for the original simulate(mu, rng) hook keep control
+    # of their draws.
     return family.simulate(mu, rng=rng)
 
 

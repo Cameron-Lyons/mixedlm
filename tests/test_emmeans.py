@@ -3,12 +3,10 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import pytest
-from mixedlm import glmer, lmer
-from mixedlm.families import Binomial
+from mixedlm import lmer
 from mixedlm.inference.emmeans import (
     ContrastResult,
     EmmeanResult,
-    Emmeans,
     _adjust_pvalues,
     _rowwise_quadratic_form,
     emmeans,
@@ -16,12 +14,12 @@ from mixedlm.inference.emmeans import (
 from numpy.testing import assert_allclose
 from scipy import stats
 
-from tests._lmer_data import CBPP
+from tests._inference_results import synthetic_emmeans
 
 
 @pytest.fixture
 def simple_data():
-    np.random.seed(42)
+    rng = np.random.default_rng(42)
     n_groups = 5
     n_per_group = 20
     n = n_groups * n_per_group
@@ -29,10 +27,10 @@ def simple_data():
     groups = np.repeat([f"G{i}" for i in range(n_groups)], n_per_group)
     treatment = np.tile(["A", "B"], n // 2)
 
-    group_effects = np.repeat(np.random.randn(n_groups), n_per_group)
-    treatment_effect = np.where(np.array(treatment) == "B", 2.0, 0.0)
+    group_effects = np.repeat(rng.standard_normal(n_groups), n_per_group)
+    treatment_effect = np.where(treatment == "B", 2.0, 0.0)
 
-    y = 5.0 + treatment_effect + group_effects + np.random.randn(n) * 0.5
+    y = 5.0 + treatment_effect + group_effects + rng.normal(0.0, 0.5, n)
 
     return pd.DataFrame({"y": y, "treatment": treatment, "group": groups})
 
@@ -40,39 +38,6 @@ def simple_data():
 @pytest.fixture
 def lmer_result(simple_data):
     return lmer("y ~ treatment + (1|group)", simple_data)
-
-
-def _synthetic_emmeans(n_levels: int = 12, n_beta: int = 5) -> Emmeans:
-    rng = np.random.default_rng(91)
-    coefficients = rng.normal(size=(n_levels, n_beta))
-    covariance_factor = rng.normal(size=(n_beta, n_beta))
-    covariance = covariance_factor @ covariance_factor.T
-    beta = rng.normal(size=n_beta)
-    estimates = coefficients @ beta
-    zeros = np.zeros(n_levels)
-    result = EmmeanResult(
-        emmean=estimates,
-        se=zeros,
-        df=80.0,
-        lower=zeros,
-        upper=zeros,
-        grid=pd.DataFrame({"treatment": [f"L{i}" for i in range(n_levels)]}),
-        level=0.95,
-    )
-    return Emmeans(
-        result=result,
-        _L=coefficients,
-        _vcov=covariance,
-        _beta=beta,
-        _df=80.0,
-        _specs=["treatment"],
-        _levels=[list(range(n_levels))],
-    )
-
-
-@pytest.fixture(scope="module")
-def glmer_result():
-    return glmer("y ~ period + (1 | herd)", CBPP, family=Binomial())
 
 
 class TestAdjustPvalues:
@@ -89,25 +54,25 @@ class TestAdjustPvalues:
     def test_bonferroni_clipping(self):
         p = np.array([0.5, 0.7])
         adjusted = _adjust_pvalues(p, "bonferroni", 2, 100, None)
-        assert np.all(adjusted <= 1.0)
+        assert_allclose(adjusted, [1.0, 1.0])
 
     def test_holm(self):
+        # Step-down: sorted p times (3, 2, 1), then a running maximum.
         p = np.array([0.01, 0.04, 0.06])
         adjusted = _adjust_pvalues(p, "holm", 3, 100, None)
-        assert adjusted[0] <= adjusted[1]
-        assert adjusted[1] <= adjusted[2]
+        assert_allclose(adjusted, [0.03, 0.08, 0.08])
 
     def test_fdr(self):
+        # Benjamini-Hochberg: p * 3 / rank, then a running minimum from the top.
         p = np.array([0.01, 0.04, 0.06])
         adjusted = _adjust_pvalues(p, "fdr", 3, 100, None)
-        assert adjusted[0] <= p[0] * 3
+        assert_allclose(adjusted, [0.03, 0.06, 0.06])
 
     def test_tukey(self):
         p = np.array([0.01])
         t_ratio = np.array([3.0])
         adjusted = _adjust_pvalues(p, "tukey", 3, 100, t_ratio)
-        assert len(adjusted) == 1
-        assert 0 <= adjusted[0] <= 1
+        assert_allclose(adjusted, [stats.studentized_range.sf(3.0 * np.sqrt(2.0), 3, 100)])
 
 
 class TestRowwiseQuadraticForm:
@@ -196,40 +161,38 @@ class TestContrastResult:
 
 
 class TestEmmeans:
-    def test_emmeans_basic(self, lmer_result, simple_data):
+    def test_means_are_treatment_coded_fixed_effects(self, lmer_result):
         em = emmeans(lmer_result, "treatment")
-        assert em.result.emmean is not None
-        assert len(em.result.emmean) == 2
+        L = np.array([[1.0, 0.0], [1.0, 1.0]])
+        se = np.sqrt(np.diag(L @ lmer_result.vcov() @ L.T))
+        critical = stats.t.isf(0.025, lmer_result.df_residual())
 
-    def test_emmeans_grid(self, lmer_result, simple_data):
-        em = emmeans(lmer_result, "treatment")
-        assert "treatment" in em.result.grid.columns
-        assert set(em.result.grid["treatment"]) == {"A", "B"}
+        assert em.result.grid["treatment"].tolist() == ["A", "B"]
+        assert_allclose(em.result.emmean, L @ lmer_result.beta)
+        assert_allclose(em.result.se, se)
+        assert_allclose(em.result.lower, em.result.emmean - critical * se)
+        assert_allclose(em.result.upper, em.result.emmean + critical * se)
 
-    def test_emmeans_confidence_intervals(self, lmer_result, simple_data):
-        em = emmeans(lmer_result, "treatment")
-        assert np.all(em.result.lower < em.result.emmean)
-        assert np.all(em.result.upper > em.result.emmean)
-
-    def test_emmeans_str(self, lmer_result, simple_data):
+    def test_emmeans_str(self, lmer_result):
         em = emmeans(lmer_result, "treatment")
         s = str(em)
         assert "Estimated Marginal Means" in s
 
-    def test_emmeans_repr(self, lmer_result, simple_data):
+    def test_emmeans_repr(self, lmer_result):
         em = emmeans(lmer_result, "treatment")
         r = repr(em)
         assert "Emmeans" in r
 
 
 class TestEmmeansPairs:
-    def test_pairs_basic(self, lmer_result, simple_data):
+    def test_pairs_basic(self, lmer_result):
         em = emmeans(lmer_result, "treatment")
         pairs = em.pairs()
-        assert len(pairs.contrast) == 1
-        assert len(pairs.estimate) == 1
+        assert pairs.contrast == ["A - B"]
+        assert_allclose(pairs.estimate, [-lmer_result.beta[1]])
+        assert_allclose(pairs.se, [np.sqrt(lmer_result.vcov()[1, 1])])
 
-    def test_pairs_adjustment(self, lmer_result, simple_data):
+    def test_pairs_adjustment(self, lmer_result):
         em = emmeans(lmer_result, "treatment")
         pairs_none = em.pairs(adjust="none")
         pairs_bonf = em.pairs(adjust="bonferroni")
@@ -237,7 +200,7 @@ class TestEmmeansPairs:
         assert pairs_none.p_value[0] <= pairs_bonf.p_value[0]
 
     def test_pairs_match_explicit_contrast_matrix(self):
-        em = _synthetic_emmeans()
+        em = synthetic_emmeans()
         n_levels = len(em.result.emmean)
         left, right = np.triu_indices(n_levels, k=1)
         explicit = np.zeros((len(left), n_levels))
@@ -252,7 +215,7 @@ class TestEmmeansPairs:
         assert_allclose(result.se, np.sqrt(np.maximum(expected_variance, 0)))
 
     def test_pairs_do_not_allocate_dense_level_contrasts(self, monkeypatch):
-        em = _synthetic_emmeans(n_levels=80)
+        em = synthetic_emmeans(n_levels=80)
         forbidden_shape = (80 * 79 // 2, 80)
         real_zeros = np.zeros
 
@@ -269,18 +232,18 @@ class TestEmmeansPairs:
 
 
 class TestEmmeansContrast:
-    def test_pairwise_contrast(self, lmer_result, simple_data):
+    def test_pairwise_contrast(self, lmer_result):
         em = emmeans(lmer_result, "treatment")
         contrast = em.contrast(method="pairwise")
-        assert len(contrast.contrast) >= 1
+        assert_allclose(contrast.estimate, em.pairs().estimate)
 
-    def test_trt_vs_ctrl(self, lmer_result, simple_data):
+    def test_trt_vs_ctrl(self, lmer_result):
         em = emmeans(lmer_result, "treatment")
         contrast = em.contrast(method="trt.vs.ctrl")
-        assert len(contrast.contrast) == 1
+        assert_allclose(contrast.estimate, [lmer_result.beta[1]])
 
     def test_trt_vs_ctrl_matches_direct_differences(self):
-        em = _synthetic_emmeans()
+        em = synthetic_emmeans()
         treatment_indices = np.arange(1, len(em.result.emmean))
         coefficients = em._L[treatment_indices] - em._L[0]
 
@@ -290,35 +253,38 @@ class TestEmmeansContrast:
         expected_variance = np.diag(coefficients @ em._vcov @ coefficients.T)
         assert_allclose(result.se, np.sqrt(np.maximum(expected_variance, 0)))
 
-    def test_custom_contrast(self, lmer_result, simple_data):
+    def test_custom_contrast(self, lmer_result):
         em = emmeans(lmer_result, "treatment")
         C = np.array([[1, -1]])
         contrast = em.contrast(method=C)
-        assert len(contrast.contrast) == 1
-        assert contrast.contrast[0] == "C1"
+        assert contrast.contrast == ["C1"]
+        assert_allclose(contrast.estimate, [-lmer_result.beta[1]])
 
-    def test_invalid_method_raises(self, lmer_result, simple_data):
+    def test_invalid_method_raises(self, lmer_result):
         em = emmeans(lmer_result, "treatment")
         with pytest.raises(ValueError, match="Unknown contrast method"):
             em.contrast(method="invalid")
 
 
 class TestEmmeansEdgeCases:
-    def test_invalid_factor_raises(self, lmer_result, simple_data):
+    def test_invalid_factor_raises(self, lmer_result):
         with pytest.raises(ValueError, match="must name a fixed-effect predictor"):
             emmeans(lmer_result, "nonexistent")
 
     def test_multiple_specs(self, simple_data):
-        simple_data["factor2"] = np.where(np.random.rand(len(simple_data)) > 0.5, "X", "Y")
+        simple_data["factor2"] = np.tile(["X", "X", "Y", "Y"], len(simple_data) // 4)
         result = lmer("y ~ treatment * factor2 + (1|group)", simple_data)
         em = emmeans(result, ["treatment", "factor2"])
-        assert len(em.result.emmean) == 4
+        expected = result.predict(em.result.grid, re_form="NA")
+        assert len(em.result.grid.drop_duplicates()) == 4
+        assert_allclose(em.result.emmean, expected)
 
     def test_with_at_argument(self, simple_data):
-        simple_data["factor2"] = np.where(np.random.rand(len(simple_data)) > 0.5, "X", "Y")
+        simple_data["factor2"] = np.tile(["X", "X", "Y", "Y"], len(simple_data) // 4)
         result = lmer("y ~ treatment * factor2 + (1|group)", simple_data)
         em = emmeans(result, "treatment", at={"factor2": "X"})
-        assert len(em.result.emmean) == 2
+        grid = pd.DataFrame({"treatment": ["A", "B"], "factor2": ["X", "X"]})
+        assert_allclose(em.result.emmean, result.predict(grid, re_form="NA"))
 
     def test_uses_fitted_contrasts(self):
         data = pd.DataFrame(
@@ -347,26 +313,33 @@ class TestEmmeansEdgeCases:
 
 
 class TestGlmerResponseScale:
-    def test_response_standard_errors_use_inverse_link_derivative(self, glmer_result):
-        link = emmeans(glmer_result, "period", type="link")
-        response = emmeans(glmer_result, "period", type="response")
+    def test_link_means_are_treatment_coded_fixed_effects(self, cbpp_glmm):
+        link = emmeans(cbpp_glmm, "period", type="link")
+        L = np.column_stack((np.ones(4), np.eye(4)[:, 1:]))
 
-        expected_mean = glmer_result.family.link.inverse(link.result.emmean)
-        expected_se = link.result.se / np.abs(glmer_result.family.link.deriv(expected_mean))
+        assert_allclose(link.result.emmean, L @ cbpp_glmm.beta)
+        assert_allclose(link.result.se, np.sqrt(np.diag(L @ cbpp_glmm.vcov() @ L.T)))
+
+    def test_response_standard_errors_use_inverse_link_derivative(self, cbpp_glmm):
+        link = emmeans(cbpp_glmm, "period", type="link")
+        response = emmeans(cbpp_glmm, "period", type="response")
+
+        expected_mean = cbpp_glmm.family.link.inverse(link.result.emmean)
+        expected_se = link.result.se / np.abs(cbpp_glmm.family.link.deriv(expected_mean))
 
         assert_allclose(response.result.emmean, expected_mean)
         assert_allclose(response.result.se, expected_se)
 
-    def test_response_intervals_are_back_transformed_from_link_scale(self, glmer_result):
+    def test_response_intervals_are_back_transformed_from_link_scale(self, cbpp_glmm):
         level = 0.95
-        link = emmeans(glmer_result, "period", type="link", level=level)
-        response = emmeans(glmer_result, "period", type="response", level=level)
+        link = emmeans(cbpp_glmm, "period", type="link", level=level)
+        response = emmeans(cbpp_glmm, "period", type="response", level=level)
         critical_value = stats.norm.ppf(1 - (1 - level) / 2)
 
-        expected_lower = glmer_result.family.link.inverse(
+        expected_lower = cbpp_glmm.family.link.inverse(
             link.result.emmean - critical_value * link.result.se
         )
-        expected_upper = glmer_result.family.link.inverse(
+        expected_upper = cbpp_glmm.family.link.inverse(
             link.result.emmean + critical_value * link.result.se
         )
 
@@ -374,9 +347,9 @@ class TestGlmerResponseScale:
         assert_allclose(response.result.upper, expected_upper)
         assert np.all((response.result.lower >= 0) & (response.result.upper <= 1))
 
-    def test_link_scale_intervals_use_normal_critical_value(self, glmer_result):
+    def test_link_scale_intervals_use_normal_critical_value(self, cbpp_glmm):
         level = 0.9
-        link = emmeans(glmer_result, "period", type="link", level=level)
+        link = emmeans(cbpp_glmm, "period", type="link", level=level)
         critical_value = stats.norm.ppf(1 - (1 - level) / 2)
 
         assert_allclose(

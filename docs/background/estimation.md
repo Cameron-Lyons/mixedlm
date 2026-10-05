@@ -77,11 +77,13 @@ This is equivalent to ML estimation on residuals after removing the fixed effect
 ```python
 import mixedlm as mlm
 
+data = mlm.load_sleepstudy()
+
 # REML (default)
-model_reml = mlm.lmer("y ~ x + (1 | g)", data, REML=True)
+model_reml = mlm.lmer("Reaction ~ Days + (Days | Subject)", data, REML=True)
 
 # ML
-model_ml = mlm.lmer("y ~ x + (1 | g)", data, REML=False)
+model_ml = mlm.lmer("Reaction ~ Days + (Days | Subject)", data, REML=False)
 ```
 
 ### Profiled Deviance
@@ -103,20 +105,6 @@ preparing a separate workspace in each parallel worker. Response-dependent
 products are recomputed for each replicate, and each refit starts from the
 original fitted covariance parameters.
 
-The native solver checks whether the weighted design products separate by
-grouping level and caches that pattern with the design. Standard grouped
-designs use diagonal or small block solves. If an advanced design includes
-overlapping level columns, the solver retains the full covariance within each
-affected structure; covariance gradients retain those cross-level terms too.
-
-Native mixed-model fits also use these products to extract final fixed and
-random effects, scale, likelihood components, and fixed-effect information.
-They avoid building a second Python crossproduct cache during final extraction
-or response refits. The final scale is computed from weighted conditional
-residuals plus the squared spherical random effects, avoiding cancellation
-between marginal quadratic forms. Fixed-only fits retain the existing Python
-solve and least-squares fallback.
-
 At the estimation API level, `LMMOptimizer.with_response(y)` creates an
 independent optimizer sharing the prepared design on either backend. It copies
 the new response and retains the optimizer's ML/REML setting. Design matrices,
@@ -124,24 +112,26 @@ weights, and offsets must remain unchanged while the optimizers are in use;
 construct a new optimizer when those inputs change. Large Python random-effect
 systems retain sparse crossproducts.
 
-Native design preparation releases Python's interpreter lock after copying its
-inputs, allowing independent fits to prepare weighted crossproducts concurrently.
-Prepared native ML and REML evaluations release the interpreter lock after
-copying the covariance parameters. Each solve reads an immutable design and
-response and uses its own scratch storage, so Python threads can evaluate a
-shared response or separate responses concurrently. This applies to the native
-backend, including final mixed-model estimate extraction; automatic backend
-selection remains unchanged. Complete-fit throughput
-also depends on the optimizer: SciPy's default COBYQA implementation serializes
-optimizer calls with its own lock.
+Native design preparation and prepared ML and REML evaluations release Python's
+interpreter lock after copying their inputs, so Python threads can prepare
+independent fits and evaluate shared or separate responses concurrently.
+Complete-fit throughput also depends on the optimizer: SciPy's COBYQA wrapper
+serializes optimizer calls with its own lock.
 
-To fit with prepared analytic covariance gradients, enable them in the control:
+The native evaluator also returns exact gradients of the profiled deviance with
+respect to the covariance parameters, at a small multiple of the cost of a
+deviance evaluation, including for nested and crossed designs. The default
+`lmer()` optimizer, `"auto"`, runs L-BFGS-B on these gradients and falls back to
+COBYQA when that fit does not settle (see [Default Optimizers](#default-optimizers)).
+
+Explicitly chosen gradient-based optimizers use finite differences unless the
+control enables exact gradients:
 
 ```python
 from mixedlm import lmer, lmerControl
 
 fit = lmer(
-    "y ~ x + (x | group)",
+    "Reaction ~ Days + (Days | Subject)",
     data,
     control=lmerControl(optimizer="L-BFGS-B", use_analytic_gradient=True),
 )
@@ -149,27 +139,13 @@ fit = lmer(
 
 This option supports native LMM fitting with L-BFGS-B, BFGS, TNC, SLSQP, and
 trust-constr. Value and gradient requests at the same parameters share an
-evaluation within each fit. It is disabled by default because the benefit
-depends on the model and optimizer. Python backends and structured covariance
-types retain the solver's numerical derivatives; derivative-free solvers
-continue to use the scalar objective.
-
-When weighted design crossproducts separate across all grouping structures
-and their levels, gradients use compact per-level inverses and transformed
-crossproducts. Their storage grows with the sum of the squared level widths,
-which reduces gradient costs for models with many independent levels. The
-prepared design still stores the full random-effect crossproduct. Coupled
-designs require a full inverse and can make analytic gradients more expensive
-than numerical derivatives. Eligibility depends on exact zeros in the design
-crossproducts, so zero variance parameters do not hide coupled levels.
-
-REML gradients also share the fixed-effect information solve and projected
-crossproduct across covariance parameters. Each derivative contracts only the
-selected covariance-factor entries, avoiding a separate random-by-fixed matrix
-product for every parameter. Independent levels retain compact block products.
+evaluation within each fit. Python backends and structured covariance types
+retain the solver's numerical derivatives; derivative-free solvers continue to
+use the scalar objective.
 
 `LMMOptimizer.optimize(use_analytic_gradient=True)` enables the same path for
-prepared fits and response refits. `optimizeLmer()` inherits this setting from
+prepared fits and response refits, and `LMMOptimizer.optimize(method="auto")`
+applies the default policy. `optimizeLmer()` inherits the gradient setting from
 the control passed to `mkLmerDevfun()` and accepts an explicit override.
 Custom modular deviance callables retain numerical derivatives for their full objective.
 Analytic derivatives can change the optimization path; convergence checks and
@@ -196,7 +172,7 @@ owns its array. Gradient solves release the interpreter lock after copying
 The value-and-gradient pair can be passed directly to SciPy with `jac=True`.
 Given starting covariance parameters `theta0` and their corresponding `bounds`:
 
-```python
+```py
 from scipy.optimize import minimize
 
 result = minimize(
@@ -263,9 +239,10 @@ curvature correction on the optimal fixed coefficients.
 - Faster than quadrature methods
 
 ```python
+cbpp = mlm.load_cbpp()
 model = mlm.glmer(
-    "y ~ x + (1 | g)",
-    data,
+    "incidence / size ~ period + (1 | herd)",
+    cbpp,
     family=mlm.families.Binomial(),
     nAGQ=1  # Laplace approximation
 )
@@ -293,8 +270,8 @@ For more accuracy, use numerical integration with Gauss-Hermite quadrature:
 ```python
 # More accurate for small clusters
 model = mlm.glmer(
-    "y ~ x + (1 | g)",
-    data,
+    "incidence / size ~ period + (1 | herd)",
+    cbpp,
     family=mlm.families.Binomial(),
     nAGQ=10
 )
@@ -308,9 +285,6 @@ coefficient per group: a random intercept or a scalar random slope.
 For adaptive quadrature with a single scalar random effect per group, each
 integration point evaluates only the observations affected by that group's
 coefficient. Curvature is computed from the corresponding weighted design column.
-This avoids rebuilding full-model predictors and dense curvature matrices at each
-quadrature evaluation. Python parallel evaluation shares the fitted random-effect
-modes without modifying them.
 
 An observation with a zero random-effect design row still contributes its
 fixed-effect response likelihood. This includes zero-valued scalar random-slope
@@ -327,10 +301,7 @@ normal variables with `k` points per dimension. Orders and dimensions must be
 positive integers. Public rule arrays are writable and independent of later calls.
 
 Python helpers and fitting share stable Hermite rule generation, including high
-orders where polynomial-based construction can overflow. Python and native fitting
-cache up to 32 rules with at most 1,024 points each. Larger rules remain supported
-and bypass the cache. Cache entries are shared read-only across evaluations;
-changing model data or parameters does not require clearing them.
+orders where polynomial-based construction can overflow.
 
 ### PIRLS Algorithm
 
@@ -371,56 +342,21 @@ settings and allow `result.refit(pirls_maxiter=200, pirls_tol=1e-9)` to override
 Model-derived bootstrap and comparison fits, model updates, and cross-validation
 also retain these settings, including their parallel worker paths.
 
-The native `pirls`, `laplace_deviance`, `glmm_deviance`, and
-`adaptive_gh_deviance` bindings require a nonempty response and matching design,
-weight, and offset row counts. They also check covariance parameter counts and
-random-effect structure dimensions. Mismatched row counts, vector lengths, or
-metadata, and dimension overflows raise `ValueError` before fitting.
-
-Native fitting prepares an owned response, design, prior weights, offsets, and
-starting coefficients once per objective. `GLMMOptimizer` and
-`JointGLMMObjective` reuse this preparation across parameter evaluations; joint
-fits supply a new combined fixed-effect offset for each solve. Each evaluation
-starts independently, so parameter order and earlier failed evaluations do not
-change its result. Treat the model arrays and family as immutable while using
-these estimation objects; construct a new object when the inputs change. Public
-fits and refits prepare their current inputs automatically. Custom families,
-links, and covariance structures retain the Python implementation.
+`GLMMOptimizer` and `JointGLMMObjective` prepare their inputs once and reuse
+them across parameter evaluations. Each evaluation starts independently, so
+parameter order and earlier failed evaluations do not change its result. Treat
+the model arrays and family as immutable while using these estimation objects;
+construct a new object when the inputs change. Custom families, links, and
+covariance structures use the Python implementation.
 
 Prepared native GLMM likelihood evaluations release Python's interpreter lock
-during the solve. Covariance parameters and offset overrides are copied before
-release, and each evaluation has its own scratch storage, allowing Python threads
-to evaluate one immutable prepared problem concurrently. Complete-fit throughput
-also depends on the optimizer: the tested SciPy 1.17.0 COBYQA wrapper serializes
-optimizer calls with its own lock. Releasing the interpreter lock does not remove
-that synchronization.
+after copying their parameters, so Python threads can evaluate one prepared
+problem concurrently. As for LMMs, SciPy's COBYQA wrapper still serializes
+optimizer calls.
 
-Native PIRLS reuses its linear-predictor, working-weight, and working-response
-buffers across iterations and computes link derivatives and variances per
-observation without retaining separate vectors. Predictor updates overwrite the
-previous iteration's values before adding current random effects. Joint
-likelihoods pass fixed coefficients through the offset, so their mode solves
-start directly from that offset, skip the empty fixed-effect system, and use the
-two triangular random-effect solves directly. The final mode calculation reuses
-the predictor buffer. Working-weight floors, convergence checks, and the final
-likelihood correction use the same formulas.
-
-Binomial/logit iterations select a specialized working-value loop once per
-iteration. Separate contiguous input and output slices let the compiler
-vectorize this loop while retaining the existing derivative, variance, and
-weight-floor arithmetic. Other family/link combinations use the general loop.
-
-Modular `GlmerDevfun` calls with full `[theta, beta]` vectors prepare the joint
-objective on first use and reuse it for later parameter values. Changing its
-optimizer, quadrature order, or inner solver controls refreshes this preparation.
-Covariance-only calls do not allocate a joint objective. The cached objective
-keeps its native mode-solve inputs alive for the deviance callable's lifetime.
-
-These objectives and modular `GlmerDevfun` callables support copying and Python
-pickling when their model inputs and custom family are serializable. Deep copies and
-unpickled objects rebuild native preparation from the retained Python inputs,
-including when passed to a spawned worker process. Restoration uses the backend
-available in the receiving process; native buffers are not included in the pickle.
+These objectives and modular `GlmerDevfun` callables can be copied and pickled
+when their model inputs and custom family are picklable, for example to send
+them to a spawned worker process.
 
 A fitted GLMM reports `converged=True` only when both the outer optimizer and the
 inner PIRLS solver converge. `result.pirls_converged` exposes the inner status,
@@ -435,39 +371,10 @@ For direct objective evaluation,
 `(deviance, beta, u, pirls_converged)` from one solve. Existing deviance functions
 continue to return their three-item tuples.
 
-The native solver computes weighted random-effect crossproducts by observation,
-using only columns that occur together in a row of the sparse design matrix.
-It builds this row layout once per likelihood evaluation and reuses it as the
-working weights change. Dense designs accumulate one column pair at a time,
-using direct dot products for fully populated matrices. Linear and generalized
-linear models share this implementation for dense systems. Larger sparse GLMM
-systems use the sparse precision pattern described below.
-
-When the covariance factor is diagonal and its active design columns do not
-share observations, the penalized random-effect precision is diagonal. The
-native solver then accumulates one precision value per coefficient and solves
-by scalar division. The same diagonal supplies the Laplace log determinant.
-The prepared design is reused as working weights change. This covers random
-intercepts, scalar random slopes, and disjoint independent coefficients at any
-model size, including models below the sparse-factorization cutoff. Empty levels
-retain their unit prior precision. Coupled effects use the existing dense or
-sparse factorization.
-
-The native solver stores one small covariance factor per random-effect
-structure and applies it across the grouping levels. For sufficiently sparse
-models with at least 128 random-effect coefficients, it forms the scaled design
-and penalized random-effect system in sparse storage. A fill-reducing ordering
-keeps nested and crossed group structures sparse when possible. The row layout,
-precision pattern, and symbolic factorization are reused as the PIRLS working
-weights change, including the final Laplace determinant.
-
-All contributions between levels and grouping factors are retained, including
-correlated slopes and zero variance components. Small systems, dense designs,
-and patterns with excessive factor fill use dense kernels. Dense covariance
-transforms operate in place without constructing a full block-diagonal factor.
-For independent random intercepts, the sparse precision and factor each store
-one entry per group. Storage for the fixed-effect design and its crossproducts
-still depends on the numbers of observations and fixed-effect coefficients.
+Independent random intercepts and scalar slopes give a diagonal penalized
+precision, solved by scalar division. Larger sparse models use a sparse
+penalized system with a fill-reducing ordering, so nested and crossed designs
+with many levels stay sparse; small or dense systems use dense kernels.
 
 The random effects are solved in spherical coordinates,
 
@@ -488,13 +395,8 @@ This parameterization makes the covariance scale explicit, keeps zero-variance b
 well-defined, and uses the same system for the PIRLS mode, Laplace determinant, post-fit
 covariance, and leverage calculations. Adaptive quadrature uses the normalized standard-normal
 prior in these coordinates and evaluates each grouping level's likelihood contribution once.
-With one native worker, group integration runs on the calling thread. With multiple
-workers, groups are evaluated in parallel and their scalar contributions are added
-in group order with compensated summation. Compensation preserves small contributions
-beside much larger group log likelihoods. This keeps the reduction independent of scheduling and
-worker count, using one additional scalar per group for parallel collection.
-Compared with earlier versions, fixing the addition order can change the last few
-bits of the deviance. The model likelihood and quadrature rule are unchanged.
+Group contributions are added in a fixed order with compensated summation, so the
+quadrature deviance does not depend on the number of native worker threads.
 
 Starting means lie inside the family and link domains. For Poisson models with a
 log link, positive counts are transformed with the logarithm before estimating
@@ -512,12 +414,6 @@ the penalized deviance through step halving. An impossible domain or unfinished
 inner solve cannot report convergence. Quadrature nodes outside the valid domain
 contribute zero likelihood. Numerically saturated probabilities for unrestricted
 logit and similar links retain the existing stable mean clamping.
-
-The native PIRLS solver handles the fixed-effect and working-response columns in
-one triangular solve, borrowing the Cholesky factor. It reuses the transformed
-columns to recover random effects with a transpose triangular solve. This avoids
-copying the full factor and repeating a forward solve on each iteration. The
-random-effect factorization uses the sparse or dense path selected for the model.
 
 ## Nonlinear Mixed Models
 
@@ -546,13 +442,8 @@ The low-level `pnls_step()` and `nlmm_deviance()` functions, and
 `NLMMOptimizer`, accept integer grouping labels with gaps or negative values.
 Rows of the random-effect matrix `b` correspond to sorted unique labels in
 both the Python and native implementations; observations within each group
-keep their input order.
-
-Each objective evaluation builds the group row indices once and reuses them
-through linearization, random-effect updates, residual calculations, and the
-Laplace correction. Python's serial and threaded paths share the same group
-calculations, and threaded updates reuse the covariance inverse. This avoids
-repeated full-data group scans and retaining one full-length mask per group.
+keep their input order. The native evaluation checks that its inputs have
+consistent shapes and releases the interpreter lock while it solves.
 
 The inner penalized nonlinear least-squares loop checks changes in both the
 fixed parameters and every group-specific random effect. Each change is
@@ -586,11 +477,13 @@ import mixedlm as mlm
 
 # Use EM-REML initialization for LMMs
 ctrl = mlm.LmerControl(em_init=True, em_maxiter=50)
-model = mlm.lmer("y ~ x + (x | group)", data, control=ctrl)
+model = mlm.lmer("Reaction ~ Days + (Days | Subject)", data, control=ctrl)
 
 # Also available for GLMMs (provides starting theta from a linear approximation)
 ctrl = mlm.GlmerControl(em_init=True)
-model = mlm.glmer("y ~ x + (1 | group)", data, family=mlm.families.Binomial(), control=ctrl)
+model = mlm.glmer(
+    "incidence / size ~ period + (1 | herd)", cbpp, family=mlm.families.Binomial(), control=ctrl
+)
 ```
 
 ### Supported Models
@@ -622,7 +515,7 @@ mixedlm supports multiple optimization algorithms:
 
 **Always available (SciPy):**
 
-- `COBYQA` - Derivative-free constrained optimization (default)
+- `COBYQA` - Derivative-free constrained optimization
 - `L-BFGS-B` - Quasi-Newton with bounds
 - `BFGS` - Quasi-Newton
 - `Nelder-Mead` - Simplex method
@@ -632,25 +525,50 @@ mixedlm supports multiple optimization algorithms:
 - `TNC` - Truncated Newton
 - `COBYLA` - Constrained optimization by linear approximation
 
-**Optional (requires additional packages):**
+**Optional (requires the `optimizers` extra, which installs nlopt):**
 
-- `newuoa` - Derivative-free unconstrained (nlopt)
-- `praxis` - Principal axis (nlopt)
-- `sbplx` - Subplex algorithm (nlopt)
+- `nloptwrap_BOBYQA` - Bound-constrained quadratic approximation
+- `nloptwrap_NEWUOA` - Derivative-free unconstrained
+- `nloptwrap_PRAXIS` - Principal axis
+- `nloptwrap_SBPLX` - Subplex algorithm
+- `nloptwrap_COBYLA` and `nloptwrap_NELDERMEAD`
+
+NLopt optimizers stop on an absolute change in deviance (the control's `ftol`),
+like lme4's `nloptwrap`, and report non-convergence when they reach their
+evaluation or time limit. Their `optCtrl` options are described with
+[LmerControl](../api/models.md#lmercontrol). Results from these algorithms are
+best confirmed with `allFit()`.
+
+`mixedlm.estimation.available_optimizers()` lists the installed choices.
+
+### Default Optimizers
+
+`lmer()` uses `"auto"` by default. It runs L-BFGS-B on the exact native
+gradient with tight tolerances. When that fit does not converge, ends with a
+large gradient, or leaves the variance of a correlated random-effect term near
+zero, where a rank-deficient covariance can have several boundary optima,
+COBYQA refits from the same start and the lower deviance is kept. Scalar and
+uncorrelated variances at zero are checked by the `restart_edge` probes instead.
+Most fits therefore need only the fast gradient stage, and a fit that falls back
+is never worse than COBYQA alone. Without native gradients (`use_rust=False`,
+no native extension, or compound-symmetry and AR(1) covariances), `"auto"` runs
+COBYQA alone. `result.optimizer` records which method produced the estimates.
+
+`glmer()` uses COBYQA, and `"auto"` is not available for generalized models.
 
 ### Choosing an Optimizer
 
 ```python
 # Use a specific optimizer
 model = mlm.lmer(
-    "y ~ x + (1 | g)",
+    "Reaction ~ Days + (Days | Subject)",
     data,
-    control=mlm.LmerControl(optimizer="COBYQA")
+    control=mlm.LmerControl(optimizer="L-BFGS-B")
 )
 
 # Try all available optimizers
 results = model.allFit(data)
-print(results.summary())
+print(results.summary)
 ```
 
 ### Convergence Criteria
@@ -664,8 +582,8 @@ The optimizer stops when:
 
 ```python
 control = mlm.LmerControl(
-    maxfun=50000,    # Maximum function evaluations
-    tol=1e-8         # Convergence tolerance
+    maxiter=50000,   # Maximum iterations (evaluations for TNC and COBYLA)
+    ftol=1e-10,      # Objective-change tolerance for solvers that use one
 )
 ```
 
@@ -695,12 +613,9 @@ For models with many groups, mixedlm uses sparse matrix operations to efficientl
 
 This enables fitting models with thousands of groups.
 
-The Python ML/REML evaluator keeps large random-effect systems sparse and reuses
-one factorization for the fixed-effect and random-effect solves. Small systems
-use dense Cholesky. Both paths support observation weights, offsets, and
-unstructured, independent, compound-symmetry, and AR(1) random effects.
-
-Native sparse solves process multiple right-hand sides together, reusing the
-factor for every column. Cached and uncached solves share this implementation
-and solve directly in the returned array's storage, leaving the input unchanged
-even for strided or read-only arrays.
+The Python ML/REML evaluator also keeps large random-effect systems sparse and
+supports observation weights, offsets, and unstructured, independent,
+compound-symmetry, and AR(1) random effects. Post-fit calculations, including
+`vcov()`, `hatvalues()`, prediction intervals, conditional variances, and
+denominator degrees of freedom, factor systems with many random effects using
+the native sparse Cholesky with a fill-reducing ordering.

@@ -12,85 +12,24 @@ import numpy as np
 import pytest
 from mixedlm import families, pvalues
 from numpy.testing import assert_allclose
-from scipy import linalg, optimize, stats
+from scipy import stats
 
-from tests._lmer_data import CBPP
+from tests._datasets import CBPP, CBPP_FORMULA, SLEEPSTUDY
+from tests._lmm_oracles import observation_space_reference
+
+pytestmark = pytest.mark.installed_wheel
 
 _CBPP_FLOAT_ATOL = 1e-6
 
 
-def observation_space_reference(data, *, slopes):
-    y = data["Reaction" if slopes else "diameter"].to_numpy(dtype=float)
-    n = len(y)
-    if slopes:
-        days = data["Days"].to_numpy(dtype=float)
-        X = np.column_stack((np.ones(n), days))
-        membership = data["Subject"].to_numpy()
-        same = (membership[:, None] == membership[None, :]).astype(float)
-
-        def covariance(theta):
-            lower = np.array([[theta[0], 0.0], [theta[1], theta[2]]])
-            G = lower @ lower.T
-            return np.eye(n) + same * (X @ G @ X.T)
-
-        start = [1.0, 0.02, 0.2]
-    else:
-        X = np.ones((n, 1))
-        grouping = [data[name].to_numpy() for name in ("plate", "sample")]
-        same = [(values[:, None] == values[None, :]).astype(float) for values in grouping]
-
-        def covariance(theta):
-            return np.eye(n) + sum(
-                value**2 * matrix for value, matrix in zip(theta, same, strict=True)
-            )
-
-        start = [1.5, 3.5]
-    df = n - X.shape[1]
-
-    def evaluate(theta):
-        V = covariance(theta)
-        factor = linalg.cho_factor(V, lower=True)
-        inverse_X = linalg.cho_solve(factor, X)
-        information = X.T @ inverse_X
-        beta = np.linalg.solve(information, X.T @ linalg.cho_solve(factor, y))
-        residuals = y - X @ beta
-        inverse_residuals = linalg.cho_solve(factor, residuals)
-        sigma_squared = float(residuals @ inverse_residuals / df)
-        deviance = (
-            2 * np.log(np.diag(factor[0])).sum()
-            + np.linalg.slogdet(information)[1]
-            + df * (1 + np.log(2 * np.pi * sigma_squared))
-        )
-        random_part = (V - np.eye(n)) @ inverse_residuals
-        return {
-            "deviance": float(deviance),
-            "beta": beta,
-            "sigma": np.sqrt(sigma_squared),
-            "vcov": sigma_squared * np.linalg.inv(information),
-            "fitted": X @ beta + random_part,
-            "residuals": residuals - random_part,
-        }
-
-    optimum = optimize.minimize(
-        lambda theta: evaluate(theta)["deviance"],
-        start,
-        method="Nelder-Mead",
-        options={"xatol": 1e-9, "fatol": 1e-10, "maxiter": 2000},
-    )
-    assert optimum.success, optimum.message
-    reference = evaluate(optimum.x)
-    reference["theta"] = optimum.x
-    return reference
-
-
 @pytest.fixture(scope="class")
 def model():
-    return mlm.lmer("Reaction ~ Days + (Days | Subject)", mlm.load_sleepstudy(), REML=True)
+    return mlm.lmer("Reaction ~ Days + (Days | Subject)", SLEEPSTUDY, REML=True)
 
 
 @pytest.fixture(scope="class")
 def sleepstudy_reference():
-    return observation_space_reference(mlm.load_sleepstudy(), slopes=True)
+    return observation_space_reference(SLEEPSTUDY, slopes=True)
 
 
 class TestSleepstudyGolden:
@@ -166,34 +105,27 @@ def test_penicillin_crossed_random_effects_golden():
     assert varcorr.residual == pytest.approx(reference["sigma"] ** 2, abs=2e-5)
 
 
-@pytest.mark.filterwarnings("ignore:divide by zero encountered in log")
-@pytest.mark.filterwarnings("ignore:invalid value encountered in multiply")
 def test_cbpp_binomial_glmer_fast_approximation_golden() -> None:
-    # Preserve the reference for the former joint PIRLS approximation.
-    # Full likelihood fits have a separate independent integration oracle.
-    data = CBPP.copy()
-    model = mlm.glmer(
-        "y ~ period + (1 | herd)",
-        data,
-        family=families.Binomial(),
-        nAGQ=0,
-        weights=data["size"].to_numpy(dtype=float),
-    )
+    # Snapshot of the nAGQ=0 fit beyond lme4's published precision; its rounded
+    # estimates are checked against lme4 in the next test. Full likelihood fits
+    # have a separate independent integration oracle.
+    model = mlm.glmer(CBPP_FORMULA, CBPP, family=families.Binomial(), nAGQ=0)
 
     assert model.converged
     assert_allclose(
         model.beta,
-        [-1.861164732564236, -0.208553975355595, -0.078281733042295, -0.618291994021517],
+        [-1.360471755378668, -0.976177470924035, -1.111076893294222, -1.559680515617786],
         rtol=0,
         atol=_CBPP_FLOAT_ATOL,
     )
-    assert_allclose(model.theta, [0.48750557774242], rtol=0, atol=_CBPP_FLOAT_ATOL)
+    assert_allclose(model.theta, [0.641815070389878], rtol=0, atol=_CBPP_FLOAT_ATOL)
     assert model.sigma == pytest.approx(1.0, abs=0.0)
-    assert model.deviance == pytest.approx(74.03136198466316, abs=_CBPP_FLOAT_ATOL)
+    assert model.deviance == pytest.approx(100.15188340645719, abs=_CBPP_FLOAT_ATOL)
 
     loglik = model.logLik()
-    saturated_loglik = stats.binom.logpmf(data["incidence"], data["size"], data["y"]).sum()
-    normalized_deviance = 74.03136198466316 - 2 * saturated_loglik
+    incidence, size = CBPP["incidence"], CBPP["size"]
+    saturated_loglik = stats.binom.logpmf(incidence, size, incidence / size).sum()
+    normalized_deviance = 100.15188340645719 - 2 * saturated_loglik
     assert loglik.value == pytest.approx(-0.5 * normalized_deviance, abs=_CBPP_FLOAT_ATOL)
     assert loglik.df == 5
     assert loglik.nobs == 56
@@ -202,10 +134,10 @@ def test_cbpp_binomial_glmer_fast_approximation_golden() -> None:
     assert_allclose(
         model.vcov(),
         [
-            [0.086506090158, -0.065213683451, -0.067123707411, -0.067040141073],
-            [-0.065213683451, 0.160280508337, 0.065151552713, 0.064818269431],
-            [-0.067123707411, 0.065151552713, 0.144882987863, 0.067106011166],
-            [-0.067040141073, 0.064818269431, 0.067106011166, 0.189605383319],
+            [0.051790208727, -0.024371090477, -0.024332790926, -0.024231789050],
+            [-0.024371090477, 0.091983215914, 0.026523738201, 0.026293639936],
+            [-0.024332790926, 0.026523738201, 0.104659886705, 0.025970642323],
+            [-0.024231789050, 0.026293639936, 0.025970642323, 0.180162472641],
         ],
         rtol=0,
         atol=_CBPP_FLOAT_ATOL,
@@ -213,14 +145,14 @@ def test_cbpp_binomial_glmer_fast_approximation_golden() -> None:
     assert_allclose(
         model.fitted()[:8],
         [
-            0.198309632363,
-            0.167221722142,
-            0.186157376781,
-            0.117617807046,
-            0.131593373719,
-            0.109535223114,
-            0.122902679701,
-            0.075491973286,
+            0.309266031176,
+            0.144336430227,
+            0.128461611119,
+            0.086019641495,
+            0.155781652255,
+            0.065001579149,
+            0.057268396322,
+            0.270616261989,
         ],
         rtol=0,
         atol=_CBPP_FLOAT_ATOL,
@@ -228,22 +160,22 @@ def test_cbpp_binomial_glmer_fast_approximation_golden() -> None:
     assert_allclose(
         model.residuals()[:8],
         [
-            -0.541510359941,
-            0.726873965828,
-            1.773098171001,
-            -1.118615177302,
-            0.065853413303,
-            -0.802052054265,
-            0.272457372704,
-            0.265837027814,
+            -1.446018457708,
+            0.960942734138,
+            2.329516388142,
+            -0.948399690844,
+            -0.255661399684,
+            -0.166471488371,
+            -0.195723089899,
+            0.952473483654,
         ],
         rtol=0,
         atol=_CBPP_FLOAT_ATOL,
     )
 
     herd = model.VarCorr().groups["herd"]
-    assert herd.variance["(Intercept)"] == pytest.approx(0.23766168832997042, abs=_CBPP_FLOAT_ATOL)
-    assert herd.stddev["(Intercept)"] == pytest.approx(0.4875055777424197, abs=_CBPP_FLOAT_ATOL)
+    assert herd.variance["(Intercept)"] == pytest.approx(0.41192658457956455, abs=_CBPP_FLOAT_ATOL)
+    assert herd.stddev["(Intercept)"] == pytest.approx(0.641815070389878, abs=_CBPP_FLOAT_ATOL)
 
 
 @pytest.mark.parametrize(
@@ -257,12 +189,7 @@ def test_cbpp_binomial_glmer_fast_approximation_golden() -> None:
 def test_original_cbpp_matches_published_lme4_estimates(nAGQ, beta, scale):
     # https://lme4.github.io/lme4/reference/glmer.html
     # Published rounded coefficients differ slightly with optimizer precision.
-    model = mlm.glmer(
-        "incidence / size ~ period + (1 | herd)",
-        mlm.load_cbpp(),
-        family=families.Binomial(),
-        nAGQ=nAGQ,
-    )
+    model = mlm.glmer(CBPP_FORMULA, CBPP, family=families.Binomial(), nAGQ=nAGQ)
     assert model.converged and model.pirls_converged
     assert model.ngrps()["herd"] == 15
     assert_allclose(model.beta, beta, rtol=0, atol=0.001)

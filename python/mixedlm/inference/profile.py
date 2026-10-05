@@ -1,14 +1,16 @@
 from __future__ import annotations
 
-import os
-from concurrent.futures import ProcessPoolExecutor, as_completed
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
+from functools import partial
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from numpy.typing import NDArray
 from scipy import stats
 
+from mixedlm._parallel import process_pool, resolve_n_jobs
 from mixedlm.inference.profile_types import Profile2DResult, ProfileResult
 from mixedlm.models.shared_utils import _RandomEffectFactor
 from mixedlm.utils.validation import _validate_confidence_level
@@ -19,7 +21,11 @@ if TYPE_CHECKING:
     from mixedlm.models.glmer import GlmerResult
     from mixedlm.models.lmer import LmerResult
 
-_SLICE2D_PARALLEL_MIN_TASKS = 400
+# Starting worker processes can take a second. A conditional slice point is one
+# linear solve whose cost depends on the data, the random effects and the BLAS
+# threads of this process, so slice2D times its first row and sends the other
+# rows to workers only when they would take at least this long serially.
+_SLICE2D_PARALLEL_MIN_SECONDS = 1.0
 
 
 def plot_profiles(
@@ -201,12 +207,13 @@ def profile_lmer(
 
     Use an ML reference fit for both ML and REML inputs. Plotting resolution does
     not control endpoint accuracy. Failed fits or unbracketed intervals raise.
+    ``n_jobs`` worker processes, or -1 for all CPUs, profile coefficients
+    concurrently. Workers are started without forking, so scripts need an
+    ``if __name__ == "__main__":`` guard.
     """
     from mixedlm.inference.lmm_profile import likelihood_profiles
 
-    return likelihood_profiles(
-        result, which, n_points, level, n_jobs, executor_factory=ProcessPoolExecutor
-    )
+    return likelihood_profiles(result, which, n_points, level, n_jobs)
 
 
 @dataclass
@@ -264,96 +271,6 @@ class _ProfileProjection:
             sqrt_weights=weighted.sqrt_weights,
             logdet_weights=float(np.sum(np.log(weights))),
             weighted_X=weighted.weighted_X[:, keep_idx],
-            weighted_Zt=weighted_Zt,
-            Lambda_T=Lambda_T,
-            random_factor=random_factor,
-            logdet_V=logdet_V,
-            random_fixed_map=random_fixed_map,
-            L_XtVinvX=L_XtVinvX,
-            logdet_XtVinvX=logdet_XtVinvX,
-        )
-
-    @classmethod
-    def from_components(
-        cls,
-        theta: NDArray[np.floating],
-        y: NDArray[np.floating],
-        weights: NDArray[np.floating],
-        X: NDArray[np.floating],
-        keep_idx: list[int],
-        Zt_data: NDArray[np.floating],
-        Zt_indices: NDArray[np.int64],
-        Zt_indptr: NDArray[np.int64],
-        Zt_shape: tuple[int, int],
-        random_structures: list[Any],
-        n: int,
-        q: int,
-        REML: bool,
-    ) -> _ProfileProjection:
-        from scipy import linalg, sparse
-
-        from mixedlm.estimation.reml import _build_lambda
-        from mixedlm.matrices.design import validate_prior_weights
-
-        validated_weights = validate_prior_weights(weights, n)
-        sqrt_weights = np.sqrt(validated_weights)
-        X_reduced = X[:, keep_idx]
-        weighted_X = sqrt_weights[:, None] * X_reduced
-
-        if q == 0:
-            information = weighted_X.T @ weighted_X
-            L_XtVinvX, logdet_XtVinvX = _factor_profile_information(information, REML)
-            return cls(
-                n=n,
-                q=q,
-                REML=REML,
-                y=y,
-                X_reduced=X_reduced,
-                sqrt_weights=sqrt_weights,
-                logdet_weights=float(np.sum(np.log(validated_weights))),
-                weighted_X=weighted_X,
-                weighted_Zt=None,
-                Lambda_T=None,
-                random_factor=None,
-                logdet_V=0.0,
-                random_fixed_map=None,
-                L_XtVinvX=L_XtVinvX,
-                logdet_XtVinvX=logdet_XtVinvX,
-            )
-
-        Zt = sparse.csc_matrix((Zt_data, Zt_indices, Zt_indptr), shape=Zt_shape)
-        weighted_Zt = Zt.multiply(sqrt_weights[None, :]).tocsc()
-        Lambda_T = _build_lambda(theta, random_structures).T
-        V_factor = Lambda_T @ (weighted_Zt @ weighted_Zt.T) @ Lambda_T.T
-        V_factor = V_factor + sparse.eye(q, format="csc")
-
-        try:
-            random_factor = _RandomEffectFactor(V_factor)
-        except (linalg.LinAlgError, RuntimeError):
-            random_factor = None
-
-        if random_factor is None:
-            random_fixed_map = None
-            L_XtVinvX = None
-            logdet_V = 0.0
-            logdet_XtVinvX = 0.0
-        else:
-            logdet_V = random_factor.logdet
-            Lambdat_ZtWX = Lambda_T @ (weighted_Zt @ weighted_X)
-            random_fixed_map, correction = random_factor.solve_with_crossproduct(Lambdat_ZtWX)
-            information = weighted_X.T @ weighted_X - correction
-            information = (information + information.T) / 2.0
-            L_XtVinvX, logdet_XtVinvX = _factor_profile_information(information, REML)
-
-        return cls(
-            n=n,
-            q=q,
-            REML=REML,
-            y=y,
-            X_reduced=X_reduced,
-            sqrt_weights=sqrt_weights,
-            logdet_weights=float(np.sum(np.log(validated_weights))),
-            weighted_X=weighted_X,
             weighted_Zt=weighted_Zt,
             Lambda_T=Lambda_T,
             random_factor=random_factor,
@@ -464,121 +381,130 @@ def profile_glmer(
     return likelihood_profiles(result, which, n_points, level)
 
 
-def logProf(profile: ProfileResult) -> ProfileResult:
-    """Transform profile to log scale for variance components.
+def _transform_profile(
+    profile: ProfileResult, transform: Callable[[Any], Any], parameter: str
+) -> ProfileResult:
+    """Map a profile's points and bounds through a monotone transform, keeping zeta."""
+    lower, upper = float(transform(profile.ci_lower)), float(transform(profile.ci_upper))
+    if lower > upper:
+        lower, upper = upper, lower
+    return ProfileResult(
+        parameter=parameter,
+        values=transform(profile.values),
+        zeta=profile.zeta,
+        mle=float(transform(profile.mle)),
+        ci_lower=lower,
+        ci_upper=upper,
+        level=profile.level,
+    )
 
-    This transformation is useful for variance components, which are
-    always positive and often better represented on a log scale.
-    The transformation is: log_value = log(value)
+
+def _profile_points(profile: ProfileResult) -> NDArray[np.floating]:
+    return np.append(profile.values, [profile.mle, profile.ci_lower, profile.ci_upper])
+
+
+def logProf(profile: ProfileResult) -> ProfileResult:
+    """Transform a profile of a positive parameter to the log scale.
+
+    ``profile_lmer`` and ``profile_glmer`` profile fixed effects, which can be
+    negative. These scale transforms apply to profiles of positive scale
+    parameters, such as a ``ProfileResult`` built for a standard deviation.
 
     Parameters
     ----------
     profile : ProfileResult
-        Original profile result.
+        Profile whose values, MLE and confidence bounds are all positive.
 
     Returns
     -------
     ProfileResult
-        Profile with values transformed to log scale.
+        Profile of ``log(parameter)`` with the original zeta values.
+
+    Raises
+    ------
+    ValueError
+        If any value, the MLE or a confidence bound is not positive.
 
     Examples
     --------
-    >>> profiles = profile_lmer(result)
-    >>> log_profile = logProf(profiles["sigma"])
+    >>> sd = ProfileResult(
+    ...     parameter="sigma",
+    ...     values=np.array([1.5, 2.0, 2.5]),
+    ...     zeta=np.array([-1.0, 0.0, 1.0]),
+    ...     mle=2.0,
+    ...     ci_lower=1.6,
+    ...     ci_upper=2.4,
+    ...     level=0.95,
+    ... )
+    >>> logProf(sd).parameter
+    'log(sigma)'
     """
-    log_values = np.log(np.maximum(profile.values, 1e-10))
-    log_mle = np.log(max(profile.mle, 1e-10))
-    log_ci_lower = np.log(max(profile.ci_lower, 1e-10))
-    log_ci_upper = np.log(max(profile.ci_upper, 1e-10))
-
-    return ProfileResult(
-        parameter=f"log({profile.parameter})",
-        values=log_values,
-        zeta=profile.zeta,
-        mle=log_mle,
-        ci_lower=log_ci_lower,
-        ci_upper=log_ci_upper,
-        level=profile.level,
-    )
+    if np.any(_profile_points(profile) <= 0):
+        raise ValueError("logProf requires a profile of a positive parameter")
+    return _transform_profile(profile, np.log, f"log({profile.parameter})")
 
 
 def varianceProf(profile: ProfileResult) -> ProfileResult:
-    """Transform profile to variance scale.
+    """Transform a standard-deviation profile to the variance scale.
 
-    This transformation squares the values, which is useful when
-    the original profile is on the standard deviation scale but
-    the variance is desired.
+    Squaring is monotone only on one side of zero, so the profile must not
+    change sign. See :func:`logProf` for the profiles these transforms suit.
 
     Parameters
     ----------
     profile : ProfileResult
-        Original profile result (typically on SD scale).
+        Profile on the standard-deviation scale.
 
     Returns
     -------
     ProfileResult
-        Profile with values transformed to variance scale.
+        Profile of the squared parameter with the original zeta values.
+
+    Raises
+    ------
+    ValueError
+        If the values, MLE and confidence bounds include both signs.
 
     Examples
     --------
-    >>> profiles = profile_lmer(result)
-    >>> var_profile = varianceProf(profiles["sigma"])
+    >>> var_profile = varianceProf(sd)
+    >>> var_profile.mle
+    4.0
     """
-    var_values = profile.values**2
-    var_mle = profile.mle**2
-    var_ci_lower = profile.ci_lower**2
-    var_ci_upper = profile.ci_upper**2
-
-    if var_ci_lower > var_ci_upper:
-        var_ci_lower, var_ci_upper = var_ci_upper, var_ci_lower
-
-    return ProfileResult(
-        parameter=f"{profile.parameter}²",
-        values=var_values,
-        zeta=profile.zeta,
-        mle=var_mle,
-        ci_lower=var_ci_lower,
-        ci_upper=var_ci_upper,
-        level=profile.level,
-    )
+    points = _profile_points(profile)
+    if np.any(points < 0) and np.any(points > 0):
+        raise ValueError("varianceProf requires a profile that does not change sign")
+    return _transform_profile(profile, np.square, f"{profile.parameter}²")
 
 
 def sdProf(profile: ProfileResult) -> ProfileResult:
-    """Transform profile to standard deviation scale.
+    """Transform a variance profile to the standard-deviation scale.
 
-    This transformation takes the square root of the values,
-    which is useful when the original profile is on the variance
-    scale but the standard deviation is desired.
+    See :func:`logProf` for the profiles these transforms suit.
 
     Parameters
     ----------
     profile : ProfileResult
-        Original profile result (typically on variance scale).
+        Profile on the variance scale, with nonnegative values, MLE and
+        confidence bounds.
 
     Returns
     -------
     ProfileResult
-        Profile with values transformed to SD scale.
+        Profile of ``sqrt(parameter)`` with the original zeta values.
+
+    Raises
+    ------
+    ValueError
+        If any value, the MLE or a confidence bound is negative.
 
     Examples
     --------
-    >>> profiles = profile_lmer(result)
     >>> sd_profile = sdProf(var_profile)
     """
-    sd_values = np.sqrt(np.maximum(profile.values, 0))
-    sd_mle = np.sqrt(max(profile.mle, 0))
-    sd_ci_lower = np.sqrt(max(profile.ci_lower, 0))
-    sd_ci_upper = np.sqrt(max(profile.ci_upper, 0))
-
-    return ProfileResult(
-        parameter=f"sqrt({profile.parameter})",
-        values=sd_values,
-        zeta=profile.zeta,
-        mle=sd_mle,
-        ci_lower=sd_ci_lower,
-        ci_upper=sd_ci_upper,
-        level=profile.level,
-    )
+    if np.any(_profile_points(profile) < 0):
+        raise ValueError("sdProf requires a profile of a nonnegative parameter")
+    return _transform_profile(profile, np.sqrt, f"sqrt({profile.parameter})")
 
 
 def as_dataframe(
@@ -727,7 +653,10 @@ def slice2D(
     level : float, default 0.95
         Confidence level for the joint region.
     n_jobs : int, default 1
-        Number of parallel jobs. Use -1 for all available cores.
+        Number of worker processes, or -1 for all available cores. Conditional
+        slices that would take less than about a second in this process run
+        serially. Workers are started without forking, so scripts need an
+        ``if __name__ == "__main__":`` guard.
     profile_covariance : bool, default False
         Re-optimize covariance parameters at each pair of fixed coefficients.
         True uses an ML reference and ranges covering the requested joint
@@ -751,15 +680,7 @@ def slice2D(
     if profile_covariance:
         from mixedlm.inference.lmm_profile import likelihood_surface
 
-        return likelihood_surface(
-            result,
-            param1,
-            param2,
-            n_points,
-            level,
-            n_jobs,
-            executor_factory=ProcessPoolExecutor,
-        )
+        return likelihood_surface(result, param1, param2, n_points, level, n_jobs)
 
     if param1 not in result.matrices.fixed_names:
         raise ValueError(f"Parameter '{param1}' not found in fixed effects")
@@ -774,6 +695,7 @@ def slice2D(
         alternative="Rename colliding formula variables before requesting named profile slices.",
     )
 
+    workers = resolve_n_jobs(n_jobs, max_tasks=n_points - 1)
     idx1 = result.matrices.fixed_names.index(param1)
     idx2 = result.matrices.fixed_names.index(param2)
 
@@ -788,70 +710,20 @@ def slice2D(
 
     reference_cache = _Slice2DCache.build(result, idx1, idx2)
     dev_mle = _profile_deviance_2d_cached(reference_cache, mle1, mle2)
+    zeta_row = partial(_slice2d_zeta_row, reference_cache, dev_mle, values2)
 
-    zeta = np.zeros((n_points, n_points))
-    if n_jobs == -1:
-        n_jobs_actual = os.cpu_count() or 1
-    elif n_jobs > 1:
-        n_jobs_actual = n_jobs
+    started = time.perf_counter()
+    rows = list(map(zeta_row, values1[:1]))
+    remaining = values1[1:]
+    serial_seconds = (time.perf_counter() - started) * len(remaining)
+    if workers > 1 and serial_seconds >= _SLICE2D_PARALLEL_MIN_SECONDS:
+        # One chunk of rows per worker sends the cached projection once to each.
+        with process_pool(workers) as executor:
+            chunksize = -(-len(remaining) // workers)
+            rows.extend(executor.map(zeta_row, remaining, chunksize=chunksize))
     else:
-        n_jobs_actual = 1
-
-    use_parallel = n_jobs_actual > 1 and (n_points * n_points) >= _SLICE2D_PARALLEL_MIN_TASKS
-
-    if not use_parallel:
-        cache = reference_cache
-        for i, v1 in enumerate(values1):
-            for j, v2 in enumerate(values2):
-                dev = _profile_deviance_2d_cached(cache, v1, v2)
-                diff = dev - dev_mle
-                sign = 1 if diff >= 0 else -1
-                zeta[i, j] = sign * np.sqrt(abs(diff))
-    else:
-        matrices = result.matrices
-        if matrices.n_random > 0:
-            Zt = matrices.Zt
-            Zt_data = np.array(Zt.data)
-            Zt_indices = np.array(Zt.indices)
-            Zt_indptr = np.array(Zt.indptr)
-            Zt_shape = Zt.shape
-        else:
-            Zt_data = np.array([])
-            Zt_indices = np.array([])
-            Zt_indptr = np.array([0])
-            Zt_shape = (0, matrices.n_obs)
-
-        tasks = []
-        for i, v1 in enumerate(values1):
-            tasks.append(
-                (
-                    i,
-                    float(v1),
-                    values2,
-                    dev_mle,
-                    idx1,
-                    idx2,
-                    result.theta.copy(),
-                    (matrices.y - matrices.offset).copy(),
-                    matrices.weights.copy(),
-                    matrices.X.copy(),
-                    Zt_data,
-                    Zt_indices,
-                    Zt_indptr,
-                    Zt_shape,
-                    matrices.random_structures,
-                    matrices.n_obs,
-                    matrices.n_fixed,
-                    matrices.n_random,
-                    result.REML,
-                )
-            )
-
-        with ProcessPoolExecutor(max_workers=n_jobs_actual) as executor:
-            futures = {executor.submit(_slice2d_row_worker, task): task[0] for task in tasks}
-            for future in as_completed(futures):
-                i, zeta_row = future.result()
-                zeta[i, :] = zeta_row
+        rows.extend(map(zeta_row, remaining))
+    zeta = np.array(rows, dtype=np.float64).reshape(n_points, n_points)
 
     return Profile2DResult(
         param1=param1,
@@ -865,57 +737,18 @@ def slice2D(
     )
 
 
-def _slice2d_row_worker(
-    args: tuple[Any, ...],
-) -> tuple[int, NDArray[np.floating]]:
-    (
-        i,
-        v1,
-        values2,
-        dev_mle,
-        idx1,
-        idx2,
-        theta,
-        y,
-        weights,
-        X,
-        Zt_data,
-        Zt_indices,
-        Zt_indptr,
-        Zt_shape,
-        random_structures,
-        n,
-        p,
-        q,
-        REML,
-    ) = args
-
-    cache = _Slice2DCache.from_components(
-        idx1,
-        idx2,
-        theta,
-        y,
-        weights,
-        X,
-        Zt_data,
-        Zt_indices,
-        Zt_indptr,
-        Zt_shape,
-        random_structures,
-        n,
-        p,
-        q,
-        REML,
-    )
-
-    row = np.zeros(len(values2), dtype=np.float64)
-    for j, v2 in enumerate(values2):
-        dev = _profile_deviance_2d_cached(cache, float(v1), float(v2))
-        diff = dev - dev_mle
+def _slice2d_zeta_row(
+    cache: _Slice2DCache,
+    dev_mle: float,
+    values2: NDArray[np.floating],
+    value1: float,
+) -> NDArray[np.floating]:
+    row = np.empty(len(values2), dtype=np.float64)
+    for j, value2 in enumerate(values2):
+        diff = _profile_deviance_2d_cached(cache, float(value1), float(value2)) - dev_mle
         sign = 1 if diff >= 0 else -1
         row[j] = sign * np.sqrt(abs(diff))
-
-    return i, row
+    return row
 
 
 @dataclass
@@ -934,46 +767,6 @@ class _Slice2DCache:
             projection=_ProfileProjection.from_result(result, keep_idx),
             X_col1=matrices.X[:, idx1],
             X_col2=matrices.X[:, idx2],
-        )
-
-    @classmethod
-    def from_components(
-        cls,
-        idx1: int,
-        idx2: int,
-        theta: NDArray[np.floating],
-        y: NDArray[np.floating],
-        weights: NDArray[np.floating],
-        X: NDArray[np.floating],
-        Zt_data: NDArray[np.floating],
-        Zt_indices: NDArray[np.int64],
-        Zt_indptr: NDArray[np.int64],
-        Zt_shape: tuple[int, int],
-        random_structures: list[Any],
-        n: int,
-        p: int,
-        q: int,
-        REML: bool,
-    ) -> _Slice2DCache:
-        keep_idx = [column for column in range(p) if column not in (idx1, idx2)]
-        return cls(
-            projection=_ProfileProjection.from_components(
-                theta,
-                y,
-                weights,
-                X,
-                keep_idx,
-                Zt_data,
-                Zt_indices,
-                Zt_indptr,
-                Zt_shape,
-                random_structures,
-                n,
-                q,
-                REML,
-            ),
-            X_col1=X[:, idx1],
-            X_col2=X[:, idx2],
         )
 
 

@@ -6,7 +6,6 @@ import numpy as np
 import pandas as pd
 import pytest
 from mixedlm import families, glmer
-from mixedlm.estimation import laplace
 from mixedlm.estimation.laplace import pirls
 from mixedlm.families import (
     Binomial,
@@ -22,8 +21,9 @@ from mixedlm.families import (
 )
 from mixedlm.formula.parser import parse_formula
 from mixedlm.matrices import build_model_matrices
+from scipy import special
 
-from tests._lmer_data import CBPP
+from tests._datasets import CBPP, CBPP_FORMULA
 
 
 def test_binomial_deviance_handles_boundary_outcomes_without_warnings() -> None:
@@ -137,12 +137,15 @@ def test_gamma_fit_recovers_finite_coefficients_and_deviance() -> None:
     y = rng.gamma(12.0, mu / 12.0)
     data = pd.DataFrame({"y": y, "x": x, "group": group.astype(str)})
 
-    result = glmer("y ~ x + (1 | group)", data, family=Gamma())
+    # GLMM dispersion is fixed at one, so prior weights carry the gamma shape.
+    result = glmer("y ~ x + (1 | group)", data, family=Gamma(), weights=np.full(n, 12.0))
 
     assert result.converged
     assert np.isfinite(result.deviance)
     assert result.deviance >= 0
     np.testing.assert_allclose(result.beta, np.array([0.7, 0.35]), atol=0.06)
+    # About two standard errors of an SD estimated from 12 groups.
+    assert result.theta[0] == pytest.approx(random_intercepts.std(ddof=1), abs=0.08)
     assert np.all((result.fitted() > 0) & (result.fitted() < 10))
 
 
@@ -163,23 +166,6 @@ def test_python_pirls_preserves_poisson_means_above_one() -> None:
     assert converged
     assert np.isfinite(deviance)
     np.testing.assert_allclose(fitted, 5.0, rtol=1e-6)
-
-
-@pytest.mark.parametrize("family", [Gamma(), InverseGaussian(), NegativeBinomial()])
-def test_unsupported_native_families_use_python_backend(monkeypatch, family) -> None:
-    expected = (1.0, np.array([2.0]), np.array([3.0]))
-
-    monkeypatch.setattr(laplace, "_HAS_RUST", True)
-    monkeypatch.setattr(
-        laplace,
-        "_rust_laplace_deviance",
-        lambda *args: pytest.fail("unsupported family was sent to the Rust backend"),
-    )
-    monkeypatch.setattr(laplace, "laplace_deviance", lambda *args, **kwargs: expected)
-
-    actual = laplace.laplace_deviance_fast(np.array([0.5]), object(), family)
-
-    assert actual is expected
 
 
 @pytest.mark.parametrize(
@@ -239,6 +225,58 @@ def test_quasi_family_rejects_invalid_dispersion(phi: float) -> None:
         QuasiFamily(Poisson(), phi=phi)
 
 
+class _ConfigurablePoisson(families.CustomFamily):
+    def __init__(self, **overrides) -> None:
+        self.link = families.LogLink()
+        for name, value in overrides.items():
+            setattr(self, name, value)
+
+    def variance(self, mu):
+        return mu
+
+    def deviance_resids(self, y, mu, wt):
+        return 2 * wt * (special.xlogy(y, y / mu) - y + mu)
+
+
+class _NonInvertibleLog(families.LogLink):
+    def inverse(self, eta):
+        return np.exp(eta) + 1.0
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"link": "log"}, "Link instance"),
+        ({"variance": lambda mu: np.ones(1)}, r"variance\(\) returned wrong shape"),
+        ({"variance": lambda mu: np.full_like(mu, np.nan)}, r"variance\(\) returned non-finite"),
+        ({"variance": lambda mu: -mu}, r"variance\(\) must return positive"),
+        (
+            {"deviance_resids": lambda y, mu, wt: np.ones(1)},
+            r"deviance_resids\(\) returned wrong shape",
+        ),
+        (
+            {"deviance_resids": lambda y, mu, wt: np.full_like(mu, np.inf)},
+            r"deviance_resids\(\) returned non-finite",
+        ),
+        ({"weights": lambda mu: np.zeros_like(mu)}, r"weights\(\) must return positive"),
+        ({"link": _NonInvertibleLog()}, r"link.inverse\(link.link\(mu\)\) != mu"),
+    ],
+)
+def test_validate_family_rejects_invalid_custom_families(overrides, message: str) -> None:
+    assert families.validate_family(_ConfigurablePoisson()) is True
+    with pytest.raises(ValueError, match=message):
+        families.validate_family(_ConfigurablePoisson(**overrides))
+
+
+def test_validate_family_requires_a_link() -> None:
+    class Unlinked(families.CustomFamily):
+        def __init__(self) -> None:
+            pass
+
+    with pytest.raises(ValueError, match="must have a 'link' attribute"):
+        families.validate_family(Unlinked())
+
+
 def test_documented_family_helpers() -> None:
     family = Binomial(link="probit")
     mu = np.array([0.2, 0.8])
@@ -255,17 +293,13 @@ def test_documented_family_helpers() -> None:
 
 @pytest.mark.parametrize("link", ["probit", "cloglog", "cauchit"])
 def test_binomial_alternative_links_fit_end_to_end(link: str) -> None:
-    result = glmer(
-        "y ~ period + (1 | herd)",
-        CBPP,
-        family=families.Binomial(link=link),
-        weights=CBPP["size"].to_numpy(),
-    )
+    result = glmer(CBPP_FORMULA, CBPP, family=families.Binomial(link=link))
 
     assert result.converged
     assert result.family.link.name == link
     assert np.isfinite(result.deviance)
-    assert np.all((result.fitted() > 0) & (result.fitted() < 1))
+    eta = result.getME("X") @ result.beta + result.getME("Z") @ result.getME("b")
+    np.testing.assert_allclose(result.fitted(), result.family.link.inverse(eta))
 
 
 def test_positive_family_canonical_links_fit_end_to_end() -> None:
@@ -284,7 +318,9 @@ def test_positive_family_canonical_links_fit_end_to_end() -> None:
 
     for family, y in cases:
         data = pd.DataFrame({"y": y, "x": x, "group": group})
-        result = glmer("y ~ x + (1 | group)", data, family=family)
+        # The simulated means have no group effect.
+        with pytest.warns(UserWarning, match="Model is singular"):
+            result = glmer("y ~ x + (1 | group)", data, family=family)
 
         assert result.converged
         assert np.isfinite(result.deviance)
@@ -300,24 +336,9 @@ def test_poisson_alternative_links_fit_end_to_end(link: str) -> None:
         }
     )
 
-    result = glmer("y ~ 1 + (1 | group)", data, family=Poisson(link=link))
+    # A constant response has no between-group variation.
+    with pytest.warns(UserWarning, match="Model is singular"):
+        result = glmer("y ~ 1 + (1 | group)", data, family=Poisson(link=link))
 
     assert result.converged
     np.testing.assert_allclose(result.fitted(), 5.0, rtol=1e-6)
-
-
-@pytest.mark.parametrize("family", [Binomial(link="probit"), Poisson(link="sqrt")])
-def test_non_native_links_use_python_backend(monkeypatch, family) -> None:
-    expected = (1.0, np.array([2.0]), np.array([3.0]))
-
-    monkeypatch.setattr(laplace, "_HAS_RUST", True)
-    monkeypatch.setattr(
-        laplace,
-        "_rust_laplace_deviance",
-        lambda *args: pytest.fail("non-native link was sent to the Rust backend"),
-    )
-    monkeypatch.setattr(laplace, "laplace_deviance", lambda *args, **kwargs: expected)
-
-    actual = laplace.laplace_deviance_fast(np.array([0.5]), object(), family)
-
-    assert actual is expected

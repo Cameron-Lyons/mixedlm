@@ -1,347 +1,241 @@
+"""getME components, update() and refit()/refitML() against direct fits."""
+
 import numpy as np
+import pandas as pd
 import pytest
 from mixedlm import families, glmer, lmer
+from numpy.testing import assert_allclose, assert_array_equal
 
-from tests._lmer_data import CBPP, SLEEPSTUDY
-
-
-class TestGetMEComponents:
-    def test_getME_X(self) -> None:
-        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
-        X = result.getME("X")
-
-        assert X.shape == (180, 2)
-        assert np.allclose(X[:, 0], 1.0)
-
-    def test_getME_Z(self) -> None:
-        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
-        Z = result.getME("Z")
-
-        assert Z.shape == (180, 18)
-
-    def test_getME_y(self) -> None:
-        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
-        y = result.getME("y")
-
-        assert len(y) == 180
-        assert np.allclose(y, SLEEPSTUDY["Reaction"].values)
-
-    def test_getME_beta(self) -> None:
-        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
-        beta = result.getME("beta")
-
-        assert len(beta) == 2
-        assert np.allclose(beta, list(result.fixef().values()))
-
-    def test_getME_theta(self) -> None:
-        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
-        theta = result.getME("theta")
-
-        assert len(theta) == 1
-        assert theta[0] >= 0
-
-    def test_getME_Lambda(self) -> None:
-        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
-        Lambda = result.getME("Lambda")
-
-        assert Lambda.shape == (18, 18)
-
-    def test_getME_u_b(self) -> None:
-        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
-        u = result.getME("u")
-        b = result.getME("b")
-
-        assert len(u) == 18
-        assert np.allclose(u, b)
-
-    def test_getME_sigma(self) -> None:
-        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
-        sigma = result.getME("sigma")
-
-        assert sigma > 0
-        assert sigma == result.sigma
-
-    def test_getME_dimensions(self) -> None:
-        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
-
-        assert result.getME("n") == 180
-        assert result.getME("n_obs") == 180
-        assert result.getME("p") == 2
-        assert result.getME("n_fixed") == 2
-        assert result.getME("q") == 18
-        assert result.getME("n_random") == 18
-
-    def test_getME_lower(self) -> None:
-        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
-        lower = result.getME("lower")
-
-        assert len(lower) == 1
-        assert lower[0] == 0.0
-
-    def test_getME_lower_correlated(self) -> None:
-        result = lmer("Reaction ~ Days + (Days | Subject)", SLEEPSTUDY)
-        lower = result.getME("lower")
-
-        assert len(lower) == 3
-        assert lower[0] == 0.0
-        assert lower[1] == -np.inf
-        assert lower[2] == 0.0
-
-    def test_getME_weights_offset(self) -> None:
-        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
-
-        weights = result.getME("weights")
-        assert len(weights) == 180
-        assert np.allclose(weights, 1.0)
-
-        offset = result.getME("offset")
-        assert len(offset) == 180
-        assert np.allclose(offset, 0.0)
-
-    def test_getME_REML_deviance(self) -> None:
-        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
-
-        assert result.getME("REML") is True
-        assert result.getME("deviance") > 0
-
-    def test_getME_flist_cnms(self) -> None:
-        result = lmer("Reaction ~ Days + (Days | Subject)", SLEEPSTUDY)
-
-        flist = result.getME("flist")
-        assert flist == ["Subject"]
-
-        cnms = result.getME("cnms")
-        assert "Subject" in cnms
-        assert "(Intercept)" in cnms["Subject"]
-        assert "Days" in cnms["Subject"]
-
-    def test_getME_Gp(self) -> None:
-        result = lmer("Reaction ~ Days + (Days | Subject)", SLEEPSTUDY)
-        Gp = result.getME("Gp")
-
-        assert len(Gp) == 2
-        assert Gp[0] == 0
-        assert Gp[1] == 36
-
-    def test_getME_invalid(self) -> None:
-        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
-
-        with pytest.raises(ValueError, match="Unknown component name"):
-            result.getME("invalid_name")
-
-    def test_getME_glmer(self) -> None:
-        data = CBPP.copy()
-        data["y"] = data["incidence"] / data["size"]
-
-        result = glmer("y ~ period + (1 | herd)", data, family=families.Binomial())
-
-        X = result.getME("X")
-        assert X.shape[1] == 4
-
-        family = result.getME("family")
-        assert isinstance(family, families.Binomial)
+from tests._datasets import CBPP, CBPP_FORMULA, SLEEPSTUDY, grouped_data
 
 
-class TestUpdateSleepstudy:
-    def test_update_REML(self) -> None:
-        result1 = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
-        assert result1.REML is True
+def assert_same_fit(actual, expected, *, atol=1e-4) -> None:
+    assert actual.converged and expected.converged
+    assert_allclose(actual.beta, expected.beta, rtol=0, atol=atol)
+    assert_allclose(actual.theta, expected.theta, rtol=0, atol=atol)
+    assert actual.deviance == pytest.approx(expected.deviance, abs=1e-6)
 
-        result2 = result1.update(REML=False)
-        assert result2.REML is False
 
-    def test_update_same_formula(self) -> None:
-        result1 = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
-        result2 = result1.update()
+class TestGetME:
+    def test_design_matrices_and_response(self, sleepstudy_lmm) -> None:
+        subjects = pd.get_dummies(SLEEPSTUDY["Subject"]).to_numpy(dtype=float)
 
-        fixef1 = np.array(list(result1.fixef().values()))
-        fixef2 = np.array(list(result2.fixef().values()))
-        assert np.allclose(fixef1, fixef2, rtol=1e-4)
-
-    def test_update_new_formula(self) -> None:
-        data = SLEEPSTUDY.copy()
-        data["Days2"] = data["Days"] ** 2
-
-        result1 = lmer("Reaction ~ Days + (1 | Subject)", data)
-        result2 = result1.update("Reaction ~ Days + Days2 + (1 | Subject)", data=data)
-
-        assert len(result1.fixef()) == 2
-        assert len(result2.fixef()) == 3
-
-    def test_update_new_data(self) -> None:
-        result1 = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
-
-        subset = SLEEPSTUDY[SLEEPSTUDY["Days"] <= 5].copy()
-        result2 = result1.update(data=subset)
-
-        assert result2.getME("n") < result1.getME("n")
-
-    def test_update_glmer_family(self) -> None:
-        data = CBPP.copy()
-        data["y"] = data["incidence"] / data["size"]
-
-        result1 = glmer("y ~ period + (1 | herd)", data, family=families.Binomial())
-
-        data["count"] = np.round(data["incidence"]).astype(int)
-        result2 = result1.update(
-            formula="count ~ period + (1 | herd)", data=data, family=families.Poisson()
+        assert_array_equal(
+            sleepstudy_lmm.getME("X"), np.column_stack((np.ones(180), SLEEPSTUDY["Days"]))
         )
+        # Columns follow the sorted subject levels used by ranef().
+        assert_array_equal(sleepstudy_lmm.getME("Z").toarray(), subjects)
+        assert_array_equal(sleepstudy_lmm.getME("y"), SLEEPSTUDY["Reaction"])
 
-        assert isinstance(result1.getME("family"), families.Binomial)
-        assert isinstance(result2.getME("family"), families.Poisson)
+    def test_parameters_match_the_fit(self, sleepstudy_lmm) -> None:
+        assert_array_equal(sleepstudy_lmm.getME("beta"), sleepstudy_lmm.beta)
+        assert_array_equal(sleepstudy_lmm.getME("beta"), list(sleepstudy_lmm.fixef().values()))
+        assert_array_equal(sleepstudy_lmm.getME("theta"), sleepstudy_lmm.theta)
+        assert sleepstudy_lmm.getME("sigma") == sleepstudy_lmm.sigma
+        assert sleepstudy_lmm.getME("deviance") == sleepstudy_lmm.deviance
+        assert sleepstudy_lmm.getME("REML") is True
 
-    def test_update_with_weights(self) -> None:
-        result1 = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+    def test_scalar_relative_covariance_factor(self, sleepstudy_lmm) -> None:
+        Lambda = sleepstudy_lmm.getME("Lambda").toarray()
 
+        assert_allclose(Lambda, sleepstudy_lmm.theta[0] * np.eye(18))
+        assert_allclose(sleepstudy_lmm.getME("Lambdat").toarray(), Lambda.T)
+
+    def test_correlated_factor_repeats_the_lower_cholesky_block(
+        self, sleepstudy_slopes_lmm
+    ) -> None:
+        theta = sleepstudy_slopes_lmm.theta
+        block = np.array([[theta[0], 0.0], [theta[1], theta[2]]])
+
+        Lambda = sleepstudy_slopes_lmm.getME("Lambda").toarray()
+
+        assert_allclose(Lambda, np.kron(np.eye(18), block))
+        assert_array_equal(sleepstudy_slopes_lmm.getME("lower"), [0.0, -np.inf, 0.0])
+        assert_array_equal(sleepstudy_slopes_lmm.getME("Gp"), [0, 36])
+        assert sleepstudy_slopes_lmm.getME("flist") == ["Subject"]
+        assert sleepstudy_slopes_lmm.getME("cnms") == {"Subject": ["(Intercept)", "Days"]}
+
+    def test_spherical_and_conditional_random_effects(self, sleepstudy_slopes_lmm) -> None:
+        u = sleepstudy_slopes_lmm.getME("u")
+        b = sleepstudy_slopes_lmm.getME("b")
+        ranef = sleepstudy_slopes_lmm.ranef()["Subject"]
+
+        assert_allclose(b, sleepstudy_slopes_lmm.getME("Lambda") @ u)
+        assert_allclose(b[0::2], ranef["(Intercept)"])
+        assert_allclose(b[1::2], ranef["Days"])
+        assert u @ u == pytest.approx(sleepstudy_slopes_lmm.getME("devcomp")["cmp"]["ussq"])
+
+    def test_dimensions_names_weights_and_offset(self, sleepstudy_lmm) -> None:
+        assert sleepstudy_lmm.getME("n") == sleepstudy_lmm.getME("n_obs") == 180
+        assert sleepstudy_lmm.getME("p") == sleepstudy_lmm.getME("n_fixed") == 2
+        assert sleepstudy_lmm.getME("q") == sleepstudy_lmm.getME("n_random") == 18
+        assert sleepstudy_lmm.getME("fixef_names") == ["(Intercept)", "Days"]
+        assert_array_equal(sleepstudy_lmm.getME("lower"), [0.0])
+        assert_array_equal(sleepstudy_lmm.getME("weights"), np.ones(180))
+        assert_array_equal(sleepstudy_lmm.getME("offset"), np.zeros(180))
+
+    def test_invalid_component(self, sleepstudy_lmm) -> None:
+        with pytest.raises(ValueError, match="Unknown component name"):
+            sleepstudy_lmm.getME("invalid_name")
+
+    def test_glmm_components(self, cbpp_glmm) -> None:
+        periods = pd.get_dummies(CBPP["period"]).to_numpy(dtype=float)
+        b = cbpp_glmm.getME("b")
+
+        assert_array_equal(cbpp_glmm.getME("X"), np.column_stack((np.ones(56), periods[:, 1:])))
+        assert_array_equal(cbpp_glmm.getME("beta"), cbpp_glmm.beta)
+        assert isinstance(cbpp_glmm.getME("family"), families.Binomial)
+        assert cbpp_glmm.getME("nAGQ") == 1
+        assert_allclose(b, cbpp_glmm.ranef()["herd"]["(Intercept)"])
+        assert_allclose(b, cbpp_glmm.theta[0] * cbpp_glmm.getME("u"))
+        assert np.all(b != 0)
+
+
+class TestUpdate:
+    def test_reml_switch_matches_a_direct_ml_fit(self, sleepstudy_lmm) -> None:
+        updated = sleepstudy_lmm.update(REML=False)
+
+        assert sleepstudy_lmm.REML is True
+        assert updated.REML is False
+        assert_same_fit(updated, lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY, REML=False))
+
+    def test_without_arguments_reproduces_the_fit(self, sleepstudy_lmm) -> None:
+        assert_same_fit(sleepstudy_lmm.update(), sleepstudy_lmm, atol=1e-6)
+        # A no-op formula edit reuses the stored model frame.
+        assert_same_fit(sleepstudy_lmm.update(". ~ . + 1"), sleepstudy_lmm, atol=1e-6)
+
+    @pytest.mark.parametrize(
+        ("original", "change", "expected"),
+        [
+            ("Reaction ~ 1 + (1 | Subject)", ". ~ . + Days", "Reaction ~ Days + (1 | Subject)"),
+            ("Reaction ~ Days + (1 | Subject)", ". ~ . - Days", "Reaction ~ 1 + (1 | Subject)"),
+            (
+                "Reaction ~ Days + (1 | Subject)",
+                ". ~ 1 + (1 | Subject)",
+                "Reaction ~ 1 + (1 | Subject)",
+            ),
+            (
+                "Reaction ~ Days + (1 | Subject)",
+                ". ~ . + Days2",
+                "Reaction ~ Days + Days2 + (1 | Subject)",
+            ),
+            (
+                "Reaction ~ 1 + (1 | Subject)",
+                "Reaction ~ Days + (Days | Subject)",
+                "Reaction ~ Days + (1 + Days | Subject)",
+            ),
+        ],
+    )
+    def test_formula_changes_match_direct_fits(self, original, change, expected) -> None:
+        data = SLEEPSTUDY.assign(Days2=SLEEPSTUDY["Days"] ** 2)
+
+        updated = lmer(original, data).update(change, data=data)
+
+        assert str(updated.formula) == expected
+        assert updated.formula.response == "Reaction"
+        assert_same_fit(updated, lmer(expected, data))
+
+    def test_new_data_matches_a_direct_fit(self, sleepstudy_lmm) -> None:
+        subset = SLEEPSTUDY[SLEEPSTUDY["Days"] <= 5]
+
+        updated = sleepstudy_lmm.update(data=subset)
+
+        assert updated.getME("n") == 108
+        assert_same_fit(updated, lmer("Reaction ~ Days + (1 | Subject)", subset))
+
+    def test_new_weights_match_a_direct_fit(self, sleepstudy_lmm) -> None:
         weights = np.ones(180)
         weights[:90] = 2.0
-        result2 = result1.update(weights=weights)
 
-        w1 = result1.getME("weights")
-        w2 = result2.getME("weights")
+        updated = sleepstudy_lmm.update(weights=weights)
 
-        assert np.allclose(w1, 1.0)
-        assert np.allclose(w2[:90], 2.0)
+        assert_array_equal(sleepstudy_lmm.getME("weights"), np.ones(180))
+        assert_array_equal(updated.getME("weights"), weights)
+        assert_same_fit(
+            updated, lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY, weights=weights)
+        )
 
-    def test_update_formula_dot_syntax_add(self) -> None:
-        data = SLEEPSTUDY.copy()
-        data["Days2"] = data["Days"] ** 2
+    def test_glmm_added_term_matches_a_direct_fit(self, cbpp_glmm) -> None:
+        intercept_only = glmer(
+            "incidence / size ~ 1 + (1 | herd)", CBPP, family=families.Binomial()
+        )
 
-        result1 = lmer("Reaction ~ Days + (1 | Subject)", data)
-        result2 = result1.update(". ~ . + Days2", data=data)
+        updated = intercept_only.update(". ~ . + period", data=CBPP)
 
-        assert len(result1.fixef()) == 2
-        assert len(result2.fixef()) == 3
+        assert updated.matrices.fixed_names == cbpp_glmm.matrices.fixed_names
+        assert_same_fit(updated, cbpp_glmm)
+
+    def test_glmm_family_change_matches_a_direct_fit(self, cbpp_glmm) -> None:
+        updated = cbpp_glmm.update(
+            formula="incidence ~ period + (1 | herd)", family=families.Poisson()
+        )
+
+        assert isinstance(cbpp_glmm.getME("family"), families.Binomial)
+        assert isinstance(updated.getME("family"), families.Poisson)
+        assert_same_fit(
+            updated, glmer("incidence ~ period + (1 | herd)", CBPP, family=families.Poisson())
+        )
 
 
-class TestRefitSleepstudy:
-    def test_refit_same_response(self) -> None:
-        result1 = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+class TestRefit:
+    def test_same_response_reproduces_the_fit(self, sleepstudy_lmm) -> None:
+        refitted = sleepstudy_lmm.refit(SLEEPSTUDY["Reaction"].to_numpy())
 
-        newresp = SLEEPSTUDY["Reaction"].values.copy()
-        result2 = result1.refit(newresp)
+        assert_same_fit(refitted, sleepstudy_lmm, atol=1e-6)
+        assert_same_fit(refitted.refit(SLEEPSTUDY["Reaction"].to_numpy()), refitted, atol=1e-6)
 
-        fixef1 = np.array(list(result1.fixef().values()))
-        fixef2 = np.array(list(result2.fixef().values()))
-        assert np.allclose(fixef1, fixef2, rtol=1e-4)
+    def test_simulated_response_matches_a_direct_fit(self, sleepstudy_lmm) -> None:
+        newresp = sleepstudy_lmm.simulate(seed=123)
 
-    def test_refit_new_response(self) -> None:
-        result1 = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+        refitted = sleepstudy_lmm.refit(newresp)
 
-        np.random.seed(42)
-        newresp = SLEEPSTUDY["Reaction"].values + np.random.normal(0, 50, 180)
-        result2 = result1.refit(newresp)
+        assert refitted.REML is True
+        assert (refitted.getME("n"), refitted.getME("p"), refitted.getME("q")) == (180, 2, 18)
+        direct = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY.assign(Reaction=newresp))
+        assert_same_fit(refitted, direct)
+        assert not np.allclose(refitted.beta, sleepstudy_lmm.beta, rtol=1e-4)
 
-        fixef1 = np.array(list(result1.fixef().values()))
-        fixef2 = np.array(list(result2.fixef().values()))
-        assert not np.allclose(fixef1, fixef2, rtol=1e-4)
+    def test_glmm_success_counts_match_a_direct_fit(self, cbpp_glmm) -> None:
+        # Grouped binomial refits take success counts, like the formula response.
+        incidence = np.minimum(CBPP["incidence"].to_numpy()[::-1], CBPP["size"])
 
-    def test_refit_wrong_size(self) -> None:
-        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+        refitted = cbpp_glmm.refit(incidence)
 
-        with pytest.raises(ValueError, match="length"):
+        direct = glmer(CBPP_FORMULA, CBPP.assign(incidence=incidence), family=families.Binomial())
+        assert_same_fit(refitted, direct)
+
+    def test_glmm_bernoulli_response_matches_a_direct_fit(self, grouped_glmm) -> None:
+        data = grouped_data("binomial")
+        y = np.random.default_rng(7).binomial(1, grouped_glmm.fitted()).astype(float)
+
+        refitted = grouped_glmm.refit(y)
+
+        direct = glmer("y ~ x + (1 | group)", data.assign(y=y), family=families.Binomial())
+        assert_same_fit(refitted, direct)
+
+    @pytest.mark.parametrize("model", ["sleepstudy_lmm", "cbpp_glmm"])
+    def test_wrong_length_response_is_rejected(self, request, model) -> None:
+        result = request.getfixturevalue(model)
+
+        with pytest.raises(ValueError, match="newresp has length 3"):
             result.refit(np.array([1.0, 2.0, 3.0]))
 
-    def test_refit_preserves_structure(self) -> None:
-        result1 = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+    @pytest.mark.parametrize(
+        "formula", ["Reaction ~ Days + (1 | Subject)", "Reaction ~ Days + (Days | Subject)"]
+    )
+    def test_refit_ml_matches_a_direct_ml_fit(self, formula) -> None:
+        reml = lmer(formula, SLEEPSTUDY)
 
-        newresp = SLEEPSTUDY["Reaction"].values + 100
-        result2 = result1.refit(newresp)
+        ml = reml.refitML()
 
-        assert result1.getME("n") == result2.getME("n")
-        assert result1.getME("p") == result2.getME("p")
-        assert result1.getME("q") == result2.getME("q")
+        assert reml.REML is True and reml.isREML()
+        assert ml.REML is False and not ml.isREML()
+        assert_same_fit(ml, lmer(formula, SLEEPSTUDY, REML=False))
+        assert ml.logLik().value == pytest.approx(-ml.deviance / 2)
 
-    def test_refit_multiple_times(self) -> None:
-        result1 = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+    def test_refit_ml_returns_maximum_likelihood_fits_unchanged(self, cbpp_glmm) -> None:
+        ml = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY, REML=False)
 
-        newresp = SLEEPSTUDY["Reaction"].values.copy()
-        result2 = result1.refit(newresp)
-        result3 = result2.refit(newresp)
-
-        fixef2 = np.array(list(result2.fixef().values()))
-        fixef3 = np.array(list(result3.fixef().values()))
-        assert np.allclose(fixef2, fixef3, rtol=1e-4)
-
-    def test_refit_glmer_basic(self) -> None:
-        data = CBPP.copy()
-        data["y"] = data["incidence"] / data["size"]
-
-        result1 = glmer("y ~ period + (1 | herd)", data, family=families.Binomial())
-
-        np.random.seed(42)
-        newresp = np.clip(data["y"].values + np.random.normal(0, 0.1, len(data)), 0.01, 0.99)
-        result2 = result1.refit(newresp)
-
-        assert result1.getME("n") == result2.getME("n")
-
-    def test_refit_glmer_wrong_size(self) -> None:
-        data = CBPP.copy()
-        data["y"] = data["incidence"] / data["size"]
-
-        result = glmer("y ~ period + (1 | herd)", data, family=families.Binomial())
-
-        with pytest.raises(ValueError, match="length"):
-            result.refit(np.array([0.1, 0.2, 0.3]))
-
-    def test_refit_simulation_workflow(self) -> None:
-        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
-
-        np.random.seed(123)
-        fixef_samples = []
-        for _ in range(3):
-            newresp = SLEEPSTUDY["Reaction"].values + np.random.normal(0, 30, 180)
-            refit_result = result.refit(newresp)
-            fixef_samples.append(list(refit_result.fixef().values()))
-
-        fixef_array = np.array(fixef_samples)
-        assert fixef_array.shape == (3, 2)
-
-
-class TestRefitML:
-    def test_refitML_basic(self) -> None:
-        result_reml = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY, REML=True)
-        assert result_reml.REML is True
-
-        result_ml = result_reml.refitML()
-        assert result_ml.REML is False
-
-    def test_refitML_preserves_structure(self) -> None:
-        result_reml = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY, REML=True)
-        result_ml = result_reml.refitML()
-
-        assert result_reml.getME("n") == result_ml.getME("n")
-        assert result_reml.getME("p") == result_ml.getME("p")
-        assert result_reml.getME("q") == result_ml.getME("q")
-
-    def test_refitML_different_estimates(self) -> None:
-        result_reml = lmer("Reaction ~ Days + (Days | Subject)", SLEEPSTUDY, REML=True)
-        result_ml = result_reml.refitML()
-
-        theta_reml = result_reml.theta
-        theta_ml = result_ml.theta
-
-        assert result_reml.REML is True
-        assert result_ml.REML is False
-        assert theta_reml.shape == theta_ml.shape
-
-    def test_refitML_already_ML_returns_self(self) -> None:
-        result_ml = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY, REML=False)
-        result_ml2 = result_ml.refitML()
-
-        assert result_ml is result_ml2
-
-    def test_refitML_for_LRT(self) -> None:
-        data = SLEEPSTUDY.copy()
-        data["Days2"] = data["Days"] ** 2
-
-        result_full = lmer("Reaction ~ Days + Days2 + (1 | Subject)", data, REML=True)
-        result_reduced = lmer("Reaction ~ Days + (1 | Subject)", data, REML=True)
-
-        ml_full = result_full.refitML()
-        ml_reduced = result_reduced.refitML()
-
-        ll_full = ml_full.logLik().value
-        ll_reduced = ml_reduced.logLik().value
-
-        assert ll_full > ll_reduced
+        assert ml.refitML() is ml
+        assert not cbpp_glmm.isREML()
+        assert cbpp_glmm.refitML() is cbpp_glmm
