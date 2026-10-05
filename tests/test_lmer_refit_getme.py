@@ -52,7 +52,10 @@ class TestGetMEComponents:
         b = result.getME("b")
 
         assert len(u) == 18
-        assert np.allclose(u, b)
+        assert np.allclose(b, result.ranef()["Subject"]["(Intercept)"])
+        # A scalar factor scales the spherical effects: b = theta * u.
+        assert np.allclose(b, result.theta[0] * u)
+        assert np.isclose(u @ u, result.getME("devcomp")["cmp"]["ussq"])
 
     def test_getME_sigma(self) -> None:
         result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)

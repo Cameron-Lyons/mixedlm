@@ -168,7 +168,7 @@ class TestBootstrapResult:
     def test_ci_rejects_invalid_level(self, level):
         boot = self.result_from_samples([1.0, 3.0])
 
-        with pytest.raises(ValueError, match="level must be strictly between"):
+        with pytest.raises(ValueError, match="level must be a finite number strictly between"):
             boot.ci(level=level)
 
     def test_single_finite_sample_has_undefined_standard_error(self):

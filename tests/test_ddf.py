@@ -138,7 +138,8 @@ class TestSatterthwaiteDF:
     @pytest.mark.parametrize("sparse_profile", [False, True])
     def test_sleepstudy_matches_reference_denominator_df(self, sparse_profile, monkeypatch) -> None:
         monkeypatch.setattr(
-            "mixedlm.estimation.reml._SPARSE_PROFILE_MIN_RANDOM", 0 if sparse_profile else 256
+            "mixedlm.models.shared_utils._SPARSE_PROJECTION_MIN_RANDOM",
+            0 if sparse_profile else np.inf,
         )
         model = lmer("Reaction ~ Days + (Days | Subject)", load_sleepstudy())
 
@@ -346,7 +347,8 @@ class TestWeightedDDF:
         self, sparse_profile, monkeypatch
     ) -> None:
         monkeypatch.setattr(
-            "mixedlm.estimation.reml._SPARSE_PROFILE_MIN_RANDOM", 0 if sparse_profile else 256
+            "mixedlm.models.shared_utils._SPARSE_PROJECTION_MIN_RANDOM",
+            0 if sparse_profile else np.inf,
         )
         data, weights = create_weighted_ddf_data()
         scale = 25.0

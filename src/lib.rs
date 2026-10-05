@@ -1,5 +1,7 @@
+#![forbid(unsafe_code)]
+
 use numpy::ndarray::Array2;
-use numpy::{PyArray1, PyArray2, PyArrayLike1, PyArrayLike2};
+use numpy::{PyArray2, PyArrayLike1, PyArrayLike2};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
@@ -13,8 +15,8 @@ mod glmm_sparse;
 mod linalg;
 mod lmm;
 mod nlmm;
+mod parallel;
 mod quadrature;
-mod reml_algorithms;
 mod simulation;
 mod sparse_chol;
 
@@ -165,33 +167,10 @@ fn sparse_cholesky_logdet<'py>(
     py.detach(|| linalg::sparse_cholesky_logdet(&matrix, ordering))
 }
 
-#[pyfunction]
-#[allow(clippy::type_complexity)]
-fn update_cholesky_factor<'py>(
-    py: Python<'py>,
-    l_data: PyArrayLike1<'py, f64>,
-    l_indices: PyArrayLike1<'py, i64>,
-    l_indptr: PyArrayLike1<'py, i64>,
-    l_shape: (usize, usize),
-    theta: PyArrayLike1<'py, f64>,
-) -> PyResult<(Py<PyArray1<f64>>, Py<PyArray1<i64>>, Py<PyArray1<i64>>)> {
-    let (data, indices, indptr) = linalg::update_cholesky_factor(
-        l_data.as_slice()?,
-        l_indices.as_slice()?,
-        l_indptr.as_slice()?,
-        l_shape,
-        theta.as_slice()?,
-    )?;
-    Ok((
-        PyArray1::from_vec(py, data).into(),
-        PyArray1::from_vec(py, indices).into(),
-        PyArray1::from_vec(py, indptr).into(),
-    ))
-}
-
 #[pymodule]
 fn _rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("_source_fingerprint", env!("MIXEDLM_SOURCE_FINGERPRINT"))?;
+    parallel::register_at_fork(m)?;
     m.add_class::<lmm::LmmDesign>()?;
     m.add_class::<lmm::LmmResponse>()?;
     m.add_class::<glmm::GlmmProblem>()?;
@@ -199,24 +178,8 @@ fn _rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<SparseCholeskyNumeric>()?;
     m.add_function(wrap_pyfunction!(sparse_cholesky_solve, m)?)?;
     m.add_function(wrap_pyfunction!(sparse_cholesky_logdet, m)?)?;
-    m.add_function(wrap_pyfunction!(update_cholesky_factor, m)?)?;
-    m.add_function(wrap_pyfunction!(quadrature::gauss_hermite, m)?)?;
-    m.add_function(wrap_pyfunction!(quadrature::adaptive_gauss_hermite_1d, m)?)?;
-    m.add_function(wrap_pyfunction!(lmm::profiled_deviance, m)?)?;
-    m.add_function(wrap_pyfunction!(lmm::profiled_deviance_cached, m)?)?;
-    m.add_function(wrap_pyfunction!(lmm::compute_ztwz, m)?)?;
-    m.add_function(wrap_pyfunction!(lmm::profiled_deviance_with_gradient, m)?)?;
-    m.add_function(wrap_pyfunction!(glmm::pirls, m)?)?;
-    m.add_function(wrap_pyfunction!(glmm::laplace_deviance, m)?)?;
     m.add_function(wrap_pyfunction!(glmm::glmm_deviance, m)?)?;
-    m.add_function(wrap_pyfunction!(glmm::adaptive_gh_deviance, m)?)?;
-    m.add_function(wrap_pyfunction!(nlmm::pnls_step, m)?)?;
-    m.add_function(wrap_pyfunction!(nlmm::nlmm_deviance, m)?)?;
     m.add_function(wrap_pyfunction!(nlmm::nlmm_deviance_with_status, m)?)?;
     m.add_function(wrap_pyfunction!(simulation::simulate_re_batch, m)?)?;
-    m.add_function(wrap_pyfunction!(simulation::compute_zu, m)?)?;
-    m.add_function(wrap_pyfunction!(reml_algorithms::mm_reml, m)?)?;
-    m.add_function(wrap_pyfunction!(reml_algorithms::augmented_ai_reml, m)?)?;
-    m.add_function(wrap_pyfunction!(reml_algorithms::riemannian_reml, m)?)?;
     Ok(())
 }

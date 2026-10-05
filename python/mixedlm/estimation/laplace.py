@@ -100,9 +100,7 @@ def clear_lambda_cache() -> None:
 
 try:
     from mixedlm._rust import GlmmProblem as _RustGlmmProblem
-    from mixedlm._rust import adaptive_gh_deviance as _rust_adaptive_gh_deviance
     from mixedlm._rust import glmm_deviance as _rust_glmm_deviance
-    from mixedlm._rust import laplace_deviance as _rust_laplace_deviance
 
     _HAS_RUST = True
 except ImportError:
@@ -129,8 +127,13 @@ def _get_link_name(family: Family) -> str | None:
     return None
 
 
-def _native_covariance_supported(matrices: ModelMatrices) -> bool:
-    return all(getattr(struct, "cov_type", "us") == "us" for struct in matrices.random_structures)
+def _native_supported(matrices: ModelMatrices, family: Family) -> bool:
+    """Whether the native backend implements this family, link and covariance."""
+    return (
+        _HAS_RUST
+        and (_get_family_name(family), _get_link_name(family)) in _NATIVE_FAMILY_LINKS
+        and all(getattr(struct, "cov_type", "us") == "us" for struct in matrices.random_structures)
+    )
 
 
 @dataclass
@@ -853,11 +856,7 @@ def _native_glmm_args(
 
 def _prepare_native_glmm(matrices: ModelMatrices, family: Family) -> Any | None:
     """Snapshot eligible native inputs once for the lifetime of an objective."""
-    if (
-        not _HAS_RUST
-        or (_get_family_name(family), _get_link_name(family)) not in _NATIVE_FAMILY_LINKS
-        or not _native_covariance_supported(matrices)
-    ):
+    if not _native_supported(matrices, family):
         return None
     args = _native_glmm_args(np.empty(0), matrices, family)
     return _RustGlmmProblem(*args[:8], *args[9:])
@@ -883,42 +882,6 @@ def _evaluate_native_problem(
     return deviance, np.array(beta), np.array(u), converged
 
 
-def _laplace_deviance_rust(
-    theta: NDArray[np.floating],
-    matrices: ModelMatrices,
-    family: Family,
-    *,
-    pirls_maxiter: int | None = None,
-    pirls_tol: float = 1e-6,
-) -> tuple[float, NDArray[np.floating], NDArray[np.floating]]:
-    validate_pirls_controls(pirls_maxiter, pirls_tol)
-    deviance, beta, u = _rust_laplace_deviance(
-        *_native_glmm_args(theta, matrices, family),
-        maxiter=100 if pirls_maxiter is None else pirls_maxiter,
-        tol=pirls_tol,
-    )
-    return deviance, np.array(beta), np.array(u)
-
-
-def _adaptive_gh_deviance_rust(
-    theta: NDArray[np.floating],
-    matrices: ModelMatrices,
-    family: Family,
-    nAGQ: int,
-    *,
-    pirls_maxiter: int | None = None,
-    pirls_tol: float = 1e-6,
-) -> tuple[float, NDArray[np.floating], NDArray[np.floating]]:
-    validate_pirls_controls(pirls_maxiter, pirls_tol)
-    deviance, beta, u = _rust_adaptive_gh_deviance(
-        *_native_glmm_args(theta, matrices, family),
-        nAGQ,
-        maxiter=100 if pirls_maxiter is None else pirls_maxiter,
-        tol=pirls_tol,
-    )
-    return deviance, np.array(beta), np.array(u)
-
-
 def _native_deviance_with_status(
     theta: NDArray[np.floating],
     matrices: ModelMatrices,
@@ -938,90 +901,6 @@ def _native_deviance_with_status(
     return deviance, np.array(beta), np.array(u), converged
 
 
-def laplace_deviance_fast(
-    theta: NDArray[np.floating],
-    matrices: ModelMatrices,
-    family: Family,
-    beta_start: NDArray[np.floating] | None = None,
-    u_start: NDArray[np.floating] | None = None,
-    *,
-    pirls_maxiter: int | None = None,
-    pirls_tol: float = 1e-6,
-) -> tuple[float, NDArray[np.floating], NDArray[np.floating]]:
-    family_name = _get_family_name(family)
-    link_name = _get_link_name(family)
-    if (
-        _HAS_RUST
-        and beta_start is None
-        and u_start is None
-        and (family_name, link_name) in _NATIVE_FAMILY_LINKS
-        and _native_covariance_supported(matrices)
-    ):
-        return _laplace_deviance_rust(
-            theta, matrices, family, pirls_maxiter=pirls_maxiter, pirls_tol=pirls_tol
-        )
-    return laplace_deviance(
-        theta,
-        matrices,
-        family,
-        beta_start,
-        u_start,
-        pirls_maxiter=pirls_maxiter,
-        pirls_tol=pirls_tol,
-    )
-
-
-def adaptive_gh_deviance_fast(
-    theta: NDArray[np.floating],
-    matrices: ModelMatrices,
-    family: Family,
-    nAGQ: int = 1,
-    beta_start: NDArray[np.floating] | None = None,
-    u_start: NDArray[np.floating] | None = None,
-    *,
-    pirls_maxiter: int | None = None,
-    pirls_tol: float = 1e-6,
-) -> tuple[float, NDArray[np.floating], NDArray[np.floating]]:
-    _validate_quadrature(nAGQ, matrices)
-
-    if nAGQ <= 1:
-        return laplace_deviance_fast(
-            theta,
-            matrices,
-            family,
-            beta_start,
-            u_start,
-            pirls_maxiter=pirls_maxiter,
-            pirls_tol=pirls_tol,
-        )
-
-    family_name = _get_family_name(family)
-    link_name = _get_link_name(family)
-    if (
-        _HAS_RUST
-        and beta_start is None
-        and u_start is None
-        and (family_name, link_name) in _NATIVE_FAMILY_LINKS
-        and _native_covariance_supported(matrices)
-    ):
-        first_struct = matrices.random_structures[0] if matrices.random_structures else None
-        if first_struct and first_struct.n_terms == 1:
-            return _adaptive_gh_deviance_rust(
-                theta, matrices, family, nAGQ, pirls_maxiter=pirls_maxiter, pirls_tol=pirls_tol
-            )
-
-    return adaptive_gh_deviance(
-        theta,
-        matrices,
-        family,
-        nAGQ,
-        beta_start,
-        u_start,
-        pirls_maxiter=pirls_maxiter,
-        pirls_tol=pirls_tol,
-    )
-
-
 def glmm_deviance_with_status(
     theta: NDArray[np.floating],
     matrices: ModelMatrices,
@@ -1039,14 +918,10 @@ def glmm_deviance_with_status(
     success alone does not establish convergence of the conditional mode.
     """
     _validate_quadrature(nAGQ, matrices)
-    family_name = _get_family_name(family)
-    link_name = _get_link_name(family)
     if (
-        _HAS_RUST
-        and beta_start is None
+        beta_start is None
         and u_start is None
-        and (family_name, link_name) in _NATIVE_FAMILY_LINKS
-        and _native_covariance_supported(matrices)
+        and _native_supported(matrices, family)
         and (
             nAGQ <= 1 or (matrices.random_structures and matrices.random_structures[0].n_terms == 1)
         )
@@ -1134,24 +1009,16 @@ class GLMMOptimizer:
                 pirls_maxiter=self.pirls_maxiter,
                 pirls_tol=self.pirls_tol,
             )[0]
-        if self.nAGQ > 1:
-            dev, _, _ = adaptive_gh_deviance_fast(
-                theta,
-                self.matrices,
-                self.family,
-                nAGQ=self.nAGQ,
-                pirls_maxiter=self.pirls_maxiter,
-                pirls_tol=self.pirls_tol,
-            )
-        else:
-            dev, _, _ = laplace_deviance_fast(
-                theta,
-                self.matrices,
-                self.family,
-                pirls_maxiter=self.pirls_maxiter,
-                pirls_tol=self.pirls_tol,
-            )
-        return dev
+        # Python evaluates unsupported inputs and quadrature without random
+        # effects, matching glmm_deviance_with_status for the final estimates.
+        return adaptive_gh_deviance(
+            theta,
+            self.matrices,
+            self.family,
+            nAGQ=self.nAGQ,
+            pirls_maxiter=self.pirls_maxiter,
+            pirls_tol=self.pirls_tol,
+        )[0]
 
     def joint_objective(self) -> JointGLMMObjective:
         from mixedlm.estimation.joint_glmm import JointGLMMObjective

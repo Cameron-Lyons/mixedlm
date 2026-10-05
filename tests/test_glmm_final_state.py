@@ -4,11 +4,11 @@ import numpy as np
 import pandas as pd
 import pytest
 from mixedlm import families
-from mixedlm.estimation.laplace import _native_deviance_with_status, _native_glmm_args
+from mixedlm.estimation.laplace import _native_deviance_with_status
 from mixedlm.estimation.reml import _build_lambda, _count_theta
 from mixedlm.formula.parser import parse_formula
 from mixedlm.matrices.design import build_model_matrices
-from numpy.testing import assert_allclose, assert_array_equal
+from numpy.testing import assert_allclose
 from scipy import special
 
 
@@ -55,24 +55,22 @@ def mode_problem(kind, layout, *, n_obs=48, n_groups=4):
 def test_laplace_correction_matches_independent_final_mode_information(
     kind, layout, maxiter, zero_covariance
 ):
-    native = pytest.importorskip("mixedlm._rust")
+    pytest.importorskip("mixedlm._rust")
     matrices, family, theta = mode_problem(kind, layout)
     if zero_covariance:
         theta[:] = 0
-    beta, u, penalized_deviance, converged = native.pirls(
-        *_native_glmm_args(theta, matrices, family), maxiter=maxiter, tol=1e-10
-    )
-    actual = _native_deviance_with_status(
+    deviance, beta, u, _ = _native_deviance_with_status(
         theta, matrices, family, 1, pirls_maxiter=maxiter, pirls_tol=1e-10
     )
+    covariance = _build_lambda(theta, matrices.random_structures).toarray()
+    # Every mode update lies in the row space of the covariance factor.
+    spherical = np.linalg.pinv(covariance) @ u
     mean = family.link.inverse(matrices.X @ beta + matrices.Z @ u + matrices.offset)
     family.clamp_mu(mean, eps=1e-10, out=mean)
+    conditional = np.sum(family.deviance_resids(matrices.y, mean, matrices.weights))
     weights = np.maximum(family.weights(mean) * matrices.weights, 1e-10)
-    design = (matrices.Z @ _build_lambda(theta, matrices.random_structures)).toarray()
+    design = matrices.Z.toarray() @ covariance
     precision = np.eye(matrices.n_random) + design.T @ (weights[:, None] * design)
     sign, logdet = np.linalg.slogdet(precision)
     assert sign == 1
-    assert_allclose(actual[0], penalized_deviance + logdet, rtol=1e-13, atol=1e-12)
-    assert_array_equal(actual[1], beta)
-    assert_array_equal(actual[2], u)
-    assert actual[3] == converged
+    assert_allclose(deviance, conditional + spherical @ spherical + logdet, rtol=1e-12, atol=1e-11)

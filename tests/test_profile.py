@@ -280,18 +280,47 @@ class TestVarianceProf:
         assert var_profile.mle == 4.0
         assert_allclose(var_profile.values, [1.0, 4.0, 9.0])
 
-    def test_variance_ci_swap(self):
+    def test_variance_of_a_negative_profile_reorders_the_bounds(self):
         original = ProfileResult(
-            parameter="sigma",
-            values=np.array([1.0, 2.0, 3.0]),
-            zeta=np.array([1.0, 0.0, -1.0]),
-            mle=2.0,
-            ci_lower=-1.5,
-            ci_upper=-2.5,
+            parameter="b",
+            values=np.array([-3.0, -2.0, -1.0]),
+            zeta=np.array([-1.0, 0.0, 1.0]),
+            mle=-2.0,
+            ci_lower=-2.5,
+            ci_upper=-1.5,
             level=0.95,
         )
         var_profile = varianceProf(original)
-        assert var_profile.ci_lower <= var_profile.ci_upper
+        assert (var_profile.ci_lower, var_profile.ci_upper) == (2.25, 6.25)
+        assert_allclose(var_profile.values, [9.0, 4.0, 1.0])
+        assert_allclose(var_profile.zeta, original.zeta)
+
+
+def _profile_through(values, mle, ci_lower, ci_upper):
+    return ProfileResult(
+        parameter="b",
+        values=np.asarray(values, dtype=float),
+        zeta=np.linspace(-1.0, 1.0, len(values)),
+        mle=mle,
+        ci_lower=ci_lower,
+        ci_upper=ci_upper,
+        level=0.95,
+    )
+
+
+@pytest.mark.parametrize(
+    ("transform", "profile", "message"),
+    [
+        (logProf, _profile_through([-0.5, 0.5, 1.5], 0.5, -0.2, 1.2), "positive parameter"),
+        (logProf, _profile_through([0.5, 1.0, 1.5], 1.0, 0.0, 1.4), "positive parameter"),
+        (sdProf, _profile_through([0.5, 1.0, 1.5], 1.0, -0.1, 1.4), "nonnegative parameter"),
+        (varianceProf, _profile_through([-0.5, 0.5, 1.5], 0.5, -0.2, 1.2), "change sign"),
+    ],
+)
+def test_scale_transforms_reject_profiles_outside_their_domain(transform, profile, message):
+    # Clamping a signed fixed-effect profile would silently invent values.
+    with pytest.raises(ValueError, match=message):
+        transform(profile)
 
 
 class TestSdProf:

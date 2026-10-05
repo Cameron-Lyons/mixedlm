@@ -162,24 +162,10 @@ def test_many_independent_levels_match_groupwise_likelihood(levels, fixed, reml,
 @pytest.mark.parametrize("diagonal", [False, True])
 @pytest.mark.parametrize("variance", ["regular", "singular", "zero"])
 @pytest.mark.parametrize("reml", [False, True])
-def test_compact_preparation_matches_explicit_cached_products(
-    widths, coupled, diagonal, variance, reml
-):
+def test_compact_preparation_matches_observation_system(widths, coupled, diagonal, variance, reml):
     matrices, theta = fixed_effect_problem(widths, 3, coupled, diagonal, variance)
-    arguments = native_arguments(matrices)
-    cache = _rust.compute_ztwz(
-        **{
-            name: arguments[name]
-            for name in ["z_data", "z_indices", "z_indptr", "z_shape", "weights"]
-        }
-    )
-    unchanged = cache.copy()
-    response = _rust.LmmDesign(**arguments).with_response(matrices.y)
+    response = _rust.LmmDesign(**native_arguments(matrices)).with_response(matrices.y)
     value, gradient = response.deviance_with_gradient(theta, reml)
-    cached = _rust.profiled_deviance_cached(
-        **arguments, y=matrices.y, theta=theta, reml=reml, ztwz_cache=cache
-    )
-    assert cached == value
-    assert_array_equal(cache, unchanged)
+    assert value == response.deviance(theta, reml)
     assert_allclose(value, observation_likelihood(matrices, theta, reml), rtol=2e-12, atol=2e-10)
     assert_allclose(gradient, observation_gradient(matrices, theta, reml), rtol=2e-10, atol=2e-9)

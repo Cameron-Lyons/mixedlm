@@ -89,8 +89,10 @@ def test_dominant_random_effects_retain_finite_accurate_profile(
     final = optimizer._final_evaluation(theta)
     assert actual == final.deviance
     assert_allclose(final.sigma, sigma, rtol=2e-7)
-    gradient_value, gradient = _rust.profiled_deviance_with_gradient(
-        theta=theta, y=matrices.y, reml=reml, **native_arguments(matrices)
+    gradient_value, gradient = (
+        _rust.LmmDesign(**native_arguments(matrices))
+        .with_response(matrices.y)
+        .deviance_with_gradient(theta, reml)
     )
     assert_allclose(gradient_value, actual, rtol=0, atol=1e-10)
     assert np.all(np.isfinite(gradient))
@@ -135,8 +137,10 @@ def test_large_random_slopes_match_augmented_least_squares(variance_scale, indep
     assert np.isfinite(actual)
     assert_allclose(actual, expected, rtol=0, atol=2e-5)
     assert actual == optimizer._final_evaluation(theta).deviance
-    gradient_value, gradient = _rust.profiled_deviance_with_gradient(
-        theta=theta, y=matrices.y, **native_arguments(matrices)
+    gradient_value, gradient = (
+        _rust.LmmDesign(**native_arguments(matrices))
+        .with_response(matrices.y)
+        .deviance_with_gradient(theta)
     )
     assert_allclose(gradient_value, actual, rtol=0, atol=1e-10)
     # Here the factor is invertible and well conditioned. Recover the projected
@@ -242,8 +246,10 @@ def test_singular_and_near_singular_factors_match_decimal_gradient(parameters):
         y=signal + 1e-3 * np.cos(np.arange(matrices.n_obs)) + matrices.offset,
     )
     expected, expected_gradient = decimal_mode_likelihood(matrices, theta)
-    value, gradient = _rust.profiled_deviance_with_gradient(
-        theta=theta, y=matrices.y, **native_arguments(matrices)
+    value, gradient = (
+        _rust.LmmDesign(**native_arguments(matrices))
+        .with_response(matrices.y)
+        .deviance_with_gradient(theta)
     )
     optimizer = LMMOptimizer(matrices, use_rust=True)
     assert_allclose(value, expected, rtol=0, atol=2e-5)

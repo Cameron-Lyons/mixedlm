@@ -382,7 +382,8 @@ impl CovarianceFactor {
         matrix
     }
 
-    /// Retain the existing rank-revealing solve for explicit random-effect starts.
+    /// Assemble the dense block-diagonal factor as an independent test reference.
+    #[cfg(test)]
     pub fn to_dense(&self) -> Mat<f64> {
         let mut result = Mat::zeros(self.dimension, self.dimension);
         for block in &self.blocks {

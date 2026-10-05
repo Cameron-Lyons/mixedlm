@@ -81,17 +81,12 @@ def test_iteration_limit_and_tolerance_match_independent_update(backend):
     assert np.linalg.norm(complete[1] - limited[1]) > 1e-3
 
 
-@pytest.mark.parametrize("backend", ["1", "2", "native"])
+@pytest.mark.parametrize("backend", ["1", "2"])
 def test_legacy_deviance_returns_the_same_values_without_status(backend):
     data = problem()
     theta = np.array([0.4])
     expected = evaluate(backend, data, theta, pnls_maxiter=1, pnls_tol=1e-12)
-    if backend == "native":
-        actual = nlmm._nlmm_deviance_rust(theta, **data, pnls_maxiter=1, pnls_tol=1e-12)
-    else:
-        actual = nlmm.nlmm_deviance(
-            theta, **data, n_jobs=int(backend), pnls_maxiter=1, pnls_tol=1e-12
-        )
+    actual = nlmm.nlmm_deviance(theta, **data, n_jobs=int(backend), pnls_maxiter=1, pnls_tol=1e-12)
     assert len(actual) == 4
     for value, reference in zip(actual, expected[:4], strict=True):
         np.testing.assert_array_equal(value, reference)
@@ -208,35 +203,22 @@ def test_invalid_controls_fail_before_evaluation(entry, name, value):
             function(np.array([0.4]), **data, **controls)
 
 
+def native_status(data, **controls):
+    args = (data["y"], data["x"], data["groups"], "ssmicmen", data["phi"], data["b"])
+    return _rust.nlmm_deviance_with_status(
+        np.array([0.4]), *args, [0], data["sigma"], data["weights"], **controls
+    )
+
+
 @pytest.mark.parametrize("tol", [0.0, -1.0, np.nan, np.inf, -np.inf])
-@pytest.mark.parametrize("entry", ["deviance", "status", "pnls"])
-def test_native_bindings_reject_invalid_tolerances(entry, tol):
-    data = problem()
-    args = (data["y"], data["x"], data["groups"], "ssmicmen", data["phi"], data["b"])
-    theta = np.array([0.4])
+def test_native_binding_rejects_invalid_tolerances(tol):
     with pytest.raises(ValueError, match="pnls_tol"):
-        if entry == "pnls":
-            _rust.pnls_step(*args, theta, data["sigma"], [0], data["weights"], tol=tol)
-        else:
-            function = (
-                _rust.nlmm_deviance if entry == "deviance" else _rust.nlmm_deviance_with_status
-            )
-            function(theta, *args, [0], data["sigma"], data["weights"], tol=tol)
+        native_status(problem(), tol=tol)
 
 
-@pytest.mark.parametrize("entry", ["deviance", "status", "pnls"])
-def test_native_bindings_reject_zero_iteration_limit(entry):
-    data = problem()
-    args = (data["y"], data["x"], data["groups"], "ssmicmen", data["phi"], data["b"])
-    theta = np.array([0.4])
+def test_native_binding_rejects_zero_iteration_limit():
     with pytest.raises(ValueError, match="pnls_maxiter"):
-        if entry == "pnls":
-            _rust.pnls_step(*args, theta, data["sigma"], [0], data["weights"], maxiter=0)
-        else:
-            function = (
-                _rust.nlmm_deviance if entry == "deviance" else _rust.nlmm_deviance_with_status
-            )
-            function(theta, *args, [0], data["sigma"], data["weights"], maxiter=0)
+        native_status(problem(), maxiter=0)
 
 
 @pytest.mark.parametrize("backend", ["python", "native"])

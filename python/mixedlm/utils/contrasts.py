@@ -237,9 +237,6 @@ def apply_contrasts(
     return apply_contrasts_array(col.to_numpy(), name, contrast_matrix, categories)
 
 
-ContrastsSpec = dict[str, str | ContrastType | NDArray[np.floating]]
-
-
 def apply_contrasts_array(
     col_values: NDArray,
     name: str,

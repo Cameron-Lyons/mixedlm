@@ -697,6 +697,26 @@ def _run_optimizer_once(
     return _optimize_scipy(fun, x0, method, bounds, options, callback, jac)
 
 
+def _rounding_tolerance(value: float) -> float:
+    """Treat objective differences below this as rounding at ``value``."""
+    return 64 * np.finfo(float).eps * max(1.0, abs(value))
+
+
+def _near_zero_variances(
+    x: NDArray[np.floating],
+    x0: NDArray[np.floating],
+    bounds: list[tuple[float | None, float | None]],
+) -> list[int]:
+    """Indices of variance scales close enough to zero for boundary probes.
+
+    Variance scales have bounds (0, None); the zone is relative to their starts.
+    """
+    scale = np.maximum(np.abs(x0), 1.0)
+    return [
+        i for i, bound in enumerate(bounds) if bound == (0.0, None) and abs(x[i]) <= 1e-4 * scale[i]
+    ]
+
+
 def run_optimizer(
     fun: Callable[[NDArray[np.floating]], float],
     x0: NDArray[np.floating],
@@ -737,7 +757,7 @@ def run_optimizer(
 
     result = _run_optimizer_once(counted, x0, method, bounds, original_options, callback, jac)
     iterations += result.nit
-    variance_indices = [i for i, bound in enumerate(bounds) if bound == (0.0, None)]
+    n_variances = sum(bound == (0.0, None) for bound in bounds)
     scale = np.maximum(np.abs(x0), 1.0)
 
     def finish() -> OptimizeResult:
@@ -749,11 +769,11 @@ def run_optimizer(
     while result.success and np.isfinite(result.fun):
         # Small positive scales can also appear stationary to finite differences.
         # Probe them before accepting convergence, without rounding them to zero.
-        boundary = [i for i in variance_indices if abs(result.x[i]) <= 1e-4 * scale[i]]
+        boundary = _near_zero_variances(result.x, x0, bounds)
         if not boundary:
             return finish()
         point, value = result.x.copy(), float(result.fun)
-        tolerance = 64 * np.finfo(float).eps * max(1.0, abs(value))
+        tolerance = _rounding_tolerance(value)
 
         for index in boundary:
             for step in (1e-3, 1e-2, 1e-1):
@@ -781,7 +801,7 @@ def run_optimizer(
             iterations >= maxiter
             or nfev >= maxeval
             or insufficient_restart
-            or restarts >= len(variance_indices) + 1
+            or restarts >= n_variances + 1
         ):
             result = replace(
                 result,

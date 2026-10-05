@@ -1,19 +1,27 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+import warnings
+from collections.abc import Callable, Sequence
 from copy import copy
 from dataclasses import dataclass, replace
 from functools import cached_property
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from numpy.typing import NDArray
 from scipy import linalg, sparse
-from scipy.sparse import linalg as sparse_linalg
 
-from mixedlm.estimation.optimizers import run_optimizer
+from mixedlm.estimation.optimizers import (
+    OptimizeResult,
+    _near_zero_variances,
+    _rounding_tolerance,
+    run_optimizer,
+)
 from mixedlm.estimation.validation import validate_finite_real
 from mixedlm.matrices.design import ModelMatrices, RandomEffectStructure, validate_prior_weights
+
+if TYPE_CHECKING:
+    from mixedlm.models.shared_utils import _SparseCholeskyPattern
 
 try:
     from mixedlm import _rust as _rust
@@ -21,9 +29,6 @@ try:
     _HAS_RUST = True
 except ImportError:
     _HAS_RUST = False
-
-
-_SPARSE_PROFILE_MIN_RANDOM = 256
 
 
 @dataclass
@@ -39,6 +44,7 @@ class OptimizationResult:
     at_boundary: bool = False
     message: str = ""
     function_evals: int = 0
+    optimizer: str = ""
 
 
 @dataclass
@@ -152,12 +158,30 @@ def _build_lambda(
     structures: list[RandomEffectStructure],
 ) -> sparse.csc_matrix:
     """Assemble repeated covariance factors directly in column-compressed form."""
+    return _assemble_lambda(_build_lambda_blocks(theta, structures), structures)
+
+
+def _lambda_pattern(structures: list[RandomEffectStructure]) -> sparse.csc_matrix:
+    """Mark every entry a covariance factor can store, whatever its parameters."""
+    blocks = [
+        np.eye(s.n_terms)
+        if not s.correlated and getattr(s, "cov_type", "us") not in ("cs", "ar1")
+        else np.tril(np.ones((s.n_terms, s.n_terms)))
+        for s in structures
+    ]
+    return _assemble_lambda(blocks, structures)
+
+
+def _assemble_lambda(
+    factors: Sequence[NDArray[np.floating]],
+    structures: list[RandomEffectStructure],
+) -> sparse.csc_matrix:
     data_blocks: list[NDArray[np.floating]] = []
     row_blocks: list[NDArray[np.intp]] = []
     column_counts: list[NDArray[np.intp]] = []
     offset = 0
 
-    for struct, factor in zip(structures, _build_lambda_blocks(theta, structures), strict=True):
+    for struct, factor in zip(structures, factors, strict=True):
         # Transposing before nonzero orders entries by column, then by row.
         columns, rows = np.nonzero(factor.T)
         level_offsets = offset + np.arange(struct.n_levels) * struct.n_terms
@@ -221,6 +245,21 @@ def _count_theta(structures: list[RandomEffectStructure]) -> int:
         else:
             count += q
     return count
+
+
+def _in_correlated_block(structures: list[RandomEffectStructure]) -> list[bool]:
+    """Flag the theta entries of correlated covariances of two or more terms."""
+    flags: list[bool] = []
+    for struct in structures:
+        q = struct.n_terms
+        cov_type = getattr(struct, "cov_type", "us")
+        if cov_type == "cs" or cov_type == "ar1":
+            flags.extend([False] * (2 if q > 1 else 1))
+        elif struct.correlated:
+            flags.extend([q > 1] * (q * (q + 1) // 2))
+        else:
+            flags.extend([False] * q)
+    return flags
 
 
 def _build_theta_bounds(
@@ -297,9 +336,13 @@ class _LMMCrossproducts:
     ZtWX: NDArray[np.floating]
     ZtWy: NDArray[np.floating]
     ZtWZ_diagonal: NDArray[np.floating] | None = None
+    # Symbolic analysis of the random-effect precision, shared by every theta.
+    precision_pattern: _SparseCholeskyPattern | None = None
 
     @classmethod
     def from_matrices(cls, matrices: ModelMatrices) -> _LMMCrossproducts:
+        from mixedlm.models import shared_utils
+
         weights = validate_prior_weights(matrices.weights, matrices.n_obs)
         y_adj = matrices.y - matrices.offset
         sqrt_w = np.sqrt(weights)
@@ -310,6 +353,15 @@ class _LMMCrossproducts:
             else sqrt_w[:, None] * matrices.Z
         )
         ZtWZ = WZ.T @ WZ
+        precision_pattern = None
+        q = matrices.n_random
+        if shared_utils._HAS_RUST and q >= shared_utils._SPARSE_PROJECTION_MIN_RANDOM:
+            # Absolute values keep products of the structural pattern from cancelling.
+            factor = _lambda_pattern(matrices.random_structures)
+            pattern = factor.T @ abs(sparse.csc_matrix(ZtWZ)) @ factor
+            precision_pattern = shared_utils._SparseCholeskyPattern(
+                pattern + sparse.eye(q, format="csc")
+            )
         return cls(
             weights=weights,
             sqrt_weights=sqrt_w,
@@ -322,6 +374,7 @@ class _LMMCrossproducts:
             ZtWX=matrices.Zt @ (weights[:, None] * matrices.X),
             ZtWy=matrices.Zt @ (weights * y_adj),
             ZtWZ_diagonal=_diagonal_entries(ZtWZ),
+            precision_pattern=precision_pattern,
         )
 
     def with_response(self, matrices: ModelMatrices) -> _LMMCrossproducts:
@@ -416,39 +469,22 @@ def _profiled_deviance_core(
         XtVinvX = crossproducts.XtWX - RZX.T @ RZX
         Xty_adj = crossproducts.XtWy - RZX.T @ cu_star
     else:
+        from mixedlm.models.shared_utils import _RandomEffectFactor
+
         Lambda = _build_lambda(theta, matrices.random_structures)
-        LambdatZtWZLambda = Lambda.T @ crossproducts.ZtWZ @ Lambda
-        V_factor = LambdatZtWZLambda + sparse.eye(q, format="csc")
-        cu = Lambda.T @ crossproducts.ZtWy
-        Lambdat_ZtWX = Lambda.T @ crossproducts.ZtWX
-        if sparse.issparse(V_factor) and q >= _SPARSE_PROFILE_MIN_RANDOM:
-            try:
-                factor = sparse_linalg.splu(V_factor.tocsc())
-            except RuntimeError:
-                return None
-            solve_random = factor.solve
-            # The precision is positive definite. Permutation signs do not affect
-            # its log determinant, obtained from the absolute LU diagonal.
-            ldL2 = np.sum(np.log(np.abs(factor.U.diagonal())))
-            solved = solve_random(np.column_stack((cu, Lambdat_ZtWX)))
-            XtVinvX = crossproducts.XtWX - Lambdat_ZtWX.T @ solved[:, 1:]
-            XtVinvX = (XtVinvX + XtVinvX.T) * 0.5
-            Xty_adj = crossproducts.XtWy - Lambdat_ZtWX.T @ solved[:, 0]
-        else:
-            try:
-                V_factor_dense = V_factor.toarray() if sparse.issparse(V_factor) else V_factor
-                L_V = linalg.cholesky(V_factor_dense, lower=True)
-            except linalg.LinAlgError:
-                return None
-
-            def solve_random(rhs: NDArray[np.floating]) -> NDArray[np.floating]:
-                return linalg.cho_solve((L_V, True), rhs)
-
-            ldL2 = 2.0 * np.sum(np.log(np.diag(L_V)))
-            cu_star = linalg.solve_triangular(L_V, cu, lower=True)
-            RZX = linalg.solve_triangular(L_V, Lambdat_ZtWX, lower=True)
-            XtVinvX = crossproducts.XtWX - RZX.T @ RZX
-            Xty_adj = crossproducts.XtWy - RZX.T @ cu_star
+        random_precision = Lambda.T @ crossproducts.ZtWZ @ Lambda + sparse.eye(q, format="csc")
+        try:
+            factor = _RandomEffectFactor(random_precision, pattern=crossproducts.precision_pattern)
+        except (linalg.LinAlgError, RuntimeError):
+            return None
+        solve_random = factor.solve
+        ldL2 = factor.logdet
+        projected = factor.crossproduct(
+            Lambda.T @ crossproducts.ZtWX, Lambda.T @ crossproducts.ZtWy
+        )
+        XtVinvX = crossproducts.XtWX - projected[:, :p]
+        XtVinvX = (XtVinvX + XtVinvX.T) * 0.5
+        Xty_adj = crossproducts.XtWy - projected[:, p]
 
     try:
         L_XtVinvX = linalg.cholesky(XtVinvX, lower=True)
@@ -505,6 +541,19 @@ def profiled_deviance(
     if result is None:
         return 1e10
     return result.deviance
+
+
+def profiled_reml(
+    theta: NDArray[np.floating],
+    matrices: ModelMatrices,
+) -> float:
+    """Deprecated alias for ``profiled_deviance(theta, matrices, REML=True)``."""
+    warnings.warn(
+        "profiled_reml is deprecated; use profiled_deviance(theta, matrices, REML=True).",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return profiled_deviance(theta, matrices, REML=True)
 
 
 def profiled_deviance_components(
@@ -575,31 +624,12 @@ def _profiled_deviance_rust_cached(
     return cache.response.deviance(theta, REML)
 
 
-def _profiled_deviance_rust(
-    theta: NDArray[np.floating],
-    matrices: ModelMatrices,
-    REML: bool = True,
-) -> float:
-    cache = _RustMatrixCache.from_matrices(matrices)
-    return _profiled_deviance_rust_cached(theta, cache, REML)
-
-
-def profiled_deviance_fast(
-    theta: NDArray[np.floating],
-    matrices: ModelMatrices,
-    REML: bool = True,
-    use_rust: bool = False,
-) -> float:
-    if use_rust and _HAS_RUST:
-        return _profiled_deviance_rust(theta, matrices, REML)
-    return profiled_deviance(theta, matrices, REML)
-
-
-def profiled_reml(
-    theta: NDArray[np.floating],
-    matrices: ModelMatrices,
-) -> float:
-    return profiled_deviance(theta, matrices, REML=True)
+# The default lmer optimizer: L-BFGS-B with exact native gradients, falling back
+# to COBYQA, which also fits covariance structures without native gradients.
+AUTO_OPTIMIZER = "auto"
+# Final gradient tolerances per observation, as the deviance sums observation terms.
+_AUTO_GRADIENT_TOL = 1e-8
+_AUTO_FALLBACK_GRADIENT_TOL = 1e-6
 
 
 class _LMMGradientObjective:
@@ -649,7 +679,7 @@ class LMMOptimizer:
             getattr(s, "cov_type", "us") in ("cs", "ar1") for s in matrices.random_structures
         )
         if use_rust is None:
-            use_rust = _HAS_RUST and not has_special_cov and matrices.n_random < 50
+            use_rust = _HAS_RUST
         self.use_rust = use_rust and _HAS_RUST and not has_special_cov
         self._rust_cache: _RustMatrixCache | None = None
         if self.use_rust:
@@ -747,21 +777,13 @@ class LMMOptimizer:
     def _get_adaptive_start_for_structure(
         self, struct, residuals: NDArray[np.floating], sigma_ols: float
     ) -> list[float]:
-        """Get data-driven starting values for a random effect structure."""
+        """Start each covariance scale at the relative spread of group residual means.
+
+        Theta is relative to the residual scale, so every structure starts from
+        the same dimensionless estimate.
+        """
         q = struct.n_terms
         cov_type = getattr(struct, "cov_type", "us")
-
-        if cov_type in ("cs", "ar1"):
-            sigma_start = max(0.5 * sigma_ols, 0.1)
-            rho_start = 0.3 if cov_type == "cs" else 0.5
-
-            if q > 1:
-                return [sigma_start, rho_start]
-            return [sigma_start]
-
-        if not struct.correlated:
-            sigma_start = max(0.5 * sigma_ols, 0.1)
-            return [sigma_start] * q
 
         level_indices = getattr(struct, "level_indices", None)
         if level_indices is not None and len(level_indices) == len(residuals):
@@ -797,12 +819,17 @@ class LMMOptimizer:
                     residual_means.append(float(level_resid_mean))
             group_residual_means = np.asarray(residual_means)
 
-        if len(group_residual_means) > 1:
-            group_var = max(float(np.var(group_residual_means, ddof=1)), 0.01)
-            relative_sd = np.sqrt(group_var) / max(sigma_ols, 0.1)
+        if len(group_residual_means) > 1 and sigma_ols > 0:
+            relative_sd = np.sqrt(float(np.var(group_residual_means, ddof=1))) / sigma_ols
             theta_diag = max(min(relative_sd, 3.0), 0.2)
         else:
             theta_diag = 0.5
+
+        if cov_type in ("cs", "ar1"):
+            rho_start = 0.3 if cov_type == "cs" else 0.5
+            return [theta_diag, rho_start] if q > 1 else [theta_diag]
+        if not struct.correlated:
+            return [theta_diag] * q
 
         theta_struct = []
         for i in range(q):
@@ -899,13 +926,6 @@ class LMMOptimizer:
             ) from exc
         return result
 
-    def _extract_estimates(
-        self, theta: NDArray[np.floating]
-    ) -> tuple[NDArray[np.floating], float, NDArray[np.floating]]:
-        """Extract beta, sigma, and u from valid fitted theta."""
-        result = self._final_evaluation(theta)
-        return result.beta, result.sigma, result.u
-
     def _check_at_boundary(
         self, theta: NDArray[np.floating], bounds: list[tuple[float | None, float | None]]
     ) -> bool:
@@ -933,7 +953,9 @@ class LMMOptimizer:
         Analytic gradients support L-BFGS-B, BFGS, TNC, SLSQP, and trust-constr.
         They share value/gradient evaluations within this call; other backends
         and covariance structures retain the solver's numerical derivatives.
-        Large random-effect systems can make analytic evaluation more expensive.
+        ``method="auto"`` always uses native gradients where available and
+        passes ``options`` other than ``maxiter`` and evaluation limits only
+        to its COBYQA stage.
         """
         if start is None:
             start = self.get_start_theta()
@@ -952,16 +974,19 @@ class LMMOptimizer:
         if options:
             opt_options.update(options)
 
-        result = run_optimizer(
-            objective,
-            start,
-            method=method,
-            bounds=bounds,
-            options=opt_options,
-            callback=callback,
-            jac=gradient,
-            restart_edge=restart_edge,
-        )
+        if method == AUTO_OPTIMIZER:
+            result, method = self._optimize_auto(start, bounds, opt_options, callback, restart_edge)
+        else:
+            result = run_optimizer(
+                objective,
+                start,
+                method=method,
+                bounds=bounds,
+                options=opt_options,
+                callback=callback,
+                jac=gradient,
+                restart_edge=restart_edge,
+            )
 
         theta_opt = result.x
         core_result = self._final_evaluation(theta_opt)
@@ -984,4 +1009,88 @@ class LMMOptimizer:
             at_boundary=at_boundary,
             message=result.message,
             function_evals=result.nfev,
+            optimizer=method,
         )
+
+    def _optimize_auto(
+        self,
+        start: NDArray[np.floating],
+        bounds: list[tuple[float | None, float | None]],
+        options: dict[str, Any],
+        callback: Callable[[NDArray[np.floating]], None] | None,
+        restart_edge: bool,
+    ) -> tuple[OptimizeResult, str]:
+        """Run exact-gradient L-BFGS-B, falling back to COBYQA from the same start.
+
+        The fallback covers unconverged fits and large final gradients. It also
+        covers variance scales left near zero, where the gradient vanishes by
+        symmetry, unless boundary probes checked them: scales of correlated
+        covariances always fall back, as such singular fits can have several
+        boundary optima. The fallback keeps the lower of the two deviances,
+        preferring COBYQA's within rounding.
+        """
+        gradient_fit = None
+        if self.use_rust and self._rust_cache is not None and self.n_theta:
+            response, reml = self._rust_cache.response, self.REML
+
+            def evaluate(theta: NDArray[np.floating]) -> tuple[float, NDArray[np.floating]]:
+                # A failed line search can propose non-finite steps, which the
+                # native evaluator rejects; report them as infeasible instead.
+                if np.all(np.isfinite(theta)):
+                    value, derivative = response.deviance_with_gradient(theta, reml)
+                    if np.isfinite(value) and np.all(np.isfinite(derivative)):
+                        return value, derivative
+                return np.inf, np.zeros_like(theta)
+
+            objective = _LMMGradientObjective(evaluate)
+            n_obs = self.matrices.n_obs
+            gradient_options = {
+                "maxiter": options["maxiter"],
+                "ftol": 1e-15,
+                "gtol": _AUTO_GRADIENT_TOL * n_obs,
+            }
+            # Evaluation limits bound each stage.
+            limit = options.get("maxfev", options.get("maxfun"))
+            if limit is not None:
+                gradient_options["maxfun"] = limit
+            gradient_fit = run_optimizer(
+                objective,
+                start,
+                method="L-BFGS-B",
+                bounds=bounds,
+                options=gradient_options,
+                callback=callback,
+                jac=objective.gradient,
+                restart_edge=restart_edge,
+            )
+            correlated = _in_correlated_block(self.matrices.random_structures)
+            near_zero = [
+                i
+                for i in _near_zero_variances(gradient_fit.x, start, bounds)
+                if correlated[i] or not restart_edge
+            ]
+            if (
+                gradient_fit.success
+                and np.isfinite(gradient_fit.fun)
+                and not near_zero
+                and gradient_fit.jac is not None
+                and np.max(np.abs(gradient_fit.jac)) <= _AUTO_FALLBACK_GRADIENT_TOL * n_obs
+            ):
+                return gradient_fit, "L-BFGS-B"
+
+        result = run_optimizer(
+            self.objective,
+            start,
+            method="COBYQA",
+            bounds=bounds,
+            options=options,
+            callback=callback,
+            restart_edge=restart_edge,
+        )
+        if gradient_fit is None:
+            return result, "COBYQA"
+        nit, nfev = gradient_fit.nit + result.nit, gradient_fit.nfev + result.nfev
+        if gradient_fit.success and gradient_fit.fun < result.fun - _rounding_tolerance(result.fun):
+            return replace(gradient_fit, nit=nit, nfev=nfev), "L-BFGS-B"
+        message = f"{result.message} (after L-BFGS-B: {gradient_fit.message})"
+        return replace(result, nit=nit, nfev=nfev, message=message), "COBYQA"

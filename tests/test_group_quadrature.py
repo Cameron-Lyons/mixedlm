@@ -45,7 +45,10 @@ def make_matrices(kind="gaussian", pattern="mixed", n_groups=4, n_per_group=6):
 def evaluate(matrices, family, native=False, order=15, n_jobs=1, theta=0.7):
     if native:
         pytest.importorskip("mixedlm._rust")
-        return laplace.adaptive_gh_deviance_fast(np.array([theta]), matrices, family, nAGQ=order)
+        deviance, beta, u, _ = laplace.glmm_deviance_with_status(
+            np.array([theta]), matrices, family, nAGQ=order
+        )
+        return deviance, beta, u
     return laplace.adaptive_gh_deviance(
         np.array([theta]), matrices, family, nAGQ=order, n_jobs=n_jobs
     )

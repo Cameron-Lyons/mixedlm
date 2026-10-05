@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 import pytest
 from mixedlm import lmer, slice2D
+from mixedlm.estimation import reml
 from mixedlm.formula.parser import set_cov_type
 from mixedlm.inference import lmm_profile
 from mixedlm.inference.profile import profile_lmer
@@ -186,13 +187,18 @@ def test_two_parameter_profile_matches_independent_constrained_likelihood(jobs):
     assert not slice2D(result, "(Intercept)", "x", n_points=3).profile_covariance
 
 
-def test_crossproducts_and_fitted_points_are_reused_and_grid_does_not_change_limits():
-    result = fitted_model()
-    with patch.object(
-        lmm_profile._LMMCrossproducts,
-        "from_matrices",
-        wraps=lmm_profile._LMMCrossproducts.from_matrices,
-    ) as prepare:
+@pytest.mark.parametrize("kind", ["intercept", "ar1"])
+def test_prepared_products_and_fitted_points_are_reused_and_grid_does_not_change_limits(kind):
+    result = fitted_model(kind)
+    native = reml._HAS_RUST and kind != "ar1"
+    with (
+        patch.object(
+            reml._RustMatrixCache, "from_matrices", wraps=reml._RustMatrixCache.from_matrices
+        ) as native_designs,
+        patch.object(
+            reml._LMMCrossproducts, "from_matrices", wraps=reml._LMMCrossproducts.from_matrices
+        ) as python_products,
+    ):
         likelihood, optimum, _ = lmm_profile._reference(result)
         parameter = lmm_profile._LMMParameterProfile(likelihood, 1, optimum)
         value = parameter.mle + 0.2
@@ -202,7 +208,18 @@ def test_crossproducts_and_fitted_points_are_reused_and_grid_does_not_change_lim
         ):
             assert parameter.deviance(value) == first
         parameter.deviance(value + 0.1)
-        assert prepare.call_count == 1
+        other = lmm_profile._LMMParameterProfile(likelihood, 2, optimum)
+        other.deviance(other.mle + 0.1)
+    if native:
+        # One design per set of free coefficients serves all of its held values.
+        # Only the latest is retained, so memory does not grow with the number
+        # of profiled coefficients.
+        assert (native_designs.call_count, python_products.call_count) == (3, 0)
+        assert likelihood._design is not None and likelihood._design[0] == (0, 1)
+    else:
+        # The Python likelihood slices one set of weighted products.
+        assert (native_designs.call_count, python_products.call_count) == (0, 1)
+        assert likelihood._design is None
     short = result.confint("x", method="profile")["x"]
     dense = result.profile("x", n_points=15)["x"]
     assert_allclose(short, [dense.ci_lower, dense.ci_upper], atol=1e-10)
@@ -261,7 +278,7 @@ def test_failed_gradient_optimization_retries_the_likelihood_with_cobyqa(monkeyp
 
 def test_failed_factorization_is_reported(monkeypatch):
     result = fitted_model()
-    monkeypatch.setattr(lmm_profile, "_profiled_deviance_core", lambda *args, **kwargs: None)
+    monkeypatch.setattr(lmm_profile.LMMOptimizer, "_evaluate_core", lambda self, theta: None)
     with pytest.raises(RuntimeError, match="factorization failed"):
         result.confint(method="profile")
 

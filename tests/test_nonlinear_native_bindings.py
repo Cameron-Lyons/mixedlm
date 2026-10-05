@@ -38,11 +38,10 @@ def micmen_arguments():
         ({"groups": np.zeros(17, dtype=np.int64)}, r"groups has length 17, expected 18"),
     ],
 )
-@pytest.mark.parametrize("binding", [_rust.nlmm_deviance_with_status, _rust.pnls_step])
-def test_inconsistent_shapes_raise_value_errors(binding, change, message):
+def test_inconsistent_shapes_raise_value_errors(change, message):
     # These used to panic inside the solver; short groups silently dropped an observation.
     with pytest.raises(ValueError, match=message):
-        binding(**{**micmen_arguments(), **change})
+        _rust.nlmm_deviance_with_status(**{**micmen_arguments(), **change})
 
 
 def test_objective_releases_interpreter_lock_and_snapshots_inputs():

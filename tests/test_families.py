@@ -6,7 +6,6 @@ import numpy as np
 import pandas as pd
 import pytest
 from mixedlm import families, glmer
-from mixedlm.estimation import laplace
 from mixedlm.estimation.laplace import pirls
 from mixedlm.families import (
     Binomial,
@@ -22,6 +21,7 @@ from mixedlm.families import (
 )
 from mixedlm.formula.parser import parse_formula
 from mixedlm.matrices import build_model_matrices
+from scipy import special
 
 from tests._lmer_data import CBPP
 
@@ -165,23 +165,6 @@ def test_python_pirls_preserves_poisson_means_above_one() -> None:
     np.testing.assert_allclose(fitted, 5.0, rtol=1e-6)
 
 
-@pytest.mark.parametrize("family", [Gamma(), InverseGaussian(), NegativeBinomial()])
-def test_unsupported_native_families_use_python_backend(monkeypatch, family) -> None:
-    expected = (1.0, np.array([2.0]), np.array([3.0]))
-
-    monkeypatch.setattr(laplace, "_HAS_RUST", True)
-    monkeypatch.setattr(
-        laplace,
-        "_rust_laplace_deviance",
-        lambda *args: pytest.fail("unsupported family was sent to the Rust backend"),
-    )
-    monkeypatch.setattr(laplace, "laplace_deviance", lambda *args, **kwargs: expected)
-
-    actual = laplace.laplace_deviance_fast(np.array([0.5]), object(), family)
-
-    assert actual is expected
-
-
 @pytest.mark.parametrize(
     ("family", "expected_link"),
     [
@@ -237,6 +220,58 @@ def test_negative_binomial_rejects_invalid_theta(theta: float) -> None:
 def test_quasi_family_rejects_invalid_dispersion(phi: float) -> None:
     with pytest.raises(ValueError, match="greater than zero"):
         QuasiFamily(Poisson(), phi=phi)
+
+
+class _ConfigurablePoisson(families.CustomFamily):
+    def __init__(self, **overrides) -> None:
+        self.link = families.LogLink()
+        for name, value in overrides.items():
+            setattr(self, name, value)
+
+    def variance(self, mu):
+        return mu
+
+    def deviance_resids(self, y, mu, wt):
+        return 2 * wt * (special.xlogy(y, y / mu) - y + mu)
+
+
+class _NonInvertibleLog(families.LogLink):
+    def inverse(self, eta):
+        return np.exp(eta) + 1.0
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"link": "log"}, "Link instance"),
+        ({"variance": lambda mu: np.ones(1)}, r"variance\(\) returned wrong shape"),
+        ({"variance": lambda mu: np.full_like(mu, np.nan)}, r"variance\(\) returned non-finite"),
+        ({"variance": lambda mu: -mu}, r"variance\(\) must return positive"),
+        (
+            {"deviance_resids": lambda y, mu, wt: np.ones(1)},
+            r"deviance_resids\(\) returned wrong shape",
+        ),
+        (
+            {"deviance_resids": lambda y, mu, wt: np.full_like(mu, np.inf)},
+            r"deviance_resids\(\) returned non-finite",
+        ),
+        ({"weights": lambda mu: np.zeros_like(mu)}, r"weights\(\) must return positive"),
+        ({"link": _NonInvertibleLog()}, r"link.inverse\(link.link\(mu\)\) != mu"),
+    ],
+)
+def test_validate_family_rejects_invalid_custom_families(overrides, message: str) -> None:
+    assert families.validate_family(_ConfigurablePoisson()) is True
+    with pytest.raises(ValueError, match=message):
+        families.validate_family(_ConfigurablePoisson(**overrides))
+
+
+def test_validate_family_requires_a_link() -> None:
+    class Unlinked(families.CustomFamily):
+        def __init__(self) -> None:
+            pass
+
+    with pytest.raises(ValueError, match="must have a 'link' attribute"):
+        families.validate_family(Unlinked())
 
 
 def test_documented_family_helpers() -> None:
@@ -304,20 +339,3 @@ def test_poisson_alternative_links_fit_end_to_end(link: str) -> None:
 
     assert result.converged
     np.testing.assert_allclose(result.fitted(), 5.0, rtol=1e-6)
-
-
-@pytest.mark.parametrize("family", [Binomial(link="probit"), Poisson(link="sqrt")])
-def test_non_native_links_use_python_backend(monkeypatch, family) -> None:
-    expected = (1.0, np.array([2.0]), np.array([3.0]))
-
-    monkeypatch.setattr(laplace, "_HAS_RUST", True)
-    monkeypatch.setattr(
-        laplace,
-        "_rust_laplace_deviance",
-        lambda *args: pytest.fail("non-native link was sent to the Rust backend"),
-    )
-    monkeypatch.setattr(laplace, "laplace_deviance", lambda *args, **kwargs: expected)
-
-    actual = laplace.laplace_deviance_fast(np.array([0.5]), object(), family)
-
-    assert actual is expected

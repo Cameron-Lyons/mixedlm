@@ -95,7 +95,7 @@ def test_result_cannot_relabel_optimization_with_another_order(data, recorded):
     expected = 5 if recorded is None else recorded
     with (
         patch.object(
-            laplace, "adaptive_gh_deviance_fast", side_effect=AssertionError("must not evaluate")
+            laplace, "glmm_deviance_with_status", side_effect=AssertionError("must not evaluate")
         ),
         pytest.raises(ValueError, match="must match the setting used for optimization"),
     ):
@@ -106,16 +106,16 @@ INVALID_ORDERS = [-1, True, False, np.bool_(True), 1.0, 2.5, np.nan, np.inf, "5"
 
 
 @pytest.mark.parametrize("n_agq", INVALID_ORDERS)
-@pytest.mark.parametrize("entry", ["optimizer", "python", "fast", "modular", "fit"])
+@pytest.mark.parametrize("entry", ["optimizer", "python", "status", "modular", "fit"])
 def test_invalid_orders_fail_before_numerical_evaluation(data, n_agq, entry):
     parsed = glFormula("y ~ x + (1 | g)", data, family=Poisson())
     with (
         patch.object(laplace, "_pirls_state", side_effect=AssertionError("must not evaluate")),
         patch.object(
-            laplace, "_rust_laplace_deviance", side_effect=AssertionError("must not evaluate")
+            laplace, "_rust_glmm_deviance", side_effect=AssertionError("must not evaluate")
         ),
         patch.object(
-            laplace, "_rust_adaptive_gh_deviance", side_effect=AssertionError("must not evaluate")
+            laplace, "_evaluate_native_problem", side_effect=AssertionError("must not evaluate")
         ),
         pytest.raises(ValueError, match="nAGQ must be a nonnegative integer"),
     ):
@@ -129,7 +129,7 @@ def test_invalid_orders_fail_before_numerical_evaluation(data, n_agq, entry):
             method = (
                 laplace.adaptive_gh_deviance
                 if entry == "python"
-                else laplace.adaptive_gh_deviance_fast
+                else laplace.glmm_deviance_with_status
             )
             method(np.ones(1), parsed.matrices, parsed.family, nAGQ=n_agq)
 
@@ -143,7 +143,7 @@ def test_invalid_result_order_is_rejected(data, n_agq):
 
 
 @pytest.mark.parametrize("formula", ["y ~ x + (1 + x | g)", "y ~ x + (1 | g) + (1 | h)"])
-@pytest.mark.parametrize("entry", ["optimizer", "python", "fast", "modular", "fit"])
+@pytest.mark.parametrize("entry", ["optimizer", "python", "status", "modular", "fit"])
 def test_unsupported_quadrature_structure_does_not_silently_use_laplace(data, formula, entry):
     parsed = glFormula(formula, data, family=Poisson())
     with pytest.raises(ValueError, match="one random-effect term with one coefficient per group"):
@@ -157,7 +157,7 @@ def test_unsupported_quadrature_structure_does_not_silently_use_laplace(data, fo
             method = (
                 laplace.adaptive_gh_deviance
                 if entry == "python"
-                else laplace.adaptive_gh_deviance_fast
+                else laplace.glmm_deviance_with_status
             )
             method(np.ones(parsed.n_theta), parsed.matrices, parsed.family, nAGQ=5)
     assert np.isfinite(mkGlmerDevfun(parsed)(np.ones(parsed.n_theta)))
@@ -212,7 +212,7 @@ def test_native_binding_rejects_unavailable_quadrature(data, formula, order):
     native = pytest.importorskip("mixedlm._rust")
     parsed = glFormula(formula, data, family=Poisson())
     with pytest.raises(ValueError, match="n_agq"):
-        native.adaptive_gh_deviance(*native_args(parsed), order)
+        native.glmm_deviance(*native_args(parsed), order)
 
 
 def test_existing_positional_arguments_keep_their_meaning(data):

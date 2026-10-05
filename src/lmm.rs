@@ -4,7 +4,7 @@ use faer::linalg::matmul::matmul;
 use faer::linalg::solvers::{Llt, Solve};
 use faer::{Accum, ColRef, Mat, MatMut, MatRef, Par, Side};
 use numpy::PyArray1;
-use numpy::ndarray::{ArrayView1, ArrayView2};
+use numpy::ndarray::ArrayView1;
 use pyo3::PyResult;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -14,31 +14,6 @@ pub use crate::covariance::RandomEffectStructure;
 use crate::covariance::{CovarianceFactor, build_lambda_blocks};
 use crate::csc::{CscMatrix, LevelTiles, SCALAR_WIDTH};
 use crate::linalg::LinalgError;
-
-fn validate_prior_weights(weights: ArrayView1<'_, f64>, n: usize) -> PyResult<(Vec<f64>, f64)> {
-    if weights.len() != n {
-        return Err(PyValueError::new_err(format!(
-            "weights has length {}, expected {n}",
-            weights.len()
-        )));
-    }
-
-    let mut values = Vec::with_capacity(n);
-    let mut logdet = 0.0;
-    for &weight in weights {
-        if !weight.is_finite() {
-            return Err(PyValueError::new_err(
-                "weights must contain only finite values",
-            ));
-        }
-        if weight <= 0.0 {
-            return Err(PyValueError::new_err("weights must be strictly positive"));
-        }
-        values.push(weight);
-        logdet += weight.ln();
-    }
-    Ok((values, logdet))
-}
 
 fn random_effect_structures(
     n_levels: Vec<usize>,
@@ -402,10 +377,6 @@ fn add_tile_trace(
     }
 }
 
-fn compute_ztwz_sparse(z: &CscMatrix, weights: &[f64]) -> Mat<f64> {
-    z.weighted_crossproduct(weights)
-}
-
 fn compute_ztwy_sparse(z: &CscMatrix, w: &[f64], y: &[f64], q: usize) -> Mat<f64> {
     let mut result = Mat::zeros(q, 1);
 
@@ -469,49 +440,6 @@ fn structure_parameters(structure: &RandomEffectStructure) -> usize {
     } else {
         structure.n_terms
     }
-}
-
-/// Stacked per-level blocks of a cached Z'WZ, or None when levels couple.
-fn cached_levels(
-    values: &[f64],
-    q: usize,
-    structures: &[RandomEffectStructure],
-) -> Option<Vec<Mat<f64>>> {
-    if q == 0 {
-        return Some(Vec::new());
-    }
-    let mut levels = Vec::with_capacity(q);
-    let mut block = 0;
-    for structure in structures {
-        for _ in 0..structure.n_levels {
-            levels.extend(std::iter::repeat_n(block, structure.n_terms));
-            block += 1;
-        }
-    }
-    for (row, entries) in values.chunks_exact(q).enumerate() {
-        if entries
-            .iter()
-            .enumerate()
-            .any(|(column, &value)| levels[row] != levels[column] && value != 0.0)
-        {
-            return None;
-        }
-    }
-    let mut offset = 0;
-    Some(
-        structures
-            .iter()
-            .map(|structure| {
-                let width = structure.n_terms;
-                let dimension = structure.n_levels * width;
-                let block = Mat::from_fn(dimension, width, |row, column| {
-                    values[(offset + row) * q + offset + row / width * width + column]
-                });
-                offset += dimension;
-                block
-            })
-            .collect(),
-    )
 }
 
 /// Coupled structures are eliminated with the most random-effect columns first,
@@ -712,7 +640,6 @@ impl PreparedLmmDesign {
         weights: Vec<f64>,
         offset: Vec<f64>,
         structures: Vec<RandomEffectStructure>,
-        cached_ztwz: Option<&[f64]>,
     ) -> Result<Self, &'static str> {
         let (n, p, q) = (x.nrows(), x.ncols(), z.ncols());
         if n == 0 || z.nrows() != n || weights.len() != n || offset.len() != n {
@@ -758,16 +685,8 @@ impl PreparedLmmDesign {
         if columns != q {
             return Err("random-effect structures do not match the design column count");
         }
-        if let Some(values) = cached_ztwz
-            && (q.checked_mul(q) != Some(values.len()) || values.iter().any(|v| !v.is_finite()))
-        {
-            return Err("cached Z'WZ must contain q * q finite values");
-        }
         let blocks = structure_blocks(&structures);
-        let independent = match cached_ztwz {
-            Some(values) => cached_levels(values, q, &structures),
-            None => z.weighted_repeated_block_crossproducts(&weights, &blocks),
-        };
+        let independent = z.weighted_repeated_block_crossproducts(&weights, &blocks);
         let (z, structures, order, tiles) = match independent {
             Some(stacked) => {
                 let tiles = LevelTiles::from_level_blocks(&blocks, &stacked);
@@ -789,17 +708,7 @@ impl PreparedLmmDesign {
                 let blocks = structure_blocks(&structures);
                 // Rows spanning levels only through stored or cancelling zeros
                 // leave no couplings; such levels are again eliminated blockwise.
-                let tiles = match (cached_ztwz, &order) {
-                    (Some(values), Some(order)) => {
-                        LevelTiles::lower_from_entries(&blocks, |i, j| {
-                            values[order.columns[i] * q + order.columns[j]]
-                        })
-                    }
-                    (Some(values), None) => {
-                        LevelTiles::lower_from_entries(&blocks, |i, j| values[i * q + j])
-                    }
-                    (None, _) => z.weighted_level_crossproduct(&weights, &blocks),
-                };
+                let tiles = z.weighted_level_crossproduct(&weights, &blocks);
                 (z, structures, order, tiles)
             }
         };
@@ -1230,9 +1139,7 @@ impl LmmDesign {
         // the caller may change input values or layouts while Python is detached.
         drop((x, z_data, z_indices, z_indptr, weights, offset));
         let inner = py
-            .detach(|| {
-                PreparedLmmDesign::new(x_owned, z, weights_owned, offset_owned, structures, None)
-            })
+            .detach(|| PreparedLmmDesign::new(x_owned, z, weights_owned, offset_owned, structures))
             .map_err(PyValueError::new_err)?;
         Ok(Self {
             inner: Arc::new(inner),
@@ -1336,250 +1243,6 @@ impl LmmResponse {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn prepare_lmm_response(
-    y: ArrayView1<'_, f64>,
-    x_data: ArrayView2<'_, f64>,
-    z_data: &[f64],
-    z_indices: &[i64],
-    z_indptr: &[i64],
-    z_shape: (usize, usize),
-    weights: ArrayView1<'_, f64>,
-    offset: ArrayView1<'_, f64>,
-    structures: Vec<RandomEffectStructure>,
-    ztwz_cache: Option<&[f64]>,
-) -> PyResult<PreparedLmmResponse> {
-    let x = Mat::from_fn(x_data.nrows(), x_data.ncols(), |i, j| x_data[[i, j]]);
-    let z = csc_from_scipy(z_data, z_indices, z_indptr, z_shape)?;
-    let design = Arc::new(
-        PreparedLmmDesign::new(
-            x,
-            z,
-            weights.to_vec(),
-            offset.to_vec(),
-            structures,
-            ztwz_cache,
-        )
-        .map_err(PyValueError::new_err)?,
-    );
-    design.with_response(y).map_err(PyValueError::new_err)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn profiled_deviance_impl(
-    theta: &[f64],
-    y: ArrayView1<'_, f64>,
-    x_data: ArrayView2<'_, f64>,
-    z_data: &[f64],
-    z_indices: &[i64],
-    z_indptr: &[i64],
-    z_shape: (usize, usize),
-    weights: ArrayView1<'_, f64>,
-    offset: ArrayView1<'_, f64>,
-    structures: Vec<RandomEffectStructure>,
-    reml: bool,
-    ztwz_cache: Option<&[f64]>,
-) -> PyResult<f64> {
-    let response = prepare_lmm_response(
-        y, x_data, z_data, z_indices, z_indptr, z_shape, weights, offset, structures, ztwz_cache,
-    )?;
-    response
-        .validate_parameters(theta, reml)
-        .map_err(PyValueError::new_err)?;
-    Ok(response.deviance(theta, reml))
-}
-
-#[pyfunction]
-pub fn compute_ztwz<'py>(
-    py: Python<'py>,
-    z_data: numpy::PyArrayLike1<'py, f64>,
-    z_indices: numpy::PyArrayLike1<'py, i64>,
-    z_indptr: numpy::PyArrayLike1<'py, i64>,
-    z_shape: (usize, usize),
-    weights: numpy::PyArrayLike1<'py, f64>,
-) -> PyResult<Py<PyArray1<f64>>> {
-    let z = csc_from_scipy(
-        z_data.as_slice()?,
-        z_indices.as_slice()?,
-        z_indptr.as_slice()?,
-        z_shape,
-    )?;
-    let (w, _) = validate_prior_weights(weights.as_array(), z_shape.0)?;
-    let q = z_shape.1;
-
-    let ztwz = compute_ztwz_sparse(&z, &w);
-
-    let mut flat_data = Vec::with_capacity(q * q);
-    for i in 0..q {
-        for j in 0..q {
-            flat_data.push(ztwz[(i, j)]);
-        }
-    }
-
-    Ok(PyArray1::from_vec(py, flat_data).into())
-}
-
-#[pyfunction]
-#[pyo3(signature = (
-    theta,
-    y,
-    x,
-    z_data,
-    z_indices,
-    z_indptr,
-    z_shape,
-    weights,
-    offset,
-    n_levels,
-    n_terms,
-    correlated,
-    reml = true,
-    ztwz_cache = None
-))]
-#[allow(clippy::too_many_arguments)]
-pub fn profiled_deviance_cached<'py>(
-    theta: numpy::PyArrayLike1<'py, f64>,
-    y: numpy::PyArrayLike1<'py, f64>,
-    x: numpy::PyArrayLike2<'py, f64>,
-    z_data: numpy::PyArrayLike1<'py, f64>,
-    z_indices: numpy::PyArrayLike1<'py, i64>,
-    z_indptr: numpy::PyArrayLike1<'py, i64>,
-    z_shape: (usize, usize),
-    weights: numpy::PyArrayLike1<'py, f64>,
-    offset: numpy::PyArrayLike1<'py, f64>,
-    n_levels: Vec<usize>,
-    n_terms: Vec<usize>,
-    correlated: Vec<bool>,
-    reml: bool,
-    ztwz_cache: Option<numpy::PyArrayLike1<'py, f64>>,
-) -> PyResult<f64> {
-    let structures = random_effect_structures(n_levels, n_terms, correlated)?;
-
-    let ztwz_data = ztwz_cache.as_ref().map(|arr| arr.as_slice()).transpose()?;
-
-    profiled_deviance_impl(
-        theta.as_slice()?,
-        y.as_array(),
-        x.as_array(),
-        z_data.as_slice()?,
-        z_indices.as_slice()?,
-        z_indptr.as_slice()?,
-        z_shape,
-        weights.as_array(),
-        offset.as_array(),
-        structures,
-        reml,
-        ztwz_data,
-    )
-}
-
-#[pyfunction]
-#[pyo3(signature = (
-    theta,
-    y,
-    x,
-    z_data,
-    z_indices,
-    z_indptr,
-    z_shape,
-    weights,
-    offset,
-    n_levels,
-    n_terms,
-    correlated,
-    reml = true
-))]
-#[allow(clippy::too_many_arguments)]
-pub fn profiled_deviance<'py>(
-    theta: numpy::PyArrayLike1<'py, f64>,
-    y: numpy::PyArrayLike1<'py, f64>,
-    x: numpy::PyArrayLike2<'py, f64>,
-    z_data: numpy::PyArrayLike1<'py, f64>,
-    z_indices: numpy::PyArrayLike1<'py, i64>,
-    z_indptr: numpy::PyArrayLike1<'py, i64>,
-    z_shape: (usize, usize),
-    weights: numpy::PyArrayLike1<'py, f64>,
-    offset: numpy::PyArrayLike1<'py, f64>,
-    n_levels: Vec<usize>,
-    n_terms: Vec<usize>,
-    correlated: Vec<bool>,
-    reml: bool,
-) -> PyResult<f64> {
-    let structures = random_effect_structures(n_levels, n_terms, correlated)?;
-
-    profiled_deviance_impl(
-        theta.as_slice()?,
-        y.as_array(),
-        x.as_array(),
-        z_data.as_slice()?,
-        z_indices.as_slice()?,
-        z_indptr.as_slice()?,
-        z_shape,
-        weights.as_array(),
-        offset.as_array(),
-        structures,
-        reml,
-        None,
-    )
-}
-
-#[pyfunction]
-#[pyo3(signature = (
-    theta,
-    y,
-    x,
-    z_data,
-    z_indices,
-    z_indptr,
-    z_shape,
-    weights,
-    offset,
-    n_levels,
-    n_terms,
-    correlated,
-    reml = true
-))]
-#[allow(clippy::too_many_arguments)]
-pub fn profiled_deviance_with_gradient<'py>(
-    py: Python<'py>,
-    theta: numpy::PyArrayLike1<'py, f64>,
-    y: numpy::PyArrayLike1<'py, f64>,
-    x: numpy::PyArrayLike2<'py, f64>,
-    z_data: numpy::PyArrayLike1<'py, f64>,
-    z_indices: numpy::PyArrayLike1<'py, i64>,
-    z_indptr: numpy::PyArrayLike1<'py, i64>,
-    z_shape: (usize, usize),
-    weights: numpy::PyArrayLike1<'py, f64>,
-    offset: numpy::PyArrayLike1<'py, f64>,
-    n_levels: Vec<usize>,
-    n_terms: Vec<usize>,
-    correlated: Vec<bool>,
-    reml: bool,
-) -> PyResult<(f64, Py<PyArray1<f64>>)> {
-    let structures = random_effect_structures(n_levels, n_terms, correlated)?;
-
-    let response = prepare_lmm_response(
-        y.as_array(),
-        x.as_array(),
-        z_data.as_slice()?,
-        z_indices.as_slice()?,
-        z_indptr.as_slice()?,
-        z_shape,
-        weights.as_array(),
-        offset.as_array(),
-        structures,
-        None,
-    )?;
-
-    let theta = theta.as_slice()?;
-    response
-        .validate_parameters(theta, reml)
-        .map_err(PyValueError::new_err)?;
-    let (dev, grad) = response.deviance_with_gradient(theta, reml);
-
-    Ok((dev, PyArray1::from_vec(py, grad).into()))
-}
-
 #[cfg(test)]
 mod prepared_tests {
     use super::*;
@@ -1626,7 +1289,6 @@ mod prepared_tests {
             vec![1.0; 4],
             vec![0.0; 4],
             vec![structure(levels, 1, true)],
-            None,
         )
         .unwrap();
         assert_eq!(design.engine(), "levels");
@@ -1635,44 +1297,40 @@ mod prepared_tests {
     }
 
     #[test]
-    fn cached_crossproducts_keep_level_blocks_and_tiny_couplings() {
+    fn crossproducts_keep_level_blocks_and_tiny_couplings() {
         // The second structure has more columns, so coupled designs reorder.
         let structures = vec![structure(1, 2, true), structure(5, 1, false)];
         let q = 7;
-        let design = |values: &[f64]| {
-            let rows = (0..q).collect::<Vec<_>>();
-            let offsets = (0..=q).collect::<Vec<_>>();
-            let z = CscMatrix::try_from_usize(&vec![1.0; q], &rows, &offsets, (q, q)).unwrap();
-            PreparedLmmDesign::new(
-                Mat::full(q, 1, 1.0),
-                z,
-                vec![1.0; q],
-                vec![0.0; q],
-                structures.clone(),
-                Some(values),
-            )
-            .unwrap()
+        // Row j loads column j; each extra row loads a pair of columns.
+        let design = |pairs: &[(usize, usize, f64)]| {
+            let n = q + pairs.len();
+            let mut columns: Vec<Vec<(usize, f64)>> =
+                (0..q).map(|column| vec![(column, 1.0)]).collect();
+            for (index, &(left, right, value)) in pairs.iter().enumerate() {
+                columns[left].push((q + index, 1.0));
+                columns[right].push((q + index, value));
+            }
+            let (mut values, mut rows, mut offsets) = (Vec::new(), Vec::new(), vec![0]);
+            for (row, value) in columns.into_iter().flat_map(|column| {
+                offsets.push(offsets.last().unwrap() + column.len());
+                column
+            }) {
+                rows.push(row);
+                values.push(value);
+            }
+            let z = CscMatrix::try_from_usize(&values, &rows, &offsets, (n, q)).unwrap();
+            let x = Mat::full(n, 1, 1.0);
+            PreparedLmmDesign::new(x, z, vec![1.0; n], vec![0.0; n], structures.clone()).unwrap()
         };
-        let mut values = vec![0.0; q * q];
-        for i in 0..q {
-            values[i * q + i] = 2.0 + i as f64;
-        }
-        // Cached matrices need not be symmetric: preserve both orientations.
-        values[1] = 0.2;
-        values[q] = 0.4;
-        let independent = design(&values);
+        let independent = design(&[(0, 1, 0.5)]);
         assert_eq!(independent.engine(), "levels");
         assert!(independent.order.is_none());
         let tiles = &independent.crossproducts.tiles;
-        assert_eq!(tiles.tile(0), [2.0, 0.4, 0.2, 3.0]);
+        assert_eq!(tiles.tile(0), [2.0, 0.5, 0.5, 1.25]);
         assert_eq!(tiles.len(), 4 + 5);
-        for (row, column) in [(0, 2), (2, 0), (0, 4), (4, 0)] {
-            let mut coupled = values.clone();
-            coupled[row * q + column] = 1e-300;
-            assert!(cached_levels(&coupled, q, &structures).is_none());
-            // A symmetric tiny coupling keeps its own tile after reordering.
-            coupled[column * q + row] = 1e-300;
-            let design = design(&coupled);
+        for pair in [(0, 2), (2, 0), (0, 4), (4, 0)] {
+            // A tiny coupling across levels keeps its own tile after reordering.
+            let design = design(&[(0, 1, 0.5), (pair.0, pair.1, 1e-300)]);
             assert_eq!(design.engine(), "blocked");
             assert_eq!(
                 design.order.as_ref().map(|order| order.structures.clone()),
@@ -1997,7 +1655,7 @@ mod prepared_tests {
             vec![coarse, fine]
         };
         let weights = (0..n).map(|row| 0.5 + (row % 4) as f64 / 4.0).collect();
-        let design = PreparedLmmDesign::new(x, z, weights, vec![0.1; n], structures, None).unwrap();
+        let design = PreparedLmmDesign::new(x, z, weights, vec![0.1; n], structures).unwrap();
         let y = (0..n)
             .map(|row| ((row * 13) % 17) as f64 / 3.0 + covariate(row))
             .collect();
@@ -2045,7 +1703,7 @@ mod prepared_tests {
     fn intercept_design() -> Arc<PreparedLmmDesign> {
         let x = Mat::from_fn(4, 1, |_, _| 1.0);
         let z = CscMatrix::try_from_i64(&[], &[], &[0], (4, 0)).unwrap();
-        Arc::new(PreparedLmmDesign::new(x, z, vec![1.0; 4], vec![0.0; 4], vec![], None).unwrap())
+        Arc::new(PreparedLmmDesign::new(x, z, vec![1.0; 4], vec![0.0; 4], vec![]).unwrap())
     }
 
     #[test]

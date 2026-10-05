@@ -142,13 +142,3 @@ def test_high_order_adaptive_quadrature_matches_gaussian_marginal():
     residual = matrices.y - matrices.X @ beta
     expected = np.linalg.slogdet(covariance)[1] + residual @ np.linalg.solve(covariance, residual)
     assert deviance == pytest.approx(expected, rel=1e-12, abs=1e-12)
-
-
-@pytest.mark.parametrize("order", [0, 9, 25, 100, 200, 400])
-def test_native_public_rules_do_not_share_mutable_results(order):
-    native = pytest.importorskip("mixedlm._rust")
-    expected = native.gauss_hermite(order)
-    nodes, weights = native.gauss_hermite(order)
-    nodes[:] = [np.nan] * order
-    weights[:] = [-1] * order
-    assert native.gauss_hermite(order) == expected

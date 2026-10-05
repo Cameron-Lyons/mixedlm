@@ -42,14 +42,14 @@ def _result(kind, n_groups=8):
 def test_large_projection_avoids_dense_random_precision_and_reuses_factor(kind, monkeypatch):
     result = _result(kind, n_groups=300)
     q = result.matrices.n_random
-    calls = []
-    original_splu = sparse.linalg.splu
+    factorizations = []
+    factorize = _RandomEffectFactor._factorize
 
-    def counted_splu(matrix, *args, **kwargs):
-        calls.append(matrix.shape)
-        return original_splu(matrix, *args, **kwargs)
+    def counted_factorize(self):
+        factorizations.append(self.precision.shape)
+        return factorize(self)
 
-    monkeypatch.setattr(sparse.linalg, "splu", counted_splu)
+    monkeypatch.setattr(_RandomEffectFactor, "_factorize", counted_factorize)
     monkeypatch.setattr(shared_utils, "_MAX_QUADRATIC_FORM_ELEMENTS", 2 * q)
     for cls in (sparse.csc_matrix, sparse.csr_matrix):
         original_toarray = cls.toarray
@@ -75,7 +75,8 @@ def test_large_projection_avoids_dense_random_precision_and_reuses_factor(kind, 
         assert_allclose(result.predict(se_fit=True).se_fit ** 2, scale * expected_hat)
     covariance[:] = np.nan
     assert_allclose(result.vcov(), [[expected_covariance]])
-    assert calls == [(q, q)]
+    # One sparse factorization serves every projection.
+    assert factorizations == [(q, q)]
 
 
 @pytest.mark.parametrize("kind", ["lmm", "glmm"])

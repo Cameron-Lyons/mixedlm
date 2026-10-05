@@ -259,12 +259,28 @@ def test_invalid_refits_are_excluded_before_custom_test(pilot, monkeypatch, attr
     assert np.isnan(result.power)
 
 
-def test_nonboolean_test_result_is_a_failed_simulation(pilot, monkeypatch):
+def test_nonboolean_test_result_raises(pilot, monkeypatch):
     monkeypatch.setattr(pilot, "refit", lambda response: pilot)
-    with pytest.warns(RuntimeWarning, match="boolean significance decision"):
-        result = powerSim(pilot, test=lambda fitted: np.nan, nsim=2, seed=42)
+    with pytest.raises(TypeError, match="boolean significance decision"):
+        powerSim(pilot, test=lambda fitted: np.nan, nsim=2, seed=42)
+
+
+def test_errors_in_a_custom_test_propagate_instead_of_counting_as_failed_fits(pilot):
+    def misspelled(fitted):
+        return fitted.betas[1] > 0
+
+    with pytest.raises(AttributeError, match="betas"):
+        powerSim(pilot, test=misspelled, nsim=2, seed=42)
+
+
+def test_default_wald_test_errors_still_count_as_failed_fits(pilot, monkeypatch):
+    degenerate = replace(pilot)
+    monkeypatch.setattr(degenerate, "vcov", lambda: np.zeros((2, 2)))
+    monkeypatch.setattr(pilot, "refit", lambda response: degenerate)
+    with pytest.warns(RuntimeWarning, match="nonpositive sampling variance"):
+        result = powerSim(pilot, test="x", nsim=2, seed=42)
     assert result.n_failed == 2
-    assert result.n_simulations == 0
+    assert np.isnan(result.power)
 
 
 @pytest.mark.parametrize(

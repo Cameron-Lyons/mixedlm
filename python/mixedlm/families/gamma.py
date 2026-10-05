@@ -50,10 +50,18 @@ class Gamma(Family):
             np.sum(xlogy(wt - 1, y) - wt * y / mu - gammaln(wt) - wt * (np.log(mu) - np.log(wt)))
         )
 
-    def simulate(self, mu: NDArray[np.floating], rng: Any | None = None) -> NDArray[np.floating]:
+    def simulate(
+        self,
+        mu: NDArray[np.floating],
+        rng: Any | None = None,
+        *,
+        weights: NDArray[np.floating] | None = None,
+        trials: NDArray[np.floating] | None = None,
+    ) -> NDArray[np.floating]:
         rng = np.random if rng is None else rng
         mu = np.minimum(self.clamp_mu(mu, eps=1e-6), 1e10)
-        return rng.gamma(1.0, mu)
+        precision = 1.0 if weights is None else weights
+        return rng.gamma(precision, mu / precision)
 
 
 class GammaInverse(Gamma):

@@ -3,15 +3,17 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Sequence
-from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from copy import deepcopy
 from dataclasses import dataclass
+from functools import partial
 from typing import TYPE_CHECKING, Any, TypeAlias
 
 import numpy as np
 import pandas as pd
 from numpy.typing import ArrayLike, NDArray
 
+from mixedlm._parallel import process_pool, resolve_n_jobs
 from mixedlm.matrices.design import _build_response, _restore_binomial_factor
 from mixedlm.utils.dataframe import (
     dataframe_length,
@@ -698,6 +700,48 @@ def _fit_fold(
     )
 
 
+def _fit_and_predict_fold(
+    model: LmerResult | GlmerResult,
+    frame: Any,
+    fit_weights: NDArray[np.float64],
+    offset: NDArray[np.float64],
+    fit_options: dict[str, Any],
+    re_form: str | None,
+    fold: CrossValidationFold,
+) -> tuple[CrossValidationFold, NDArray[np.float64], bool, bool]:
+    """Refit on the training rows and predict the held-out rows of one fold."""
+    from mixedlm.models.glmer import GlmerResult
+
+    train_data = _take_rows(frame, fold.train_indices)
+    test_data = _take_rows(frame, fold.test_indices)
+    fold_model = _fit_fold(
+        model,
+        train_data,
+        fit_weights[fold.train_indices],
+        offset[fold.train_indices],
+        fit_options,
+    )
+    if isinstance(fold_model, GlmerResult):
+        raw_predictions = fold_model.predict(
+            test_data,
+            type="response",
+            re_form=re_form,
+            allow_new_levels=True,
+            offset=offset[fold.test_indices],
+        )
+    else:
+        raw_predictions = fold_model.predict(
+            test_data,
+            re_form=re_form,
+            allow_new_levels=True,
+            offset=offset[fold.test_indices],
+        )
+    fold_predictions: NDArray[np.float64] = np.asarray(raw_predictions, dtype=np.float64)
+    if fold_predictions.shape != fold.test_indices.shape:
+        raise ValueError("fold predictions are not aligned with held-out observations")
+    return fold, fold_predictions, bool(fold_model.converged), bool(fold_model.isSingular())
+
+
 def cross_validate(
     model: LmerResult | GlmerResult,
     data: Any | None = None,
@@ -721,9 +765,15 @@ def cross_validate(
     Custom metric callables receive ``(y_true, y_pred, weights)`` arrays and
     must return one finite scalar. Original weights are preserved for refits
     and scoring; original offsets are preserved for refits and held-out
-    predictions. Set ``n_jobs`` above one to fit independent folds concurrently
-    with threads. Categorical contrast coding and grouped binomial trial counts
+    predictions. Categorical contrast coding and grouped binomial trial counts
     are retained from the fitted model.
+
+    ``n_jobs`` worker processes, or -1 for all CPUs, refit the folds; results
+    match a serial run. Workers are started without forking, so scripts need an
+    ``if __name__ == "__main__":`` guard, and a custom family or ``fit_kwargs``
+    value must be importable and picklable. Metrics are computed in the calling
+    process. Warnings from refits in workers are not raised in the calling
+    process; the ``converged`` and ``singular`` fold columns record each refit.
 
     ``cv`` accepts a fold count or an iterable of ``(train_indices,
     test_indices)`` pairs or :class:`CrossValidationFold` objects. Explicit
@@ -739,11 +789,7 @@ def cross_validate(
 
     if not isinstance(model, LmerResult | GlmerResult):
         raise TypeError("cross_validate supports fitted linear and generalized linear mixed models")
-    if isinstance(n_jobs, bool) or not isinstance(n_jobs, (int, np.integer)):
-        raise TypeError("n_jobs must be an integer")
-    n_jobs = int(n_jobs)
-    if n_jobs < 1:
-        raise ValueError("n_jobs must be at least 1")
+    workers = resolve_n_jobs(n_jobs)
 
     frame = _stored_model_frame(model) if data is None else ensure_dataframe(data)
     n_samples = dataframe_length(frame)
@@ -793,6 +839,7 @@ def cross_validate(
         )
     else:
         folds = _explicit_folds(cv, n_samples, group_values)
+    workers = min(workers, len(folds))
 
     weights: NDArray[np.float64] = np.asarray(model.weights(), dtype=np.float64)
     # Grouped binomial matrices store prior weights multiplied by trial counts.
@@ -805,48 +852,18 @@ def cross_validate(
     fold_ids = np.full(n_samples, -1, dtype=np.int64)
     prediction_re_form = ("~0" if group is not None else None) if re_form == "auto" else re_form
 
-    def fit_and_predict(
-        fold: CrossValidationFold,
-    ) -> tuple[CrossValidationFold, NDArray[np.float64], bool, bool]:
-        train_data = _take_rows(frame, fold.train_indices)
-        test_data = _take_rows(frame, fold.test_indices)
-        fold_model = _fit_fold(
-            model,
-            train_data,
-            fit_weights[fold.train_indices],
-            offset[fold.train_indices],
-            fit_options,
-        )
-        if isinstance(fold_model, GlmerResult):
-            raw_predictions = fold_model.predict(
-                test_data,
-                type="response",
-                re_form=prediction_re_form,
-                allow_new_levels=True,
-                offset=offset[fold.test_indices],
-            )
-        else:
-            raw_predictions = fold_model.predict(
-                test_data,
-                re_form=prediction_re_form,
-                allow_new_levels=True,
-                offset=offset[fold.test_indices],
-            )
-        fold_predictions: NDArray[np.float64] = np.asarray(raw_predictions, dtype=np.float64)
-        if fold_predictions.shape != fold.test_indices.shape:
-            raise ValueError("fold predictions are not aligned with held-out observations")
-        return (
-            fold,
-            fold_predictions,
-            bool(fold_model.converged),
-            bool(fold_model.isSingular()),
-        )
-
-    if n_jobs == 1:
-        fitted_folds = [fit_and_predict(fold) for fold in folds]
-    else:
-        with ThreadPoolExecutor(max_workers=min(n_jobs, len(folds))) as executor:
-            fitted_folds = list(executor.map(fit_and_predict, folds))
+    fit_and_predict = partial(
+        _fit_and_predict_fold,
+        model,
+        frame,
+        fit_weights,
+        offset,
+        fit_options,
+        prediction_re_form,
+    )
+    with process_pool(workers) if workers > 1 else nullcontext() as executor:
+        run = map if executor is None else executor.map
+        fitted_folds = list(run(fit_and_predict, folds))
 
     records: list[dict[str, float | int | bool]] = []
     for fold, fold_predictions, converged, singular in fitted_folds:

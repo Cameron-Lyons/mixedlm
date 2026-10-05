@@ -86,10 +86,9 @@ def _direct_information(model, theta):
 @pytest.mark.parametrize("reml_fit", [False, True])
 def test_reused_information_matches_direct_weighted_covariance(cov_type, reml_fit):
     model = _model(cov_type, reml_fit)
-    products = reml._LMMCrossproducts.from_matrices(model.matrices)
     information, sigma2 = _direct_information(model, model.theta)
 
-    actual = ddf._vcov_from_theta(model, model.theta, products)
+    actual = ddf._vcov_from_theta(model, model.theta, ddf._deviance_evaluator(model))
     profiled = reml._profiled_deviance_core(model.theta, model.matrices, REML=reml_fit)
 
     assert profiled is not None
@@ -118,30 +117,42 @@ def test_covariance_derivatives_match_direct_marginal_reference(cov_type, reml_f
         assert_allclose(actual[index], expected, rtol=1e-6, atol=2e-10)
 
 
-def test_derivatives_and_curvature_share_one_set_of_weighted_products(monkeypatch):
+@pytest.mark.parametrize("cov_type", ["us", "diagonal", "cs", "ar1"])
+def test_native_and_python_likelihoods_give_the_same_derivatives(cov_type):
+    model = _model(cov_type)
+    native = ddf._deviance_evaluator(model)
+    python = reml.LMMOptimizer(model.matrices, REML=model.REML, use_rust=False)
+    assert native.use_rust == (reml._HAS_RUST and cov_type not in ("cs", "ar1"))
+
+    for evaluator in (native, python):
+        assert_allclose(
+            ddf._vcov_from_theta(model, model.theta, evaluator),
+            ddf._vcov_from_theta(model, model.theta, python),
+            rtol=1e-11,
+        )
+        # Second differences amplify rounding in the deviance by 1e8.
+        assert_allclose(
+            ddf._profiled_theta_covariance(model, model.theta, evaluator),
+            ddf._profiled_theta_covariance(model, model.theta, python),
+            rtol=1e-3,
+            atol=1e-6,
+        )
+
+
+def test_repeated_derivatives_reuse_the_cached_entry():
     model = _model()
-    builds = 0
-    original = reml._LMMCrossproducts.from_matrices
-
-    def count_build(cls, matrices):
-        nonlocal builds
-        builds += 1
-        return original(matrices)
-
-    monkeypatch.setattr(reml._LMMCrossproducts, "from_matrices", classmethod(count_build))
     ddf.clear_vcov_grad_cache()
 
     first_gradients, first_covariance = ddf._vcov_derivatives(model)
     repeated_gradients, repeated_covariance = ddf._vcov_derivatives(model)
 
-    assert builds == 1
-    assert_array_equal(first_gradients, repeated_gradients)
-    assert_array_equal(first_covariance, repeated_covariance)
+    assert repeated_gradients is first_gradients
+    assert repeated_covariance is first_covariance
 
 
 def test_coefficient_covariance_factors_random_system_only_once(monkeypatch):
     model = _model()
-    products = reml._LMMCrossproducts.from_matrices(model.matrices)
+    evaluator = reml.LMMOptimizer(model.matrices, REML=model.REML, use_rust=False)
     random_factorizations = 0
     cholesky = linalg.cholesky
 
@@ -153,21 +164,25 @@ def test_coefficient_covariance_factors_random_system_only_once(monkeypatch):
 
     monkeypatch.setattr(linalg, "cholesky", count_cholesky)
 
-    ddf._vcov_from_theta(model, model.theta, products)
+    ddf._vcov_from_theta(model, model.theta, evaluator)
 
     assert random_factorizations == 1
 
 
-def test_failed_profile_retains_fitted_scale_fallback(monkeypatch):
+@pytest.mark.parametrize("native", [False, True])
+def test_failed_profile_retains_fitted_scale_fallback(native, monkeypatch):
+    if native and not reml._HAS_RUST:
+        pytest.skip("native backend unavailable")
     model = _model()
-    products = reml._LMMCrossproducts.from_matrices(model.matrices)
+    evaluator = reml.LMMOptimizer(model.matrices, REML=model.REML, use_rust=native)
     information, _ = _direct_information(model, model.theta)
-    monkeypatch.setattr(reml, "_profiled_deviance_core", lambda *args, **kwargs: None)
+    monkeypatch.setattr(evaluator, "_evaluate_core", lambda theta: None)
+    monkeypatch.setattr(evaluator, "objective", lambda theta: 1e10)
 
-    actual = ddf._vcov_from_theta(model, model.theta, products)
+    actual = ddf._vcov_from_theta(model, model.theta, evaluator)
 
     assert_allclose(actual, model.sigma**2 * linalg.inv(information), atol=1e-13)
     assert_array_equal(
-        ddf._profiled_theta_covariance(model, model.theta, products),
+        ddf._profiled_theta_covariance(model, model.theta, evaluator),
         np.zeros((len(model.theta), len(model.theta))),
     )

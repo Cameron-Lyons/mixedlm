@@ -9,6 +9,8 @@ import pandas as pd
 from numpy.typing import NDArray
 from scipy import stats
 
+from mixedlm.utils.validation import _validate_confidence_level
+
 if TYPE_CHECKING:
     from mixedlm.inference.bootstrap import BootstrapResult, NlmerBootstrapResult
 
@@ -244,12 +246,7 @@ def bootCI(
     standard errors are NaN with fewer than two finite samples. A single sample
     still contributes its mean, bias, and successful replicate count.
     """
-    try:
-        level_value = float(level)
-    except (TypeError, ValueError) as exc:
-        raise TypeError("level must be a number between 0 and 1") from exc
-    if not 0.0 < level_value < 1.0:
-        raise ValueError("level must be between 0 and 1")
+    level_value = _validate_confidence_level(level)
     if not isinstance(component, str):
         raise TypeError("component must be a string")
 

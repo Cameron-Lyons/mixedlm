@@ -39,19 +39,22 @@ def model_data(case, random=True):
 @pytest.mark.parametrize("order", [1, 7])
 @pytest.mark.parametrize("backend", ["python", "native"])
 @pytest.mark.parametrize("random", [False, True])
-def test_status_matches_inner_solution_and_preserves_legacy_results(case, order, backend, random):
+def test_status_matches_inner_solution_and_optimizer_objective(case, order, backend, random):
     _, _, matrices, family, theta = model_data(case, random)
     if backend == "native":
         pytest.importorskip("mixedlm._rust")
     with patch.object(laplace, "_HAS_RUST", backend == "native"):
         actual = laplace.glmm_deviance_with_status(theta, matrices, family, nAGQ=order)
-        legacy = laplace.adaptive_gh_deviance_fast(theta, matrices, family, nAGQ=order)
+        objective = laplace.GLMMOptimizer(matrices, family, nAGQ=order).objective(theta)
     assert len(actual) == 4
-    assert len(legacy) == 3
     assert isinstance(actual[3], bool)
     assert actual[3] == (case in {"poisson", "binomial", "gaussian"})
-    for value, expected in zip(actual[:3], legacy, strict=True):
-        np.testing.assert_array_equal(value, expected)
+    # Final estimates repeat the evaluation that the optimizer minimized.
+    np.testing.assert_array_equal(actual[0], objective)
+    if backend == "python":
+        legacy = laplace.adaptive_gh_deviance(theta, matrices, family, nAGQ=order)
+        for value, expected in zip(actual[:3], legacy, strict=True):
+            np.testing.assert_array_equal(value, expected)
 
 
 @pytest.mark.parametrize("case", ["zero_poisson", "zero_binomial", "one_binomial"])

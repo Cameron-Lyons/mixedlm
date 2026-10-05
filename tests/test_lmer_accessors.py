@@ -1,4 +1,5 @@
 from copy import copy
+from dataclasses import replace
 from pickle import dumps, loads
 
 import numpy as np
@@ -187,8 +188,8 @@ class TestGetME:
         sigma = result.getME("sigma")
         assert sigma == result.sigma
 
-        u = result.getME("u")
-        np.testing.assert_array_equal(u, result.u)
+        np.testing.assert_array_equal(result.getME("b"), result.u)
+        np.testing.assert_allclose(result.getME("Lambda") @ result.getME("u"), result.u)
 
     def test_lmer_getME_lambda(self) -> None:
         np.random.seed(42)
@@ -711,11 +712,37 @@ class TestAllFit:
         assert best_bic is not None
 
     def test_allfit_is_consistent(self):
-        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
-        allfit_result = result.allFit(SLEEPSTUDY, optimizers=["L-BFGS-B", "Nelder-Mead"])
+        result = lmer("Reaction ~ Days + (Days | Subject)", SLEEPSTUDY)
+        allfit_result = result.allFit(SLEEPSTUDY)
 
-        consistent = allfit_result.is_consistent()
-        assert isinstance(consistent, bool)
+        assert allfit_result.errors == {}
+        best = allfit_result.best_fit()
+        assert best is not None and best.deviance <= result.deviance + 1e-6
+        for fit in allfit_result.fits.values():
+            assert fit is not None
+            if fit.converged:
+                assert fit.deviance == pytest.approx(best.deviance, abs=1e-3)
+        assert allfit_result.is_consistent()
+
+    def test_is_consistent_ignores_fits_that_did_not_converge(self):
+        result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+        stalled = replace(result, deviance=result.deviance + 50.0, converged=False)
+        fits = {"COBYQA": result, "stalled": stalled}
+        allfit_result = AllFitResult(fits=fits, errors={}, warnings={})
+
+        assert allfit_result.is_consistent()
+        fits["stalled"] = replace(stalled, converged=True)
+        assert not allfit_result.is_consistent()
+
+    def test_allfit_methods_pass_n_jobs_to_the_worker_policy(self):
+        lmm = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)
+        glmm = glmer("y ~ period + (1 | herd)", CBPP, family=families.Binomial())
+
+        for result, data in ((lmm, SLEEPSTUDY), (glmm, CBPP)):
+            with pytest.raises(ValueError, match="n_jobs must be -1 or a positive integer"):
+                result.allFit(data, optimizers=["Nelder-Mead"], n_jobs=0)
+            with pytest.raises(ValueError, match="n_jobs must be -1 or a positive integer"):
+                result.drop1(data, n_jobs=0)
 
     def test_allfit_fixef_table(self):
         result = lmer("Reaction ~ Days + (1 | Subject)", SLEEPSTUDY)

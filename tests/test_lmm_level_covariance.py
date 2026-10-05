@@ -40,8 +40,10 @@ def test_overlapping_levels_match_observation_covariance(layout, variance, weigh
 @pytest.mark.parametrize("reml", [False, True])
 def test_overlapping_level_gradients_match_independent_likelihood(layout, variance, reml):
     matrices, theta, _ = _problem(layout, variance, True, overlap=True)
-    value, gradient = _rust.profiled_deviance_with_gradient(
-        theta=theta, y=matrices.y, reml=reml, **native_arguments(matrices)
+    value, gradient = (
+        _rust.LmmDesign(**native_arguments(matrices))
+        .with_response(matrices.y)
+        .deviance_with_gradient(theta, reml)
     )
     expected = _direct_profiled_likelihood(theta, matrices, reml)["deviance"]
     assert_allclose(value, expected, rtol=1e-12, atol=1e-11)
@@ -62,25 +64,6 @@ def test_overlapping_level_gradients_match_independent_likelihood(layout, varian
 
 
 @pytest.mark.parametrize("reml", [False, True])
-def test_cached_crossproducts_preserve_overlapping_level_terms(reml):
-    matrices, theta, _ = _problem("correlated", "regular", True, overlap=True)
-    arguments = native_arguments(matrices)
-    products = _rust.compute_ztwz(
-        arguments["z_data"],
-        arguments["z_indices"],
-        arguments["z_indptr"],
-        arguments["z_shape"],
-        arguments["weights"],
-    )
-    expected = _direct_profiled_likelihood(theta, matrices, reml)["deviance"]
-    for cache in [None, products]:
-        actual = _rust.profiled_deviance_cached(
-            theta=theta, y=matrices.y, reml=reml, ztwz_cache=cache, **arguments
-        )
-        assert_allclose(actual, expected, rtol=1e-12, atol=1e-11)
-
-
-@pytest.mark.parametrize("reml", [False, True])
 def test_overlapping_levels_do_not_create_spurious_factorization_failure(reml):
     matrices, _, _ = mode_problem("gaussian", "slope", n_obs=8192, n_groups=64)
     columns = np.roll(np.arange(matrices.n_random), 2)
@@ -92,8 +75,10 @@ def test_overlapping_levels_do_not_create_spurious_factorization_failure(reml):
     for field in vars(expected):
         assert_allclose(getattr(actual, field), getattr(expected, field), rtol=2e-11, atol=2e-10)
     assert_allclose(optimizer.objective(theta), expected.deviance, rtol=2e-12)
-    value, gradient = _rust.profiled_deviance_with_gradient(
-        theta=theta, y=matrices.y, reml=reml, **native_arguments(matrices)
+    value, gradient = (
+        _rust.LmmDesign(**native_arguments(matrices))
+        .with_response(matrices.y)
+        .deviance_with_gradient(theta, reml)
     )
     assert_allclose(value, expected.deviance, rtol=2e-12)
     assert np.all(np.isfinite(gradient))

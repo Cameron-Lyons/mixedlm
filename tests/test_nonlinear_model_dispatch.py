@@ -162,7 +162,7 @@ def test_native_wrapper_rejects_unsupported_models_before_calling_extension(mode
         ) as native,
         pytest.raises(ValueError, match="unmodified built-in model"),
     ):
-        nlmm._nlmm_deviance_rust(
+        nlmm._nlmm_deviance_rust_with_status(
             np.array([0.8]),
             y,
             x,

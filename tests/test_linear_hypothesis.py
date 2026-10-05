@@ -217,7 +217,7 @@ def test_invalid_hypotheses_raise(lmm_result, hypothesis, match: str) -> None:
         ({"labels": ["one", "two"]}, "labels has length"),
         ({"labels": "one"}, "sequence of strings"),
         ({"level": 1.0}, "strictly between"),
-        ({"level": "bad"}, "level must be numeric"),
+        ({"level": "bad"}, "level must be a finite number"),
         ({"test": "invalid"}, "test must be"),
         ({"test": None}, "test must be a string"),
         ({"test": "F", "denominator_df": 0}, "positive finite"),

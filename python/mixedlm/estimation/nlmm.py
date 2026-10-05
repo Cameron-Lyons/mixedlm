@@ -545,37 +545,6 @@ def _nlmm_deviance(
     return deviance, phi_new, b_new, np.sqrt(sigma_sq), converged
 
 
-def _nlmm_deviance_rust(
-    theta: NDArray[np.floating],
-    y: NDArray[np.floating],
-    x: NDArray[np.floating],
-    groups: NDArray[np.integer],
-    model: NonlinearModel,
-    phi: NDArray[np.floating],
-    b: NDArray[np.floating],
-    random_params: list[int],
-    sigma: float,
-    weights: NDArray[np.floating],
-    *,
-    pnls_maxiter: int | None = None,
-    pnls_tol: float = _PNLS_TOL,
-) -> tuple[float, NDArray[np.floating], NDArray[np.floating], float]:
-    return _nlmm_deviance_rust_with_status(
-        theta,
-        y,
-        x,
-        groups,
-        model,
-        phi,
-        b,
-        random_params,
-        sigma,
-        weights,
-        pnls_maxiter=pnls_maxiter,
-        pnls_tol=pnls_tol,
-    )[:4]
-
-
 def _nlmm_deviance_rust_with_status(
     theta: NDArray[np.floating],
     y: NDArray[np.floating],

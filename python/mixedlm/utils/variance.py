@@ -1,17 +1,16 @@
 from __future__ import annotations
 
-from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 import numpy as np
 from numpy.typing import NDArray
 from scipy import linalg, sparse
-from scipy.sparse import linalg as sparse_linalg
 
 if TYPE_CHECKING:
     from mixedlm.matrices.design import RandomEffectStructure
     from mixedlm.models.glmer import GlmerResult
     from mixedlm.models.lmer import LmerResult
+    from mixedlm.models.shared_utils import _RandomEffectFactor
 
 
 _CONDVAR_BATCH_COLUMNS = 64
@@ -36,46 +35,27 @@ def _covariance_block_names(structures: list[RandomEffectStructure]) -> list[str
     return names
 
 
-def _dense_condvar_solver(
-    precision: NDArray[np.floating],
-) -> Callable[[NDArray[np.floating]], NDArray[np.floating]]:
-    try:
-        chol = linalg.cho_factor(precision, lower=True)
-
-        def solve(rhs: NDArray[np.floating]) -> NDArray[np.floating]:
-            return linalg.cho_solve(chol, rhs)
-
-    except linalg.LinAlgError:
-
-        def solve(rhs: NDArray[np.floating]) -> NDArray[np.floating]:
-            return linalg.lstsq(precision, rhs)[0]
-
-    return solve
-
-
 def _conditional_variance_blocks(
-    precision: sparse.spmatrix | NDArray[np.floating],
+    precision: sparse.spmatrix | NDArray[np.floating] | _RandomEffectFactor,
     lambda_factor: sparse.spmatrix | NDArray[np.floating],
     structures: list[RandomEffectStructure],
     *,
     scale: float = 1.0,
     include_cov: bool = False,
 ) -> dict[str, dict[str, NDArray[np.floating]]]:
-    """Extract per-level conditional covariance blocks without a dense q-by-q inverse."""
-    q = precision.shape[0]
-    if q == 0:
+    """Extract per-level conditional covariance blocks without a dense q-by-q inverse.
+
+    ``precision`` may be an existing factor of the random-effect precision.
+    """
+    from mixedlm.models.shared_utils import _RandomEffectFactor
+
+    if isinstance(precision, _RandomEffectFactor):
+        factor = precision
+    elif precision.shape[0] == 0:
         return {}
-
-    precision_csc = sparse.csc_matrix(precision)
+    else:
+        factor = _RandomEffectFactor(precision)
     lambda_csc = sparse.csc_matrix(lambda_factor)
-
-    solver: Callable[[NDArray[np.floating]], NDArray[np.floating]]
-    try:
-        factor = sparse_linalg.splu(precision_csc)
-        solver = factor.solve
-    except RuntimeError:
-        precision_dense = precision_csc.toarray()
-        solver = _dense_condvar_solver(precision_dense)
 
     grouped_structures: dict[str, list[tuple[RandomEffectStructure, int]]] = {}
     offset = 0
@@ -125,7 +105,7 @@ def _conditional_variance_blocks(
             )
             lambda_rows = lambda_csc[indices, :]
             rhs = lambda_rows.T.toarray()
-            solved = np.asarray(solver(rhs))
+            solved = factor.solve(rhs)
             batch_cov = np.asarray(lambda_rows @ solved) * scale
 
             for level in range(first_level, last_level):

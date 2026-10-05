@@ -8,6 +8,7 @@ from mixedlm.estimation.laplace import (
     GLMMOptimizer,
     _build_lambda,
     _get_lambda_cached,
+    _laplace_deviance_with_status,
     adaptive_gh_deviance,
     clear_lambda_cache,
     laplace_deviance,
@@ -17,7 +18,7 @@ from mixedlm.families import Binomial, Gaussian
 from mixedlm.formula.parser import parse_formula, set_cov_type
 from mixedlm.matrices.design import ModelMatrices, build_model_matrices
 from mixedlm.models.glmer import GlmerResult
-from numpy.testing import assert_allclose
+from numpy.testing import assert_allclose, assert_array_equal
 from scipy import integrate, sparse, stats
 
 
@@ -223,21 +224,15 @@ def test_native_and_python_paths_agree_away_from_unit_scale() -> None:
         "logit",
     )
 
-    py_beta, py_random, py_deviance, py_converged = pirls(matrices, family, theta)
-    rust_beta, rust_random, rust_deviance, rust_converged = native.pirls(*args)
-    assert rust_converged == py_converged
-    assert_allclose(rust_beta, py_beta, rtol=1e-11, atol=1e-11)
-    assert_allclose(rust_random, py_random, rtol=1e-11, atol=1e-11)
-    assert rust_deviance == pytest.approx(py_deviance, rel=1e-11, abs=1e-11)
-
-    py_laplace = laplace_deviance(theta, matrices, family)
-    rust_laplace = native.laplace_deviance(*args)
+    py_laplace = _laplace_deviance_with_status(theta, matrices, family)
+    rust_laplace = native.glmm_deviance(*args, 1)
+    assert rust_laplace[3] == py_laplace[3]
     assert rust_laplace[0] == pytest.approx(py_laplace[0], rel=1e-11, abs=1e-11)
     assert_allclose(rust_laplace[1], py_laplace[1], rtol=1e-11, atol=1e-11)
     assert_allclose(rust_laplace[2], py_laplace[2], rtol=1e-11, atol=1e-11)
 
     py_agh = adaptive_gh_deviance(theta, matrices, family, nAGQ=9)
-    rust_agh = native.adaptive_gh_deviance(*args, 9)
+    rust_agh = native.glmm_deviance(*args, 9)
     assert rust_agh[0] == pytest.approx(py_agh[0], rel=1e-10, abs=1e-10)
     assert_allclose(rust_agh[1], py_agh[1], rtol=1e-11, atol=1e-11)
     assert_allclose(rust_agh[2], py_agh[2], rtol=1e-11, atol=1e-11)
@@ -272,8 +267,10 @@ def test_native_correlated_random_slopes_match_python() -> None:
         "logit",
     )
 
-    py_beta, py_random, py_deviance, py_converged = pirls(matrices, Binomial(), theta)
-    rust_beta, rust_random, rust_deviance, rust_converged = native.pirls(*args)
+    py_deviance, py_beta, py_random, py_converged = _laplace_deviance_with_status(
+        theta, matrices, Binomial()
+    )
+    rust_deviance, rust_beta, rust_random, rust_converged = native.glmm_deviance(*args, 1)
     assert rust_converged == py_converged
     assert_allclose(rust_beta, py_beta, rtol=1e-11, atol=1e-11)
     assert_allclose(rust_random, py_random, rtol=1e-11, atol=1e-11)
@@ -313,9 +310,7 @@ def test_covariance_factor_cache_distinguishes_structured_models() -> None:
     assert_allclose(lambda_ar1, _build_lambda(theta, ar1.random_structures).toarray())
 
 
-def test_structured_covariance_avoids_unsupported_native_layout(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_structured_covariance_avoids_unsupported_native_layout() -> None:
     data = pd.DataFrame(
         {
             "y": np.linspace(0.1, 0.9, 12),
@@ -325,14 +320,14 @@ def test_structured_covariance_avoids_unsupported_native_layout(
         }
     )
     matrices = build_model_matrices(set_cov_type("y ~ x + z + (x + z | group)", "ar1"), data)
+    theta = np.array([0.7, 0.35])
 
-    def unsupported(*args: object, **kwargs: object) -> tuple[float, np.ndarray, np.ndarray]:
-        raise AssertionError("unsupported native covariance layout was dispatched")
-
-    monkeypatch.setattr(laplace_module, "_laplace_deviance_rust", unsupported)
-    deviance, beta, random_effects = laplace_module.laplace_deviance_fast(
-        np.array([0.7, 0.35]), matrices, Gaussian()
-    )
-    assert np.isfinite(deviance)
-    assert np.all(np.isfinite(beta))
-    assert np.all(np.isfinite(random_effects))
+    # The native backend only implements unstructured factors, whose theta has
+    # six entries here; it must not receive this structured parameterization.
+    assert laplace_module._prepare_native_glmm(matrices, Gaussian()) is None
+    actual = laplace_module.glmm_deviance_with_status(theta, matrices, Gaussian())
+    expected = laplace_deviance(theta, matrices, Gaussian())
+    assert np.isfinite(actual[0])
+    assert actual[3]
+    for value, reference in zip(actual[:3], expected, strict=True):
+        assert_array_equal(value, reference)

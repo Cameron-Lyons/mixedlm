@@ -1,28 +1,37 @@
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 from functools import cached_property
 from typing import TYPE_CHECKING, Any, ClassVar
 
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
-from scipy import linalg, sparse, stats
+from scipy import linalg, sparse
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     import pandas as pd
 
-from mixedlm.estimation.reml import LMMOptimizer, _build_lambda, _count_theta
+    from mixedlm.estimation.reml import DevianceComponents
+    from mixedlm.inference.allfit import AllFitResult
+    from mixedlm.inference.bootstrap import BootstrapResult
+    from mixedlm.inference.drop1 import Drop1Result
+    from mixedlm.inference.profile_types import ProfileResult
+    from mixedlm.models.control import LmerControl
+    from mixedlm.utils.random import RandomSeed
+
+from mixedlm.estimation.reml import LMMOptimizer, _build_lambda
 from mixedlm.formula.terms import Formula
 from mixedlm.matrices.design import ModelMatrices
-from mixedlm.models.lmer_types import (
-    LogLik,
-    ModelTerms,
-    PredictResult,
-    RanefResult,
-    RePCA,
-    VarCorrGroup,
-)
+from mixedlm.models.lmer_types import LogLik as LogLik
+from mixedlm.models.lmer_types import ModelTerms as ModelTerms
+from mixedlm.models.lmer_types import PredictResult as PredictResult
+from mixedlm.models.lmer_types import RanefResult as RanefResult
+from mixedlm.models.lmer_types import RePCA as RePCA
 from mixedlm.models.lmer_types import RePCAGroup as RePCAGroup
+from mixedlm.models.lmer_types import VarCorrGroup as VarCorrGroup
 from mixedlm.models.result_mixin import MerResultMixin
 from mixedlm.models.shared_utils import (
     _RandomEffectFactor,
@@ -30,8 +39,6 @@ from mixedlm.models.shared_utils import (
     symmetric_inverse,
 )
 from mixedlm.utils import _format_pvalue, _get_signif_code
-from mixedlm.utils.random import RandomSeed, native_seed, random_stream, validate_simulation_count
-from mixedlm.utils.simulation import simulate_random_effects, simulation_parameters
 from mixedlm.utils.validation import _validate_confidence_level
 
 
@@ -95,9 +102,19 @@ class VarCorr:
         return self.groups[group].corr
 
 
+def _warn_deprecated_alias(name: str, replacement: str) -> None:
+    warnings.warn(
+        f"LmerResult.{name} is deprecated and will be removed in a future release; "
+        f"use {replacement} instead.",
+        DeprecationWarning,
+        stacklevel=3,
+    )
+
+
 @dataclass
 class LmerResult(MerResultMixin):
     _IS_LMM: ClassVar[bool] = True
+    _HAS_SIGMA: ClassVar[bool] = True
     formula: Formula
     matrices: ModelMatrices
     theta: NDArray[np.floating]
@@ -113,34 +130,32 @@ class LmerResult(MerResultMixin):
     message: str = ""
     function_evals: int = 0
     optimizer: str = ""
+    # The fitting controls, reused by formula-based refits such as drop1 and allFit.
+    control: LmerControl | None = None
 
     @property
     def fe_params(self) -> NDArray[np.floating]:
-        """Compatibility alias for fixed-effect parameters."""
+        """Deprecated alias for ``beta``."""
+        _warn_deprecated_alias("fe_params", "beta")
         return self.beta
 
     @property
     def re_params(self) -> NDArray[np.floating]:
-        """Compatibility alias for random-effect covariance parameters."""
+        """Deprecated alias for ``theta``."""
+        _warn_deprecated_alias("re_params", "theta")
         return self.theta
 
     @property
     def resid(self) -> NDArray[np.floating]:
-        """Compatibility alias for residuals."""
+        """Deprecated alias for ``residuals()``."""
+        _warn_deprecated_alias("resid", "residuals()")
         return self.residuals()
 
     @property
     def fittedvalues(self) -> NDArray[np.floating]:
-        """Compatibility alias for fitted values."""
+        """Deprecated alias for ``fitted()``."""
+        _warn_deprecated_alias("fittedvalues", "fitted()")
         return self.fitted()
-
-    def fixef(self) -> dict[str, float]:
-        return self._fixef_dict(self.beta)
-
-    def ranef(
-        self, condVar: bool = False
-    ) -> dict[str, dict[str, NDArray[np.floating]]] | RanefResult:
-        return self._ranef_with_optional_condvar(self.u, condVar)
 
     @cached_property
     def _weighted_projection(self) -> _WeightedProjection:
@@ -194,137 +209,15 @@ class LmerResult(MerResultMixin):
         if q == 0:
             return {}
 
-        Lambda = _build_lambda(self.theta, self.matrices.random_structures)
-        sqrt_weights = np.sqrt(self.matrices.weights)
-        weighted_z = self.matrices.Z.multiply(sqrt_weights[:, np.newaxis])
-        ztwz = weighted_z.T @ weighted_z
-        precision = Lambda.T @ ztwz @ Lambda + sparse.eye(q, format="csc")
-
+        # Reuse the factor cached for vcov and prediction intervals.
+        projection = self._weighted_projection
         return _conditional_variance_blocks(
-            precision,
-            Lambda,
+            projection.random_factor,
+            projection.lambda_matrix,
             self.matrices.random_structures,
             scale=self.sigma**2,
             include_cov=include_cov,
         )
-
-    def get_sigma(self) -> float:
-        return self.sigma
-
-    def weights(self, copy: bool = True) -> NDArray[np.floating]:
-        """Get the model weights.
-
-        Returns the prior weights used in model fitting.
-        If no weights were specified, returns an array of ones.
-        The observation-level residual variance is ``sigma**2 / weight``.
-
-        Parameters
-        ----------
-        copy : bool, default True
-            If True, return a copy of the weights array.
-            If False, return the original array (faster but should not be modified).
-
-        Returns
-        -------
-        NDArray
-            Array of weights with length equal to number of observations.
-        """
-        return self._weights_array(copy=copy)
-
-    def offset(self, copy: bool = True) -> NDArray[np.floating]:
-        """Get the model offset.
-
-        Returns the offset used in model fitting.
-        If no offset was specified, returns an array of zeros.
-
-        Parameters
-        ----------
-        copy : bool, default True
-            If True, return a copy of the offset array.
-            If False, return the original array (faster but should not be modified).
-
-        Returns
-        -------
-        NDArray
-            Array of offsets with length equal to number of observations.
-        """
-        return self._offset_array(copy=copy)
-
-    def model_matrix(
-        self, type: str = "fixed"
-    ) -> NDArray[np.floating] | sparse.csc_matrix | tuple[NDArray[np.floating], sparse.csc_matrix]:
-        """Get the model design matrix.
-
-        Parameters
-        ----------
-        type : str, default "fixed"
-            Which design matrix to return:
-            - "fixed" or "X": Fixed effects design matrix
-            - "random" or "Z": Random effects design matrix (sparse)
-            - "both": Tuple of (X, Z)
-
-        Returns
-        -------
-        NDArray or sparse.csc_matrix or tuple
-            The requested design matrix. X is dense, Z is sparse.
-
-        Examples
-        --------
-        >>> result = lmer("y ~ x + (1|group)", data)
-        >>> X = result.model_matrix("fixed")
-        >>> Z = result.model_matrix("random")
-        >>> X, Z = result.model_matrix("both")
-        """
-        return self._model_matrix(type)
-
-    def terms(self) -> ModelTerms:
-        """Get information about the model terms.
-
-        Returns a ModelTerms object containing information about the
-        response variable, fixed effect terms, random effect terms,
-        and grouping factors.
-
-        Returns
-        -------
-        ModelTerms
-            Object containing:
-            - response: Name of the response variable
-            - fixed_terms: List of fixed effect term names
-            - random_terms: Dict mapping grouping factors to their term names
-            - fixed_variables: Set of variables in fixed effects
-            - random_variables: Set of variables in random effects
-            - grouping_factors: Set of grouping factor names
-            - has_intercept: Whether the model has an intercept
-
-        Examples
-        --------
-        >>> result = lmer("y ~ x + (x | group)", data)
-        >>> t = result.terms()
-        >>> print(t.response)  # 'y'
-        >>> print(t.fixed_terms)  # ['(Intercept)', 'x']
-        >>> print(t.random_terms)  # {'group': ['(Intercept)', 'x']}
-        """
-        return self._build_model_terms(self.formula)
-
-    def model_frame(self) -> Any:
-        """Get the model frame.
-
-        Returns the data frame containing only the variables used
-        in the model formula, after any NA handling.
-
-        Returns
-        -------
-        DataFrame
-            Data frame with the response variable, fixed effect variables,
-            and grouping factors. The fitted input's backend is preserved.
-
-        Examples
-        --------
-        >>> result = lmer("y ~ x + (1 | group)", data)
-        >>> mf = result.model_frame()
-        >>> print(mf.columns.tolist())  # ['y', 'x', 'group']
-        """
-        return self._model_frame()
 
     @cached_property
     def _fitted_values(self) -> NDArray[np.floating]:
@@ -480,7 +373,9 @@ class LmerResult(MerResultMixin):
                     )
                     pred += random_design[0] @ self.u
                 else:
-                    pred = self._add_random_effects_to_pred(pred, newdata, allow_new_levels)
+                    pred += self._random_effect_prediction_contrib(
+                        newdata, allow_new_levels, self.u
+                    )
 
         if not se_fit and interval == "none":
             return pred
@@ -494,6 +389,8 @@ class LmerResult(MerResultMixin):
 
         if interval == "none":
             return PredictResult(fit=pred, se_fit=se, interval="none", level=level)
+
+        from scipy import stats
 
         z_crit = stats.norm.isf((1 - level) / 2)
 
@@ -522,16 +419,6 @@ class LmerResult(MerResultMixin):
                 level=level,
             )
         raise AssertionError("interval validation should make this branch unreachable")
-
-    def _add_random_effects_to_pred(
-        self,
-        pred: NDArray[np.floating],
-        newdata: pd.DataFrame,
-        allow_new_levels: bool,
-    ) -> NDArray[np.floating]:
-        """Add random effects contribution to predictions."""
-        pred += self._random_effect_prediction_contrib(newdata, allow_new_levels, self.u)
-        return pred
 
     def _compute_prediction_variance(
         self,
@@ -588,70 +475,8 @@ class LmerResult(MerResultMixin):
         h_fixed = np.einsum("ij,ij->i", projected_X @ information_inv, projected_X)
         return np.clip(h_fixed + h_random, 0, 1 - 1e-10)
 
-    def hatvalues(self) -> NDArray[np.floating]:
-        """Return leverage values (the diagonal of the mixed-model hat matrix).
-
-        For mixed models, the hat matrix projects the response onto fitted values.
-        The leverage h_i measures how much observation i influences its own
-        fitted value.
-
-        Returns
-        -------
-        NDArray
-            Leverage values for each observation, between 0 and 1.
-            Values close to 1 indicate high-leverage observations.
-
-        Notes
-        -----
-        For linear mixed models, the hat matrix incorporates both fixed and
-        random effects. High leverage observations can have undue influence
-        on model estimates.
-        """
-        return self._hat_values.copy()
-
-    def cooks_distance(self) -> NDArray[np.floating]:
-        """Compute Cook's distance for each observation.
-
-        Cook's distance measures the influence of each observation on the
-        fitted values. Large values indicate observations that have substantial
-        influence on the model fit.
-
-        Returns
-        -------
-        NDArray
-            Cook's distance for each observation.
-
-        Notes
-        -----
-        Cook's distance is computed as:
-            D_i = (e_i^2 / (p * sigma^2)) * (h_i / (1 - h_i)^2)
-
-        where e_i is the residual, h_i is the leverage, p is the number of
-        fixed effect parameters, and sigma^2 is the residual variance.
-
-        A common rule of thumb is that observations with D_i > 4/n or D_i > 1
-        may be influential and warrant further investigation.
-        Models without fixed effects return NaN because this normalization
-        divides by the number of fixed-effect parameters.
-        """
-        p = self.matrices.n_fixed
-        if p == 0:
-            return np.full(self.matrices.n_obs, np.nan)
-        h = self.hatvalues()
-        resid = self.residuals(type="response", na_expand=False)
-        weighted_resid = np.sqrt(self.matrices.weights) * resid
-
-        h = np.clip(h, 0, 1 - 1e-10)
-
-        cooks_d = (weighted_resid**2 / (p * self.sigma**2)) * (h / (1 - h) ** 2)
-
-        return cooks_d
-
     def influence(self) -> dict[str, NDArray[np.floating]]:
         """Compute influence diagnostics for the model.
-
-        Returns a dictionary containing various influence measures for
-        identifying influential observations.
 
         Returns
         -------
@@ -660,492 +485,39 @@ class LmerResult(MerResultMixin):
             - 'hat': Leverage values (hatvalues)
             - 'cooks_d': Cook's distance
             - 'std_resid': Standardized residuals
-            - 'student_resid': Studentized residuals
+            - 'student_resid': Studentized residuals (leave-one-out scale)
 
         Notes
         -----
-        Influential observations are those that have a large effect on
-        the model estimates. Use these diagnostics to identify:
-        - High leverage points (large hat values)
-        - Outliers (large standardized residuals)
-        - Influential points (large Cook's distance)
+        Residuals include square-root prior weights. Large hat values flag
+        high-leverage points, large residuals flag outliers and large Cook's
+        distances flag influential observations. ``mixedlm.diagnostics.influence``
+        returns the same quantities with DFBETAS and DFFITS.
         """
-        h = self.hatvalues()
-        resid = self.residuals(type="response", na_expand=False)
-        weighted_resid = np.sqrt(self.matrices.weights) * resid
+        from mixedlm.diagnostics.influence import influence
 
-        h_safe = np.clip(h, 0, 1 - 1e-10)
-        std_resid = weighted_resid / (self.sigma * np.sqrt(1 - h_safe))
-
-        n = self.matrices.n_obs
-        p = self.matrices.n_fixed
-        df = n - p
-
-        mse = np.sum(weighted_resid**2) / df
-        loo_var = ((df * mse) - (weighted_resid**2 / (1 - h_safe))) / (df - 1)
-        loo_var = np.maximum(loo_var, 1e-10)
-        student_resid = weighted_resid / np.sqrt(loo_var * (1 - h_safe))
+        diagnostics = influence(self)
+        resid = diagnostics.residuals
+        one_minus_h = 1 - np.clip(diagnostics.hat_values, 0, 1 - 1e-10)
+        df = self.matrices.n_obs - self.matrices.n_fixed
+        loo_var = (np.sum(resid**2) - resid**2 / one_minus_h) / (df - 1)
 
         return {
-            "hat": h,
-            "cooks_d": self.cooks_distance(),
-            "std_resid": std_resid,
-            "student_resid": student_resid,
+            "hat": diagnostics.hat_values,
+            "cooks_d": diagnostics.cooks_distance,
+            "std_resid": resid / (self.sigma * np.sqrt(one_minus_h)),
+            "student_resid": resid / np.sqrt(np.maximum(loo_var, 1e-10) * one_minus_h),
         }
 
     def VarCorr(self) -> VarCorr:
         return VarCorr(groups=self._varcorr_groups(scale=self.sigma**2), residual=self.sigma**2)
 
-    def rePCA(self) -> RePCA:
-        """Perform PCA on the random effects covariance matrix.
-
-        This function computes principal component analysis on the covariance
-        matrix of each random effect grouping factor. It's useful for diagnosing
-        overparameterization in the random effects structure.
-
-        Returns
-        -------
-        RePCA
-            Object containing PCA results for each random effect group,
-            including standard deviations, proportion of variance, and
-            cumulative proportion for each principal component.
-
-        Notes
-        -----
-        If any principal component has very small standard deviation (< 1e-4),
-        this suggests the random effects structure may be overparameterized
-        (singular or near-singular). Use the `is_singular()` method on the
-        result to check for this condition.
-
-        Examples
-        --------
-        >>> result = lmer("y ~ x + (x | group)", data)
-        >>> pca = result.rePCA()
-        >>> print(pca)
-        >>> pca.is_singular()  # Check if any components are near-zero
-        """
-        return self._random_effect_pca(scale=self.sigma**2)
-
-    def dotplot(
-        self,
-        group: str | None = None,
-        term: str | None = None,
-        condVar: bool = True,
-        order: bool = True,
-        figsize: tuple[float, float] | None = None,
-    ):
-        """Create a caterpillar plot of random effects.
-
-        Dotplots (also called caterpillar plots) show the estimated random
-        effects with confidence intervals, ordered by magnitude. They are
-        useful for visualizing the distribution of random effects across
-        groups and identifying outlier groups.
-
-        Parameters
-        ----------
-        group : str, optional
-            Name of grouping factor to plot. If None, uses the first
-            random effect grouping factor.
-        term : str, optional
-            Name of random effect term to plot. If None, plots all terms
-            for the selected group in separate panels.
-        condVar : bool, default True
-            Whether to show 95% confidence intervals based on the
-            conditional variance of the random effects.
-        order : bool, default True
-            Whether to order groups by random effect magnitude.
-        figsize : tuple, optional
-            Figure size (width, height) in inches.
-
-        Returns
-        -------
-        Figure
-            Matplotlib figure with the dotplot(s).
-
-        Raises
-        ------
-        ImportError
-            If matplotlib is not installed.
-
-        Examples
-        --------
-        >>> result = lmer("y ~ x + (x | group)", data)
-        >>> fig = result.dotplot()  # Plot all random effects
-        >>> fig = result.dotplot(term="(Intercept)")  # Plot only intercepts
-        """
-        from mixedlm.diagnostics.plots import _check_matplotlib, plot_ranef
-
-        _check_matplotlib()
-        import matplotlib.pyplot as plt
-
-        if group is None:
-            if not self.matrices.random_structures:
-                raise ValueError("No random effects in model")
-            group = self.matrices.random_structures[0].grouping_factor
-
-        struct = None
-        for s in self.matrices.random_structures:
-            if s.grouping_factor == group:
-                struct = s
-                break
-
-        if struct is None:
-            raise ValueError(f"Grouping factor '{group}' not found")
-
-        if term is not None:
-            if figsize is None:
-                figsize = (8, max(6, struct.n_levels * 0.3))
-            fig, ax = plt.subplots(figsize=figsize)
-            plot_ranef(self, group=group, term=term, ax=ax, condVar=condVar, order=order)
-            fig.tight_layout()
-            return fig
-
-        n_terms = struct.n_terms
-        if n_terms == 1:
-            if figsize is None:
-                figsize = (8, max(6, struct.n_levels * 0.3))
-            fig, ax = plt.subplots(figsize=figsize)
-            plot_ranef(
-                self, group=group, term=struct.term_names[0], ax=ax, condVar=condVar, order=order
-            )
-            fig.tight_layout()
-            return fig
-
-        ncols = min(2, n_terms)
-        nrows = (n_terms + ncols - 1) // ncols
-
-        if figsize is None:
-            figsize = (6 * ncols, max(6, struct.n_levels * 0.25) * nrows)
-
-        fig, axes = plt.subplots(nrows, ncols, figsize=figsize)
-        axes = axes.flatten() if n_terms > 1 else [axes]
-
-        for i, term_name in enumerate(struct.term_names):
-            if i < len(axes):
-                plot_ranef(
-                    self, group=group, term=term_name, ax=axes[i], condVar=condVar, order=order
-                )
-
-        for i in range(n_terms, len(axes)):
-            axes[i].set_visible(False)
-
-        fig.tight_layout()
-        return fig
-
-    def qqmath(
-        self,
-        group: str | None = None,
-        term: str | None = None,
-        figsize: tuple[float, float] | None = None,
-    ):
-        """Create QQ plots of random effects against normal distribution.
-
-        QQ (quantile-quantile) plots compare the distribution of random
-        effects to a theoretical normal distribution. Points falling along
-        a diagonal line indicate normality. Deviations suggest the random
-        effects may not be normally distributed.
-
-        Parameters
-        ----------
-        group : str, optional
-            Name of grouping factor to plot. If None, uses the first
-            random effect grouping factor.
-        term : str, optional
-            Name of random effect term to plot. If None, plots all terms
-            for the selected group in separate panels.
-        figsize : tuple, optional
-            Figure size (width, height) in inches.
-
-        Returns
-        -------
-        Figure
-            Matplotlib figure with the QQ plot(s).
-
-        Raises
-        ------
-        ImportError
-            If matplotlib is not installed.
-
-        Examples
-        --------
-        >>> result = lmer("y ~ x + (x | group)", data)
-        >>> fig = result.qqmath()  # QQ plots for all random effects
-        >>> fig = result.qqmath(term="(Intercept)")  # Only intercepts
-        """
-        from mixedlm.diagnostics.plots import _check_matplotlib
-
-        _check_matplotlib()
-        import matplotlib.pyplot as plt
-        from scipy import stats
-
-        if group is None:
-            if not self.matrices.random_structures:
-                raise ValueError("No random effects in model")
-            group = self.matrices.random_structures[0].grouping_factor
-
-        struct = None
-        for s in self.matrices.random_structures:
-            if s.grouping_factor == group:
-                struct = s
-                break
-
-        if struct is None:
-            raise ValueError(f"Grouping factor '{group}' not found")
-
-        ranefs = self.ranef()
-        group_ranefs = ranefs[group]
-
-        def plot_qq(ax, values, title):
-            values = np.asarray(values)
-            values_sorted = np.sort(values)
-            n = len(values_sorted)
-
-            theoretical = stats.norm.ppf((np.arange(1, n + 1) - 0.5) / n)
-
-            ax.scatter(theoretical, values_sorted, alpha=0.7, edgecolors="black", linewidths=0.5)
-
-            slope, intercept = np.polyfit(theoretical, values_sorted, 1)
-            line_x = np.array([theoretical.min(), theoretical.max()])
-            line_y = slope * line_x + intercept
-            ax.plot(line_x, line_y, "r--", linewidth=1.5, label="Reference line")
-
-            ax.set_xlabel("Theoretical Quantiles")
-            ax.set_ylabel("Sample Quantiles")
-            ax.set_title(title)
-            ax.axhline(0, color="gray", linestyle=":", alpha=0.5)
-            ax.axvline(0, color="gray", linestyle=":", alpha=0.5)
-
-        if term is not None:
-            if term not in group_ranefs:
-                raise ValueError(f"Term '{term}' not found in group '{group}'")
-            if figsize is None:
-                figsize = (6, 5)
-            fig, ax = plt.subplots(figsize=figsize)
-            plot_qq(ax, group_ranefs[term], f"QQ Plot: {group} / {term}")
-            fig.tight_layout()
-            return fig
-
-        n_terms = len(group_ranefs)
-        if n_terms == 1:
-            if figsize is None:
-                figsize = (6, 5)
-            fig, ax = plt.subplots(figsize=figsize)
-            term_name = list(group_ranefs.keys())[0]
-            plot_qq(ax, group_ranefs[term_name], f"QQ Plot: {group} / {term_name}")
-            fig.tight_layout()
-            return fig
-
-        ncols = min(2, n_terms)
-        nrows = (n_terms + ncols - 1) // ncols
-
-        if figsize is None:
-            figsize = (5 * ncols, 4 * nrows)
-
-        fig, axes = plt.subplots(nrows, ncols, figsize=figsize)
-        axes = axes.flatten() if n_terms > 1 else [axes]
-
-        for i, (term_name, values) in enumerate(group_ranefs.items()):
-            if i < len(axes):
-                plot_qq(axes[i], values, f"QQ Plot: {group} / {term_name}")
-
-        for i in range(n_terms, len(axes)):
-            axes[i].set_visible(False)
-
-        fig.tight_layout()
-        return fig
-
-    def plot(
-        self,
-        which: list[int] | None = None,
-        figsize: tuple[float, float] | None = None,
-    ):
-        """Create diagnostic plots for the fitted model.
-
-        Creates a panel of residual diagnostic plots similar to R's plot() method
-        for lmer objects. This is useful for assessing model assumptions such as
-        homoscedasticity, normality of residuals, and detecting outliers.
-
-        Parameters
-        ----------
-        which : list of int, optional
-            Which plots to include. Default is [1, 2, 3, 4].
-            1 = Residuals vs Fitted values
-            2 = Normal Q-Q plot of residuals
-            3 = Scale-Location plot (sqrt of standardized residuals vs fitted)
-            4 = Residuals by Group (boxplot, only if random effects exist)
-        figsize : tuple, optional
-            Figure size (width, height) in inches. Default is calculated based
-            on number of plots.
-
-        Returns
-        -------
-        Figure
-            Matplotlib figure containing the diagnostic plots.
-
-        Raises
-        ------
-        ImportError
-            If matplotlib is not installed.
-
-        Examples
-        --------
-        >>> result = lmer("y ~ x + (1 | group)", data)
-        >>> fig = result.plot()  # All 4 diagnostic plots
-        >>> fig = result.plot(which=[1, 2])  # Only residuals vs fitted and Q-Q
-
-        See Also
-        --------
-        qqmath : QQ plots of random effects (normality assessment)
-        residuals : Get residuals from the fitted model
-        fitted : Get fitted values from the model
-        """
-        from mixedlm.diagnostics.plots import plot_diagnostics
-
-        return plot_diagnostics(self, which=which, figsize=figsize)
-
-    def isSingular(self, tol: float = 1e-4) -> bool:
-        return self._is_singular_covariance(tol)
-
-    def getME(self, name: str):
-        """Extract model components by name.
-
-        This method provides access to internal model components, similar to
-        R's getME() function in lme4. It's useful for advanced users who need
-        access to specific matrices or parameters.
-
-        Parameters
-        ----------
-        name : str
-            Name of the component to extract. Valid names are:
-            - "X" : Fixed effects design matrix (n x p)
-            - "Z" : Random effects design matrix (n x q)
-            - "Zt" : Transpose of Z (q x n)
-            - "y" : Response vector
-            - "beta" : Fixed effects coefficients
-            - "theta" : Variance component parameters (relative covariance factors)
-            - "Lambda" : Relative covariance factor (sparse, q x q)
-            - "Lambdat" : Transpose of Lambda
-            - "u" : Spherical random effects
-            - "b" : Conditional modes of random effects (same as u for LMM)
-            - "sigma" : Residual standard deviation
-            - "n" or "n_obs" : Number of observations
-            - "p" or "n_fixed" : Number of fixed effects
-            - "q" or "n_random" : Number of random effects
-            - "lower" : Lower bounds for theta
-            - "weights" : Prior weights
-            - "offset" : Offset term
-            - "REML" : Whether REML estimation was used
-            - "deviance" : Deviance (or REML criterion)
-            - "flist" : List of grouping factors
-            - "cnms" : Component names for random effects
-            - "Gp" : Group pointers (cumulative number of random effects per group)
-
-        Returns
-        -------
-        The requested component. Type depends on the component name.
-
-        Raises
-        ------
-        ValueError
-            If an unknown component name is requested.
-
-        Examples
-        --------
-        >>> result = lmer("y ~ x + (1|group)", data)
-        >>> X = result.getME("X")  # Fixed effects design matrix
-        >>> theta = result.getME("theta")  # Variance parameters
-        >>> Lambda = result.getME("Lambda")  # Relative covariance factor
-        """
-        if name == "X":
-            return self.matrices.X
-        elif name == "Z":
-            return self.matrices.Z
-        elif name == "Zt":
-            return self.matrices.Zt
-        elif name == "y":
-            return self.matrices.y
-        elif name == "beta":
-            return self.beta.copy()
-        elif name == "theta":
-            return self.theta.copy()
-        elif name == "Lambda":
-            return _build_lambda(self.theta, self.matrices.random_structures)
-        elif name == "Lambdat":
-            Lambda = _build_lambda(self.theta, self.matrices.random_structures)
-            return Lambda.T
-        elif name == "u" or name == "b":
-            return self.u.copy()
-        elif name == "sigma":
-            return self.sigma
-        elif name in ("n", "n_obs"):
-            return self.matrices.n_obs
-        elif name in ("p", "n_fixed"):
-            return self.matrices.n_fixed
-        elif name in ("q", "n_random"):
-            return self.matrices.n_random
-        elif name == "lower":
-            return self._theta_lower_bounds()
-        elif name == "weights":
-            return self.matrices.weights.copy()
-        elif name == "offset":
-            return self.matrices.offset.copy()
-        elif name == "REML":
-            return self.REML
-        elif name == "deviance":
-            return self.deviance
-        elif name == "fixef_names":
-            return list(self.matrices.fixed_names)
-        elif name == "flist":
-            return [s.grouping_factor for s in self.matrices.random_structures]
-        elif name == "cnms":
-            return {s.grouping_factor: s.term_names for s in self.matrices.random_structures}
-        elif name == "Gp":
-            gp = [0]
-            for s in self.matrices.random_structures:
-                gp.append(gp[-1] + s.n_levels * s.n_terms)
-            return np.array(gp)
-        elif name == "RX":
-            return self._compute_RX()
-        elif name == "RZX":
-            return self._compute_RZX()
-        elif name == "Lind":
-            return self._build_Lind()
-        elif name == "devcomp":
-            return self._get_devcomp()
-        else:
-            valid_names = [
-                "X",
-                "Z",
-                "Zt",
-                "y",
-                "beta",
-                "theta",
-                "Lambda",
-                "Lambdat",
-                "u",
-                "b",
-                "sigma",
-                "n",
-                "n_obs",
-                "p",
-                "n_fixed",
-                "q",
-                "n_random",
-                "lower",
-                "weights",
-                "offset",
-                "REML",
-                "deviance",
-                "fixef_names",
-                "flist",
-                "cnms",
-                "Gp",
-                "RX",
-                "RZX",
-                "Lind",
-                "devcomp",
-            ]
-            raise ValueError(f"Unknown component name: '{name}'. Valid names are: {valid_names}")
+    def _getme_components(self) -> dict[str, Callable[[], Any]]:
+        return {
+            **super()._getme_components(),
+            "sigma": lambda: self.sigma,
+            "REML": lambda: self.REML,
+        }
 
     def _compute_RZX(self) -> NDArray[np.floating]:
         """Compute RZX, the cross-term in the mixed model equations."""
@@ -1155,88 +527,30 @@ class LmerResult(MerResultMixin):
         """Compute the upper Cholesky factor of the fixed-effect information."""
         return linalg.cholesky(self._weighted_projection.XtVinvX, lower=False)
 
-    def _build_Lind(self) -> NDArray[np.int64]:
-        """Build Lind, the index mapping from theta to Lambda entries."""
-        indices = []
-        theta_idx = 0
-
-        for struct in self.matrices.random_structures:
-            n_terms = struct.n_terms
-
-            if struct.correlated:
-                n_theta = n_terms * (n_terms + 1) // 2
-                template_indices = []
-                idx = 0
-                for i in range(n_terms):
-                    for _j in range(i + 1):
-                        template_indices.append(theta_idx + idx)
-                        idx += 1
-            else:
-                n_theta = n_terms
-                template_indices = list(range(theta_idx, theta_idx + n_terms))
-
-            for _ in range(struct.n_levels):
-                indices.extend(template_indices)
-
-            theta_idx += n_theta
-
-        return np.array(indices, dtype=np.int64)
-
-    def _get_devcomp(self) -> dict[str, Any]:
-        """Get deviance components and model dimensions."""
-        from mixedlm.estimation.reml import profiled_deviance_components
-
+    def _devcomp_cmp(self) -> dict[str, float]:
+        projection = self._weighted_projection
         n = self.matrices.n_obs
         p = self.matrices.n_fixed
-        q = self.matrices.n_random
-        n_theta = len(self.theta)
-
-        try:
-            dc = profiled_deviance_components(self.theta, self.matrices, self.REML)
-            cmp = {
-                "ldL2": dc.ldL2,
-                "ldRX2": dc.ldRX2,
-                "wrss": dc.wrss,
-                "ussq": dc.ussq,
-                "pwrss": dc.pwrss,
-                "drsum": 0.0,
-                "REML": float(self.deviance) if self.REML else np.nan,
-                "dev": float(self.deviance) if not self.REML else np.nan,
-                "sigmaML": np.sqrt(dc.sigma2) if not self.REML else np.nan,
-                "sigmaREML": np.sqrt(dc.sigma2) if self.REML else np.nan,
-            }
-        except (ImportError, RuntimeError, ValueError, np.linalg.LinAlgError):
-            cmp = {
-                "ldL2": 0.0,
-                "ldRX2": 0.0,
-                "wrss": 0.0,
-                "ussq": float(np.sum(self.u**2)) if self.u is not None else 0.0,
-                "pwrss": 0.0,
-                "drsum": 0.0,
-                "REML": float(self.deviance) if self.REML else np.nan,
-                "dev": float(self.deviance) if not self.REML else np.nan,
-                "sigmaML": self.sigma,
-                "sigmaREML": self.sigma,
-            }
-
-        dims = {
-            "n": n,
-            "p": p,
-            "q": q,
-            "nmp": n - p,
-            "nth": n_theta,
-            "REML": 1 if self.REML else 0,
-            "useSc": 1,
-            "nAGQ": 1,
-            "q0": q,
-            "q1": 0,
-            "qrx": p,
-            "ngrps": len(self.matrices.random_structures),
+        u = self._spherical_u()
+        resid = self.residuals(na_expand=False)
+        wrss = float(np.dot(self.matrices.weights * resid, resid))
+        ussq = float(np.dot(u, u))
+        pwrss = wrss + ussq
+        deviance = float(self.deviance)
+        return {
+            "ldL2": 0.0 if projection.random_factor is None else projection.random_factor.logdet,
+            "ldRX2": float(np.linalg.slogdet(projection.XtVinvX)[1]),
+            "wrss": wrss,
+            "ussq": ussq,
+            "pwrss": pwrss,
+            "drsum": np.nan,
+            "REML": deviance if self.REML else np.nan,
+            "dev": np.nan if self.REML else deviance,
+            "sigmaML": float(np.sqrt(pwrss / n)),
+            "sigmaREML": float(np.sqrt(pwrss / (n - p))),
         }
 
-        return {"cmp": cmp, "dims": dims}
-
-    def get_deviance_components(self):
+    def get_deviance_components(self) -> DevianceComponents:
         """Get detailed deviance components for the fitted model.
 
         Returns a DevianceComponents object containing the breakdown of
@@ -1300,7 +614,8 @@ class LmerResult(MerResultMixin):
         offset : array-like, optional
             New offset. If None, uses the original offset.
         **kwargs
-            Additional arguments passed to lmer().
+            Additional arguments passed to lmer(). The fitted control settings
+            are reused unless ``control`` is given.
 
         Returns
         -------
@@ -1343,51 +658,14 @@ class LmerResult(MerResultMixin):
         if offset is None and not data_size_changed:
             offset = self.matrices.offset
 
+        kwargs.setdefault("control", self._refit_control())
+
         return lmer(new_formula, data, REML=REML, weights=weights, offset=offset, **kwargs)
 
-    def _update_formula(self, new_formula: str) -> str:
-        """Process formula update syntax with '.' placeholders."""
-        original = str(self.formula)
-
-        if "." not in new_formula:
-            return new_formula
-
-        lhs, rhs = original.split("~", 1)
-        lhs = lhs.strip()
-        rhs = rhs.strip()
-
-        if "~" in new_formula:
-            new_lhs, new_rhs = new_formula.split("~", 1)
-            new_lhs = new_lhs.strip()
-            new_rhs = new_rhs.strip()
-
-            if new_lhs == ".":
-                new_lhs = lhs
-
-            if new_rhs.startswith(". +"):
-                new_rhs = rhs + " +" + new_rhs[3:]
-            elif new_rhs.startswith(". -"):
-                terms_to_remove = new_rhs[3:].strip().split("+")
-                terms_to_remove = [t.strip() for t in terms_to_remove]
-                rhs_terms = [t.strip() for t in rhs.split("+")]
-                rhs_terms = [t for t in rhs_terms if t not in terms_to_remove]
-                new_rhs = " + ".join(rhs_terms)
-            elif new_rhs == ".":
-                new_rhs = rhs
-
-            return f"{new_lhs} ~ {new_rhs}"
-        else:
-            return new_formula
-
     def logLik(self) -> LogLik:
-        n = self.matrices.n_obs
-        p = self.matrices.n_fixed
-        n_theta = _count_theta(self.matrices.random_structures)
-        df = p + n_theta + 1
-
-        value = -0.5 * self.deviance
-
-        return LogLik(value=value, df=df, nobs=n, REML=self.REML)
+        return LogLik(
+            value=-0.5 * self.deviance, df=self.npar(), nobs=self.matrices.n_obs, REML=self.REML
+        )
 
     def get_deviance(self) -> float:
         """Get the deviance of the fitted model.
@@ -1434,84 +712,6 @@ class LmerResult(MerResultMixin):
         """
         return self.deviance
 
-    def AIC(self) -> float:
-        ll = self.logLik()
-        return -2 * ll.value + 2 * ll.df
-
-    def BIC(self) -> float:
-        ll = self.logLik()
-        return -2 * ll.value + ll.df * np.log(ll.nobs)
-
-    def extractAIC(self) -> tuple[float, float]:
-        """Extract AIC with effective degrees of freedom.
-
-        Returns the effective degrees of freedom and AIC value,
-        matching the interface of R's extractAIC function.
-
-        Returns
-        -------
-        tuple of (float, float)
-            (edf, AIC) where edf is the effective degrees of freedom.
-
-        Examples
-        --------
-        >>> result = lmer("Reaction ~ Days + (Days|Subject)", sleepstudy)
-        >>> edf, aic = result.extractAIC()
-        """
-        ll = self.logLik()
-        edf = float(ll.df)
-        aic = float(-2 * ll.value + 2 * ll.df)
-        return (edf, aic)
-
-    def get_formula(
-        self,
-        random_only: bool = False,
-        fixed_only: bool = False,
-    ) -> Formula | str:
-        """Get the model formula.
-
-        When called without arguments, returns the Formula object.
-        When random_only or fixed_only is specified, returns a string.
-
-        Parameters
-        ----------
-        random_only : bool, default False
-            If True, return only the random effects part as a string.
-        fixed_only : bool, default False
-            If True, return only the fixed effects part as a string.
-
-        Returns
-        -------
-        Formula or str
-            The Formula object (default), or a string if random_only
-            or fixed_only is specified.
-
-        Examples
-        --------
-        >>> result = lmer("Reaction ~ Days + (Days|Subject)", sleepstudy)
-        >>> f = result.get_formula()
-        >>> f.response
-        'Reaction'
-        >>> result.get_formula(fixed_only=True)
-        'Reaction ~ Days'
-        >>> result.get_formula(random_only=True)
-        '(Days | Subject)'
-        """
-        from mixedlm.formula.parser import (
-            getFixedFormulaStr,
-            getRandomFormulaStr,
-        )
-
-        if random_only and fixed_only:
-            raise ValueError("Cannot specify both random_only and fixed_only")
-
-        if random_only:
-            return getRandomFormulaStr(str(self.formula))
-        elif fixed_only:
-            return getFixedFormulaStr(str(self.formula))
-        else:
-            return self.formula
-
     def as_function(
         self,
         type: str = "deviance",
@@ -1536,8 +736,6 @@ class LmerResult(MerResultMixin):
         >>> devfun = result.as_function("deviance")
         >>> devfun(result.theta)  # Should equal result.deviance
         """
-        from mixedlm.estimation.reml import LMMOptimizer
-
         if type == "deviance":
             optimizer = LMMOptimizer(
                 self.matrices,
@@ -1554,175 +752,44 @@ class LmerResult(MerResultMixin):
         else:
             raise ValueError(f"Unknown type: {type}. Use 'deviance' or 'predict'.")
 
-    def confint(
+    def profile(
         self,
-        parm: str | list[str] | None = None,
+        which: str | list[str] | None = None,
+        n_points: int = 20,
         level: float = 0.95,
-        method: str = "Wald",
-        n_boot: int = 1000,
-        seed: int | None = None,
-    ) -> dict[str, tuple[float, float]]:
-        from mixedlm.inference.bootstrap import bootstrap_lmer
+        n_jobs: int = 1,
+    ) -> dict[str, ProfileResult]:
+        """Compute fixed-effect likelihood profiles for this fitted model."""
         from mixedlm.inference.profile import profile_lmer
 
-        level = _validate_confidence_level(level)
-        if parm is None:
-            parm = self.matrices.fixed_names
-        elif isinstance(parm, str):
-            parm = [parm]
+        return profile_lmer(self, which=which, n_points=n_points, level=level, n_jobs=n_jobs)
 
-        from mixedlm.utils.names import _check_unique_coefficient_names
+    def _bootstrap(self, n_boot: int, seed: RandomSeed) -> BootstrapResult:
+        from mixedlm.inference.bootstrap import bootstrap_lmer
 
-        _check_unique_coefficient_names(
-            self.matrices.fixed_names,
-            None if method == "boot" else parm,
-            alternative="Use tidy(conf_int=True) for intervals in coefficient order.",
-        )
+        return bootstrap_lmer(self, n_boot=n_boot, seed=seed)
 
-        if method == "Wald":
-            vcov = self.vcov()
-            alpha = 1 - level
-            z_crit = stats.norm.isf(alpha / 2)
-
-            result: dict[str, tuple[float, float]] = {}
-            for p in parm:
-                if p not in self.matrices.fixed_names:
-                    continue
-                idx = self.matrices.fixed_names.index(p)
-                se = np.sqrt(vcov[idx, idx])
-                lower = self.beta[idx] - z_crit * se
-                upper = self.beta[idx] + z_crit * se
-                result[p] = (float(lower), float(upper))
-            return result
-
-        elif method == "profile":
-            profiles = profile_lmer(self, which=parm, level=level, n_points=3)
-            return {p: (profiles[p].ci_lower, profiles[p].ci_upper) for p in parm if p in profiles}
-
-        elif method == "boot":
-            boot_result = bootstrap_lmer(self, n_boot=n_boot, seed=seed)
-            return boot_result.ci(level=level)
-
-        else:
-            raise ValueError(f"Unknown method: {method}. Use 'Wald', 'profile', or 'boot'.")
-
-    def simulate(
-        self,
-        nsim: int = 1,
-        seed: RandomSeed = None,
-        use_re: bool = True,
-        re_form: str | None = None,
-    ) -> NDArray[np.floating]:
-        """Simulate responses using an isolated or caller-provided random stream.
-
-        ``seed`` accepts an integer, ``RandomState``, ``Generator``, or ``None``.
-        Integer seeds preserve the existing draw sequence for the selected backend.
-        Reusing a stream continues it across calls without changing NumPy's global state.
-        """
-        validate_simulation_count(nsim)
-        rng = random_stream(seed)
-
-        n = self.matrices.n_obs
-        q = self.matrices.n_random
-
-        if nsim == 1:
-            return self._simulate_once(use_re, re_form, rng)
-
-        include_re = use_re and q > 0 and re_form not in ("~0", "NA")
-
-        if not include_re:
-            fixed_part = self.matrices.X @ self.beta + self.matrices.offset
-            result = rng.standard_normal((nsim, n)).T
-            result *= (self.sigma / np.sqrt(self.matrices.weights))[:, None]
-            result += fixed_part[:, None]
-            return result
-
-        try:
-            from mixedlm._rust import simulate_re_batch
-
-            return self._simulate_batch_rust(nsim, native_seed(seed, rng), simulate_re_batch, rng)
-        except ImportError:
-            pass
-
-        result = np.zeros((n, nsim), dtype=np.float64)
-        for i in range(nsim):
-            result[:, i] = self._simulate_once(use_re, re_form, rng)
-
-        return result
-
-    def _simulate_batch_rust(
-        self,
-        nsim: int,
-        seed: int | None,
-        simulate_re_batch: Any,
-        rng: Any | None = None,
-    ) -> NDArray[np.floating]:
-        rng = np.random if rng is None else rng
-        n = self.matrices.n_obs
-
-        fixed_part = self.matrices.X @ self.beta + self.matrices.offset
-
-        n_levels = [s.n_levels for s in self.matrices.random_structures]
-        n_terms = [s.n_terms for s in self.matrices.random_structures]
-        theta, correlated = simulation_parameters(self.theta, self.matrices.random_structures)
-
-        u_batch = simulate_re_batch(
-            theta,
-            self.sigma,
-            n_levels,
-            n_terms,
-            correlated,
-            nsim,
-            seed,
-        )
-
-        Z = self.matrices.Z
-
-        result = np.asarray(Z @ u_batch.T, dtype=np.float64)
-        result += fixed_part[:, None]
-        noise = rng.standard_normal((nsim, n)).T
-        noise *= (self.sigma / np.sqrt(self.matrices.weights))[:, None]
-        result += noise
-        return result
-
-    def _simulate_once(
-        self,
-        use_re: bool = True,
-        re_form: str | None = None,
-        rng: Any | None = None,
-    ) -> NDArray[np.floating]:
-        rng = np.random if rng is None else rng
-        n = self.matrices.n_obs
-        q = self.matrices.n_random
-
-        fixed_part = self.matrices.X @ self.beta + self.matrices.offset
-
-        if re_form == "~0" or re_form == "NA" or not use_re or q == 0:
-            random_part = np.zeros(n)
-        else:
-            u_new = simulate_random_effects(
-                self.theta, self.matrices.random_structures, self.sigma, rng=rng
-            )
-            random_part = self.matrices.Z @ u_new
-
-        noise = rng.standard_normal(n) * self.sigma / np.sqrt(self.matrices.weights)
-
-        return fixed_part + random_part + noise
+    def _simulate_from_eta(self, eta: NDArray[np.floating], rng: Any) -> NDArray[np.floating]:
+        """Add residual noise with variance ``sigma**2 / weights`` along the first axis."""
+        scale = self.sigma / np.sqrt(self.matrices.weights)
+        return eta + (rng.standard_normal(eta.shape[::-1]) * scale).T
 
     def _refit_from_matrices(
         self,
         matrices: ModelMatrices,
-        reml: bool,
+        reml: bool | None = None,
         **kwargs,
     ) -> LmerResult:
+        reml = self.REML if reml is None else reml
         optimizer = LMMOptimizer(
             matrices,
             REML=reml,
             verbose=0,
+            use_rust=None if self.control is None else self.control.use_rust,
         )
 
         start = kwargs.pop("start", self.theta)
-        kwargs.setdefault("method", "L-BFGS-B")
+        kwargs.setdefault("method", "auto")
         opt_result = optimizer.optimize(start=start, **kwargs)
 
         return LmerResult(
@@ -1740,8 +807,15 @@ class LmerResult(MerResultMixin):
             at_boundary=opt_result.at_boundary,
             message=opt_result.message,
             function_evals=opt_result.function_evals,
-            optimizer=kwargs["method"],
+            optimizer=opt_result.optimizer or kwargs["method"],
+            control=self.control,
         )
+
+    def _refit_control(self) -> LmerControl:
+        """Return the fitting controls for formula-based refits, or the defaults."""
+        from mixedlm.models.control import LmerControl
+
+        return self.control if self.control is not None else LmerControl()
 
     def refitML(self, **kwargs) -> LmerResult:
         """Refit the model using ML instead of REML.
@@ -1794,75 +868,21 @@ class LmerResult(MerResultMixin):
         matrices = self._clone_matrices_with_response_base(self.matrices.y)
         return self._refit_from_matrices(matrices, reml=False, **kwargs)
 
-    def refit(
-        self,
-        newresp: NDArray[np.floating] | None = None,
-        **kwargs,
-    ) -> LmerResult:
-        """Refit the model with a new response vector.
-
-        This method refits the model using the same formula and design matrices
-        but with a different response vector. This is useful for simulation
-        studies, bootstrap, and permutation tests.
-
-        Parameters
-        ----------
-        newresp : array-like, optional
-            New response values. Must have the same length as the original
-            response. If None, refits with the original response.
-        **kwargs
-            Additional arguments passed to the optimizer (start, method, maxiter).
-
-        Returns
-        -------
-        LmerResult
-            New fitted model result with the updated response.
-
-        Examples
-        --------
-        >>> result = lmer("y ~ x + (1|group)", data)
-        >>> # Refit with simulated response
-        >>> y_sim = result.simulate()
-        >>> result_sim = result.refit(newresp=y_sim)
-
-        See Also
-        --------
-        simulate : Simulate response from the fitted model.
-        refitML : Refit using ML instead of REML.
-        """
-        y_new = self._coerce_new_response(newresp)
-        matrices = self._clone_matrices_with_response_base(y_new)
-        return self._refit_from_matrices(matrices, reml=self.REML, **kwargs)
-
-    def npar(self) -> int:
-        """Get the number of parameters in the model.
-
-        Returns the total number of estimated parameters:
-        - Fixed effects (beta)
-        - Variance-covariance parameters (theta)
-        - Residual standard deviation (sigma)
-
-        Returns
-        -------
-        int
-            Total number of parameters.
-        """
-        return self._npar_count(include_sigma=True)
-
-    def drop1(self, data: pd.DataFrame, test: str = "Chisq"):
+    def drop1(self, data: pd.DataFrame, test: str = "Chisq", n_jobs: int = 1) -> Drop1Result:
         from mixedlm.inference.drop1 import drop1_lmer
 
-        return drop1_lmer(self, data, test=test)
+        return drop1_lmer(self, data, test=test, n_jobs=n_jobs)
 
     def allFit(
         self,
         data: pd.DataFrame,
         optimizers: list[str] | None = None,
         verbose: bool = False,
-    ):
+        n_jobs: int = 1,
+    ) -> AllFitResult:
         from mixedlm.inference.allfit import allfit_lmer
 
-        return allfit_lmer(self, data, optimizers=optimizers, verbose=verbose)
+        return allfit_lmer(self, data, optimizers=optimizers, n_jobs=n_jobs, verbose=verbose)
 
     def summary(self, ddf_method: str | None = "Satterthwaite") -> str:
         """Generate summary of linear mixed model fit.
@@ -1895,6 +915,8 @@ class LmerResult(MerResultMixin):
         se = np.sqrt(np.diag(vcov))
 
         if ddf_method is not None:
+            from scipy import stats
+
             from mixedlm.inference.ddf import kenward_roger_df, satterthwaite_df
 
             if ddf_method == "Satterthwaite":
@@ -1944,9 +966,6 @@ class LmerResult(MerResultMixin):
             lines.append("  consider simplifying the random-effects structure")
 
         return "\n".join(lines)
-
-    def __str__(self) -> str:
-        return self.summary()
 
     def __repr__(self) -> str:
         return f"LmerResult(formula={self.formula}, deviance={self.deviance:.4f})"

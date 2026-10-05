@@ -1,9 +1,6 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use pyo3::exceptions::PyValueError;
-use pyo3::prelude::*;
-
 const CACHE_SIZE: usize = 32;
 const MAX_CACHED_ORDER: usize = 1024;
 
@@ -217,55 +214,6 @@ fn implicit_ql(diagonal: &mut [f64], off_diagonal: &mut [f64], transformed: &mut
     }
 }
 
-#[pyfunction]
-pub fn gauss_hermite(n: usize) -> (Vec<f64>, Vec<f64>) {
-    let rule = gauss_hermite_nodes_weights(n);
-    (rule.nodes.clone(), rule.weights.clone())
-}
-
-#[pyfunction]
-pub fn adaptive_gauss_hermite_1d(
-    nodes: Vec<f64>,
-    weights: Vec<f64>,
-    mode: f64,
-    scale: f64,
-) -> PyResult<(Vec<f64>, Vec<f64>)> {
-    if nodes.len() != weights.len() {
-        return Err(PyValueError::new_err(
-            "nodes and weights must have the same length",
-        ));
-    }
-    if !mode.is_finite() {
-        return Err(PyValueError::new_err("mode must be finite"));
-    }
-    if !scale.is_finite() || scale <= 0.0 {
-        return Err(PyValueError::new_err(
-            "scale must be finite and greater than zero",
-        ));
-    }
-    if nodes.iter().any(|value| !value.is_finite()) {
-        return Err(PyValueError::new_err(
-            "nodes must contain only finite values",
-        ));
-    }
-    if weights.iter().any(|value| !value.is_finite()) {
-        return Err(PyValueError::new_err(
-            "weights must contain only finite values",
-        ));
-    }
-
-    let sqrt2 = std::f64::consts::SQRT_2;
-    let mut adapted_nodes = Vec::with_capacity(nodes.len());
-    let mut adapted_weights = Vec::with_capacity(weights.len());
-
-    for (node, weight) in nodes.into_iter().zip(weights) {
-        adapted_nodes.push(mode + sqrt2 * scale * node);
-        adapted_weights.push(weight * (node * node).exp());
-    }
-
-    Ok((adapted_nodes, adapted_weights))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -315,22 +263,54 @@ mod tests {
     }
 
     #[test]
-    fn high_order_rule_integrates_low_order_moments() {
-        let (nodes, weights) = compute_gauss_hermite(200);
-        let total_weight: f64 = weights.iter().sum();
-        let second_moment: f64 = nodes
-            .iter()
-            .zip(&weights)
-            .map(|(node, weight)| node * node * weight)
-            .sum();
-
-        assert!((total_weight - std::f64::consts::PI.sqrt()).abs() < 1e-13);
-        assert!((second_moment - std::f64::consts::PI.sqrt() / 2.0).abs() < 1e-13);
-        assert!(nodes.windows(2).all(|pair| pair[0] < pair[1]));
+    fn rules_are_sorted_symmetric_and_exact_for_low_degree_polynomials() {
+        let sqrt_pi = std::f64::consts::PI.sqrt();
+        assert!(compute_gauss_hermite(0).0.is_empty());
+        let (nodes, weights) = compute_gauss_hermite(1);
+        assert!(nodes == [0.0] && (weights[0] - sqrt_pi).abs() < 1e-15);
+        let (nodes, weights) = compute_gauss_hermite(2);
+        let node = std::f64::consts::FRAC_1_SQRT_2;
+        assert!((nodes[0] + node).abs() < 1e-15 && (nodes[1] - node).abs() < 1e-15);
         assert!(
             weights
                 .iter()
-                .all(|weight| weight.is_finite() && *weight >= 0.0)
+                .all(|weight| (weight - sqrt_pi / 2.0).abs() < 1e-15)
         );
+        // Orders on both sides of the switch from Newton iteration to the QL method.
+        for n in [5, 10, 50, 128, 129, 200] {
+            let (nodes, weights) = compute_gauss_hermite(n);
+            assert_eq!((nodes.len(), weights.len()), (n, n));
+            assert!(nodes.windows(2).all(|pair| pair[0] < pair[1]));
+            assert!(
+                weights
+                    .iter()
+                    .all(|weight| weight.is_finite() && *weight > 0.0)
+            );
+            for (index, (node, weight)) in nodes.iter().zip(&weights).enumerate() {
+                let (mirror, mirror_weight) = (nodes[n - 1 - index], weights[n - 1 - index]);
+                assert!(
+                    (node + mirror).abs() <= 1e-12 * node.abs().max(1.0),
+                    "{n}: {node}"
+                );
+                assert!(
+                    (weight - mirror_weight).abs() <= 1e-12 * weight,
+                    "{n}: {weight}"
+                );
+            }
+            // An n-point rule integrates x^(2k) exp(-x^2) exactly, to Gamma(k + 1/2).
+            let mut expected = sqrt_pi;
+            for k in 0..5 {
+                let moment: f64 = nodes
+                    .iter()
+                    .zip(&weights)
+                    .map(|(node, weight)| weight * node.powi(2 * k))
+                    .sum();
+                assert!(
+                    (moment - expected).abs() <= 1e-12 * expected,
+                    "{n}, {k}: {moment}"
+                );
+                expected *= f64::from(k) + 0.5;
+            }
+        }
     }
 }

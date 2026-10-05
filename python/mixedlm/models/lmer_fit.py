@@ -121,7 +121,8 @@ class LmerMod:
             at_boundary=opt_result.at_boundary,
             message=opt_result.message,
             function_evals=opt_result.function_evals,
-            optimizer=opt_method,
+            optimizer=opt_result.optimizer,
+            control=ctrl,
         )
 
         if ctrl.check_conv and not result.converged:

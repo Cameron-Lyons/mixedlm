@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import numpy as np
 import pandas as pd
 import pytest
 from mixedlm import glmer, lmer
 from mixedlm.families import Binomial
 from mixedlm.inference.drop1 import Drop1Result, _likelihood_ratio, drop1_glmer, drop1_lmer
+from mixedlm.models.control import lmerControl
+from mixedlm.models.lmer import LmerMod
 
 
 @pytest.fixture
@@ -147,6 +151,26 @@ class TestDrop1Lmer:
         assert result.aic == pytest.approx(expected.aic)
         assert result.lrt == pytest.approx(expected.lrt)
         assert result.p_value == pytest.approx(expected.p_value)
+
+    def test_reduced_models_reuse_the_fitted_control(self, multi_predictor_data):
+        # COBYQA counts one iteration per evaluation limit; "auto" adds a second stage.
+        control = lmerControl(optimizer="COBYQA", maxiter=2, check_conv=False)
+        model = replace(lmer("y ~ x1 + x2 + (1|group)", multi_predictor_data), control=control)
+        result = drop1_lmer(model, multi_predictor_data)
+
+        comparison = model.refitML()
+        assert comparison.control is control
+        for term, aic in zip(result.terms, result.aic, strict=True):
+            reduced = LmerMod(
+                f"y ~ {'x2' if term == 'x1' else 'x1'} + (1|group)",
+                multi_predictor_data,
+                REML=False,
+                control=control,
+            ).fit(start=comparison.theta)
+            assert reduced.n_iter <= 2
+            assert aic == reduced.AIC()
+        default = drop1_lmer(replace(model, control=None), multi_predictor_data)
+        assert result.aic != pytest.approx(default.aic, rel=1e-6)
 
     @pytest.mark.parametrize("test", ["invalid", "F", "LRT"])
     def test_invalid_test_raises(self, multi_predictor_data, test):

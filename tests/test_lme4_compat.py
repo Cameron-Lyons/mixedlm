@@ -26,14 +26,16 @@ from mixedlm import (
 )
 from mixedlm.inference.bootstrap import bootMer
 from mixedlm.inference.ddf import kenward_roger_df, pvalues_with_ddf, satterthwaite_df
+from mixedlm.models.control import lmerControl
+from mixedlm.utils.contrasts import contr_helmert, contr_poly, contr_sum, contr_treatment
 from mixedlm.utils.lme4_compat import (
-    ConvergenceInfo,
     DevComp,
     GHrule,
     VarCorr,
     checkConv,
     convergence_ok,
     devcomp,
+    dummy,
     factorize,
     fortify,
     isNested,
@@ -45,6 +47,8 @@ from mixedlm.utils.lme4_compat import (
     sigma,
     vcconv,
 )
+from numpy.testing import assert_allclose
+from scipy import stats
 
 
 class TestAccessorFunctions:
@@ -75,6 +79,7 @@ class TestAccessorFunctions:
 
     def test_sigma_glmer(self, glmer_model) -> None:
         s = sigma(glmer_model)
+        assert isinstance(s, float)
         assert s == 1.0
 
     def test_root_accessors_are_canonical_functions(self) -> None:
@@ -208,6 +213,17 @@ class TestPvalues:
         with pytest.raises(ValueError, match="Unknown method"):
             pvalues(lmer_model, method="invalid")
 
+    def test_glmm_pvalues_validate_the_method(self) -> None:
+        data = load_cbpp()
+        model = glmer("incidence / size ~ period + (1 | herd)", data, family=families.Binomial())
+        z = model.beta / np.sqrt(np.diag(model.vcov()))
+        expected = dict(zip(model.fixef(), 2 * stats.norm.sf(np.abs(z)), strict=True))
+
+        with pytest.raises(ValueError, match="Unknown method 'bogus'"):
+            pvalues(model, method="bogus")
+        for method in ("Satterthwaite", "KR", "normal"):
+            assert pvalues(model, method=method) == pytest.approx(expected)
+
 
 class TestLmList:
     def test_lmlist_basic(self) -> None:
@@ -245,31 +261,44 @@ class TestLmList:
         assert "pooled" not in results
 
 
+@pytest.fixture(scope="module")
+def converged_model():
+    return lmer(
+        "Reaction ~ Days + (Days | Subject)",
+        load_sleepstudy(),
+        control=lmerControl(optimizer="COBYQA"),
+    )
+
+
 class TestConvergenceFunctions:
-    @pytest.fixture
-    def converged_model(self):
-        sleepstudy = load_sleepstudy()
-        return lmer("Reaction ~ Days + (Days | Subject)", sleepstudy)
-
-    def test_checkConv_returns_info(self, converged_model) -> None:
+    def test_checkConv_reports_the_fit_metadata(self, converged_model) -> None:
         info = checkConv(converged_model)
-        assert isinstance(info, ConvergenceInfo)
-        assert hasattr(info, "converged")
-        assert hasattr(info, "gradient_norm")
-        assert hasattr(info, "messages")
-        assert hasattr(info, "is_singular")
 
-    def test_checkConv_grad_tol(self, converged_model) -> None:
-        info = checkConv(converged_model, grad_tol=1e-3)
-        assert isinstance(info.converged, bool)
+        assert info.converged and not info.is_singular
+        assert info.optimizer == converged_model.optimizer == "COBYQA"
+        assert info.iterations == converged_model.n_iter > 0
+        assert info.messages == []
+        assert convergence_ok(converged_model)
 
-    def test_convergence_ok_converged_model(self, converged_model) -> None:
-        ok = convergence_ok(converged_model)
-        assert isinstance(ok, bool)
+    def test_checkConv_reports_the_optimizer_message(self) -> None:
+        stalled = lmer(
+            "Reaction ~ Days + (Days | Subject)",
+            load_sleepstudy(),
+            control=lmerControl(optimizer="COBYQA", maxiter=2, check_conv=False),
+        )
+        info = checkConv(stalled)
 
-    def test_convergence_ok_strict_tol(self, converged_model) -> None:
-        ok = convergence_ok(converged_model, tol=1e-10)
-        assert isinstance(ok, bool)
+        assert not info.converged
+        assert info.iterations == 2
+        assert info.messages == [f"Optimizer did not report convergence: {stalled.message}"]
+        assert not convergence_ok(stalled)
+
+    def test_singularity_tolerance_controls_convergence_ok(self, converged_model) -> None:
+        info = checkConv(converged_model, tol=1e3)
+
+        assert info.is_singular
+        assert info.messages == ["Model is singular (boundary fit) at tolerance 1000.0"]
+        assert not convergence_ok(converged_model, tol=1e3)
 
 
 class TestFortify:
@@ -279,16 +308,10 @@ class TestFortify:
         fortified = fortify(result, sleepstudy)
 
         assert isinstance(fortified, pd.DataFrame)
-        assert ".fitted" in fortified.columns
-        assert ".resid" in fortified.columns
         assert len(fortified) == len(sleepstudy)
-
-    def test_fortify_fixed_column(self) -> None:
-        sleepstudy = load_sleepstudy()
-        result = lmer("Reaction ~ Days + (Days | Subject)", sleepstudy)
-        fortified = fortify(result, sleepstudy)
-
-        assert ".fixed" in fortified.columns
+        assert_allclose(fortified[".fitted"], result.fitted())
+        assert_allclose(fortified[".resid"], result.residuals())
+        assert_allclose(fortified[".fixed"], result.matrices.X @ result.beta)
 
     def test_fortify_fitted_plus_resid(self) -> None:
         sleepstudy = load_sleepstudy()
@@ -298,36 +321,121 @@ class TestFortify:
         reconstructed = fortified[".fitted"] + fortified[".resid"]
         assert np.allclose(reconstructed, sleepstudy["Reaction"], rtol=1e-10)
 
+    @pytest.mark.parametrize("na_action", ["omit", "exclude"])
+    def test_fortify_aligns_rows_dropped_for_missing_values(self, na_action) -> None:
+        data = load_sleepstudy()
+        data.loc[[0, 90], "Reaction"] = np.nan
+        result = lmer("Reaction ~ Days + (Days | Subject)", data, na_action=na_action)
+        fortified = fortify(result, data)
+
+        assert len(fortified) == len(data)
+        dropped = data["Reaction"].isna()
+        assert fortified.loc[dropped, [".fitted", ".resid", ".fixed"]].isna().all().all()
+        kept = fortified[~dropped]
+        assert_allclose(kept["Reaction"] - kept[".fitted"], kept[".resid"], atol=1e-9)
+        assert_allclose(kept[".fitted"], result.fitted(na_expand=False))
+        assert len(fortify(result)) == result.nobs()
+
+    def test_fortify_rejects_data_of_another_length(self) -> None:
+        data = load_sleepstudy()
+        result = lmer("Reaction ~ Days + (1 | Subject)", data)
+
+        with pytest.raises(ValueError, match="data has 179 rows"):
+            fortify(result, data.iloc[1:])
+
+    def test_fortify_population_fit_excludes_random_effects(self) -> None:
+        data = load_sleepstudy()
+        offset = np.linspace(-1.0, 1.0, len(data))
+        result = lmer("Reaction ~ Days + (Days | Subject)", data, offset=offset)
+        conditional = fortify(result, data)
+        population = fortify(result, data, include_re=False)
+        fixed = result.matrices.X @ result.beta + offset
+
+        assert_allclose(population[".fitted"], fixed)
+        assert_allclose(conditional[".fixed"], fixed)
+        assert not np.allclose(conditional[".fitted"], population[".fitted"])
+
+    def test_fortify_glmm_uses_the_response_scale(self) -> None:
+        data = load_cbpp()
+        result = glmer("incidence / size ~ period + (1 | herd)", data, family=families.Binomial())
+        conditional = fortify(result, data)
+        population = fortify(result, data, include_re=False)
+
+        assert_allclose(conditional[".fitted"], result.fitted(type="response"))
+        assert_allclose(conditional[".mu"], conditional[".fitted"])
+        assert_allclose(population[".fitted"], result.family.link.inverse(conditional[".fixed"]))
+        assert_allclose(population[".mu"], conditional[".mu"])
+
 
 class TestDevcomp:
-    def test_devcomp_basic(self) -> None:
-        sleepstudy = load_sleepstudy()
-        result = lmer("Reaction ~ Days + (1 | Subject)", sleepstudy)
+    def test_devcomp_matches_getme_for_lmm(self) -> None:
+        result = lmer("Reaction ~ Days + (1 | Subject)", load_sleepstudy())
         dc = devcomp(result)
+        expected = result.getME("devcomp")
 
         assert isinstance(dc, DevComp)
-        assert hasattr(dc, "cmp")
-        assert hasattr(dc, "dims")
+        assert dc.cmp.keys() == expected["cmp"].keys()
+        assert_allclose(list(dc.cmp.values()), list(expected["cmp"].values()), equal_nan=True)
+        assert dc.dims == expected["dims"]
+        assert (dc.dims["n"], dc.dims["p"], dc.dims["q"], dc.dims["ngrps"]) == (180, 2, 18, 1)
+        assert dc.cmp["REML"] == result.deviance
+        assert "pwrss" in str(dc)
 
-    def test_devcomp_cmp_keys(self) -> None:
-        sleepstudy = load_sleepstudy()
-        result = lmer("Reaction ~ Days + (1 | Subject)", sleepstudy)
-        dc = devcomp(result)
+    def test_devcomp_rejects_nonlinear_models(self) -> None:
+        from tests.test_nlmer_methods import fit_nlme
 
-        assert "dev" in dc.cmp
-        assert "logLik" in dc.cmp
-        assert "wrss" in dc.cmp
+        with pytest.raises(TypeError, match="devcomp\\(\\) is not available for NlmerResult"):
+            devcomp(fit_nlme())
 
-    def test_devcomp_dims_keys(self) -> None:
-        sleepstudy = load_sleepstudy()
-        result = lmer("Reaction ~ Days + (1 | Subject)", sleepstudy)
-        dc = devcomp(result)
 
-        assert "n" in dc.dims
-        assert "p" in dc.dims
-        assert "q" in dc.dims
-        assert dc.dims["n"] == 180
-        assert dc.dims["p"] == 2
+class TestDummy:
+    X = np.array(["b", "c", "a", "b", "c", "a", "c"])
+    CODES = np.array([1, 2, 0, 1, 2, 0, 2])
+
+    @pytest.mark.parametrize(
+        ("contrasts", "matrix"),
+        [
+            ("treatment", contr_treatment(3)),
+            ("sum", contr_sum(3)),
+            ("helmert", contr_helmert(3)),
+            ("poly", contr_poly(3)),
+        ],
+    )
+    def test_rows_match_the_contrast_matrix(self, contrasts, matrix) -> None:
+        assert_allclose(dummy(self.X, contrasts=contrasts), matrix[self.CODES])
+
+    def test_poly_contrasts_are_orthonormal(self) -> None:
+        coded = dummy(["low", "mid", "high"], contrasts="poly")
+        # Levels sort as high < low < mid; each row codes its level.
+        expected = contr_poly(3)[[1, 2, 0]]
+
+        assert_allclose(coded, expected)
+        assert_allclose(contr_poly(3).T @ contr_poly(3), np.eye(2), atol=1e-12)
+
+    def test_ordered_categorical_keeps_level_order(self) -> None:
+        levels = ["low", "mid", "high"]
+        x = pd.Categorical(["high", "low", "mid", "low"], categories=levels, ordered=True)
+
+        assert_allclose(dummy(x, contrasts="poly"), contr_poly(3)[[2, 0, 1, 0]])
+        assert_allclose(dummy(pd.Series(x), base="mid"), [[0, 1], [1, 0], [0, 0], [1, 0]])
+
+    @pytest.mark.parametrize("base", ["b", 1, -2])
+    def test_base_level_by_name_or_index(self, base) -> None:
+        expected = np.column_stack([self.X == "a", self.X == "c"]).astype(float)
+
+        assert_allclose(dummy(self.X, base=base), expected)
+
+    @pytest.mark.parametrize(
+        ("base", "message"),
+        [(3, "base index 3 is out of range"), (-4, "base index -4"), ("z", "'z' is not a level")],
+    )
+    def test_invalid_base_raises(self, base, message) -> None:
+        with pytest.raises(ValueError, match=message):
+            dummy(self.X, base=base)
+
+    def test_unknown_contrast_raises(self) -> None:
+        with pytest.raises(ValueError, match="Unknown contrast type"):
+            dummy(self.X, contrasts="bogus")
 
 
 class TestScaleVcov:

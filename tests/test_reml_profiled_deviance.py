@@ -12,7 +12,6 @@ from mixedlm.estimation.reml import (
     _build_lambda,
     _profiled_deviance_core,
     profiled_deviance,
-    profiled_deviance_fast,
 )
 from mixedlm.formula.parser import parse_formula
 from mixedlm.matrices.design import ModelMatrices, build_model_matrices
@@ -104,7 +103,8 @@ def test_profiled_core_matches_direct_marginal_likelihood(
     reml: bool, sparse_profile: bool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(
-        "mixedlm.estimation.reml._SPARSE_PROFILE_MIN_RANDOM", 0 if sparse_profile else 256
+        "mixedlm.models.shared_utils._SPARSE_PROJECTION_MIN_RANDOM",
+        0 if sparse_profile else np.inf,
     )
     matrices = _weighted_random_slope_matrices()
     theta = np.array([0.8, 0.15, 0.45])
@@ -124,6 +124,16 @@ def test_profiled_core_matches_direct_marginal_likelihood(
     assert_allclose(result.fixed_information, expected["fixed_information"], atol=1e-12)
 
 
+def test_profiled_reml_is_a_deprecated_reml_deviance_alias() -> None:
+    from mixedlm.estimation import profiled_reml
+
+    matrices = _weighted_random_slope_matrices()
+    theta = np.array([0.8, 0.15, 0.45])
+    with pytest.warns(DeprecationWarning, match="profiled_deviance"):
+        deviance = profiled_reml(theta, matrices)
+    assert deviance == profiled_deviance(theta, matrices, REML=True)
+
+
 @pytest.mark.parametrize("reml", [False, True])
 @pytest.mark.parametrize("cov_type", ["us", "cs", "ar1", "diagonal"])
 @pytest.mark.parametrize("sparse_profile", [False, True])
@@ -131,7 +141,8 @@ def test_cached_optimizer_matches_direct_likelihood(
     reml: bool, cov_type: str, sparse_profile: bool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(
-        "mixedlm.estimation.reml._SPARSE_PROFILE_MIN_RANDOM", 0 if sparse_profile else 256
+        "mixedlm.models.shared_utils._SPARSE_PROJECTION_MIN_RANDOM",
+        0 if sparse_profile else np.inf,
     )
     matrices = _weighted_random_slope_matrices()
     structure = matrices.random_structures[0]
@@ -149,10 +160,10 @@ def test_cached_optimizer_matches_direct_likelihood(
         theta = np.array(values)
         expected = _direct_profiled_likelihood(theta, matrices, reml)
         assert optimizer.objective(theta) == pytest.approx(expected["deviance"], abs=1e-10)
-        beta, sigma, u = optimizer._extract_estimates(theta)
-        assert_allclose(beta, expected["beta"], atol=1e-12)
-        assert sigma == pytest.approx(expected["sigma"], abs=1e-12)
-        assert_allclose(u, expected["u"], atol=1e-12)
+        estimates = optimizer._final_evaluation(theta)
+        assert_allclose(estimates.beta, expected["beta"], atol=1e-12)
+        assert estimates.sigma == pytest.approx(expected["sigma"], abs=1e-12)
+        assert_allclose(estimates.u, expected["u"], atol=1e-12)
 
 
 def test_optimizer_reuses_weighted_products(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -171,7 +182,7 @@ def test_optimizer_reuses_weighted_products(monkeypatch: pytest.MonkeyPatch) -> 
     assert optimizer.objective(theta) != pytest.approx(expected)
     theta[0] = 0.8
     assert optimizer.objective(theta) == expected
-    optimizer._extract_estimates(theta)
+    optimizer._final_evaluation(theta)
 
 
 def test_new_optimizer_uses_updated_response_and_weights() -> None:
@@ -215,7 +226,7 @@ def test_rust_profiled_deviance_matches_direct_marginal_likelihood(reml: bool) -
     theta = np.array([0.8, 0.15, 0.45])
     expected = _direct_profiled_likelihood(theta, matrices, reml)
 
-    deviance = profiled_deviance_fast(theta, matrices, REML=reml, use_rust=True)
+    deviance = LMMOptimizer(matrices, REML=reml, use_rust=True).objective(theta)
 
     assert deviance == pytest.approx(expected["deviance"], abs=1e-10)
 

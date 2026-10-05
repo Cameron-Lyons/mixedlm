@@ -52,7 +52,7 @@ def test_benchmark_joint_nonlinear_fit(benchmark, native):
 @pytest.mark.benchmark(group="python-nonlinear-likelihood")
 @pytest.mark.parametrize("n_groups,n_jobs", [(4, 1), (4, 2), (40, 1), (40, 2)])
 def test_benchmark_python_nonlinear_likelihood(benchmark, n_groups, n_jobs):
-    from mixedlm.estimation.nlmm import _nlmm_deviance_rust, nlmm_deviance
+    from mixedlm.estimation.nlmm import _nlmm_deviance_rust_with_status, nlmm_deviance
     from mixedlm.nlme.models import SSasymp
 
     rng = np.random.default_rng(765)
@@ -67,7 +67,7 @@ def test_benchmark_python_nonlinear_likelihood(benchmark, n_groups, n_jobs):
     theta = np.array([0.7])
     b = np.zeros((n_groups, 1))
     args = (theta, y, x, groups, model, phi, b, [0], 0.3)
-    expected = _nlmm_deviance_rust(*args, weights)
+    expected = _nlmm_deviance_rust_with_status(*args, weights)[:4]
     actual = benchmark(nlmm_deviance, *args, weights=weights, n_jobs=n_jobs)
     for value, reference in zip(actual, expected, strict=True):
         np.testing.assert_allclose(value, reference, rtol=1e-8, atol=1e-8)
@@ -126,56 +126,6 @@ def test_benchmark_diagonal_lmm_likelihood(benchmark, n_groups):
     assert np.isfinite(actual)
 
 
-@pytest.mark.benchmark(group="native-sparse-inputs")
-@pytest.mark.parametrize("n", [37, 8193, 65539])
-@pytest.mark.parametrize("noncanonical", [False, True])
-def test_benchmark_native_sparse_input_crossproducts(benchmark, n, noncanonical):
-    from mixedlm import _rust
-
-    from tests.test_native_weighted_crossproducts import _noncanonical
-
-    rows = np.arange(n)
-    groups = rows % 16
-    values = 1.0 + np.sin(rows) / 5
-    weights = np.linspace(0.5, 2, n)
-    z = sparse.coo_matrix((values, (rows, groups)), shape=(n, 16)).tocsc()
-    if noncanonical:
-        z = _noncanonical(z)
-    expected = np.diag(np.bincount(groups, weights=weights * values**2, minlength=16))
-    actual = benchmark(
-        _rust.compute_ztwz,
-        z.data,
-        z.indices.astype(np.int64),
-        z.indptr.astype(np.int64),
-        z.shape,
-        weights,
-    ).reshape(16, 16)
-    np.testing.assert_allclose(actual, expected, rtol=2e-13, atol=1e-12)
-
-
-@pytest.mark.benchmark(group="native-partially-dense-crossproducts")
-@pytest.mark.parametrize("columns", [16, 32, 64])
-@pytest.mark.parametrize("density", [0.3, 0.6, 0.9, 0.99, 1.0])
-def test_benchmark_partially_dense_crossproducts(benchmark, columns, density):
-    from mixedlm import _rust
-
-    rng = np.random.default_rng(431)
-    dense = rng.normal(size=(96, columns))
-    dense[rng.random(dense.shape) > density] = 0.0
-    z = sparse.csc_matrix(dense)
-    weights = np.geomspace(0.2, 2.0, dense.shape[0])
-    expected = dense.T @ (weights[:, None] * dense)
-    actual = benchmark(
-        _rust.compute_ztwz,
-        z.data,
-        z.indices.astype(np.int64),
-        z.indptr.astype(np.int64),
-        z.shape,
-        weights,
-    ).reshape(columns, columns)
-    np.testing.assert_allclose(actual, expected, rtol=2e-12, atol=2e-12)
-
-
 @pytest.mark.benchmark(group="native-glmm-crossproducts")
 @pytest.mark.parametrize(
     ("layout", "n_obs", "n_groups"),
@@ -187,17 +137,24 @@ def test_benchmark_partially_dense_crossproducts(benchmark, columns, density):
         ("intercept", 6000, 300),
         ("slopes", 6000, 150),
         ("crossed", 6000, 150),
+        ("small_nested", 400, 100),
+        ("balanced_crossed", 10000, 200),
     ],
 )
 def test_benchmark_native_glmm_crossproducts(benchmark, layout, n_obs, n_groups):
-    from mixedlm.estimation.laplace import _laplace_deviance_rust, laplace_deviance
+    from mixedlm.estimation.laplace import (
+        _evaluate_native_problem,
+        _prepare_native_glmm,
+        laplace_deviance,
+    )
     from mixedlm.families import Poisson
 
     matrices, theta = _poisson_glmm_layout(layout, n_obs, n_groups)
     family = Poisson()
     expected = laplace_deviance(theta, matrices, family)
-    actual = benchmark(_laplace_deviance_rust, theta, matrices, family)
-    for left, right in zip(actual, expected, strict=True):
+    problem = _prepare_native_glmm(matrices, family)
+    actual = benchmark(_evaluate_native_problem, problem, theta, 1)
+    for left, right in zip(actual[:3], expected, strict=True):
         np.testing.assert_allclose(left, right, rtol=1e-7, atol=1e-7)
 
 
@@ -238,13 +195,18 @@ def _poisson_glmm_layout(layout, n_obs, n_groups):
             "x": x,
             "g": groups,
             "h": (rows * 7) % (n_groups // 2),
+            "k": (rows // n_groups) % (n_groups // 4),
+            "s": groups % 10,
         }
     )
+    # Fewer than 128 nested columns, or every g crossed with every k, factor densely.
     formula = {
         "intercept": "y ~ x + (1 | g)",
         "scalar_slope": "y ~ x + (0 + x | g)",
         "slopes": "y ~ x + (x | g)",
         "crossed": "y ~ x + (1 | g) + (1 | h)",
+        "small_nested": "y ~ x + (1 | s/g)",
+        "balanced_crossed": "y ~ x + (1 | g) + (1 | k)",
     }[layout]
     theta = np.array(
         {
@@ -252,6 +214,8 @@ def _poisson_glmm_layout(layout, n_obs, n_groups):
             "scalar_slope": [0.5],
             "slopes": [0.5, 0.1, 0.3],
             "crossed": [0.5, 0.35],
+            "small_nested": [0.5, 0.35],
+            "balanced_crossed": [0.5, 0.35],
         }[layout]
     )
     matrices = build_model_matrices(
@@ -263,7 +227,11 @@ def _poisson_glmm_layout(layout, n_obs, n_groups):
 @pytest.mark.benchmark(group="native-glmm-crossproducts")
 @pytest.mark.parametrize("n_terms", [8, 32])
 def test_benchmark_native_glmm_dense_crossproducts(benchmark, n_terms):
-    from mixedlm.estimation.laplace import _laplace_deviance_rust, laplace_deviance
+    from mixedlm.estimation.laplace import (
+        _evaluate_native_problem,
+        _prepare_native_glmm,
+        laplace_deviance,
+    )
     from mixedlm.families import Poisson
 
     rng = np.random.default_rng(23)
@@ -278,8 +246,9 @@ def test_benchmark_native_glmm_dense_crossproducts(benchmark, n_terms):
     theta = np.full(n_terms, 0.5)
     family = Poisson()
     expected = laplace_deviance(theta, matrices, family)
-    actual = benchmark(_laplace_deviance_rust, theta, matrices, family)
-    for left, right in zip(actual, expected, strict=True):
+    problem = _prepare_native_glmm(matrices, family)
+    actual = benchmark(_evaluate_native_problem, problem, theta, 1)
+    for left, right in zip(actual[:3], expected, strict=True):
         np.testing.assert_allclose(left, right, rtol=1e-7, atol=1e-7)
 
 
@@ -614,6 +583,85 @@ def test_benchmark_repeated_prediction_uncertainty(benchmark, large_crossed_spar
     actual = benchmark(result.predict, newdata, se_fit=True)
 
     np.testing.assert_allclose(actual.se_fit, expected.se_fit)
+
+
+def _crossed_result(n_obs, n_group1, n_group2, theta):
+    from mixedlm.models.lmer import LmerResult
+
+    rng = np.random.default_rng(37)
+    data = pd.DataFrame(
+        {
+            "y": rng.normal(size=n_obs),
+            "x": rng.normal(size=n_obs),
+            "g1": rng.integers(0, n_group1, n_obs),
+            "g2": rng.integers(0, n_group2, n_obs),
+        }
+    )
+    slopes = "x" if len(theta) == 4 else "1"
+    formula = parse_formula(f"y ~ x + ({slopes} | g1) + (1 | g2)")
+    matrices = build_model_matrices(formula, data)
+    return LmerResult(
+        formula=formula,
+        matrices=matrices,
+        theta=np.asarray(theta),
+        beta=np.zeros(matrices.n_fixed),
+        sigma=1.0,
+        u=np.zeros(matrices.n_random),
+        deviance=0.0,
+        REML=True,
+        converged=True,
+        n_iter=0,
+    )
+
+
+@pytest.mark.benchmark(group="random-effect-factor")
+def test_benchmark_first_vcov_large_crossed(benchmark):
+    from dataclasses import replace
+
+    # About 4000 crossed random effects: the precision is factored sparsely.
+    result = _crossed_result(20_000, 2_500, 1_500, [0.9, 0.5])
+    expected = replace(result).vcov()
+
+    actual = benchmark(lambda: replace(result).vcov())
+
+    np.testing.assert_allclose(actual, expected, rtol=1e-12)
+
+
+@pytest.mark.benchmark(group="leverage")
+def test_benchmark_hatvalues_crossed(benchmark):
+    from dataclasses import replace
+
+    from mixedlm.estimation.reml import _build_lambda
+
+    result = _crossed_result(10_000, 200, 100, [0.9, 0.2, 0.3, 0.5])
+    matrices = result.matrices
+
+    actual = benchmark(lambda: replace(result).hatvalues())
+
+    # Leverages of sampled rows from the joint penalized system [X, Z Lambda].
+    joint = sparse.hstack(
+        [matrices.X, matrices.Z @ _build_lambda(result.theta, matrices.random_structures)]
+    ).tocsr()
+    penalty = np.diag(np.r_[np.zeros(matrices.n_fixed), np.ones(matrices.n_random)])
+    rows = np.random.default_rng(5).choice(matrices.n_obs, 100, replace=False)
+    sampled = joint[rows].toarray()
+    expected = np.einsum(
+        "ij,ji->i", sampled, np.linalg.solve((joint.T @ joint).toarray() + penalty, sampled.T)
+    )
+    np.testing.assert_allclose(actual[rows], expected, rtol=1e-10)
+
+
+@pytest.mark.benchmark(group="lmm-profile")
+def test_benchmark_profile_confint(benchmark, sleepstudy_data):
+    result = lmer("Reaction ~ Days + (Days | Subject)", sleepstudy_data, REML=False)
+    wald = result.confint(method="Wald")
+
+    intervals = benchmark(result.confint, method="profile")
+
+    for name, (lower, upper) in intervals.items():
+        assert lower < result.fixef()[name] < upper
+        # Likelihood intervals of a Gaussian LMM are close to Wald intervals.
+        np.testing.assert_allclose([lower, upper], wald[name], rtol=0.05)
 
 
 @pytest.mark.benchmark(group="sparse-design")
@@ -1587,7 +1635,11 @@ def test_benchmark_wide_lmm_summary(benchmark, method):
 @pytest.mark.parametrize("n_groups", [10, 100])
 @pytest.mark.parametrize("n_agq", [5, 15])
 def test_benchmark_group_quadrature(benchmark, backend, n_groups, n_agq):
-    from mixedlm.estimation.laplace import adaptive_gh_deviance, adaptive_gh_deviance_fast
+    from mixedlm.estimation.laplace import (
+        _evaluate_native_problem,
+        _prepare_native_glmm,
+        adaptive_gh_deviance,
+    )
     from mixedlm.families import Poisson
 
     if backend == "native":
@@ -1599,22 +1651,22 @@ def test_benchmark_group_quadrature(benchmark, backend, n_groups, n_agq):
     eta = 0.3 + 0.2 * x + rng.normal(0, 0.3, n_groups)[groups]
     data = pd.DataFrame({"y": rng.poisson(np.exp(eta)), "x": x, "g": groups})
     matrices = build_model_matrices(parse_formula("y ~ x + (1 | g)"), data)
-    evaluate = adaptive_gh_deviance if backend == "python" else adaptive_gh_deviance_fast
-    result = benchmark(evaluate, np.array([0.7]), matrices, Poisson(), nAGQ=n_agq)
+    theta = np.array([0.7])
+    if backend == "python":
+        result = benchmark(adaptive_gh_deviance, theta, matrices, Poisson(), nAGQ=n_agq)
+    else:
+        problem = _prepare_native_glmm(matrices, Poisson())
+        result = benchmark(_evaluate_native_problem, problem, theta, n_agq)
     assert np.isfinite(result[0])
 
 
 @pytest.mark.benchmark(group="quadrature-rule-reuse")
-@pytest.mark.parametrize("backend", ["python", "native"])
 @pytest.mark.parametrize("order", [9, 25, 100, 400])
-def test_benchmark_repeated_quadrature_rule(benchmark, backend, order):
+def test_benchmark_repeated_quadrature_rule(benchmark, order):
     from mixedlm.estimation.laplace import _get_gh_nodes_weights
 
-    evaluate = _get_gh_nodes_weights
-    if backend == "native":
-        evaluate = pytest.importorskip("mixedlm._rust").gauss_hermite
-    evaluate(order)
-    nodes, weights = benchmark(evaluate, order)
+    _get_gh_nodes_weights(order)
+    nodes, weights = benchmark(_get_gh_nodes_weights, order)
     assert len(nodes) == len(weights) == order
     assert np.sum(weights) == pytest.approx(np.sqrt(np.pi))
 
@@ -1622,7 +1674,7 @@ def test_benchmark_repeated_quadrature_rule(benchmark, backend, order):
 @pytest.mark.benchmark(group="native-poisson-initialization")
 @pytest.mark.parametrize("mean", [10, 50, 100, 1000])
 def test_benchmark_poisson_starting_values(benchmark, mean):
-    from mixedlm.estimation.laplace import laplace_deviance_fast
+    from mixedlm.estimation.laplace import _native_deviance_with_status
     from mixedlm.families import Poisson
 
     pytest.importorskip("mixedlm._rust")
@@ -1630,7 +1682,10 @@ def test_benchmark_poisson_starting_values(benchmark, mean):
     counts = np.tile([mean - 2, mean, mean + 2, mean], len(group) // 4)
     data = pd.DataFrame({"y": counts, "g": group})
     matrices = build_model_matrices(parse_formula("y ~ 1 + (1 | g)"), data)
-    deviance, beta, _ = benchmark(laplace_deviance_fast, np.array([0.5]), matrices, Poisson())
+    deviance, beta, _, converged = benchmark(
+        _native_deviance_with_status, np.array([0.5]), matrices, Poisson(), 1
+    )
+    assert converged
     assert np.isfinite(deviance)
     assert beta[0] == pytest.approx(np.log(mean), abs=1e-7)
 
@@ -1639,7 +1694,11 @@ def test_benchmark_poisson_starting_values(benchmark, mean):
 @pytest.mark.parametrize("n_groups", [20, 150])
 @pytest.mark.parametrize("layout", ["intercept", "correlated", "diagonal", "mixed"])
 def test_benchmark_native_glmm_covariance(benchmark, n_groups, layout):
-    from mixedlm.estimation.laplace import _laplace_deviance_rust, laplace_deviance
+    from mixedlm.estimation.laplace import (
+        _evaluate_native_problem,
+        _prepare_native_glmm,
+        laplace_deviance,
+    )
     from mixedlm.families import Poisson
 
     rng = np.random.default_rng(913)
@@ -1683,15 +1742,20 @@ def test_benchmark_native_glmm_covariance(benchmark, n_groups, layout):
     theta = np.asarray(parameters)
     family = Poisson()
     expected = laplace_deviance(theta, matrices, family)
-    actual = benchmark(_laplace_deviance_rust, theta, matrices, family)
-    for left, right in zip(actual, expected, strict=True):
+    problem = _prepare_native_glmm(matrices, family)
+    actual = benchmark(_evaluate_native_problem, problem, theta, 1)
+    for left, right in zip(actual[:3], expected, strict=True):
         np.testing.assert_allclose(left, right, rtol=2e-7, atol=2e-7)
 
 
 @pytest.mark.benchmark(group="native-glmm-covariance")
 @pytest.mark.parametrize("n_terms", [16, 64])
 def test_benchmark_native_glmm_wide_covariance(benchmark, n_terms):
-    from mixedlm.estimation.laplace import _laplace_deviance_rust, laplace_deviance
+    from mixedlm.estimation.laplace import (
+        _evaluate_native_problem,
+        _prepare_native_glmm,
+        laplace_deviance,
+    )
     from mixedlm.families import Poisson
 
     rng = np.random.default_rng(342)
@@ -1707,15 +1771,16 @@ def test_benchmark_native_glmm_wide_covariance(benchmark, n_terms):
     theta = lower[np.tril_indices(n_terms)]
     family = Poisson()
     expected = laplace_deviance(theta, matrices, family)
-    actual = benchmark(_laplace_deviance_rust, theta, matrices, family)
-    for left, right in zip(actual, expected, strict=True):
+    problem = _prepare_native_glmm(matrices, family)
+    actual = benchmark(_evaluate_native_problem, problem, theta, 1)
+    for left, right in zip(actual[:3], expected, strict=True):
         np.testing.assert_allclose(left, right, rtol=2e-7, atol=2e-7)
 
 
 @pytest.mark.benchmark(group="native-glmm-solves")
 @pytest.mark.parametrize("n_fixed", [2, 16, 32])
 def test_benchmark_native_glmm_fixed_columns(benchmark, n_fixed):
-    from mixedlm.estimation.laplace import _laplace_deviance_rust
+    from mixedlm.estimation.laplace import _evaluate_native_problem, _prepare_native_glmm
     from mixedlm.families import Poisson
 
     rng = np.random.default_rng(892)
@@ -1730,8 +1795,12 @@ def test_benchmark_native_glmm_fixed_columns(benchmark, n_fixed):
     formula = parse_formula("y ~ " + " + ".join(predictors) + " + (1 | g)")
     matrices = build_model_matrices(formula, data, weights=np.linspace(0.4, 2.0, n), offset=offset)
 
-    deviance, beta, random = benchmark(_laplace_deviance_rust, np.array([0.5]), matrices, Poisson())
+    problem = _prepare_native_glmm(matrices, Poisson())
+    deviance, beta, random, converged = benchmark(
+        _evaluate_native_problem, problem, np.array([0.5]), 1
+    )
 
+    assert converged
     assert np.isfinite(deviance)
     assert beta.shape == (n_fixed,)
     assert random.shape == (300,)
@@ -1765,7 +1834,7 @@ def test_benchmark_native_sparse_glmm(benchmark, groups):
     expected = np.dot(weights * residual, residual) + np.dot(spherical, spherical)
     expected += np.log(diagonal).sum()
     actual = benchmark(
-        _rust.laplace_deviance,
+        _rust.glmm_deviance,
         y,
         x,
         z.data,
@@ -1780,7 +1849,9 @@ def test_benchmark_native_sparse_glmm(benchmark, groups):
         [True],
         "gaussian",
         "identity",
+        1,
     )
+    assert actual[3]
     np.testing.assert_allclose(actual[0], expected, rtol=1e-11, atol=1e-9)
     np.testing.assert_allclose(actual[1], beta, rtol=1e-11, atol=1e-11)
     np.testing.assert_allclose(actual[2], theta * spherical, rtol=1e-11, atol=1e-11)
@@ -1884,12 +1955,8 @@ def test_benchmark_lmm_level_covariance(benchmark, layout, overlap, operation):
         prepared = LMMOptimizer(matrices, use_rust=True)
         actual = benchmark(prepared.objective, theta)
     else:
-        actual, gradient = benchmark(
-            _rust.profiled_deviance_with_gradient,
-            theta=theta,
-            y=matrices.y,
-            **native_arguments(matrices),
-        )
+        response = _rust.LmmDesign(**native_arguments(matrices)).with_response(matrices.y)
+        actual, gradient = benchmark(response.deviance_with_gradient, theta)
         assert np.all(np.isfinite(gradient))
     np.testing.assert_allclose(actual, expected, rtol=1e-12, atol=1e-11)
 
@@ -1910,12 +1977,8 @@ def test_benchmark_lmm_large_variance(benchmark, theta_value, operation):
         prepared = LMMOptimizer(matrices, use_rust=True)
         actual = benchmark(prepared.objective, theta)
     else:
-        actual, gradient = benchmark(
-            _rust.profiled_deviance_with_gradient,
-            theta=theta,
-            y=matrices.y,
-            **native_arguments(matrices),
-        )
+        response = _rust.LmmDesign(**native_arguments(matrices)).with_response(matrices.y)
+        actual, gradient = benchmark(response.deviance_with_gradient, theta)
         assert np.all(np.isfinite(gradient))
     np.testing.assert_allclose(actual, expected, rtol=0, atol=2e-5)
 
@@ -1937,12 +2000,8 @@ def test_benchmark_lmm_covariance_transforms(benchmark, width, independent, oper
         prepared = LMMOptimizer(matrices, use_rust=True)
         actual = benchmark(prepared.objective, theta)
     else:
-        actual, gradient = benchmark(
-            _rust.profiled_deviance_with_gradient,
-            theta=theta,
-            y=matrices.y,
-            **native_arguments(matrices),
-        )
+        response = _rust.LmmDesign(**native_arguments(matrices)).with_response(matrices.y)
+        actual, gradient = benchmark(response.deviance_with_gradient, theta)
         assert np.all(np.isfinite(gradient))
     np.testing.assert_allclose(actual, expected, rtol=2e-12, atol=2e-11)
 
@@ -1963,7 +2022,7 @@ def test_benchmark_prepared_lmm_gradients(benchmark, layout, size, workers):
     arguments = native_arguments(matrices)
     response = _rust.LmmDesign(**arguments).with_response(matrices.y)
     theta = parameters(matrices)
-    expected = _rust.profiled_deviance_with_gradient(theta=theta, y=matrices.y, **arguments)
+    expected = _rust.LmmDesign(**arguments).with_response(matrices.y).deviance_with_gradient(theta)
     with ThreadPoolExecutor(max_workers=workers) as pool:
         results = benchmark(lambda: list(pool.map(response.deviance_with_gradient, [theta] * 8)))
     for value, gradient in results:
@@ -1984,12 +2043,8 @@ def test_benchmark_lmm_validated_gradient(benchmark, layout, size):
     matrices, _, _ = mode_problem("gaussian", layout, n_obs=size, n_groups=16)
     theta = parameters(matrices)
     expected = _profiled_deviance_core(theta, matrices).deviance
-    value, gradient = benchmark(
-        _rust.profiled_deviance_with_gradient,
-        theta=theta,
-        y=matrices.y,
-        **native_arguments(matrices),
-    )
+    response = _rust.LmmDesign(**native_arguments(matrices)).with_response(matrices.y)
+    value, gradient = benchmark(response.deviance_with_gradient, theta)
     np.testing.assert_allclose(value, expected, rtol=2e-12, atol=2e-9)
     assert gradient.shape == theta.shape
     assert np.all(np.isfinite(gradient))
@@ -2180,12 +2235,11 @@ def test_benchmark_lmm_blocked_scalar_solves(benchmark, layout, groups, overlap,
 @pytest.mark.benchmark(group="lmm-residual-rows")
 @pytest.mark.parametrize("layout", ["intercept", "slope"])
 @pytest.mark.parametrize("size", [64, 65536])
-@pytest.mark.parametrize("operation", ["prepare", "objective", "cached"])
+@pytest.mark.parametrize("operation", ["prepare", "objective"])
 def test_benchmark_lmm_residual_rows(benchmark, layout, size, operation):
-    from mixedlm import _rust
     from mixedlm.estimation.reml import _profiled_deviance_core
 
-    from tests.test_lmm_prepared_design import native_arguments, parameters
+    from tests.test_lmm_prepared_design import parameters
     from tests.test_lmm_residual_rows import residual_problem
 
     matrices = residual_problem(layout, size, "disjoint")
@@ -2194,25 +2248,9 @@ def test_benchmark_lmm_residual_rows(benchmark, layout, size, operation):
     if operation == "prepare":
         prepared = benchmark(LMMOptimizer, matrices, use_rust=True)
         actual = prepared.objective(theta)
-    elif operation == "objective":
+    else:
         prepared = LMMOptimizer(matrices, use_rust=True)
         actual = benchmark(prepared.objective, theta)
-    else:
-        arguments = native_arguments(matrices)
-        products = _rust.compute_ztwz(
-            arguments["z_data"],
-            arguments["z_indices"],
-            arguments["z_indptr"],
-            arguments["z_shape"],
-            arguments["weights"],
-        )
-        actual = benchmark(
-            _rust.profiled_deviance_cached,
-            theta=theta,
-            y=matrices.y,
-            ztwz_cache=products,
-            **arguments,
-        )
     np.testing.assert_allclose(actual, expected, rtol=2e-12, atol=2e-9)
 
 
@@ -2450,30 +2488,3 @@ def test_benchmark_blocked_structure_likelihood(benchmark, layout, operation):
     assert np.isfinite(value)
     assert value == pytest.approx(expected, abs=1e-10)
     benchmark(evaluate, theta, True)
-
-
-@pytest.mark.benchmark(group="native-reml-steps")
-@pytest.mark.parametrize("algorithm", ["mm_reml", "augmented_ai_reml", "riemannian_reml"])
-@pytest.mark.parametrize("n,groups", [(48, 8), (96, 12), (240, 24)])
-def test_benchmark_native_reml_steps(benchmark, algorithm, n, groups):
-    from mixedlm import _rust
-
-    from tests.test_reml_algorithms import dense_reml_projection
-
-    rng = np.random.default_rng(334)
-    z = np.eye(groups)[np.repeat(np.arange(groups), n // groups)]
-    x = np.column_stack((np.ones(n), rng.normal(size=n)))
-    y = (
-        x @ np.array([1.0, 0.3])
-        + z @ rng.normal(scale=1.1, size=groups)
-        + rng.normal(scale=0.6, size=n)
-    )
-    initial = np.array([0.8, 1.2])
-    evaluate = getattr(_rust, algorithm)
-    variances, sigma2, iterations, _ = benchmark(
-        evaluate, y, x, [z], initial[:1], initial[1], max_iter=1, tol=1e-12
-    )
-    _, initial_objective = dense_reml_projection(y, x, [z], initial)
-    _, fitted_objective = dense_reml_projection(y, x, [z], np.r_[variances, sigma2])
-    assert iterations == 1
-    assert fitted_objective < initial_objective

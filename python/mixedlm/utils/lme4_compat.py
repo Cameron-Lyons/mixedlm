@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Union, cast
+from typing import TYPE_CHECKING, Union
 
 import numpy as np
 import pandas as pd
@@ -19,10 +19,8 @@ MerMod = Union["LmerResult", "GlmerResult", "NlmerResult"]
 def sigma(model: MerMod) -> float:
     """Extract the residual standard deviation from a fitted model.
 
-    This is a convenience function that extracts sigma (the residual
-    standard deviation) from linear mixed models. For GLMMs and NLMMs,
-    this typically returns 1.0 as the scale is absorbed into the
-    variance function.
+    Linear and nonlinear mixed models estimate sigma. Generalized linear
+    mixed models have no separate residual scale and return 1.0.
 
     Parameters
     ----------
@@ -48,14 +46,7 @@ def sigma(model: MerMod) -> float:
     --------
     VarCorr : Extract variance-covariance components.
     """
-    if hasattr(model, "sigma"):
-        s = model.sigma
-        if callable(s):
-            return s
-        return s
-    elif hasattr(model, "get_sigma"):
-        return model.get_sigma()
-    return 1.0
+    return float(model.sigma)
 
 
 def ngrps(model: MerMod) -> dict[str, int]:
@@ -85,13 +76,7 @@ def ngrps(model: MerMod) -> dict[str, int]:
     ranef : Extract random effects.
     VarCorr : Extract variance-covariance components.
     """
-    if hasattr(model, "ngrps"):
-        return model.ngrps()
-    elif hasattr(model, "matrices"):
-        return {
-            struct.grouping_factor: struct.n_levels for struct in model.matrices.random_structures
-        }
-    return {}
+    return model.ngrps()
 
 
 def fixef(model: MerMod) -> dict[str, float]:
@@ -138,17 +123,11 @@ def ranef(model: MerMod, condVar: bool = False) -> dict[str, dict[str, NDArray[n
     >>> ranef(result)
     {'group': {'(Intercept)': array([...])}}
     """
-    if hasattr(model, "isNLMM") and model.isNLMM():
-        return cast(dict[str, dict[str, NDArray[np.floating]]], model.ranef())
-    from mixedlm.models.glmer import GlmerResult
-    from mixedlm.models.lmer import LmerResult, RanefResult
+    from mixedlm.models.lmer_types import RanefResult
+    from mixedlm.models.nlmer import NlmerResult
 
-    if isinstance(model, LmerResult | GlmerResult):
-        result = model.ranef(condVar=condVar)
-        if isinstance(result, RanefResult):
-            return result.values
-        return result
-    return model.ranef()
+    result = model.ranef() if isinstance(model, NlmerResult) else model.ranef(condVar=condVar)
+    return result.values if isinstance(result, RanefResult) else result
 
 
 def VarCorr(model: MerMod):
@@ -191,8 +170,9 @@ def getME(model: MerMod, name: str):
 
     Raises
     ------
-    AttributeError
-        If the model type does not support getME (e.g., NlmerResult).
+    ValueError
+        If the model does not provide a component with that name. Nonlinear
+        models use their own names, such as "phi" and "b".
 
     Examples
     --------
@@ -200,10 +180,6 @@ def getME(model: MerMod, name: str):
     >>> X = getME(result, "X")
     >>> theta = getME(result, "theta")
     """
-    if not hasattr(model, "getME"):
-        raise AttributeError(
-            f"{type(model).__name__} does not support getME(). Use model attributes directly."
-        )
     return model.getME(name)
 
 
@@ -238,8 +214,9 @@ def pvalues(
 
     For linear mixed models (LMMs), p-values can be computed using
     Satterthwaite or Kenward-Roger approximations for degrees of freedom,
-    or using the normal approximation. For GLMMs, the normal (z-test)
-    approximation is always used.
+    or using the normal approximation. GLMMs always use the normal (z-test)
+    approximation, and nonlinear models a t-test with residual degrees of
+    freedom.
 
     Parameters
     ----------
@@ -250,7 +227,8 @@ def pvalues(
         - "Satterthwaite": Satterthwaite approximation for df (LMM only)
         - "KR" or "Kenward-Roger": Kenward-Roger approximation (LMM only)
         - "normal" or "z": Normal (z-test) approximation
-        For GLMMs, this parameter is ignored and "normal" is always used.
+        Other names raise ValueError. Valid names are ignored for GLMMs and
+        nonlinear models.
 
     Returns
     -------
@@ -285,26 +263,26 @@ def pvalues(
     """
     from scipy import stats
 
-    if not hasattr(model, "vcov"):
-        raise TypeError(f"{type(model).__name__} does not support vcov()")
     from mixedlm.models.lmer import LmerResult
 
-    if isinstance(model, LmerResult):
-        normalized_method = method.strip().lower().replace("_", "-")
-        if normalized_method in ("satterthwaite", "satt"):
-            ddf_method = "Satterthwaite"
-        elif normalized_method in ("kr", "kenward-roger"):
-            ddf_method = "Kenward-Roger"
-        elif normalized_method in ("normal", "z"):
-            ddf_method = None
-        else:
-            raise ValueError(f"Unknown method '{method}'. Use 'Satterthwaite', 'KR', or 'normal'.")
+    normalized_method = method.strip().lower().replace("_", "-")
+    ddf_methods = {
+        "satterthwaite": "Satterthwaite",
+        "satt": "Satterthwaite",
+        "kr": "Kenward-Roger",
+        "kenward-roger": "Kenward-Roger",
+        "normal": None,
+        "z": None,
+    }
+    if normalized_method not in ddf_methods:
+        raise ValueError(f"Unknown method '{method}'. Use 'Satterthwaite', 'KR', or 'normal'.")
 
-        if ddf_method is not None:
-            from mixedlm.inference.ddf import pvalues_with_ddf
+    ddf_method = ddf_methods[normalized_method]
+    if isinstance(model, LmerResult) and ddf_method is not None:
+        from mixedlm.inference.ddf import pvalues_with_ddf
 
-            detailed = pvalues_with_ddf(model, method=ddf_method)
-            return {name: values[2] for name, values in detailed.items()}
+        detailed = pvalues_with_ddf(model, method=ddf_method)
+        return {name: values[2] for name, values in detailed.items()}
 
     beta = model.fixef()
     vcov = model.vcov()
@@ -313,7 +291,7 @@ def pvalues(
     standard_errors = np.sqrt(np.diag(vcov))
     statistics = beta_values / standard_errors
 
-    if hasattr(model, "isNLMM") and model.isNLMM():
+    if model.isNLMM():
         residual_df = len(model.fitted()) - len(beta)
         probabilities = 2 * stats.t.sf(np.abs(statistics), residual_df)
     else:
@@ -575,7 +553,7 @@ def checkConv(
     Convergence Information:
       Converged: True
       Singular fit: False
-      Optimizer: COBYQA
+      Optimizer: L-BFGS-B
       ...
 
     >>> if not conv.converged or conv.is_singular:
@@ -686,18 +664,29 @@ def fortify(
     model : LmerResult, GlmerResult, or NlmerResult
         A fitted mixed model.
     data : DataFrame, optional
-        Data frame to augment. If None, uses the model's stored data.
+        Data frame to augment: the fitted observations, or the data the
+        model was fit to including rows dropped for missing values. If None,
+        uses the model's stored frame.
     include_re : bool, default True
-        If True, include random effects in fitted values.
+        If True, ``.fitted`` includes the random effects. If False, it is the
+        population-level prediction from the fixed effects and offset.
 
     Returns
     -------
     pd.DataFrame
-        Data frame with added columns:
-        - .fitted: Fitted values
-        - .resid: Residuals
-        - .fixed: Fixed effects contribution only
-        - .mu: For GLMMs, the response scale fitted values
+        A copy of the data with added columns:
+        - .fitted: Fitted values on the response scale
+        - .resid: Residuals conditional on the random effects, of the
+          model's default type
+        - .fixed: Fixed-effects linear predictor including the offset
+          (linear and generalized models)
+        - .mu: For GLMMs, the conditional response-scale fitted values
+        Rows dropped for missing values receive NaN.
+
+    Raises
+    ------
+    ValueError
+        If ``data`` has neither the fitted nor the original number of rows.
 
     Examples
     --------
@@ -715,37 +704,42 @@ def fortify(
     fitted : Extract fitted values.
     residuals : Extract residuals.
     """
-    if data is None:
-        if hasattr(model, "matrices") and hasattr(model.matrices, "frame"):
-            data = model.matrices.frame
-        else:
-            raise ValueError("No data available. Provide data or ensure model stores frame.")
-
-    if data is None:
-        raise ValueError("No data available")
-
-    result = data.copy()
-
-    fitted_vals = model.fitted()
-    resid_vals = model.residuals()
-
-    if len(fitted_vals) != len(result):
-        result = result.iloc[: len(fitted_vals)].copy()
-
-    result[".fitted"] = fitted_vals
-    result[".resid"] = resid_vals
-
-    if hasattr(model, "matrices") and hasattr(model.matrices, "X"):
-        beta = np.array(list(model.fixef().values()))
-        fixed_contrib = model.matrices.X @ beta
-        if len(fixed_contrib) == len(result):
-            result[".fixed"] = fixed_contrib
-
     from mixedlm.models.glmer import GlmerResult
+    from mixedlm.models.nlmer import NlmerResult
 
-    if isinstance(model, GlmerResult):
-        result[".mu"] = model.fitted(type="response")
+    na_info = None
+    columns: dict[str, NDArray[np.floating]]
+    if isinstance(model, NlmerResult):
+        population = model._conditional_mean(random_effects=np.zeros_like(model.b))
+        columns = {
+            ".fitted": model.fitted() if include_re else population + model.offset(copy=False),
+            ".resid": model.residuals(),
+        }
+    else:
+        na_info = model.matrices.na_info
+        fixed = model.matrices.X @ model.beta + model.matrices.offset
+        conditional = model.fitted(na_expand=False)
+        columns = {
+            ".fitted": conditional if include_re else fixed,
+            ".resid": model.residuals(na_expand=False),
+            ".fixed": fixed,
+        }
+        if isinstance(model, GlmerResult):
+            if not include_re:
+                columns[".fitted"] = model.family.link.inverse(fixed)
+            columns[".mu"] = conditional
 
+    result = (model.model_frame() if data is None else data).copy()
+    n_obs = model.nobs()
+    if na_info is not None and na_info.n_omitted and len(result) == na_info.n_original:
+        columns = {name: na_info.expand_to_original(values) for name, values in columns.items()}
+    elif len(result) != n_obs:
+        raise ValueError(
+            f"data has {len(result)} rows, but the model was fit to {n_obs} observations"
+        )
+
+    for name, values in columns.items():
+        result[name] = values
     return result
 
 
@@ -756,17 +750,21 @@ class DevComp:
     Attributes
     ----------
     cmp : dict
-        Named components including:
-        - ldL2: Log determinant of L squared
-        - ldRX2: Log determinant of RX squared
-        - wrss: Weighted residual sum of squares
-        - ussq: Sum of squared random effects
-        - pwrss: Penalized weighted residual sum of squares
-        - drsum: Deviance residual sum
-        - REML: REML criterion (if applicable)
-        - dev: Deviance or ML criterion
+        Named components, as in lme4:
+        - ldL2: Log determinant of the random-effect precision factor L squared
+        - ldRX2: Log determinant of the fixed-effect factor RX squared
+        - wrss: Weighted residual sum of squares (Pearson residuals for GLMMs)
+        - ussq: Squared length of the spherical random effects u
+        - pwrss: Penalized weighted residual sum of squares, wrss + ussq
+        - drsum: Sum of deviance residuals (GLMMs)
+        - REML: REML criterion (REML fits)
+        - dev: Deviance (ML fits)
+        - sigmaML, sigmaREML: Residual scale estimates sqrt(pwrss / n) and
+          sqrt(pwrss / (n - p)) (LMMs)
+        Components a model does not define are NaN.
     dims : dict
-        Dimension information including n, p, q, nmp, nth, etc.
+        Dimensions: n, p, q, nmp (n - p), nth (theta length), REML, useSc,
+        nAGQ, q0, q1, qrx and ngrps (number of grouping factors).
     """
 
     cmp: dict[str, float]
@@ -787,17 +785,23 @@ def devcomp(model: MerMod) -> DevComp:
     """Extract deviance components from a fitted model.
 
     This function extracts the components that make up the deviance
-    or REML criterion for a fitted mixed model.
+    or REML criterion for a fitted mixed model. It returns the same values
+    as ``model.getME("devcomp")``.
 
     Parameters
     ----------
-    model : LmerResult, GlmerResult, or NlmerResult
-        A fitted mixed model.
+    model : LmerResult or GlmerResult
+        A fitted linear or generalized linear mixed model.
 
     Returns
     -------
     DevComp
         Dataclass containing component values and dimensions.
+
+    Raises
+    ------
+    TypeError
+        If the model is not a linear or generalized linear mixed model.
 
     Examples
     --------
@@ -817,46 +821,12 @@ def devcomp(model: MerMod) -> DevComp:
     logLik : Extract log-likelihood.
     getME : Extract model elements.
     """
-    cmp: dict[str, float] = {}
-    dims: dict[str, int] = {}
+    from mixedlm.models.result_mixin import MerResultMixin
 
-    if hasattr(model, "deviance"):
-        cmp["dev"] = float(model.deviance)
-
-    if hasattr(model, "logLik"):
-        ll = model.logLik()
-        cmp["logLik"] = float(ll)
-
-    if hasattr(model, "REML") and model.REML:
-        cmp["REML"] = cmp.get("dev", 0.0)
-
-    if hasattr(model, "sigma"):
-        cmp["sigmaML"] = float(model.sigma)
-        cmp["sigmaREML"] = float(model.sigma)
-
-    if hasattr(model, "matrices"):
-        matrices = model.matrices
-        dims["n"] = matrices.n_obs
-        dims["p"] = matrices.n_fixed
-        dims["q"] = matrices.n_random
-
-        if hasattr(matrices, "y") and hasattr(model, "fitted"):
-            resid = matrices.y - model.fitted()
-            cmp["wrss"] = float(np.sum(resid**2))
-
-        if hasattr(model, "theta"):
-            cmp["nth"] = len(model.theta)
-
-        if hasattr(matrices, "random_structures"):
-            dims["ngrps"] = sum(s.n_levels for s in matrices.random_structures)
-
-    if hasattr(model, "u") and model.u is not None:
-        cmp["ussq"] = float(np.sum(model.u**2))
-
-    if "wrss" in cmp and "ussq" in cmp:
-        cmp["pwrss"] = cmp["wrss"] + cmp["ussq"]
-
-    return DevComp(cmp=cmp, dims=dims)
+    if not isinstance(model, MerResultMixin):
+        raise TypeError(f"devcomp() is not available for {type(model).__name__}")
+    parts = model._get_devcomp()
+    return DevComp(cmp=dict(parts["cmp"]), dims=dict(parts["dims"]))
 
 
 def vcconv(
@@ -1211,22 +1181,28 @@ def dummy(
     Parameters
     ----------
     x : array-like
-        Categorical variable (factor).
+        Categorical variable (factor). Pandas categoricals keep their category
+        order; other inputs use sorted unique values as levels.
     base : int or str, optional
-        Base level to exclude (reference category). If int, the index
-        of the level to use as base. If str, the level name. If None,
-        uses the first level.
+        Base level to exclude (reference category) for treatment coding.
+        An int indexes the levels (negative values count from the
+        end); any other value names a level. If None, uses the first level.
     contrasts : str, default "treatment"
-        Type of contrast coding:
+        Type of contrast coding, matching ``mixedlm.utils.contrasts``:
         - "treatment": Treatment (dummy) coding with base level excluded
-        - "sum": Sum (deviation) coding
-        - "helmert": Helmert contrasts
-        - "poly": Polynomial contrasts (for ordered factors)
+        - "sum": Sum (deviation) coding, ``contr_sum``
+        - "helmert": Helmert contrasts, ``contr_helmert``
+        - "poly": Orthogonal polynomial contrasts, ``contr_poly``
 
     Returns
     -------
     ndarray
         Dummy variable matrix with shape (n, k-1) for k levels.
+
+    Raises
+    ------
+    ValueError
+        If ``base`` is not a level or index of ``x``, or ``contrasts`` is unknown.
 
     Examples
     --------
@@ -1245,46 +1221,35 @@ def dummy(
            [1., 0.],
            [0., 0.]])
     """
-    x = np.asarray(x)
-    levels = np.unique(x)
-    n = len(x)
+    from mixedlm.utils.contrasts import get_contrast_matrix
+
+    if isinstance(getattr(x, "dtype", None), pd.CategoricalDtype) or isinstance(x, pd.Categorical):
+        # Categoricals carry their own level order, which polynomial contrasts need.
+        categorical = pd.Categorical(x)
+        if (categorical.codes < 0).any():
+            raise ValueError("x must not contain missing values")
+        levels, codes = np.asarray(categorical.categories), categorical.codes
+        x = np.asarray(categorical)
+    else:
+        x = np.asarray(x)
+        levels, codes = np.unique(x, return_inverse=True)
     k = len(levels)
-    result: NDArray[np.floating]
 
     if base is None:
         base_idx = 0
-    elif isinstance(base, int):
-        base_idx = base
+    elif isinstance(base, int | np.integer) and not isinstance(base, bool | np.bool_):
+        if not -k <= base < k:
+            raise ValueError(f"base index {base} is out of range for {k} levels")
+        base_idx = int(base) % k
     else:
-        base_idx = int(np.where(levels == base)[0][0])
+        matches = np.flatnonzero(levels == base)
+        if len(matches) == 0:
+            raise ValueError(f"base level {base!r} is not a level of x")
+        base_idx = int(matches[0])
 
-    if contrasts == "treatment":
-        non_base = [i for i in range(k) if i != base_idx]
-        result = np.zeros((n, k - 1), dtype=np.float64)
-        for j, lvl_idx in enumerate(non_base):
-            result[:, j] = (x == levels[lvl_idx]).astype(float)
-    elif contrasts == "sum":
-        result = np.zeros((n, k - 1), dtype=np.float64)
-        for j in range(k - 1):
-            result[x == levels[j], j] = 1.0
-            result[x == levels[k - 1], j] = -1.0
-    elif contrasts == "helmert":
-        result = np.zeros((n, k - 1), dtype=np.float64)
-        for j in range(k - 1):
-            for i in range(j + 1):
-                result[x == levels[i], j] = -1.0 / (j + 1)
-            result[x == levels[j + 1], j] = 1.0
-    elif contrasts == "poly":
-        from numpy.polynomial.legendre import legvander
-
-        poly_matrix = legvander(np.arange(k), k - 1)[:, 1:]
-        level_to_idx = {lvl: i for i, lvl in enumerate(levels)}
-        x_idx = np.array([level_to_idx[val] for val in x])
-        result = np.asarray(poly_matrix[x_idx], dtype=np.float64)
-    else:
-        raise ValueError(f"Unknown contrast type: {contrasts}")
-
-    return result
+    if k < 2:
+        return np.zeros((len(x), 0), dtype=np.float64)
+    return get_contrast_matrix(k, contrasts, base=base_idx)[codes.reshape(-1)]
 
 
 def REMLcrit(model: MerMod) -> float:
@@ -1416,8 +1381,9 @@ def quickSimulate(
     sigma : float, default 1.0
         Residual standard deviation (for Gaussian family).
     family : str, optional
-        Distribution family name: "gaussian", "binomial", "poisson".
-        Default is "gaussian".
+        Distribution family name accepted by :func:`simulate_formula`, such as
+        "gaussian", "binomial", "poisson" or "gamma". Default is "gaussian";
+        unknown names raise ``ValueError``.
     nsim : int, default 1
         Number of simulations to generate.
     seed : int, optional
@@ -1446,24 +1412,7 @@ def quickSimulate(
     --------
     simulate_formula : Full simulation function with more options.
     """
-    from mixedlm.families.base import Family
     from mixedlm.models.modular import simulate_formula
-
-    family_obj: Family | None = None
-    if family is not None:
-        family_lower = family.lower()
-        if family_lower == "binomial":
-            from mixedlm.families import Binomial
-
-            family_obj = Binomial()
-        elif family_lower == "poisson":
-            from mixedlm.families import Poisson
-
-            family_obj = Poisson()
-        elif family_lower == "gaussian":
-            from mixedlm.families import Gaussian
-
-            family_obj = Gaussian()
 
     return simulate_formula(
         formula=formula,
@@ -1471,7 +1420,7 @@ def quickSimulate(
         beta=beta,
         theta=theta,
         sigma=sigma,
-        family=family_obj,
+        family=family,
         nsim=nsim,
         seed=seed,
     )

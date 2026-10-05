@@ -10,6 +10,7 @@ from mixedlm import lmer
 from mixedlm.estimation import reml
 from mixedlm.formula.parser import parse_formula, set_cov_type
 from mixedlm.matrices.design import ModelMatrices, RandomEffectStructure, build_model_matrices
+from mixedlm.models import shared_utils
 from mixedlm.models.control import LmerControl
 from numpy.testing import assert_allclose, assert_array_equal
 from scipy import linalg, sparse
@@ -218,7 +219,11 @@ def test_large_diagonal_system_does_not_build_or_factor_random_precision(monkeyp
     monkeypatch.setattr(linalg, "cholesky", fixed_only)
     with (
         patch.object(reml, "_build_lambda", side_effect=AssertionError("random matrix assembly")),
-        patch.object(reml.sparse_linalg, "splu", side_effect=AssertionError("random sparse solve")),
+        patch.object(
+            shared_utils._RandomEffectFactor,
+            "_factorize",
+            side_effect=AssertionError("random sparse solve"),
+        ),
     ):
         for theta in [0, 0.5, 2]:
             actual = reml._profiled_deviance_core(
@@ -268,5 +273,7 @@ def test_python_fits_and_profiles_reuse_diagonal_preparation():
     fitted = lmer("y ~ x + (1 | g)", data, REML=False, control=LmerControl(use_rust=False))
     with patch.object(reml, "_diagonal_entries", wraps=reml._diagonal_entries) as prepare:
         profile = fitted.profile("x", n_points=7)["x"]
-    assert prepare.call_count == 1
+    # Profiles evaluate natively when the extension is available; the Python
+    # likelihood slices one shared preparation.
+    assert prepare.call_count == (0 if reml._HAS_RUST else 1)
     assert profile.ci_lower < profile.mle < profile.ci_upper

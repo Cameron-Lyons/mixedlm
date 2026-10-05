@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 
     from mixedlm.families.base import Family
     from mixedlm.formula.terms import Formula
-    from mixedlm.models.control import GlmerControl
+    from mixedlm.models.control import GlmerControl, LmerControl
     from mixedlm.models.glmer import GlmerResult
     from mixedlm.models.lmer import LmerResult
 
@@ -178,24 +178,18 @@ def _assemble_drop1_result(
     )
 
 
-def _n_params(model: LmerResult | GlmerResult) -> int:
-    """Count fixed and covariance parameters, plus the residual scale of an LMM."""
-    from mixedlm.estimation.reml import _count_theta
-
-    n_theta = _count_theta(model.matrices.random_structures)
-    return model.matrices.n_fixed + n_theta + int(model.isLMM())
-
-
 def _refit_lmer(
     data: pd.DataFrame,
     weights: NDArray[np.floating] | None,
     offset: NDArray[np.floating] | None,
+    control: LmerControl,
     start: NDArray[np.floating],
     formula: Formula,
 ) -> LmerResult:
     from mixedlm.models.lmer import LmerMod
 
-    return LmerMod(formula, data, REML=False, weights=weights, offset=offset).fit(start=start)
+    model = LmerMod(formula, data, REML=False, weights=weights, offset=offset, control=control)
+    return model.fit(start=start)
 
 
 def _refit_glmer(
@@ -218,7 +212,7 @@ def _drop1_worker(task: tuple[Any, ...]) -> Drop1WorkerResult:
     term, refit, formula, full_n_params, full_loglik, test = task
     try:
         reduced_model = refit(formula)
-        reduced_n_params = _n_params(reduced_model)
+        reduced_n_params = reduced_model.npar()
         lrt, p_val = _likelihood_ratio(
             full_n_params, reduced_n_params, full_loglik, reduced_model.logLik().value, test
         )
@@ -237,7 +231,7 @@ def _drop1(
     from mixedlm.formula.parser import update_formula
 
     droppable_terms = _droppable_fixed_terms(model)
-    full_n_params = _n_params(model)
+    full_n_params = model.npar()
     full_loglik = model.logLik().value
     tasks = [
         (
@@ -269,6 +263,7 @@ def drop1_lmer(
 
     REML fits are automatically refitted with ML because likelihoods from
     different fixed-effects specifications are not comparable under REML.
+    Reduced models reuse the fitted model's control settings.
     Terms contained in higher-order interactions are retained to respect the
     marginality principle. ``n_jobs`` worker processes, or -1 for all CPUs,
     refit deletions concurrently. Workers are started without forking, so
@@ -280,7 +275,9 @@ def drop1_lmer(
     matrices = comparison_model.matrices
     weights = matrices.weights if np.any(matrices.weights != 1.0) else None
     offset = matrices.offset if np.any(matrices.offset != 0.0) else None
-    refit = partial(_refit_lmer, data, weights, offset, comparison_model.theta)
+    refit = partial(
+        _refit_lmer, data, weights, offset, model._refit_control(), comparison_model.theta
+    )
     return _drop1(comparison_model, refit, test, n_jobs)
 
 

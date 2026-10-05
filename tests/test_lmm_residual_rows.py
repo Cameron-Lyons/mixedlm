@@ -1,4 +1,4 @@
-"""Residual traversal agrees with cached crossproducts and independent profiles."""
+"""Residual traversal agrees with fresh native designs and independent profiles."""
 
 from dataclasses import replace
 
@@ -29,29 +29,18 @@ def residual_problem(layout, size, pattern):
 @pytest.mark.parametrize("size", [64, 1024])
 @pytest.mark.parametrize("pattern", ["disjoint", "overlap", "empty_rows"])
 @pytest.mark.parametrize("reml", [False, True])
-def test_prepared_and_cached_profiles_retain_residual_arithmetic(layout, size, pattern, reml):
+def test_prepared_profiles_retain_residual_arithmetic(layout, size, pattern, reml):
     matrices = residual_problem(layout, size, pattern)
     theta = parameters(matrices)
     arguments = native_arguments(matrices)
-    products = _rust.compute_ztwz(
-        arguments["z_data"],
-        arguments["z_indices"],
-        arguments["z_indptr"],
-        arguments["z_shape"],
-        arguments["weights"],
-    )
     optimizer = LMMOptimizer(matrices, REML=reml, use_rust=True)
     for y in [matrices.y, matrices.y[::-1] + 0.2 * matrices.weights]:
         response = optimizer.with_response(y)
         actual = response._final_evaluation(theta)
         assert response.objective(theta) == actual.deviance
-        for cache in [None, products]:
-            value = _rust.profiled_deviance_cached(
-                theta=theta, y=y, reml=reml, ztwz_cache=cache, **arguments
-            )
-            # Supplying the products skips the sparse row-layout construction.
-            # Both native traversal paths must preserve the arithmetic exactly.
-            assert_array_equal(value, actual.deviance)
+        # A design prepared for this response alone preserves the arithmetic exactly.
+        fresh = _rust.LmmDesign(**arguments).with_response(y)
+        assert_array_equal(fresh.deviance(theta, reml), actual.deviance)
         changed = replace(matrices, y=y)
         expected = (
             _direct_profiled_likelihood(theta, changed, reml)
@@ -60,8 +49,6 @@ def test_prepared_and_cached_profiles_retain_residual_arithmetic(layout, size, p
         )
         for field, value in expected.items():
             assert_allclose(getattr(actual, field), value, rtol=2e-11, atol=2e-9)
-        gradient_value, gradient = _rust.profiled_deviance_with_gradient(
-            theta=theta, y=y, reml=reml, **arguments
-        )
+        gradient_value, gradient = fresh.deviance_with_gradient(theta, reml)
         assert_allclose(gradient_value, actual.deviance, rtol=0, atol=2e-10)
         assert np.all(np.isfinite(gradient))

@@ -6,7 +6,11 @@ import numpy as np
 import pandas as pd
 import pytest
 from mixedlm import _rust
-from mixedlm.estimation.laplace import adaptive_gh_deviance, laplace_deviance, pirls
+from mixedlm.estimation.laplace import (
+    _laplace_deviance_with_status,
+    adaptive_gh_deviance,
+    laplace_deviance,
+)
 from mixedlm.families import Binomial, Gaussian, Poisson
 from mixedlm.formula.parser import parse_formula
 from mixedlm.matrices.design import build_model_matrices
@@ -111,12 +115,8 @@ def test_gaussian_transform_matches_dense_system(layout, variance, weighted, ove
     logdet = np.linalg.slogdet(information[p:, p:])[1]
     args = _args(matrices, theta, "gaussian")
 
-    actual_beta, actual_random, actual_deviance, converged = _rust.pirls(*args)
-    assert converged
-    assert_allclose(actual_beta, beta, rtol=1e-11, atol=1e-11)
-    assert_allclose(actual_random, random, rtol=1e-11, atol=1e-11)
-    assert actual_deviance == pytest.approx(conditional, rel=1e-11, abs=1e-11)
-    actual = _rust.laplace_deviance(*args)
+    actual = _rust.glmm_deviance(*args, 1)
+    assert actual[3]
     assert actual[0] == pytest.approx(conditional + logdet, rel=1e-11, abs=1e-11)
     assert_allclose(actual[1], beta, rtol=1e-11, atol=1e-11)
     assert_allclose(actual[2], random, rtol=1e-11, atol=1e-11)
@@ -130,14 +130,10 @@ def test_iterative_transforms_match_python(layout, variance, weighted, family_na
     matrices, theta, _ = _problem(layout, variance, weighted, family_name)
     family = Poisson() if family_name == "poisson" else Binomial()
     args = _args(matrices, theta, family_name)
-    actual = _rust.pirls(*args)
-    expected = pirls(matrices, family, theta, maxiter=100, tol=1e-9)
+    actual = _rust.glmm_deviance(*args, 1)
+    expected = _laplace_deviance_with_status(theta, matrices, family)
     assert actual[3] and expected[3]
     for left, right in zip(actual[:3], expected[:3], strict=True):
-        assert_allclose(left, right, rtol=2e-7, atol=2e-7)
-    actual = _rust.laplace_deviance(*args)
-    expected = laplace_deviance(theta, matrices, family)
-    for left, right in zip(actual, expected, strict=True):
         assert_allclose(left, right, rtol=2e-7, atol=2e-7)
 
 
@@ -148,9 +144,9 @@ def test_quadrature_transforms_match_python(family_name, scale, weighted):
     matrices, _, _ = _problem("intercept", "regular", weighted, family_name)
     theta = np.array([scale])
     family = {"gaussian": Gaussian, "poisson": Poisson, "binomial": Binomial}[family_name]()
-    actual = _rust.adaptive_gh_deviance(*_args(matrices, theta, family_name), 9)
+    actual = _rust.glmm_deviance(*_args(matrices, theta, family_name), 9)
     expected = adaptive_gh_deviance(theta, matrices, family, nAGQ=9)
-    for left, right in zip(actual, expected, strict=True):
+    for left, right in zip(actual[:3], expected, strict=True):
         assert_allclose(left, right, rtol=2e-7, atol=2e-7)
 
 
@@ -182,7 +178,7 @@ def test_wide_correlated_blocks_match_python(n_terms, family_name, singular):
         lower[:, -1] = 0.0
     theta = lower[np.tril_indices(n_terms)]
     family = {"gaussian": Gaussian, "poisson": Poisson, "binomial": Binomial}[family_name]()
-    actual = _rust.laplace_deviance(*_args(matrices, theta, family_name))
+    actual = _rust.glmm_deviance(*_args(matrices, theta, family_name), 1)
     expected = laplace_deviance(theta, matrices, family)
-    for left, right in zip(actual, expected, strict=True):
+    for left, right in zip(actual[:3], expected, strict=True):
         assert_allclose(left, right, rtol=2e-7, atol=2e-7)

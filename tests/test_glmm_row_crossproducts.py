@@ -7,7 +7,7 @@ from threading import Barrier
 import numpy as np
 import pytest
 from mixedlm import _rust
-from mixedlm.estimation.laplace import laplace_deviance, pirls
+from mixedlm.estimation.laplace import _laplace_deviance_with_status
 from mixedlm.families import Binomial, Poisson
 from numpy.testing import assert_allclose, assert_array_equal
 
@@ -46,21 +46,18 @@ def test_wide_changing_weights_match_python(width, fixed, variance, family_name,
     matrices, theta = wide_count_problem(width, fixed, variance, family_name, noncanonical)
     family = Poisson() if family_name == "poisson" else Binomial()
     args = _args(matrices, theta, family_name)
-    actual = _rust.pirls(*args, maxiter=100, tol=1e-9)
-    expected = pirls(matrices, family, theta, maxiter=100, tol=1e-9)
+    actual = _rust.glmm_deviance(*args, 1, maxiter=100, tol=1e-9)
+    expected = _laplace_deviance_with_status(
+        theta, matrices, family, pirls_maxiter=100, pirls_tol=1e-9
+    )
     assert actual[3] and expected[3]
     for value, reference in zip(actual[:3], expected[:3], strict=True):
-        assert_allclose(value, reference, rtol=2e-8, atol=2e-8)
-    actual = _rust.laplace_deviance(*args, maxiter=100, tol=1e-9)
-    expected = laplace_deviance(theta, matrices, family, pirls_maxiter=100, pirls_tol=1e-9)
-    for value, reference in zip(actual, expected, strict=True):
         assert_allclose(value, reference, rtol=2e-8, atol=2e-8)
     problem = _rust.GlmmProblem(*args[:8], *args[9:])
     # Warm the same design with different weights before returning to this state.
     assert problem.evaluate(theta * 0.5, maxiter=100, tol=1e-9)[3]
     prepared = problem.evaluate(theta, maxiter=100, tol=1e-9)
-    assert prepared[3]
-    for value, reference in zip(prepared[:3], actual, strict=True):
+    for value, reference in zip(prepared, actual, strict=True):
         assert_array_equal(value, reference)
 
 

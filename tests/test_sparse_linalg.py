@@ -2,22 +2,13 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+from mixedlm._rust import (
+    SparseCholeskySymbolic,
+    sparse_cholesky_logdet,
+    sparse_cholesky_solve,
+)
 from numpy.testing import assert_allclose, assert_array_equal
 from scipy import sparse
-
-try:
-    from mixedlm._rust import (
-        SparseCholeskySymbolic,
-        sparse_cholesky_logdet,
-        sparse_cholesky_solve,
-        update_cholesky_factor,
-    )
-
-    _HAS_RUST = True
-except ImportError:
-    _HAS_RUST = False
-
-pytestmark = pytest.mark.skipif(not _HAS_RUST, reason="Rust extension not available")
 
 
 def sparse_arguments(matrix):
@@ -123,12 +114,6 @@ class TestSparseCholeskySolve:
 
         with pytest.raises(ValueError, match="matrix must be square, got 2x3"):
             sparse_cholesky_logdet(data, indices, indptr, shape)
-
-    def test_factor_update_rejects_non_square_matrix(self):
-        _, data, indices, indptr, shape = sparse_arguments(np.ones((2, 3)))
-
-        with pytest.raises(ValueError, match="matrix must be square, got 2x3"):
-            update_cholesky_factor(data, indices, indptr, shape, np.array([1.0]))
 
     def test_cached_factor_rejects_mismatched_right_hand_side(self):
         _, data, indices, indptr, _ = sparse_arguments(np.eye(2))

@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 
     from mixedlm.families.base import Family
     from mixedlm.formula.terms import Formula
-    from mixedlm.models.control import GlmerControl
+    from mixedlm.models.control import GlmerControl, LmerControl
     from mixedlm.models.glmer import GlmerResult
     from mixedlm.models.lmer import LmerResult
 
@@ -147,12 +147,10 @@ class AllFitResult:
             raise ValueError(f"Unknown criterion: {criterion}. Use 'deviance', 'AIC', or 'BIC'.")
 
     def is_consistent(self, tol: float = 1e-3) -> bool:
-        successful_fits = [f for f in self.fits.values() if f is not None]
-        if len(successful_fits) < 2:
-            return True
-
-        deviances = [f.deviance for f in successful_fits]
-        return bool((max(deviances) - min(deviances)) < tol)
+        """Return whether every converged fit reaches the same deviance within ``tol``."""
+        fits = [fit for fit in self.fits.values() if fit is not None and fit.converged]
+        deviances = [fit.deviance for fit in fits]
+        return len(deviances) < 2 or bool(max(deviances) - min(deviances) < tol)
 
 
 def _fit_with_optimizer(
@@ -203,11 +201,12 @@ def _refit_lmer(
     REML: bool,
     weights: NDArray[np.floating] | None,
     offset: NDArray[np.floating] | None,
+    control: LmerControl,
     optimizer: str,
 ) -> LmerResult:
     from mixedlm.models.lmer import LmerMod
 
-    model = LmerMod(formula, data, REML=REML, weights=weights, offset=offset)
+    model = LmerMod(formula, data, REML=REML, weights=weights, offset=offset, control=control)
     return model.fit(method=optimizer)
 
 
@@ -234,7 +233,7 @@ def allfit_lmer(
     n_jobs: int = 1,
     verbose: bool = False,
 ) -> AllFitResult:
-    """Refit an LMM with each optimizer.
+    """Refit an LMM with each optimizer, keeping its other control settings.
 
     ``n_jobs`` worker processes, or -1 for all CPUs, run the refits. Workers are
     started without forking, so scripts need an ``if __name__ == "__main__":``
@@ -244,7 +243,9 @@ def allfit_lmer(
         optimizers = _default_optimizers()
     weights = model.matrices.weights if np.any(model.matrices.weights != 1.0) else None
     offset = model.matrices.offset if np.any(model.matrices.offset != 0.0) else None
-    fit = partial(_refit_lmer, model.formula, data, model.REML, weights, offset)
+    fit = partial(
+        _refit_lmer, model.formula, data, model.REML, weights, offset, model._refit_control()
+    )
     return _run_allfit(fit, optimizers, n_jobs, verbose)
 
 

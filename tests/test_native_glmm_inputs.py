@@ -10,7 +10,7 @@ from numpy.testing import assert_array_equal
 from tests.test_glmm_final_state import mode_problem
 
 native = pytest.importorskip("mixedlm._rust")
-FUNCTIONS = ["pirls", "laplace_deviance", "adaptive_gh_deviance", "glmm_deviance", "prepared"]
+FUNCTIONS = ["glmm_deviance", "prepared"]
 KEYS = (
     "y",
     "x",
@@ -40,8 +40,7 @@ def evaluate(function, args, order=1):
             **{key: value for key, value in args.items() if key != "theta"}
         )
         return problem.evaluate(args["theta"], order)
-    options = {"n_agq": order} if function in {"adaptive_gh_deviance", "glmm_deviance"} else {}
-    return getattr(native, function)(**args, **options)
+    return native.glmm_deviance(**args, n_agq=order)
 
 
 @pytest.mark.parametrize("function", FUNCTIONS)
@@ -207,10 +206,10 @@ def test_fortran_fixed_design_is_preserved(function):
 
 
 @pytest.mark.parametrize("kind", ["gaussian", "binomial", "poisson"])
-def test_adaptive_wrappers_still_agree_at_higher_order(kind):
+def test_prepared_and_one_shot_entry_points_agree_at_higher_order(kind):
     args = arguments(kind=kind)
-    actual = evaluate("glmm_deviance", args, order=7)
-    expected = evaluate("adaptive_gh_deviance", args, order=7)
-    for value, reference in zip(actual[:3], expected, strict=True):
+    actual = evaluate("prepared", args, order=7)
+    expected = evaluate("glmm_deviance", args, order=7)
+    for value, reference in zip(actual, expected, strict=True):
         assert_array_equal(value, reference)
     assert actual[3]

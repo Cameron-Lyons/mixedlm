@@ -34,7 +34,7 @@ from tests.test_native_covariance_transforms import _problem
 @pytest.mark.parametrize("variance", ["regular", "singular", "zero"])
 @pytest.mark.parametrize("overlap", [False, True])
 @pytest.mark.parametrize("reml", [False, True])
-def test_prepared_gradients_match_raw_calls_and_independent_likelihood(
+def test_prepared_gradients_match_fresh_designs_and_independent_likelihood(
     layout, variance, overlap, reml
 ):
     matrices, theta, _ = _problem(layout, variance, True, overlap=overlap)
@@ -43,11 +43,10 @@ def test_prepared_gradients_match_raw_calls_and_independent_likelihood(
     for y in [matrices.y, matrices.y[::-1] + 0.2 * matrices.weights]:
         response = design.with_response(y)
         value, gradient = response.deviance_with_gradient(theta, reml)
-        raw_value, raw_gradient = _rust.profiled_deviance_with_gradient(
-            theta=theta, y=y, reml=reml, **arguments
-        )
-        assert value == raw_value == response.deviance(theta, reml)
-        assert_array_equal(gradient, raw_gradient)
+        fresh = _rust.LmmDesign(**arguments).with_response(y)
+        fresh_value, fresh_gradient = fresh.deviance_with_gradient(theta, reml)
+        assert value == fresh_value == response.deviance(theta, reml)
+        assert_array_equal(gradient, fresh_gradient)
         changed = replace(matrices, y=y)
         assert_allclose(value, observation_likelihood(changed, theta, reml), rtol=2e-12, atol=2e-11)
         expected = []
@@ -224,7 +223,7 @@ def test_prepared_gradient_detaches_and_snapshots_parameters(change_layout):
 
 @pytest.mark.parametrize("kind", ["intercept", "correlated", "crossed"])
 @pytest.mark.parametrize("reml", [False, True])
-def test_prepared_gradient_drives_the_same_scipy_fit_as_raw_evaluation(kind, reml):
+def test_prepared_gradient_drives_the_same_scipy_fit_as_fresh_designs(kind, reml):
     matrices = matrices_fixture(kind)
     arguments = native_arguments(matrices)
     response = _rust.LmmDesign(**arguments).with_response(matrices.y)
@@ -239,20 +238,20 @@ def test_prepared_gradient_drives_the_same_scipy_fit_as_raw_evaluation(kind, rem
         bounds=bounds,
         options=options,
     )
-    raw = minimize(
-        lambda current: _rust.profiled_deviance_with_gradient(
-            theta=current, y=matrices.y, reml=reml, **arguments
-        ),
+    fresh = minimize(
+        lambda current: _rust.LmmDesign(**arguments)
+        .with_response(matrices.y)
+        .deviance_with_gradient(current, reml),
         theta,
         method="L-BFGS-B",
         jac=True,
         bounds=bounds,
         options=options,
     )
-    assert prepared.success and raw.success
-    assert prepared.nit == raw.nit
-    assert prepared.nfev == raw.nfev
-    assert_array_equal(prepared.x, raw.x)
-    assert_array_equal(prepared.jac, raw.jac)
-    assert prepared.fun == raw.fun
+    assert prepared.success and fresh.success
+    assert prepared.nit == fresh.nit
+    assert prepared.nfev == fresh.nfev
+    assert_array_equal(prepared.x, fresh.x)
+    assert_array_equal(prepared.jac, fresh.jac)
+    assert prepared.fun == fresh.fun
     assert_allclose(prepared.fun, observation_likelihood(matrices, prepared.x, reml), rtol=2e-12)

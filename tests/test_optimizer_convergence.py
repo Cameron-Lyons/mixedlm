@@ -16,6 +16,10 @@ from mixedlm import (
     set_cov_type,
 )
 from mixedlm.estimation.optimizers import NLOPT_OPTIMIZER_NAMES, available_optimizers, has_nlopt
+from mixedlm.estimation.reml import LMMOptimizer
+from mixedlm.formula.parser import parse_formula
+from mixedlm.matrices.design import build_model_matrices
+from numpy.testing import assert_allclose
 from scipy import linalg, optimize
 
 from tests.test_statistical_golden import observation_space_reference
@@ -28,6 +32,15 @@ pytestmark = [
     pytest.mark.filterwarnings("ignore:Model failed to converge:UserWarning"),
     pytest.mark.filterwarnings("ignore:The 'bobyqa' optimizer name:DeprecationWarning"),
 ]
+
+
+@pytest.fixture(autouse=True)
+def seeded_nlopt():
+    # PRAXIS draws random search directions from NLopt's global generator.
+    if has_nlopt():
+        import nlopt
+
+        nlopt.srand(20240611)
 
 
 @pytest.fixture(scope="module")
@@ -102,30 +115,36 @@ def test_every_optimizer_reaches_the_optimum_or_reports_failure(name, sleepstudy
         assert np.abs(intercepts.theta) == pytest.approx([intercept_theta(sleepstudy)], abs=5e-3)
 
 
-@pytest.mark.parametrize(
-    "name",
-    [
-        pytest.param(
-            name,
-            marks=pytest.mark.xfail(
-                reason="From the AR(1) start theta (about 24 here), NLopt's Nelder-Mead and, "
-                "for some random seeds, PRAXIS collapse onto rho = 1 and report convergence; "
-                "both reach the optimum from theta = 1"
-            ),
-        )
-        if name in {"nloptwrap_NELDERMEAD", "nloptwrap_PRAXIS"}
-        else name
-        for name in available_optimizers()
-    ],
-)
+@pytest.mark.parametrize("name", available_optimizers())
 def test_every_optimizer_fits_a_structured_covariance_or_reports_failure(
     name, sleepstudy, equal_variance_reference
 ):
     # A relative function tolerance stopped nloptwrap_BOBYQA 0.11 above the optimum.
+    # From a covariance scale in response units (about 24 here) NLopt's Nelder-Mead
+    # and PRAXIS collapsed onto rho = 1 and reported convergence.
     fit = lmer(set_cov_type(SLOPES, "ar1"), sleepstudy, method=name)
     if fit.converged:
         assert np.all(np.isfinite(fit.theta))
         assert fit.deviance == pytest.approx(equal_variance_reference, abs=1e-3)
+
+
+@pytest.mark.parametrize("structure", ["correlated", "independent", "cs", "ar1"])
+def test_start_values_do_not_depend_on_response_units(structure, sleepstudy):
+    # Theta is relative to the residual scale, so its start must be too.
+    formula = SLOPES.replace("|", "||") if structure == "independent" else SLOPES
+    if structure in ("cs", "ar1"):
+        formula = set_cov_type(formula, structure)
+    starts = [
+        LMMOptimizer(
+            build_model_matrices(
+                parse_formula(formula) if isinstance(formula, str) else formula,
+                sleepstudy.assign(Reaction=units * sleepstudy["Reaction"]),
+            )
+        ).get_start_theta()
+        for units in (1e-4, 1.0, 1e4)
+    ]
+    assert_allclose(starts[0], starts[1], rtol=1e-10)
+    assert_allclose(starts[2], starts[1], rtol=1e-10)
 
 
 @pytest.fixture(scope="module")
@@ -153,11 +172,18 @@ def test_check_conv_reports_the_fitted_optimizer(sleepstudy, slopes_reference):
     default = lmer(SLOPES, sleepstudy)
     info = checkConv(default)
     assert info.converged and info.messages == []
-    assert info.optimizer == default.optimizer == "COBYQA"
+    # The default fits with exact native gradients and records that method.
+    assert info.optimizer == default.optimizer == "L-BFGS-B"
     assert info.iterations == default.n_iter > 0
+    assert info.gradient_norm == default.gradient_norm < 1e-6 * len(sleepstudy)
+    assert default.deviance == pytest.approx(slopes_reference["deviance"], abs=1e-8)
+    assert convergence_ok(default)
+
+    derivative_free = lmer(SLOPES, sleepstudy, control=lmerControl(optimizer="COBYQA"))
+    info = checkConv(derivative_free)
+    assert info.optimizer == "COBYQA" and info.messages == []
     # Derivative-free optimizers record no final gradient.
     assert info.gradient_norm is None
-    assert convergence_ok(default)
 
     gradient = lmer(SLOPES, sleepstudy, control=lmerControl(optimizer="L-BFGS-B"))
     assert gradient.deviance == pytest.approx(slopes_reference["deviance"], abs=1e-6)

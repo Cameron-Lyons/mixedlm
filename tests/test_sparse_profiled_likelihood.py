@@ -8,8 +8,9 @@ import pytest
 from mixedlm.estimation import reml
 from mixedlm.formula.parser import parse_formula
 from mixedlm.matrices.design import build_model_matrices
+from mixedlm.models import shared_utils
 from numpy.testing import assert_allclose
-from scipy import sparse
+from scipy import linalg, sparse
 
 
 def _matrices(n_groups=20):
@@ -33,9 +34,9 @@ def _matrices(n_groups=20):
 def test_sparse_crossed_profile_matches_dense_estimates(monkeypatch, reml_fit, theta):
     matrices = _matrices()
     theta = np.asarray(theta)
-    monkeypatch.setattr(reml, "_SPARSE_PROFILE_MIN_RANDOM", np.inf)
+    monkeypatch.setattr(shared_utils, "_SPARSE_PROJECTION_MIN_RANDOM", np.inf)
     expected = reml._profiled_deviance_core(theta, matrices, REML=reml_fit)
-    monkeypatch.setattr(reml, "_SPARSE_PROFILE_MIN_RANDOM", 0)
+    monkeypatch.setattr(shared_utils, "_SPARSE_PROJECTION_MIN_RANDOM", 0)
 
     actual = reml._profiled_deviance_core(theta, matrices, REML=reml_fit)
 
@@ -59,41 +60,43 @@ def test_large_random_system_never_densifies(monkeypatch):
     assert core is not None
     assert np.isfinite(core.deviance)
     assert optimizer.objective(theta) == pytest.approx(core.deviance)
-    beta, sigma, u = optimizer._extract_estimates(theta)
-    assert_allclose(beta, core.beta)
-    assert sigma == pytest.approx(core.sigma)
-    assert_allclose(u, core.u)
+    estimates = optimizer._final_evaluation(theta)
+    assert_allclose(estimates.beta, core.beta)
+    assert estimates.sigma == pytest.approx(core.sigma)
+    assert_allclose(estimates.u, core.u)
 
 
-def test_sparse_factorization_is_reused_for_all_solves(monkeypatch):
+@pytest.mark.skipif(not shared_utils._HAS_RUST, reason="native sparse Cholesky unavailable")
+@pytest.mark.parametrize("reml_fit", [False, True])
+def test_cached_symbolic_analysis_covers_parameters_that_drop_entries(monkeypatch, reml_fit):
+    # The covariance factor omits zero parameters, so a symbolic analysis
+    # built from one parameter vector need not cover the next one.
+    monkeypatch.setattr(shared_utils, "_SPARSE_PROJECTION_MIN_RANDOM", 0)
     matrices = _matrices()
-    theta = np.array([0.8, -0.2, 0.4, 0.6])
-    monkeypatch.setattr(reml, "_SPARSE_PROFILE_MIN_RANDOM", 0)
-    original = reml.sparse_linalg.splu
-    factorizations = 0
+    products = reml._LMMCrossproducts.from_matrices(matrices)
+    assert products.precision_pattern is not None
 
-    def count_factorizations(matrix):
-        nonlocal factorizations
-        factorizations += 1
-        return original(matrix)
-
-    monkeypatch.setattr(reml.sparse_linalg, "splu", count_factorizations)
-
-    result = reml._profiled_deviance_core(theta, matrices)
-
-    assert result is not None
-    assert factorizations == 1
+    for theta in ([0.0, 0.0, 0.4, 0.0], [0.8, -0.2, 0.4, 0.6], [0.8, 0.0, 0.0, 0.6]):
+        theta = np.asarray(theta)
+        actual = reml._profiled_deviance_core(theta, matrices, reml_fit, crossproducts=products)
+        monkeypatch.setattr(shared_utils, "_SPARSE_PROJECTION_MIN_RANDOM", np.inf)
+        expected = reml._profiled_deviance_core(theta, matrices, reml_fit)
+        monkeypatch.setattr(shared_utils, "_SPARSE_PROJECTION_MIN_RANDOM", 0)
+        assert actual is not None and expected is not None
+        assert actual.deviance == pytest.approx(expected.deviance, abs=1e-10)
+        assert_allclose(actual.beta, expected.beta, rtol=1e-11)
+        assert_allclose(actual.u, expected.u, rtol=1e-10, atol=1e-12)
 
 
 def test_failed_sparse_factorization_preserves_invalid_objective(monkeypatch):
     matrices = _matrices()
     theta = np.array([0.8, -0.2, 0.4, 0.6])
-    monkeypatch.setattr(reml, "_SPARSE_PROFILE_MIN_RANDOM", 0)
+    monkeypatch.setattr(shared_utils, "_SPARSE_PROJECTION_MIN_RANDOM", 0)
 
-    def fail_factorization(matrix):
-        raise RuntimeError("factor is singular")
+    def fail_factorization(self):
+        raise linalg.LinAlgError("factor is not positive definite")
 
-    monkeypatch.setattr(reml.sparse_linalg, "splu", fail_factorization)
+    monkeypatch.setattr(shared_utils._RandomEffectFactor, "_factorize", fail_factorization)
 
     assert reml._profiled_deviance_core(theta, matrices) is None
     assert reml.profiled_deviance(theta, matrices) == 1e10
@@ -101,20 +104,23 @@ def test_failed_sparse_factorization_preserves_invalid_objective(monkeypatch):
 
 def test_small_system_keeps_dense_cholesky(monkeypatch):
     matrices = _matrices()
+    theta = np.array([0.8, -0.2, 0.4, 0.6])
+    products = reml._LMMCrossproducts.from_matrices(matrices)
 
-    def reject_sparse_factorization(matrix):
+    def reject_sparse_factorization(self, precision):
         raise AssertionError("small systems should use dense Cholesky")
 
-    monkeypatch.setattr(reml.sparse_linalg, "splu", reject_sparse_factorization)
+    monkeypatch.setattr(shared_utils._SparseCholeskyPattern, "factor", reject_sparse_factorization)
 
-    assert reml._profiled_deviance_core(np.array([0.8, -0.2, 0.4, 0.6]), matrices) is not None
+    assert products.precision_pattern is None
+    assert reml._profiled_deviance_core(theta, matrices, crossproducts=products) is not None
 
 
 def test_sparse_profile_preserves_weight_rescaling(monkeypatch):
     matrices = _matrices()
     theta = np.array([0.8, -0.2, 0.4, 0.6])
     scale = 7.0
-    monkeypatch.setattr(reml, "_SPARSE_PROFILE_MIN_RANDOM", 0)
+    monkeypatch.setattr(shared_utils, "_SPARSE_PROJECTION_MIN_RANDOM", 0)
 
     result = reml._profiled_deviance_core(theta, matrices)
     scaled = reml._profiled_deviance_core(

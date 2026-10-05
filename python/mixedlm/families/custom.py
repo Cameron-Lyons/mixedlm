@@ -30,6 +30,8 @@ True
 
 from __future__ import annotations
 
+from typing import Any
+
 import numpy as np
 from numpy.typing import NDArray
 
@@ -45,7 +47,9 @@ class CustomFamily(Family):
     - deviance_resids(y, mu, wt): Return the weighted deviance residuals
 
     Set ``mean_bounds`` or override ``clamp_mu()`` when the response mean is
-    restricted. The default is unbounded.
+    restricted. The default is unbounded. Implement ``simulate(mu, rng)`` to
+    support ``simulate()``, ``bootMer`` and ``powerSim``; without it they raise
+    NotImplementedError.
 
     The weights() method is inherited and computed from the link and variance.
 
@@ -226,4 +230,17 @@ class QuasiFamily(CustomFamily):
         raise ValueError(
             "Normalized likelihood and information criteria are undefined "
             "for quasi-likelihood models"
+        )
+
+    def simulate(
+        self,
+        mu: NDArray[np.floating],
+        rng: Any | None = None,
+        *,
+        weights: NDArray[np.floating] | None = None,
+        trials: NDArray[np.floating] | None = None,
+    ) -> NDArray[np.floating]:
+        raise NotImplementedError(
+            "Quasi-likelihood families specify only a mean and variance, not a response "
+            "distribution, so responses cannot be simulated"
         )

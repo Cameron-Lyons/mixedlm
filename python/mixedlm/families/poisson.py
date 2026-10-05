@@ -41,7 +41,14 @@ class Poisson(Family):
             raise ValueError("Poisson likelihood means must be nonnegative")
         return float(np.sum(wt * (xlogy(y, mu) - mu - gammaln(y + 1))))
 
-    def simulate(self, mu: NDArray[np.floating], rng: Any | None = None) -> NDArray[np.floating]:
+    def simulate(
+        self,
+        mu: NDArray[np.floating],
+        rng: Any | None = None,
+        *,
+        weights: NDArray[np.floating] | None = None,
+        trials: NDArray[np.floating] | None = None,
+    ) -> NDArray[np.floating]:
         rng = np.random if rng is None else rng
         mu = np.minimum(self.clamp_mu(mu, eps=1e-6), 1e15)
         return rng.poisson(mu).astype(np.float64)

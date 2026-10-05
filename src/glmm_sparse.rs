@@ -2,8 +2,12 @@ use std::collections::BTreeSet;
 use std::fmt;
 use std::sync::{Arc, Mutex, PoisonError};
 
-use faer::MatMut;
-use faer::linalg::solvers::Llt;
+use faer::dyn_stack::{MemBuffer, MemStack};
+use faer::linalg::cholesky::llt::factor::{cholesky_in_place, cholesky_in_place_scratch};
+use faer::linalg::triangular_solve::{
+    solve_lower_triangular_in_place, solve_upper_triangular_in_place,
+};
+use faer::{Mat, MatMut, MatRef, Par};
 
 use crate::covariance::CovarianceFactor;
 use crate::csc::CscMatrix;
@@ -321,9 +325,24 @@ impl SparseWeightedDesign {
     }
 }
 
+/// Dense systems at least this wide use the global thread pool. PIRLS
+/// refactors the system every iteration. Narrower parallel factorizations were
+/// no faster than sequential ones with idle cores, and several times slower
+/// when other processes kept the cores busy.
+const PARALLEL_DIMENSION: usize = 1024;
+
+fn dense_parallelism(dimension: usize) -> Par {
+    if dimension >= PARALLEL_DIMENSION {
+        faer::get_global_parallelism()
+    } else {
+        Par::Seq
+    }
+}
+
 pub enum RandomFactor {
     Diagonal(Vec<f64>),
-    Dense(Llt<f64>),
+    // The lower Cholesky factor; the strict upper triangle is never read.
+    Dense(Mat<f64>),
     Sparse(NumericFactorization),
 }
 
@@ -338,14 +357,30 @@ impl fmt::Debug for RandomFactor {
 }
 
 impl RandomFactor {
+    /// Factor a dense symmetric positive definite matrix from its lower triangle.
+    pub fn dense(matrix: MatRef<'_, f64>) -> Result<Self, LinalgError> {
+        let mut lower = matrix.to_owned();
+        let par = dense_parallelism(lower.nrows());
+        let mut scratch = MemBuffer::new(cholesky_in_place_scratch::<f64>(
+            lower.nrows(),
+            par,
+            Default::default(),
+        ));
+        cholesky_in_place(
+            lower.as_mut(),
+            Default::default(),
+            par,
+            MemStack::new(&mut scratch),
+            Default::default(),
+        )
+        .map_err(|_| LinalgError::NotPositiveDefinite)?;
+        Ok(Self::Dense(lower))
+    }
+
     pub fn logdet(&self) -> f64 {
         match self {
             Self::Diagonal(diagonal) => 2.0 * diagonal.iter().map(|value| value.ln()).sum::<f64>(),
-            Self::Dense(factor) => {
-                2.0 * (0..factor.L().nrows())
-                    .map(|i| factor.L()[(i, i)].ln())
-                    .sum::<f64>()
-            }
+            Self::Dense(lower) => 2.0 * (0..lower.nrows()).map(|i| lower[(i, i)].ln()).sum::<f64>(),
             Self::Sparse(factor) => factor.logdet(),
         }
     }
@@ -353,7 +388,11 @@ impl RandomFactor {
     pub fn solve_lower_in_place(&self, rhs: MatMut<'_, f64>) {
         match self {
             Self::Diagonal(diagonal) => Self::solve_diagonal(diagonal, rhs),
-            Self::Dense(factor) => factor.L().solve_lower_triangular_in_place(rhs),
+            Self::Dense(lower) => solve_lower_triangular_in_place(
+                lower.as_ref(),
+                rhs,
+                dense_parallelism(lower.nrows()),
+            ),
             Self::Sparse(factor) => factor.solve_lower_in_place(rhs),
         }
     }
@@ -361,7 +400,11 @@ impl RandomFactor {
     pub fn solve_upper_in_place(&self, rhs: MatMut<'_, f64>) {
         match self {
             Self::Diagonal(diagonal) => Self::solve_diagonal(diagonal, rhs),
-            Self::Dense(factor) => factor.L().transpose().solve_upper_triangular_in_place(rhs),
+            Self::Dense(lower) => solve_upper_triangular_in_place(
+                lower.transpose(),
+                rhs,
+                dense_parallelism(lower.nrows()),
+            ),
             Self::Sparse(factor) => factor.solve_upper_in_place(rhs),
         }
     }
@@ -380,7 +423,7 @@ impl RandomFactor {
 mod tests {
     use super::*;
     use crate::covariance::RandomEffectStructure;
-    use faer::Mat;
+    use faer::linalg::solvers::Llt;
 
     fn covariance(q: usize, scale: f64) -> CovarianceFactor {
         CovarianceFactor::new(
@@ -593,6 +636,52 @@ mod tests {
         let pairwise =
             CscMatrix::try_from_usize(&vec![1.0; rows.len()], &rows, &offsets, (row, q)).unwrap();
         assert!(SparseWeightedDesign::new(&pairwise, &covariance(q, 1.0), None).is_none());
+    }
+
+    #[test]
+    fn dense_factor_matches_reference_on_both_sides_of_the_parallel_threshold() {
+        use faer::prelude::Solve;
+        let sizes: &[usize] = if cfg!(miri) {
+            &[1, 9]
+        } else {
+            &[1, 9, 130, PARALLEL_DIMENSION]
+        };
+        for &q in sizes {
+            let design = Mat::from_fn(q + 3, q, |i, j| {
+                ((i * 7 + j * 13) % 17) as f64 / 9.0 - 8.0 / 9.0
+            });
+            let mut matrix = design.transpose() * &design;
+            for i in 0..q {
+                matrix[(i, i)] += 1.0;
+            }
+            let reference = Llt::new(matrix.as_ref(), faer::Side::Lower).unwrap();
+            let factor = RandomFactor::dense(matrix.as_ref()).unwrap();
+            let logdet: f64 = (0..q).map(|i| 2.0 * reference.L()[(i, i)].ln()).sum();
+            assert!((factor.logdet() - logdet).abs() <= 1e-12 * logdet.abs().max(1.0));
+            let rhs = Mat::from_fn(q, 3, |i, j| ((i + 2 * j) % 11) as f64 / 5.0 - 1.0);
+            let mut expected = rhs.clone();
+            reference
+                .L()
+                .solve_lower_triangular_in_place(expected.as_mut());
+            let mut actual = rhs.clone();
+            factor.solve_lower_in_place(actual.as_mut());
+            assert!((&actual - &expected).norm_l2() <= 1e-10 * expected.norm_l2());
+            factor.solve_upper_in_place(actual.as_mut());
+            let expected = reference.solve(&rhs);
+            assert!((&actual - &expected).norm_l2() <= 1e-10 * expected.norm_l2());
+        }
+    }
+
+    #[test]
+    fn dense_factor_rejects_indefinite_and_nonfinite_matrices() {
+        for value in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            let matrix = Mat::from_fn(3, 3, |i, j| match (i, j) {
+                (1, 1) => value,
+                (i, j) if i == j => 1.0,
+                _ => 0.0,
+            });
+            assert!(RandomFactor::dense(matrix.as_ref()).is_err());
+        }
     }
 
     #[test]

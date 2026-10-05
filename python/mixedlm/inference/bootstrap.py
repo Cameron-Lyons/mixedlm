@@ -17,7 +17,8 @@ from scipy import stats
 from mixedlm._parallel import process_pool, resolve_n_jobs
 from mixedlm.utils.names import _check_unique_coefficient_names
 from mixedlm.utils.random import RandomSeed, random_seeds, random_stream, validate_simulation_count
-from mixedlm.utils.simulation import simulate_random_effects
+from mixedlm.utils.simulation import simulate_glmm_response, simulate_random_effects
+from mixedlm.utils.validation import _validate_confidence_level
 
 if TYPE_CHECKING:
     from mixedlm.estimation.laplace import GLMMOptimizationResult
@@ -33,8 +34,7 @@ _BOOTSTRAP_CI_METHODS = ("percentile", "basic", "normal")
 
 
 def _validate_ci_options(level: float, method: str) -> None:
-    if not np.isfinite(level) or not 0.0 < level < 1.0:
-        raise ValueError("level must be strictly between 0 and 1")
+    _validate_confidence_level(level)
     if method not in _BOOTSTRAP_CI_METHODS:
         raise ValueError(f"Unknown method: {method}")
 
@@ -122,6 +122,9 @@ def _bootstrap_simulation(
     try:
         # Own the response storage before asynchronous process serialization.
         return _bootstrap_sample_vector(simulate(), n_obs, "Simulated response")
+    except NotImplementedError:
+        # A family without a response distribution would fail every replicate.
+        raise
     except Exception as error:
         return _bootstrap_failure(index, "simulation", error)
 
@@ -401,7 +404,7 @@ def _refit_lmer_response(
         optimizer = LMMOptimizer(bootstrap_matrices, REML=REML, use_rust=True)
     else:
         optimizer = optimizer.with_response(response)
-    return optimizer.optimize(start=theta)
+    return optimizer.optimize(start=theta, method="auto")
 
 
 def _refit_glmer_response(
@@ -649,7 +652,8 @@ def bootstrap_glmer(
     Failed or invalid replicates remain entirely NaN and increment ``n_failed``
     in both serial and parallel execution. Details are recorded in ``failures``.
     Confidence bounds and standard errors require at least two valid samples
-    per parameter.
+    per parameter. A family that cannot simulate responses raises
+    NotImplementedError before any refit.
 
     ``n_jobs`` must be a positive integer or -1 for available CPUs. Parallel
     workers reuse the fitted design and keep only a bounded number of tasks
@@ -747,10 +751,9 @@ def _simulate_glmer_components(
         eta = matrices.X @ beta + matrices.offset
 
     mu = family.link.inverse(eta)
-    from mixedlm.utils.simulation import simulate_glmm_response
-
     response = simulate_glmm_response(family, mu, matrices.weights, trials=matrices.trials, rng=rng)
-    if family.__class__.__name__ == "Binomial" and matrices.trials is not None:
+    if matrices.trials is not None:
+        # Grouped binomial draws are counts; refits use success proportions.
         return response / matrices.trials
     return response
 
@@ -808,6 +811,10 @@ def bootMer(
         If an unsupported bootstrap type is requested.
     TypeError
         If model is not a supported type.
+    NotImplementedError
+        If the GLMM family has no response distribution to simulate from,
+        such as a quasi-likelihood family. This is raised instead of being
+        recorded as a failure for every replicate.
 
     Examples
     --------

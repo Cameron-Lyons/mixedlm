@@ -14,7 +14,6 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib import MatplotlibDeprecationWarning
 from mixedlm.diagnostics.plots import (
-    _check_matplotlib,
     plot_diagnostics,
     plot_qq,
     plot_ranef,
@@ -42,11 +41,6 @@ def simple_data():
 @pytest.fixture
 def lmer_result(simple_data):
     return lmer("y ~ x + (1|group)", simple_data)
-
-
-class TestCheckMatplotlib:
-    def test_does_not_raise_when_available(self):
-        _check_matplotlib()
 
 
 class TestPlotResidFitted:
@@ -254,3 +248,47 @@ class TestPlotEdgeCases:
         ax = plot_resid_fitted(result)
         assert ax is not None
         plt.close("all")
+
+
+@pytest.fixture(scope="module")
+def split_terms():
+    from mixedlm import load_sleepstudy
+
+    return lmer("Reaction ~ Days + (1 | Subject) + (0 + Days | Subject)", load_sleepstudy())
+
+
+class TestRandomEffectPanels:
+    def test_dotplot_draws_every_term_of_a_split_grouping_factor(self, split_terms):
+        ranefs = split_terms.ranef()["Subject"]
+        fig = split_terms.dotplot()
+
+        axes = [ax for ax in fig.axes if ax.get_visible()]
+        assert [ax.get_title() for ax in axes] == [
+            "Random Effects: (Intercept) | Subject",
+            "Random Effects: Days | Subject",
+        ]
+        for ax, term in zip(axes, ["(Intercept)", "Days"], strict=True):
+            points = ax.collections[0].get_offsets()[:, 0]
+            np.testing.assert_allclose(points, np.sort(ranefs[term]))
+        plt.close("all")
+
+    def test_qqmath_plots_sorted_effects_against_normal_quantiles(self, split_terms):
+        from scipy import stats
+
+        values = np.sort(split_terms.ranef()["Subject"]["Days"])
+        fig = split_terms.qqmath(term="Days")
+
+        (ax,) = fig.axes
+        points = ax.collections[0].get_offsets()
+        quantiles = stats.norm.ppf((np.arange(1, len(values) + 1) - 0.5) / len(values))
+        np.testing.assert_allclose(points[:, 0], quantiles)
+        np.testing.assert_allclose(points[:, 1], values)
+        assert ax.get_title() == "QQ Plot: Subject / Days"
+        plt.close("all")
+
+    @pytest.mark.parametrize("method", ["dotplot", "qqmath"])
+    def test_unknown_term_raises_before_drawing(self, split_terms, method):
+        plt.close("all")
+        with pytest.raises(ValueError, match="Term 'x' not found in group 'Subject'"):
+            getattr(split_terms, method)(term="x")
+        assert plt.get_fignums() == []

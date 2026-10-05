@@ -97,7 +97,9 @@ def process_pool(
     ``multiprocessing.set_forkserver_preload``, and a server started here keeps
     the thread limits and the preloaded mixedlm modules for every later
     forkserver pool, including the caller's own. Workers of a server the caller
-    started first get neither.
+    started first get neither. Because the server imports the native extension,
+    its forked workers run native kernels sequentially whatever
+    ``RAYON_NUM_THREADS`` says; parallelism comes from the worker count.
     """
     if _POOL_CONTEXT.get_start_method() == "forkserver":
         # A server started here imports the inference code once; otherwise every

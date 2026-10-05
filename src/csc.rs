@@ -591,6 +591,7 @@ impl LevelTiles {
     }
 
     /// Store the lower tiles of a symmetric matrix given by its entries.
+    #[cfg(test)]
     pub fn lower_from_entries(
         blocks: &[(usize, usize)],
         entry: impl Fn(usize, usize) -> f64,
@@ -952,7 +953,7 @@ impl RowStorage {
 
 /// Validate signed Python CSC buffers without reordering or merging their entries.
 /// Returns owned index storage so callers can safely release the Python GIL.
-pub(crate) fn validate_i64_parts(
+fn validate_i64_parts(
     data_len: usize,
     indices: &[i64],
     indptr: &[i64],

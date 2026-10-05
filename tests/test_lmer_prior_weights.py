@@ -8,9 +8,9 @@ import pytest
 from mixedlm import lmer
 from mixedlm.estimation.reml import (
     _HAS_RUST,
+    LMMOptimizer,
     _build_lambda,
     _profiled_deviance_core,
-    profiled_deviance_fast,
 )
 from mixedlm.formula.parser import parse_formula
 from mixedlm.matrices.design import build_model_matrices
@@ -31,6 +31,10 @@ def _weighted_slope_data() -> tuple[pd.DataFrame, np.ndarray]:
     weights = np.linspace(0.4, 2.0, len(group))
     data = pd.DataFrame({"y": y, "x": x, "group": group.astype(str)})
     return data, weights
+
+
+def _profiled_deviance(theta, matrices, REML, use_rust):
+    return LMMOptimizer(matrices, REML=REML, use_rust=use_rust).objective(theta)
 
 
 def _fit_weighted(
@@ -106,8 +110,8 @@ def test_profiled_deviance_is_normalized_for_weight_scale(reml: bool, use_rust: 
     scale = 16.0
     scaled_matrices = replace(matrices, weights=scale * weights)
 
-    deviance = profiled_deviance_fast(theta, matrices, REML=reml, use_rust=use_rust)
-    scaled_deviance = profiled_deviance_fast(
+    deviance = _profiled_deviance(theta, matrices, REML=reml, use_rust=use_rust)
+    scaled_deviance = _profiled_deviance(
         theta / np.sqrt(scale), scaled_matrices, REML=reml, use_rust=use_rust
     )
 
@@ -127,8 +131,8 @@ def test_fixed_only_profiled_deviance_includes_weight_normalization(
     scale = 9.0
     scaled_matrices = replace(matrices, weights=scale * weights)
 
-    deviance = profiled_deviance_fast(np.array([]), matrices, REML=reml, use_rust=use_rust)
-    scaled_deviance = profiled_deviance_fast(
+    deviance = _profiled_deviance(np.array([]), matrices, REML=reml, use_rust=use_rust)
+    scaled_deviance = _profiled_deviance(
         np.array([]), scaled_matrices, REML=reml, use_rust=use_rust
     )
     core = _profiled_deviance_core(np.array([]), matrices, REML=reml)
@@ -263,6 +267,4 @@ def test_native_backend_rejects_invalid_prior_weights(bad_value: float, message:
     invalid[0] = bad_value
 
     with pytest.raises(ValueError, match=message):
-        profiled_deviance_fast(
-            np.array([1.0]), replace(matrices, weights=invalid), REML=True, use_rust=True
-        )
+        LMMOptimizer(replace(matrices, weights=invalid), use_rust=True)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from unittest.mock import patch
 
 import numpy as np
@@ -56,6 +57,145 @@ def fit_nlme(**kwargs) -> NlmerResult:
         random_params=["Asym"],
         **kwargs,
     )
+
+
+def create_logistic_growth_data(seed: int = 7) -> pd.DataFrame:
+    """Simulate Orange-like growth with correlated random asymptotes and midpoints."""
+    rng = np.random.default_rng(seed)
+    ages = np.array([100.0, 250.0, 400.0, 550.0, 700.0, 850.0, 1000.0, 1200.0, 1400.0, 1600.0])
+    # Standard deviations 25 and 60 with correlation 0.4.
+    covariance = np.array([[625.0, 600.0], [600.0, 3600.0]])
+    effects = rng.multivariate_normal([0.0, 0.0], covariance, size=12)
+    rows = []
+    for tree, (asym_effect, xmid_effect) in enumerate(effects):
+        mean = (200.0 + asym_effect) / (1.0 + np.exp((700.0 + xmid_effect - ages) / 350.0))
+        noisy = mean + rng.normal(0.0, 4.0, len(ages))
+        rows.extend(
+            {"tree": f"T{tree + 1:02d}", "age": age, "circumference": value}
+            for age, value in zip(ages, noisy, strict=True)
+        )
+    return pd.DataFrame(rows)
+
+
+@pytest.fixture(scope="module")
+def growth_fit() -> NlmerResult:
+    """Two correlated random effects; refits from perturbed or simulated data converge."""
+    result = nlmer(
+        nlme.SSlogis(),
+        create_logistic_growth_data(),
+        x_var="age",
+        y_var="circumference",
+        group_var="tree",
+        random_params=["Asym", "xmid"],
+    )
+    assert result.converged and result.pnls_converged
+    assert len(result.theta) == 3
+    return result
+
+
+def _conditional_jacobian(result: NlmerResult) -> np.ndarray:
+    """Analytic derivatives of the conditional mean with respect to phi."""
+    jacobian = np.empty((len(result.y), len(result.phi)))
+    for group in range(len(result.group_levels)):
+        rows = result.groups == group
+        params = result.phi.copy()
+        params[result.random_params] += result.b[group]
+        jacobian[rows] = result.model.gradient(params, result.x[rows])
+    return jacobian
+
+
+class TestNlmerMultipleRandomEffects:
+    def test_ranef_coef_and_getme_share_the_random_effects(self, growth_fit) -> None:
+        b = growth_fit.getME("b")
+        ranefs = ranef(growth_fit)["tree"]
+        coefs = coef(growth_fit)["tree"]
+
+        assert b.shape == (12, 2)
+        assert list(ranefs) == ["Asym", "xmid"]
+        np.testing.assert_array_equal(ranefs["Asym"], b[:, 0])
+        np.testing.assert_array_equal(ranefs["xmid"], b[:, 1])
+        np.testing.assert_allclose(coefs["Asym"], growth_fit.phi[0] + b[:, 0])
+        np.testing.assert_allclose(coefs["xmid"], growth_fit.phi[1] + b[:, 1])
+        np.testing.assert_allclose(coefs["scal"], growth_fit.phi[2])
+
+        first_tree = growth_fit.groups == 0
+        params = np.array([coefs["Asym"][0], coefs["xmid"][0], coefs["scal"][0]])
+        expected = growth_fit.model.predict(params, growth_fit.x[first_tree])
+        np.testing.assert_allclose(growth_fit.fitted()[first_tree], expected)
+
+    def test_simulate_draws_correlated_effects_within_trees(self, growth_fit) -> None:
+        simulations = growth_fit.simulate(nsim=2000, seed=1)
+        correlation = np.corrcoef(simulations - simulations.mean(axis=1, keepdims=True))
+
+        np.testing.assert_array_equal(simulations, growth_fit.simulate(nsim=2000, seed=1))
+        # The last two ages of a tree share its asymptote; different trees do not.
+        assert correlation[8, 9] > 0.9
+        assert abs(correlation[9, 19]) < 0.1
+
+    def test_simulate_without_random_effects_adds_only_residual_noise(self, growth_fit) -> None:
+        simulations = growth_fit.simulate(nsim=2000, seed=1, use_re=False)
+        population = growth_fit._conditional_mean(random_effects=np.zeros_like(growth_fit.b))
+        standardized = (simulations - population[:, None]) / growth_fit.sigma
+
+        assert abs(standardized.mean()) < 0.01
+        assert standardized.std() == pytest.approx(1.0, rel=0.02)
+
+    def test_refit_and_update_reproduce_the_fit(self, growth_fit) -> None:
+        refitted = growth_fit.refit()
+        updated = growth_fit.update()
+
+        assert refitted.converged and refitted.pnls_converged
+        np.testing.assert_allclose(refitted.phi, growth_fit.phi, rtol=1e-8)
+        np.testing.assert_allclose(refitted.theta, growth_fit.theta, atol=1e-5)
+        assert refitted.deviance == pytest.approx(growth_fit.deviance, abs=1e-6)
+        for field in ("phi", "theta", "b", "deviance"):
+            np.testing.assert_array_equal(getattr(updated, field), getattr(growth_fit, field))
+
+    def test_refit_converges_on_simulated_responses(self, growth_fit) -> None:
+        for seed in range(3):
+            simulated = growth_fit.simulate(seed=seed)
+            refitted = growth_fit.refit(simulated)
+
+            assert refitted.converged and refitted.pnls_converged
+            np.testing.assert_array_equal(refitted.y, simulated)
+            assert refitted.b.shape == growth_fit.b.shape
+
+    def test_vcov_matches_the_gauss_newton_information(self, growth_fit) -> None:
+        jacobian = _conditional_jacobian(growth_fit)
+        expected = growth_fit.sigma**2 * np.linalg.inv(jacobian.T @ jacobian)
+
+        np.testing.assert_allclose(growth_fit.vcov(), expected, rtol=0.02)
+
+    def test_hatvalues_project_onto_the_conditional_jacobian(self, growth_fit) -> None:
+        jacobian = _conditional_jacobian(growth_fit)
+        expected = np.einsum(
+            "ij,ji->i", jacobian, np.linalg.solve(jacobian.T @ jacobian, jacobian.T)
+        )
+        hat = growth_fit.hatvalues()
+
+        np.testing.assert_allclose(hat, expected, atol=1e-6)
+        assert hat.sum() == pytest.approx(len(growth_fit.phi), abs=1e-6)
+
+    def test_cooks_distance_and_influence_use_the_hat_values(self, growth_fit) -> None:
+        hat = growth_fit.hatvalues()
+        pearson = growth_fit.residuals("pearson")
+        expected = pearson**2 / len(growth_fit.phi) * hat / (1 - hat) ** 2
+        influence = growth_fit.influence()
+
+        np.testing.assert_allclose(growth_fit.cooks_distance(), expected, rtol=1e-12)
+        np.testing.assert_allclose(influence["cooks_d"], expected, rtol=1e-12)
+        np.testing.assert_allclose(influence["hat"], hat)
+        np.testing.assert_allclose(influence["std_resid"], pearson / np.sqrt(1 - hat))
+
+    def test_is_singular_uses_the_covariance_not_the_cholesky_entries(self, growth_fit) -> None:
+        assert not growth_fit.isSingular()
+        # Independent effects have a zero off-diagonal Cholesky entry.
+        assert not replace(growth_fit, theta=np.array([1.0, 0.0, 1.0])).isSingular()
+        # Perfectly correlated effects have a rank-one covariance.
+        assert replace(growth_fit, theta=np.array([1.0, 1.0, 0.0])).isSingular()
+        assert replace(growth_fit, theta=np.array([0.0, 0.0, 1.0])).is_singular()
+        with pytest.raises(ValueError, match="tol must be"):
+            growth_fit.isSingular(tol=-1.0)
 
 
 class TestNlmerPredict:

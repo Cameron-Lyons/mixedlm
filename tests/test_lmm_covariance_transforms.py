@@ -92,8 +92,10 @@ def test_wide_lmm_transforms_match_observation_system(width, independent, singul
     for field, value in expected.items():
         assert_allclose(getattr(actual, field), value, rtol=2e-11, atol=2e-10)
     assert prepared.objective(theta) == actual.deviance
-    value, gradient = _rust.profiled_deviance_with_gradient(
-        theta=theta, y=matrices.y, reml=reml, **native_arguments(matrices)
+    value, gradient = (
+        _rust.LmmDesign(**native_arguments(matrices))
+        .with_response(matrices.y)
+        .deviance_with_gradient(theta, reml)
     )
     assert_allclose(value, expected["deviance"], rtol=2e-12, atol=2e-11)
     assert_allclose(gradient, observation_gradient(matrices, factor, reml), rtol=2e-10, atol=2e-10)

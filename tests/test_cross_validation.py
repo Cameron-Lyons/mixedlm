@@ -329,6 +329,28 @@ def test_grouped_glmm_cross_validation_includes_deviance(grouped_binomial_model)
     assert "singular" in result.fold_scores
 
 
+@pytest.mark.parametrize("model_name", ["weighted_lmm", "grouped_binomial_model"])
+def test_worker_processes_for_all_cpus_match_serial_folds(request, model_name) -> None:
+    model = request.getfixturevalue(model_name)
+    model = model[0] if isinstance(model, tuple) else model
+
+    serial = cross_validate(model, cv=3, random_state=8)
+    parallel = cross_validate(model, cv=3, random_state=8, n_jobs=-1)
+
+    assert_array_equal(parallel.predictions, serial.predictions)
+    pd.testing.assert_frame_equal(parallel.fold_scores, serial.fold_scores)
+
+
+@pytest.mark.parametrize(
+    ("n_jobs", "error"), [(True, TypeError), (-2, ValueError), (1.5, TypeError)]
+)
+def test_invalid_worker_counts_are_rejected_before_fitting(
+    weighted_lmm, forbid_refits, n_jobs, error
+) -> None:
+    with pytest.raises(error, match="n_jobs must be -1 or a positive integer"):
+        cross_validate(weighted_lmm[0], cv=2, n_jobs=n_jobs)
+
+
 def test_grouped_binomial_count_syntax_matches_manual_proportion_cross_validation() -> None:
     data = CBPP.assign(proportion=CBPP["incidence"] / CBPP["size"])
     prior_weights = np.linspace(0.7, 1.6, len(data))

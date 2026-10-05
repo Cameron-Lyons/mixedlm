@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from functools import partial
 from typing import TYPE_CHECKING, Any
@@ -380,121 +381,130 @@ def profile_glmer(
     return likelihood_profiles(result, which, n_points, level)
 
 
-def logProf(profile: ProfileResult) -> ProfileResult:
-    """Transform profile to log scale for variance components.
+def _transform_profile(
+    profile: ProfileResult, transform: Callable[[Any], Any], parameter: str
+) -> ProfileResult:
+    """Map a profile's points and bounds through a monotone transform, keeping zeta."""
+    lower, upper = float(transform(profile.ci_lower)), float(transform(profile.ci_upper))
+    if lower > upper:
+        lower, upper = upper, lower
+    return ProfileResult(
+        parameter=parameter,
+        values=transform(profile.values),
+        zeta=profile.zeta,
+        mle=float(transform(profile.mle)),
+        ci_lower=lower,
+        ci_upper=upper,
+        level=profile.level,
+    )
 
-    This transformation is useful for variance components, which are
-    always positive and often better represented on a log scale.
-    The transformation is: log_value = log(value)
+
+def _profile_points(profile: ProfileResult) -> NDArray[np.floating]:
+    return np.append(profile.values, [profile.mle, profile.ci_lower, profile.ci_upper])
+
+
+def logProf(profile: ProfileResult) -> ProfileResult:
+    """Transform a profile of a positive parameter to the log scale.
+
+    ``profile_lmer`` and ``profile_glmer`` profile fixed effects, which can be
+    negative. These scale transforms apply to profiles of positive scale
+    parameters, such as a ``ProfileResult`` built for a standard deviation.
 
     Parameters
     ----------
     profile : ProfileResult
-        Original profile result.
+        Profile whose values, MLE and confidence bounds are all positive.
 
     Returns
     -------
     ProfileResult
-        Profile with values transformed to log scale.
+        Profile of ``log(parameter)`` with the original zeta values.
+
+    Raises
+    ------
+    ValueError
+        If any value, the MLE or a confidence bound is not positive.
 
     Examples
     --------
-    >>> profiles = profile_lmer(result)
-    >>> log_profile = logProf(profiles["sigma"])
+    >>> sd = ProfileResult(
+    ...     parameter="sigma",
+    ...     values=np.array([1.5, 2.0, 2.5]),
+    ...     zeta=np.array([-1.0, 0.0, 1.0]),
+    ...     mle=2.0,
+    ...     ci_lower=1.6,
+    ...     ci_upper=2.4,
+    ...     level=0.95,
+    ... )
+    >>> logProf(sd).parameter
+    'log(sigma)'
     """
-    log_values = np.log(np.maximum(profile.values, 1e-10))
-    log_mle = np.log(max(profile.mle, 1e-10))
-    log_ci_lower = np.log(max(profile.ci_lower, 1e-10))
-    log_ci_upper = np.log(max(profile.ci_upper, 1e-10))
-
-    return ProfileResult(
-        parameter=f"log({profile.parameter})",
-        values=log_values,
-        zeta=profile.zeta,
-        mle=log_mle,
-        ci_lower=log_ci_lower,
-        ci_upper=log_ci_upper,
-        level=profile.level,
-    )
+    if np.any(_profile_points(profile) <= 0):
+        raise ValueError("logProf requires a profile of a positive parameter")
+    return _transform_profile(profile, np.log, f"log({profile.parameter})")
 
 
 def varianceProf(profile: ProfileResult) -> ProfileResult:
-    """Transform profile to variance scale.
+    """Transform a standard-deviation profile to the variance scale.
 
-    This transformation squares the values, which is useful when
-    the original profile is on the standard deviation scale but
-    the variance is desired.
+    Squaring is monotone only on one side of zero, so the profile must not
+    change sign. See :func:`logProf` for the profiles these transforms suit.
 
     Parameters
     ----------
     profile : ProfileResult
-        Original profile result (typically on SD scale).
+        Profile on the standard-deviation scale.
 
     Returns
     -------
     ProfileResult
-        Profile with values transformed to variance scale.
+        Profile of the squared parameter with the original zeta values.
+
+    Raises
+    ------
+    ValueError
+        If the values, MLE and confidence bounds include both signs.
 
     Examples
     --------
-    >>> profiles = profile_lmer(result)
-    >>> var_profile = varianceProf(profiles["sigma"])
+    >>> var_profile = varianceProf(sd)
+    >>> var_profile.mle
+    4.0
     """
-    var_values = profile.values**2
-    var_mle = profile.mle**2
-    var_ci_lower = profile.ci_lower**2
-    var_ci_upper = profile.ci_upper**2
-
-    if var_ci_lower > var_ci_upper:
-        var_ci_lower, var_ci_upper = var_ci_upper, var_ci_lower
-
-    return ProfileResult(
-        parameter=f"{profile.parameter}²",
-        values=var_values,
-        zeta=profile.zeta,
-        mle=var_mle,
-        ci_lower=var_ci_lower,
-        ci_upper=var_ci_upper,
-        level=profile.level,
-    )
+    points = _profile_points(profile)
+    if np.any(points < 0) and np.any(points > 0):
+        raise ValueError("varianceProf requires a profile that does not change sign")
+    return _transform_profile(profile, np.square, f"{profile.parameter}²")
 
 
 def sdProf(profile: ProfileResult) -> ProfileResult:
-    """Transform profile to standard deviation scale.
+    """Transform a variance profile to the standard-deviation scale.
 
-    This transformation takes the square root of the values,
-    which is useful when the original profile is on the variance
-    scale but the standard deviation is desired.
+    See :func:`logProf` for the profiles these transforms suit.
 
     Parameters
     ----------
     profile : ProfileResult
-        Original profile result (typically on variance scale).
+        Profile on the variance scale, with nonnegative values, MLE and
+        confidence bounds.
 
     Returns
     -------
     ProfileResult
-        Profile with values transformed to SD scale.
+        Profile of ``sqrt(parameter)`` with the original zeta values.
+
+    Raises
+    ------
+    ValueError
+        If any value, the MLE or a confidence bound is negative.
 
     Examples
     --------
-    >>> profiles = profile_lmer(result)
     >>> sd_profile = sdProf(var_profile)
     """
-    sd_values = np.sqrt(np.maximum(profile.values, 0))
-    sd_mle = np.sqrt(max(profile.mle, 0))
-    sd_ci_lower = np.sqrt(max(profile.ci_lower, 0))
-    sd_ci_upper = np.sqrt(max(profile.ci_upper, 0))
-
-    return ProfileResult(
-        parameter=f"sqrt({profile.parameter})",
-        values=sd_values,
-        zeta=profile.zeta,
-        mle=sd_mle,
-        ci_lower=sd_ci_lower,
-        ci_upper=sd_ci_upper,
-        level=profile.level,
-    )
+    if np.any(_profile_points(profile) < 0):
+        raise ValueError("sdProf requires a profile of a nonnegative parameter")
+    return _transform_profile(profile, np.sqrt, f"sqrt({profile.parameter})")
 
 
 def as_dataframe(

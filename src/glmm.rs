@@ -1,4 +1,4 @@
-use faer::linalg::solvers::{Llt, Solve, SolveLstsq};
+use faer::linalg::solvers::{Llt, Solve};
 use faer::{Col as DVector, Mat as DMatrix, MatRef, Par, Side};
 use numpy::ndarray::{ArrayView1, ArrayView2};
 use pyo3::PyResult;
@@ -497,7 +497,6 @@ impl GlmmProblem {
                 self.link,
                 n_agq,
                 beta_start,
-                None,
                 maxiter,
                 tol,
                 Some(&self.sparse_patterns),
@@ -546,23 +545,21 @@ fn factor_random_system(
             });
     }
     let mut matrix = dense_penalized_crossproduct(z, lambda, weights);
-    match Llt::new(matrix.as_ref(), Side::Lower) {
-        Ok(factor) => Ok((RandomFactor::Dense(factor), false)),
+    match RandomFactor::dense(matrix.as_ref()) {
+        Ok(factor) => Ok((factor, false)),
         Err(_) => {
             for i in 0..z.ncols() {
                 matrix[(i, i)] += 1e-6;
             }
-            Llt::new(matrix.as_ref(), Side::Lower)
-                .map(|factor| (RandomFactor::Dense(factor), true))
-                .map_err(|_| LinalgError::NotPositiveDefinite)
+            RandomFactor::dense(matrix.as_ref()).map(|factor| (factor, true))
         }
     }
 }
 
 fn dense_logdet(z: &CscMatrix, lambda: &CovarianceFactor, weights: &DVector<f64>) -> f64 {
     let matrix = dense_penalized_crossproduct(z, lambda, weights);
-    match Llt::new(matrix.as_ref(), Side::Lower) {
-        Ok(factor) => 2.0 * (0..z.ncols()).map(|i| factor.L()[(i, i)].ln()).sum::<f64>(),
+    match RandomFactor::dense(matrix.as_ref()) {
+        Ok(factor) => factor.logdet(),
         Err(_) => matrix
             .self_adjoint_eigenvalues(Side::Lower)
             .unwrap_or_else(|_| vec![1e-10; z.ncols()])
@@ -715,7 +712,6 @@ pub fn pirls_impl(
     family: FamilyType,
     link: LinkFunction,
     beta_start: Option<&DVector<f64>>,
-    u_start: Option<&DVector<f64>>,
     maxiter: usize,
     tol: f64,
     patterns: Option<&SparsePatternCache>,
@@ -732,11 +728,7 @@ pub fn pirls_impl(
 
     let lambda = CovarianceFactor::new(theta, structures);
     let random_system = WeightedRandomDesign::new(z, &lambda, patterns);
-    let mut spherical = if let Some(u_init) = u_start {
-        lambda.to_dense().col_piv_qr().solve_lstsq(u_init)
-    } else {
-        DVector::zeros(q)
-    };
+    let mut spherical = DVector::zeros(q);
 
     // Gaussian identity-link working weights are constant for this solve.
     // Keep the factor local: a new response, offset, or theta starts afresh.
@@ -944,7 +936,6 @@ pub fn laplace_deviance_impl(
     family: FamilyType,
     link: LinkFunction,
     beta_start: Option<&DVector<f64>>,
-    u_start: Option<&DVector<f64>>,
     maxiter: usize,
     tol: f64,
     patterns: Option<&SparsePatternCache>,
@@ -954,16 +945,16 @@ pub fn laplace_deviance_impl(
 
     if q == 0 {
         let result = pirls_impl(
-            y, x, z, weights, offset, theta, structures, family, link, beta_start, u_start,
-            maxiter, tol, patterns,
+            y, x, z, weights, offset, theta, structures, family, link, beta_start, maxiter, tol,
+            patterns,
         );
         let converged = result.converged && result.deviance.is_finite();
         return (result.deviance, result.beta, result.u, converged);
     }
 
     let result = pirls_impl(
-        y, x, z, weights, offset, theta, structures, family, link, beta_start, u_start, maxiter,
-        tol, patterns,
+        y, x, z, weights, offset, theta, structures, family, link, beta_start, maxiter, tol,
+        patterns,
     );
 
     let converged = result.converged && result.deviance.is_finite();
@@ -1094,7 +1085,7 @@ where
     F: Fn(usize) -> f64 + Send + Sync,
 {
     #[cfg(not(miri))]
-    if n_groups > 1 && rayon::current_num_threads() > 1 {
+    if n_groups > 1 && crate::parallel::rayon_threads() > 1 {
         // Indexed collection preserves group order while allowing uneven groups
         // to be scheduled independently. Only one scalar per group is retained.
         let values = (0..n_groups)
@@ -1119,7 +1110,6 @@ pub fn adaptive_gh_deviance_impl(
     link: LinkFunction,
     n_agq: usize,
     beta_start: Option<&DVector<f64>>,
-    u_start: Option<&DVector<f64>>,
     maxiter: usize,
     tol: f64,
     patterns: Option<&SparsePatternCache>,
@@ -1128,15 +1118,15 @@ pub fn adaptive_gh_deviance_impl(
 
     if n_agq <= 1 || q == 0 {
         return Ok(laplace_deviance_impl(
-            y, x, z, weights, offset, theta, structures, family, link, beta_start, u_start,
-            maxiter, tol, patterns,
+            y, x, z, weights, offset, theta, structures, family, link, beta_start, maxiter, tol,
+            patterns,
         ));
     }
 
     if structures.len() != 1 {
         return Ok(laplace_deviance_impl(
-            y, x, z, weights, offset, theta, structures, family, link, beta_start, u_start,
-            maxiter, tol, patterns,
+            y, x, z, weights, offset, theta, structures, family, link, beta_start, maxiter, tol,
+            patterns,
         ));
     }
 
@@ -1146,8 +1136,8 @@ pub fn adaptive_gh_deviance_impl(
 
     if n_terms_first > 1 {
         return Ok(laplace_deviance_impl(
-            y, x, z, weights, offset, theta, structures, family, link, beta_start, u_start,
-            maxiter, tol, patterns,
+            y, x, z, weights, offset, theta, structures, family, link, beta_start, maxiter, tol,
+            patterns,
         ));
     }
 
@@ -1164,8 +1154,8 @@ pub fn adaptive_gh_deviance_impl(
     }
 
     let result = pirls_impl(
-        y, x, z, weights, offset, theta, structures, family, link, beta_start, u_start, maxiter,
-        tol, patterns,
+        y, x, z, weights, offset, theta, structures, family, link, beta_start, maxiter, tol,
+        patterns,
     );
 
     let converged = result.converged && result.deviance.is_finite();
@@ -1213,186 +1203,6 @@ pub fn adaptive_gh_deviance_impl(
     let deviance = -2.0 * log_integral + fixed_deviance;
 
     Ok((deviance, beta, u, converged))
-}
-
-#[pyfunction]
-#[pyo3(signature = (
-    y,
-    x,
-    z_data,
-    z_indices,
-    z_indptr,
-    z_shape,
-    weights,
-    offset,
-    theta,
-    n_levels,
-    n_terms,
-    correlated,
-    family,
-    link,
-    *,
-    maxiter=PIRLS_MAX_ITER,
-    tol=PIRLS_TOLERANCE
-))]
-#[allow(clippy::too_many_arguments)]
-pub fn pirls<'py>(
-    y: numpy::PyArrayLike1<'py, f64>,
-    x: numpy::PyArrayLike2<'py, f64>,
-    z_data: numpy::PyArrayLike1<'py, f64>,
-    z_indices: numpy::PyArrayLike1<'py, i64>,
-    z_indptr: numpy::PyArrayLike1<'py, i64>,
-    z_shape: (usize, usize),
-    weights: numpy::PyArrayLike1<'py, f64>,
-    offset: numpy::PyArrayLike1<'py, f64>,
-    theta: numpy::PyArrayLike1<'py, f64>,
-    n_levels: Vec<usize>,
-    n_terms: Vec<usize>,
-    correlated: Vec<bool>,
-    family: &str,
-    link: &str,
-    maxiter: usize,
-    tol: f64,
-) -> PyResult<(Vec<f64>, Vec<f64>, f64, bool)> {
-    validate_pirls_controls(maxiter, tol)?;
-    let theta = theta.as_slice()?;
-    let inputs = GlmmInputs::new(
-        y.as_array(),
-        x.as_array(),
-        z_data.as_slice()?,
-        z_indices.as_slice()?,
-        z_indptr.as_slice()?,
-        z_shape,
-        weights.as_slice()?,
-        offset.as_array(),
-        Some(theta.len()),
-        n_levels,
-        n_terms,
-        correlated,
-        family,
-        link,
-        1,
-    )?;
-
-    let result = pirls_impl(
-        &inputs.y,
-        &inputs.x,
-        &inputs.z,
-        &inputs.weights,
-        &inputs.offset,
-        theta,
-        &inputs.structures,
-        inputs.family,
-        inputs.link,
-        None,
-        None,
-        maxiter,
-        tol,
-        None,
-    );
-
-    Ok((
-        result.beta.iter().cloned().collect(),
-        result.u.iter().cloned().collect(),
-        result.deviance,
-        result.converged,
-    ))
-}
-
-#[pyfunction]
-#[pyo3(signature = (
-    y,
-    x,
-    z_data,
-    z_indices,
-    z_indptr,
-    z_shape,
-    weights,
-    offset,
-    theta,
-    n_levels,
-    n_terms,
-    correlated,
-    family,
-    link,
-    *,
-    maxiter=PIRLS_MAX_ITER,
-    tol=PIRLS_TOLERANCE
-))]
-#[allow(clippy::too_many_arguments)]
-pub fn laplace_deviance<'py>(
-    py: Python<'py>,
-    y: numpy::PyArrayLike1<'py, f64>,
-    x: numpy::PyArrayLike2<'py, f64>,
-    z_data: numpy::PyArrayLike1<'py, f64>,
-    z_indices: numpy::PyArrayLike1<'py, i64>,
-    z_indptr: numpy::PyArrayLike1<'py, i64>,
-    z_shape: (usize, usize),
-    weights: numpy::PyArrayLike1<'py, f64>,
-    offset: numpy::PyArrayLike1<'py, f64>,
-    theta: numpy::PyArrayLike1<'py, f64>,
-    n_levels: Vec<usize>,
-    n_terms: Vec<usize>,
-    correlated: Vec<bool>,
-    family: &str,
-    link: &str,
-    maxiter: usize,
-    tol: f64,
-) -> PyResult<(f64, Vec<f64>, Vec<f64>)> {
-    let (deviance, beta, u, _) = glmm_deviance(
-        py, y, x, z_data, z_indices, z_indptr, z_shape, weights, offset, theta, n_levels, n_terms,
-        correlated, family, link, 1, maxiter, tol,
-    )?;
-    Ok((deviance, beta, u))
-}
-
-#[pyfunction]
-#[pyo3(signature = (
-    y,
-    x,
-    z_data,
-    z_indices,
-    z_indptr,
-    z_shape,
-    weights,
-    offset,
-    theta,
-    n_levels,
-    n_terms,
-    correlated,
-    family,
-    link,
-    n_agq,
-    *,
-    maxiter=PIRLS_MAX_ITER,
-    tol=PIRLS_TOLERANCE
-))]
-#[allow(clippy::too_many_arguments)]
-pub fn adaptive_gh_deviance<'py>(
-    py: Python<'py>,
-    y: numpy::PyArrayLike1<'py, f64>,
-    x: numpy::PyArrayLike2<'py, f64>,
-    z_data: numpy::PyArrayLike1<'py, f64>,
-    z_indices: numpy::PyArrayLike1<'py, i64>,
-    z_indptr: numpy::PyArrayLike1<'py, i64>,
-    z_shape: (usize, usize),
-    weights: numpy::PyArrayLike1<'py, f64>,
-    offset: numpy::PyArrayLike1<'py, f64>,
-    theta: numpy::PyArrayLike1<'py, f64>,
-    n_levels: Vec<usize>,
-    n_terms: Vec<usize>,
-    correlated: Vec<bool>,
-    family: &str,
-    link: &str,
-    n_agq: usize,
-    maxiter: usize,
-    tol: f64,
-) -> PyResult<(f64, Vec<f64>, Vec<f64>)> {
-    let (deviance, beta, u, _) = glmm_deviance(
-        py, y, x, z_data, z_indices, z_indptr, z_shape, weights, offset, theta, n_levels, n_terms,
-        correlated, family, link, n_agq, maxiter, tol,
-    )?;
-    Ok((deviance, beta, u))
 }
 
 #[pyfunction]
@@ -1472,7 +1282,6 @@ pub fn glmm_deviance<'py>(
             inputs.link,
             n_agq,
             None,
-            None,
             maxiter,
             tol,
             None,
@@ -1525,7 +1334,6 @@ mod quadrature_tests {
                     &structures,
                     family,
                     link,
-                    None,
                     None,
                     maxiter,
                     1e-8,
@@ -1717,7 +1525,6 @@ mod initialization_tests {
             FamilyType::Poisson,
             LinkFunction::Log,
             None,
-            None,
             6,
             1e-6,
             None,
@@ -1728,7 +1535,7 @@ mod initialization_tests {
     }
 
     #[test]
-    fn supplied_starts_are_preserved() {
+    fn supplied_fixed_start_is_preserved() {
         let y = DVector::full(3, 10.0);
         let x = DMatrix::full(3, 1, 1.0);
         let z = csc_from_scipy(&[1.0; 3], &[0, 1, 2], &[0, 3], (3, 1)).unwrap();
@@ -1738,7 +1545,6 @@ mod initialization_tests {
             correlated: true,
         }];
         let beta = DVector::full(1, 1.25);
-        let u = DVector::full(1, 0.4);
         let result = pirls_impl(
             &y,
             &x,
@@ -1750,13 +1556,14 @@ mod initialization_tests {
             FamilyType::Poisson,
             LinkFunction::Log,
             Some(&beta),
-            Some(&u),
             0,
             1e-6,
             None,
         );
         assert_eq!(result.beta[0], beta[0]);
-        assert!((result.u[0] - u[0]).abs() < 1e-14);
+        assert_eq!(result.u[0], 0.0);
+        let expected = 3.0 * FamilyType::Poisson.unit_deviance(10.0, 1.25_f64.exp());
+        assert!((result.deviance - expected).abs() <= 1e-14 * expected);
         assert!(!result.converged);
     }
 
@@ -1842,7 +1649,6 @@ mod final_mode_tests {
                             family,
                             link,
                             None,
-                            None,
                             maxiter,
                             1e-10,
                             None,
@@ -1899,7 +1705,6 @@ mod final_mode_tests {
             &structures,
             FamilyType::Poisson,
             LinkFunction::Log,
-            None,
             None,
             100,
             1e-6,

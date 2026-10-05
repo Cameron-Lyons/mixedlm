@@ -229,6 +229,8 @@ def powerSim(
         if the test is significant, or a parameter name to test.
         If None, tests the first non-intercept coefficient, or the intercept
         in an intercept-only model. Callables may test models without fixed effects.
+        A callable runs only on valid refits and must return a boolean; its
+        exceptions propagate, and other return values raise TypeError.
     nsim : int, default 1000
         Number of simulations.
     alpha : float, default 0.05
@@ -243,8 +245,11 @@ def powerSim(
     -------
     PowerResult
         Object containing the power estimate and a 95% Wilson score interval.
-        Unconverged or invalid refits are excluded and counted in ``n_failed``;
+        Refits that raise, do not converge, or that the named-parameter Wald
+        test cannot evaluate are excluded and counted in ``n_failed``;
         ``n_simulations`` is the number of valid completed simulations.
+        Simulation errors, such as a family without a response distribution,
+        propagate.
 
     Examples
     --------
@@ -257,23 +262,16 @@ def powerSim(
 
     rng = np.random.default_rng(seed)
 
-    def make_test_func(param: str, a: float) -> Callable[[LmerResult | GlmerResult], bool]:
-        def test_fn(m: LmerResult | GlmerResult) -> bool:
-            return _default_test(m, param, a)
-
-        return test_fn
-
     test_param: str | None = None
+    user_test: Callable[[LmerResult | GlmerResult], bool] | None = None
     if test is None:
         test_param = _default_parameter(model)
-        test_func = make_test_func(test_param, alpha)
     elif isinstance(test, str):
         if test not in param_names:
             raise ValueError(f"Parameter '{test}' not found. Available: {param_names}")
         test_param = test
-        test_func = make_test_func(test_param, alpha)
     elif callable(test):
-        test_func = test
+        user_test = test
     else:
         raise TypeError("test must be a parameter name, callable, or None")
 
@@ -301,21 +299,27 @@ def powerSim(
         if verbose and (i + 1) % _VERBOSE_INTERVAL == 0:
             print(f"Simulation {i + 1}/{nsim}")
 
+        simulation_seed = int(rng.integers(0, 2**32, dtype=np.uint64))
+        y_sim = _simulate_with_isolated_seed(model, simulation_seed)
         try:
-            simulation_seed = int(rng.integers(0, 2**32, dtype=np.uint64))
-            y_sim = _simulate_with_isolated_seed(model, simulation_seed)
             fit_sim = model.refit(y_sim)
             _validate_power_refit(fit_sim, model)
-            significant = test_func(fit_sim)
-            if not isinstance(significant, bool | np.bool_):
-                raise TypeError("test must return a boolean significance decision")
-            if significant:
-                n_successes += 1
-            n_completed += 1
+            # The Wald test rejects degenerate refits, such as a nonpositive
+            # sampling variance, so its errors are failed fits too.
+            significant = None if test_param is None else _default_test(fit_sim, test_param, alpha)
         except Exception as exc:
             if first_error is None:
                 first_error = exc
             continue
+        if user_test is not None:
+            # A user test sees only valid refits, so its own errors, such as
+            # a misspelled attribute, propagate.
+            significant = user_test(fit_sim)
+            if not isinstance(significant, bool | np.bool_):
+                raise TypeError("test must return a boolean significance decision")
+        if significant:
+            n_successes += 1
+        n_completed += 1
 
     if n_completed == 0:
         error_detail = f" First error: {first_error}" if first_error is not None else ""

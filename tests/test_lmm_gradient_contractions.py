@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 from mixedlm import _rust
 from mixedlm.estimation.reml import _build_lambda
-from numpy.testing import assert_allclose, assert_array_equal
+from numpy.testing import assert_allclose
 from scipy import linalg
 
 from tests.test_glmm_final_state import mode_problem
@@ -78,10 +78,6 @@ def test_contracted_gradients_preserve_all_levels_and_structures(
     arguments = native_arguments(matrices)
     response = _rust.LmmDesign(**arguments).with_response(matrices.y)
     value, gradient = response.deviance_with_gradient(theta, reml)
-    raw_value, raw_gradient = _rust.profiled_deviance_with_gradient(
-        theta=theta, y=matrices.y, reml=reml, **arguments
-    )
-    assert value == raw_value == response.deviance(theta, reml)
-    assert_array_equal(gradient, raw_gradient)
+    assert value == response.deviance(theta, reml)
     assert_allclose(value, observation_likelihood(matrices, theta, reml), rtol=2e-12, atol=2e-10)
     assert_allclose(gradient, observation_gradient(matrices, theta, reml), rtol=2e-10, atol=2e-9)

@@ -7,7 +7,6 @@ import numpy as np
 import pandas as pd
 import pytest
 from mixedlm._parallel import process_pool
-from mixedlm.estimation import reml as reml_module
 from mixedlm.estimation.reml import _build_lambda
 from mixedlm.formula.parser import parse_formula, set_cov_type
 from mixedlm.inference import profile as profile_module
@@ -69,7 +68,6 @@ def _result(structure="slope", reml=True, n_groups=8):
 def _use_sparse_profiles():
     # Worker processes import fresh modules; repeat the parent's monkeypatches.
     shared_utils._SPARSE_PROJECTION_MIN_RANDOM = 0
-    reml_module._SPARSE_PROFILE_MIN_RANDOM = 0
 
 
 def _direct_deviance(result, adjusted_y, keep):
@@ -134,14 +132,6 @@ def test_large_profile_never_densifies_random_precision(monkeypatch):
     q = result.matrices.n_random
     adjusted_y = result.matrices.y - result.matrices.offset - 0.5 * result.matrices.X[:, 1]
     expected = _direct_deviance(result, adjusted_y, [0, 2])
-    calls = []
-    original_splu = sparse.linalg.splu
-
-    def counted_splu(matrix, *args, **kwargs):
-        calls.append(matrix.shape)
-        return original_splu(matrix, *args, **kwargs)
-
-    monkeypatch.setattr(sparse.linalg, "splu", counted_splu)
     for cls in (sparse.csc_matrix, sparse.csr_matrix):
         original_toarray = cls.toarray
 
@@ -151,23 +141,30 @@ def test_large_profile_never_densifies_random_precision(monkeypatch):
 
         monkeypatch.setattr(cls, "toarray", guarded_toarray)
 
+    factorizations = []
+    factorize = _RandomEffectFactor._factorize
+
+    def counted_factorize(self):
+        factorizations.append(self.precision.shape)
+        return factorize(self)
+
+    monkeypatch.setattr(_RandomEffectFactor, "_factorize", counted_factorize)
     result.vcov()
     projection = _ProfileProjection.from_result(result, [0, 2])
     for _ in range(3):
         assert_allclose(projection.deviance(adjusted_y), expected, rtol=1e-12, atol=1e-10)
-    assert calls == [(q, q)]
+    # Profiles reuse the fitted model's sparse factorization.
+    assert factorizations == [(q, q)]
 
 
 def test_sparse_profiles_and_parallel_slices_match_dense_profiles(monkeypatch):
     result = _result("crossed")
     monkeypatch.setattr(shared_utils, "_SPARSE_PROJECTION_MIN_RANDOM", np.inf)
-    monkeypatch.setattr(reml_module, "_SPARSE_PROFILE_MIN_RANDOM", np.inf)
     # Each profiled coefficient costs seconds of nuisance fits and takes the
     # same sparse path; test_profile.py covers profiles in worker processes.
     expected_profile = profile_lmer(replace(result), which="z", n_points=7)["z"]
     expected_slice = slice2D(replace(result), "(Intercept)", "x", n_points=5)
     monkeypatch.setattr(shared_utils, "_SPARSE_PROJECTION_MIN_RANDOM", 0)
-    monkeypatch.setattr(reml_module, "_SPARSE_PROFILE_MIN_RANDOM", 0)
 
     actual = profile_lmer(replace(result), which="z", n_points=7)["z"]
     # Nuisance fits and interval roots have optimization tolerance;

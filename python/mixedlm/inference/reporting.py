@@ -7,6 +7,8 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 
+from mixedlm.utils.validation import _validate_confidence_level
+
 if TYPE_CHECKING:
     from mixedlm.models.glmer import GlmerResult
     from mixedlm.models.lmer import LmerResult
@@ -68,8 +70,7 @@ def tidy(
     """
     model_obj: Any = model
     selected = _normalize_effects(effects)
-    if not 0.0 < conf_level < 1.0:
-        raise ValueError("conf_level must be between 0 and 1")
+    conf_level = _validate_confidence_level(conf_level, "conf_level")
     if not hasattr(model_obj, "fixef") or not hasattr(model_obj, "VarCorr"):
         raise TypeError("tidy() requires a fitted mixed-model result")
 

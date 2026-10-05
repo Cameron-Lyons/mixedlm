@@ -20,7 +20,7 @@ from tests._lmer_data import CBPP, SLEEPSTUDY
 class TestControl:
     def test_lmer_control_default(self) -> None:
         ctrl = LmerControl()
-        assert ctrl.optimizer == "COBYQA"
+        assert ctrl.optimizer == "auto"
         assert ctrl.maxiter == 1000
         assert ctrl.ftol == 1e-8
         assert ctrl.gtol == 1e-5
@@ -627,8 +627,9 @@ class TestSimulateFormula:
         ("kwargs", "message"),
         [
             ({"nsim": 0}, "nsim must be at least 1"),
-            ({"sigma": -1.0}, "sigma must be finite and non-negative"),
-            ({"sigma": np.inf}, "sigma must be finite and non-negative"),
+            ({"sigma": -1.0}, "sigma must be finite and positive"),
+            ({"sigma": 0.0}, "sigma must be finite and positive"),
+            ({"sigma": np.inf}, "sigma must be finite and positive"),
             ({"beta": np.array([1.0])}, "beta has length 1; expected 2"),
             ({"theta": np.array([1.0, 2.0])}, "theta must contain 1 parameters, got 2"),
             ({"theta": np.array([np.nan])}, "theta must contain only finite values"),

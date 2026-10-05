@@ -1,5 +1,7 @@
 """allFit refits one model per optimizer through a single engine."""
 
+from dataclasses import replace
+
 import mixedlm as mlm
 import pytest
 from mixedlm.estimation.optimizers import ALL_OPTIMIZERS, COMPATIBILITY_OPTIMIZERS
@@ -51,7 +53,7 @@ def test_formula_allfit_keeps_the_callers_control(sleepstudy):
     assert not fit.converged
     assert result.warnings == {"L-BFGS-B": ["Did not converge"], "bogus": []}
     assert list(result.errors) == ["bogus"]
-    assert control.optimizer == "COBYQA"
+    assert control.optimizer == "auto"
 
 
 def test_default_optimizers_are_the_valid_names_without_aliases():
@@ -61,3 +63,19 @@ def test_default_optimizers_are_the_valid_names_without_aliases():
     assert {"COBYQA", "L-BFGS-B", "Nelder-Mead", "BFGS"} <= set(defaults)
     for name in defaults:
         assert LmerControl(optimizer=name).optimizer == name
+
+
+def test_model_allfit_keeps_the_fitted_control(sleepstudy):
+    control = lmerControl(maxiter=3, check_conv=False)
+    fitted = replace(mlm.lmer(FORMULA, sleepstudy), control=control)
+    result = allfit_lmer(fitted, sleepstudy, ["L-BFGS-B"])
+
+    expected = mlm.lmer(
+        FORMULA, sleepstudy, control=lmerControl(optimizer="L-BFGS-B", maxiter=3, check_conv=False)
+    )
+    fit = result.fits["L-BFGS-B"]
+    assert fit.n_iter == expected.n_iter <= 3
+    assert fit.deviance == expected.deviance
+    assert result.warnings == {"L-BFGS-B": ["Did not converge"]}
+    # Refitting with another optimizer must not mutate the stored control.
+    assert control.optimizer == lmerControl().optimizer

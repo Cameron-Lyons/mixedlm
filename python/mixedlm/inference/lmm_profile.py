@@ -5,6 +5,7 @@ from __future__ import annotations
 import warnings
 from collections.abc import Callable
 from dataclasses import dataclass, replace
+from functools import cached_property
 from numbers import Integral
 from typing import TYPE_CHECKING, Any
 
@@ -14,10 +15,10 @@ from scipy import linalg, optimize, stats
 
 from mixedlm._parallel import process_pool, resolve_n_jobs
 from mixedlm.estimation.reml import (
+    LMMOptimizer,
     _build_theta_bounds,
     _count_theta,
     _LMMCrossproducts,
-    _profiled_deviance_core,
 )
 from mixedlm.estimation.validation import validate_finite_real
 from mixedlm.inference.profile_types import Profile2DResult, ProfileResult
@@ -41,13 +42,59 @@ class _LMMProfileFit:
 
 
 class _LMMProfileLikelihood:
-    """Reuse the weighted design products across constrained covariance fits."""
+    """Fit ML covariance parameters with some fixed effects held at given values.
+
+    Natively supported covariances prepare one design per set of free
+    coefficients and share it across held values; profiles move through one
+    set at a time, so only the latest design is kept. Other covariances share
+    one set of Python weighted products, sliced to the free coefficients.
+    """
 
     def __init__(self, matrices: ModelMatrices) -> None:
         self.matrices = replace(matrices, frame=None)
-        self.products = _LMMCrossproducts.from_matrices(matrices)
         self.n_theta = _count_theta(matrices.random_structures)
         self.bounds = _build_theta_bounds(matrices.random_structures, self.n_theta)
+        self._design: tuple[tuple[int, ...], LMMOptimizer] | None = None
+
+    def __getstate__(self) -> dict[str, Any]:
+        # Native designs cannot be pickled; each worker prepares its own.
+        return {**self.__dict__, "_design": None}
+
+    @cached_property
+    def _products(self) -> _LMMCrossproducts:
+        return _LMMCrossproducts.from_matrices(self.matrices)
+
+    def _optimizer(self, indices: tuple[int, ...], held: NDArray[np.floating]) -> LMMOptimizer:
+        matrices = self.matrices
+        keep = tuple(i for i in range(matrices.n_fixed) if i not in indices)
+        fixed = list(indices)
+        adjusted_y = matrices.y - matrices.offset - matrices.X[:, fixed] @ held
+        if self._design is not None and self._design[0] == keep:
+            return self._design[1].with_response(adjusted_y)
+        self._design = None
+        constrained = replace(
+            matrices,
+            y=adjusted_y,
+            offset=np.zeros(matrices.n_obs),
+            X=np.ascontiguousarray(matrices.X[:, keep]),
+            n_fixed=len(keep),
+            fixed_names=[matrices.fixed_names[i] for i in keep],
+        )
+        optimizer = LMMOptimizer(constrained, REML=False)
+        if optimizer.use_rust:
+            self._design = keep, optimizer
+            return optimizer
+        products = self._products
+        free = list(keep)
+        optimizer._crossproducts = replace(
+            products,
+            y_adj=adjusted_y,
+            XtWX=products.XtWX[np.ix_(free, free)],
+            XtWy=products.XtWy[free] - products.XtWX[np.ix_(free, fixed)] @ held,
+            ZtWX=products.ZtWX[:, free],
+            ZtWy=products.ZtWy - products.ZtWX[:, fixed] @ held,
+        )
+        return optimizer
 
     def fit(
         self,
@@ -56,39 +103,12 @@ class _LMMProfileLikelihood:
         values: tuple[float, ...] = (),
     ) -> _LMMProfileFit:
         validate_finite_real("variance parameters", start, (self.n_theta,))
-        keep = np.asarray([i for i in range(self.matrices.n_fixed) if i not in indices], dtype=int)
-        fixed = np.asarray(indices, dtype=int)
         held = np.asarray(values, dtype=float)
         validate_finite_real("profile coefficients", held, (len(indices),))
-        adjusted_y = self.products.y_adj - self.matrices.X[:, fixed] @ held
-        matrices = replace(
-            self.matrices,
-            y=adjusted_y,
-            offset=np.zeros(self.matrices.n_obs),
-            X=self.matrices.X[:, keep],
-            n_fixed=len(keep),
-            fixed_names=[self.matrices.fixed_names[i] for i in keep],
-        )
-        products = replace(
-            self.products,
-            y_adj=adjusted_y,
-            XtWX=self.products.XtWX[np.ix_(keep, keep)],
-            XtWy=self.products.XtWy[keep] - self.products.XtWX[np.ix_(keep, fixed)] @ held,
-            ZtWX=self.products.ZtWX[:, keep],
-            ZtWy=self.products.ZtWy - self.products.ZtWX[:, fixed] @ held,
-        )
-        scale = np.maximum(np.abs(start), 1.0)
-        last_point = None
-        last_evaluation = None
+        optimizer = self._optimizer(tuple(indices), held)
 
-        def evaluate(scaled: NDArray[np.floating]) -> _DevianceCoreResult:
-            nonlocal last_point, last_evaluation
-            if last_evaluation is not None and np.array_equal(scaled, last_point):
-                return last_evaluation
-            theta = scaled * scale
-            evaluation = _profiled_deviance_core(
-                theta, matrices, REML=False, crossproducts=products
-            )
+        def evaluate(theta: NDArray[np.floating]) -> _DevianceCoreResult:
+            evaluation = optimizer._evaluate_core(theta)
             if evaluation is None:
                 raise RuntimeError("LMM profile covariance factorization failed")
             if (
@@ -100,13 +120,26 @@ class _LMMProfileLikelihood:
                     "LMM likelihood profiling requires a finite deviance "
                     "and positive residual scale"
                 )
-            validate_finite_real("profile fixed effects", evaluation.beta, (len(keep),))
-            validate_finite_real("profile random effects", evaluation.u, (matrices.n_random,))
-            last_point, last_evaluation = scaled.copy(), evaluation
+            validate_finite_real("profile fixed effects", evaluation.beta, (len(evaluation.beta),))
+            validate_finite_real(
+                "profile random effects", evaluation.u, (optimizer.matrices.n_random,)
+            )
             return evaluation
 
         if not self.n_theta:
             return _LMMProfileFit(start.copy(), evaluate(start))
+        # Exact native gradients where available; structured covariances
+        # fall back to finite differences of the Python likelihood.
+        objective, gradient = optimizer._optimization_functions("L-BFGS-B", True)
+        scale = np.maximum(np.abs(start), 1.0)
+
+        def scaled_objective(point: NDArray[np.floating]) -> float:
+            return objective(point * scale)
+
+        def scaled_gradient(point: NDArray[np.floating]) -> NDArray[np.floating]:
+            assert gradient is not None
+            return gradient(point * scale) * scale
+
         bounds = [
             (None if lo is None else lo / step, None if hi is None else hi / step)
             for (lo, hi), step in zip(self.bounds, scale, strict=True)
@@ -123,25 +156,27 @@ class _LMMProfileLikelihood:
         solver_start = start / scale
         failures = []
         for method in methods:
-            # Finite differences can also stall near an interior optimum.
+            # Gradient methods can also stall near an interior optimum.
             # Retry the same likelihood from the valid start if needed.
+            if method == "L-BFGS-B":
+                jac = scaled_gradient if gradient is not None else "3-point"
+                options = {"maxiter": 1000, "ftol": 1e-12, "gtol": 1e-6}
+            else:
+                jac, options = None, {"maxiter": 2000, "final_tr_radius": 1e-8}
             fitted = optimize.minimize(
-                lambda point: evaluate(point).deviance,
+                scaled_objective,
                 solver_start,
                 method=method,
-                jac="3-point" if method == "L-BFGS-B" else None,
+                jac=jac,
                 bounds=bounds,
-                options=(
-                    {"maxiter": 1000, "ftol": 1e-12, "gtol": 1e-6}
-                    if method == "L-BFGS-B"
-                    else {"maxiter": 2000, "final_tr_radius": 1e-8}
-                ),
+                options=options,
             )
             if fitted.success:
                 if method == "L-BFGS-B" and at_boundary(fitted.x * scale):
                     solver_start = fitted.x
                     continue
-                return _LMMProfileFit(fitted.x * scale, evaluate(fitted.x))
+                theta = np.ascontiguousarray(fitted.x * scale)
+                return _LMMProfileFit(theta, evaluate(theta))
             failures.append(f"{method}: {fitted.message}")
         raise RuntimeError("LMM profile nuisance optimization failed: " + "; ".join(failures))
 

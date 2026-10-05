@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import Callable
 from functools import cached_property
 from typing import Any
 
@@ -16,17 +15,83 @@ from mixedlm.utils.dataframe import (
     get_columns,
 )
 
+try:
+    from mixedlm._rust import SparseCholeskySymbolic
+
+    _HAS_RUST = True
+except ImportError:
+    _HAS_RUST = False
+
 _MAX_QUADRATIC_FORM_ELEMENTS = 1_000_000
+# Random-effect precisions of at least this order use a sparse Cholesky factor
+# (native with a fill-reducing ordering, else SuperLU); smaller ones are dense.
 _SPARSE_PROJECTION_MIN_RANDOM = 256
 
 
-class _RandomEffectFactor:
-    """Reuse a precision solve, materializing its dense Cholesky only on demand."""
+def _lower_triangle(matrix: sparse.spmatrix) -> sparse.csc_matrix:
+    lower = sparse.tril(matrix, format="csc")
+    lower.sum_duplicates()
+    lower.sort_indices()
+    return lower
 
-    def __init__(self, precision: sparse.spmatrix, *, jitter: float = 0.0) -> None:
-        self.precision = sparse.csc_matrix(precision)
+
+def _entry_keys(matrix: sparse.csc_matrix) -> NDArray[np.int64]:
+    """Order canonical column-compressed entries by column, then row."""
+    n = matrix.shape[0]
+    columns = np.repeat(np.arange(matrix.shape[1], dtype=np.int64), np.diff(matrix.indptr))
+    return columns * n + matrix.indices
+
+
+class _SparseCholeskyPattern:
+    """Native symbolic Cholesky analysis shared by precisions with one structure.
+
+    ``pattern`` must include every entry any of those precisions can store,
+    so it is built from structure rather than from values that may be zero.
+    """
+
+    def __init__(self, pattern: sparse.spmatrix) -> None:
+        self.lower = _lower_triangle(pattern)
+        self.keys = _entry_keys(self.lower)
+        self.symbolic = SparseCholeskySymbolic(
+            self.lower.indices.astype(np.int64),
+            self.lower.indptr.astype(np.int64),
+            self.lower.shape[0],
+        )
+
+    def __reduce__(self) -> tuple[type[_SparseCholeskyPattern], tuple[sparse.csc_matrix]]:
+        # Native analyses cannot be pickled; repeat the analysis on load.
+        return type(self), (self.lower,)
+
+    def factor(self, precision: sparse.spmatrix) -> Any:
+        lower = _lower_triangle(precision)
+        keys = _entry_keys(lower)
+        positions = np.searchsorted(self.keys, keys)
+        if not np.array_equal(self.keys.take(positions, mode="clip"), keys):
+            raise ValueError("precision has entries outside the analyzed pattern")
+        values = np.zeros(len(self.keys))
+        values[positions] = lower.data
+        return self.symbolic.factor(values)
+
+
+class _RandomEffectFactor:
+    """Factor a random-effect precision once for repeated solves.
+
+    The dense Cholesky factor of a sparse precision is materialized only on
+    demand. ``pattern`` reuses a symbolic analysis of the precision structure.
+    """
+
+    def __init__(
+        self,
+        precision: sparse.spmatrix,
+        *,
+        jitter: float = 0.0,
+        pattern: _SparseCholeskyPattern | None = None,
+    ) -> None:
+        # Small precisions are densified, so only sparse factors need column storage.
+        self.precision = precision if sparse.issparse(precision) else sparse.csc_matrix(precision)
+        self._pattern = pattern
         self._dense_factor: NDArray[np.float64] | None = None
-        self._sparse_factor: sparse_linalg.SuperLU | None = None
+        self._sparse_factor: Any = None
         try:
             self._factorize()
         except (linalg.LinAlgError, RuntimeError):
@@ -38,13 +103,19 @@ class _RandomEffectFactor:
             self._factorize()
 
     def _factorize(self) -> None:
-        if self.precision.shape[0] >= _SPARSE_PROJECTION_MIN_RANDOM:
-            self._sparse_factor = sparse_linalg.splu(self.precision)
-        else:
+        if self.precision.shape[0] < _SPARSE_PROJECTION_MIN_RANDOM:
             self._dense_factor = linalg.cholesky(self.precision.toarray(), lower=True)
+        elif _HAS_RUST:
+            pattern = self._pattern or _SparseCholeskyPattern(self.precision)
+            try:
+                self._sparse_factor = pattern.factor(self.precision)
+            except ValueError as error:
+                raise linalg.LinAlgError(str(error)) from error
+        else:
+            self._sparse_factor = sparse_linalg.splu(self.precision.tocsc())
 
-    def __reduce__(self) -> tuple[type[_RandomEffectFactor], tuple[sparse.csc_matrix]]:
-        # SuperLU objects cannot be pickled; rebuild from the effective precision.
+    def __reduce__(self) -> tuple[type[_RandomEffectFactor], tuple[sparse.spmatrix]]:
+        # Sparse factors cannot be pickled; rebuild from the effective precision.
         return type(self), (self.precision,)
 
     @cached_property
@@ -55,27 +126,112 @@ class _RandomEffectFactor:
 
     @cached_property
     def logdet(self) -> float:
-        if self._sparse_factor is not None:
+        if isinstance(self._sparse_factor, sparse_linalg.SuperLU):
             return float(np.sum(np.log(np.abs(self._sparse_factor.U.diagonal()))))
+        if self._sparse_factor is not None:
+            return float(self._sparse_factor.logdet())
         return float(2.0 * np.sum(np.log(np.diag(self.cholesky))))
 
     def solve(self, rhs: NDArray[np.floating]) -> NDArray[np.float64]:
+        rhs = np.asarray(rhs, dtype=np.float64)
         if rhs.size == 0:
-            return np.asarray(rhs, dtype=np.float64).copy()
-        if self._sparse_factor is not None:
+            return rhs.copy()
+        if self._sparse_factor is None:
+            return linalg.cho_solve((self.cholesky, True), rhs)
+        if isinstance(self._sparse_factor, sparse_linalg.SuperLU):
             return self._sparse_factor.solve(rhs)
-        return linalg.cho_solve((self.cholesky, True), rhs)
+        return self._sparse_factor.solve(rhs.reshape(len(rhs), -1)).reshape(rhs.shape)
+
+    @cached_property
+    def _dense_inverse(self) -> NDArray[np.float64]:
+        return linalg.cho_solve((self.cholesky, True), np.eye(self.precision.shape[0]))
+
+    def inverse_entries(
+        self, rows: NDArray[np.integer], columns: NDArray[np.integer]
+    ) -> NDArray[np.float64]:
+        """Return the paired entries C^-1[rows, columns].
+
+        Sparse factors solve for the requested unit columns in bounded batches.
+        """
+        if self._sparse_factor is None:
+            return self._dense_inverse[rows, columns]
+        q = self.precision.shape[0]
+        values = np.empty(len(rows), dtype=np.float64)
+        order = np.argsort(columns, kind="stable")
+        needed, first = np.unique(columns[order], return_index=True)
+        first = np.append(first, len(order))
+        batch = max(1, _MAX_QUADRATIC_FORM_ELEMENTS // q)
+        for start in range(0, len(needed), batch):
+            block = needed[start : start + batch]
+            unit = np.zeros((q, len(block)), dtype=np.float64)
+            unit[block, np.arange(len(block))] = 1.0
+            solved = self.solve(unit)
+            selected = order[first[start] : first[start + len(block)]]
+            values[selected] = solved[rows[selected], np.searchsorted(block, columns[selected])]
+        return values
 
     def quadratic_diagonal(self, design: sparse.spmatrix) -> NDArray[np.float64]:
-        factor = self.solve if self._sparse_factor is not None else self.cholesky
-        return sparse_quadratic_form_diagonal(design, factor)
+        """Compute diag(A C^-1 A.T) from C^-1 at the column pairs sharing a row of A."""
+        design = sparse.csr_matrix(design, dtype=np.float64)
+        design.sum_duplicates()
+        n_rows, q = design.shape
+        result = np.zeros(n_rows, dtype=np.float64)
+        if design.nnz == 0:
+            return result
 
-    def crossproduct(self, rhs: NDArray[np.floating]) -> NDArray[np.float64]:
-        """Return B.T C^-1 B, using only a forward solve for dense factors."""
+        if self._sparse_factor is None:
+            inverse = self._dense_inverse
+
+            def lookup(rows: NDArray[np.intp], columns: NDArray[np.intp]) -> NDArray[np.float64]:
+                return inverse[rows, columns]
+
+        else:
+            # Only the entries of C^-1 on the pattern of A.T A are needed.
+            structure = sparse.csr_matrix(
+                (np.ones(design.nnz), design.indices, design.indptr), shape=design.shape
+            )
+            gram = (structure.T @ structure).tocsr()
+            gram.sort_indices()
+            gram_rows = np.repeat(np.arange(q), np.diff(gram.indptr))
+            keys = gram_rows * q + gram.indices
+            entries = self.inverse_entries(gram_rows, gram.indices)
+
+            def lookup(rows: NDArray[np.intp], columns: NDArray[np.intp]) -> NDArray[np.float64]:
+                return entries[np.searchsorted(keys, rows.astype(np.int64) * q + columns)]
+
+        widths = np.diff(design.indptr)
+        rows_per_chunk = max(1, _MAX_QUADRATIC_FORM_ELEMENTS // int(widths.max()) ** 2)
+        for start in range(0, n_rows, rows_per_chunk):
+            stop = min(start + rows_per_chunk, n_rows)
+            # Enumerate every ordered pair of stored entries within each row.
+            width = widths[start:stop]
+            pairs = width**2
+            span = np.repeat(width, pairs)
+            local = np.arange(pairs.sum()) - np.repeat(np.cumsum(pairs) - pairs, pairs)
+            first = np.repeat(design.indptr[start:stop], pairs) + local // span
+            second = first - local // span + local % span
+            products = design.data[first] * design.data[second]
+            products *= lookup(design.indices[first], design.indices[second])
+            result[start:stop] = np.bincount(
+                np.repeat(np.arange(stop - start), pairs), weights=products, minlength=stop - start
+            )
+        return result
+
+    def crossproduct(
+        self, rhs: NDArray[np.floating], other: NDArray[np.floating] | None = None
+    ) -> NDArray[np.float64]:
+        """Return B.T C^-1 B, followed by the columns of B.T C^-1 D if ``other`` is given.
+
+        Dense factors use only forward solves; sparse factors solve [B D] at once.
+        """
         if self._sparse_factor is not None:
-            return rhs.T @ self.solve(rhs)
+            return rhs.T @ self.solve(rhs if other is None else np.column_stack((rhs, other)))
         whitened = linalg.solve_triangular(self.cholesky, rhs, lower=True)
-        return whitened.T @ whitened
+        gram = whitened.T @ whitened
+        if other is None:
+            return gram
+        whitened_other = linalg.solve_triangular(self.cholesky, other, lower=True)
+        return np.column_stack((gram, whitened.T @ whitened_other))
 
     def solve_with_crossproduct(
         self, rhs: NDArray[np.floating]
@@ -160,37 +316,6 @@ def resolve_prediction_vector(
     if values.ndim == 0:
         return np.broadcast_to(values, (n_rows,))
     return values
-
-
-def sparse_quadratic_form_diagonal(
-    design: sparse.spmatrix,
-    factor: NDArray[np.floating] | Callable[[NDArray[np.floating]], NDArray[np.floating]],
-) -> NDArray[np.float64]:
-    """Compute diag(A C^-1 A.T) with bounded dense solve buffers.
-
-    ``design`` is A. ``factor`` is either C's lower Cholesky factor or a
-    callable computing C^-1 times its argument without modifying that argument.
-    Each right-hand-side buffer holds at most one million elements, or one
-    row of A if its width exceeds that limit.
-    """
-    design = design.tocsr()
-    n_rows, width = design.shape
-    if width == 0:
-        return np.zeros(n_rows, dtype=np.float64)
-
-    result = np.empty(n_rows, dtype=np.float64)
-    chunk_size = max(1, _MAX_QUADRATIC_FORM_ELEMENTS // width)
-    for start in range(0, n_rows, chunk_size):
-        stop = min(start + chunk_size, n_rows)
-        rhs = design[start:stop].toarray().T
-        if callable(factor):
-            solved = factor(rhs)
-            result[start:stop] = np.einsum("ij,ij->j", rhs, solved)
-        else:
-            solved = linalg.solve_triangular(factor, rhs, lower=True, overwrite_b=True)
-            result[start:stop] = np.einsum("ij,ij->j", solved, solved)
-        del rhs, solved
-    return result
 
 
 def sparse_covariance_factor_diagonal(

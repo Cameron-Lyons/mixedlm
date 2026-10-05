@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -26,10 +27,6 @@ def _get_pyplot() -> Any:
             "matplotlib is required for plotting. Install it with: pip install mixedlm[plots]"
         ) from None
     return plt
-
-
-def _check_matplotlib() -> None:
-    _get_pyplot()
 
 
 def plot_resid_fitted(
@@ -422,6 +419,110 @@ def plot_ranef(
     ax.set_title(f"Random Effects: {term} | {group}")
 
     return ax
+
+
+def _ranef_panels(
+    result: LmerResult | GlmerResult,
+    group: str | None,
+    term: str | None,
+    draw: Callable[[Axes, str, str], None],
+    single_size: tuple[float, float],
+    panel_size: tuple[float, float],
+    figsize: tuple[float, float] | None,
+) -> Figure:
+    """Draw one panel per random-effect term of a grouping factor."""
+    plt = _get_pyplot()
+    structures = result.matrices.random_structures
+    if group is None:
+        if not structures:
+            raise ValueError("No random effects in model")
+        group = structures[0].grouping_factor
+
+    terms: list[str] = []
+    for struct in structures:
+        if struct.grouping_factor == group:
+            terms.extend(name for name in struct.term_names if name not in terms)
+    if not terms:
+        raise ValueError(f"Grouping factor '{group}' not found")
+    if term is not None:
+        if term not in terms:
+            raise ValueError(f"Term '{term}' not found in group '{group}'")
+        terms = [term]
+
+    if len(terms) == 1:
+        fig, ax = plt.subplots(figsize=figsize or single_size)
+        axes = [ax]
+    else:
+        nrows = (len(terms) + 1) // 2
+        width, height = panel_size
+        fig, grid = plt.subplots(nrows, 2, figsize=figsize or (2 * width, nrows * height))
+        axes = list(grid.flatten())
+
+    for ax, name in zip(axes, terms, strict=False):
+        draw(ax, group, name)
+    for ax in axes[len(terms) :]:
+        ax.set_visible(False)
+
+    fig.tight_layout()
+    return fig
+
+
+def _ranef_dotplot(
+    result: LmerResult | GlmerResult,
+    group: str | None = None,
+    term: str | None = None,
+    condVar: bool = True,
+    order: bool = True,
+    figsize: tuple[float, float] | None = None,
+) -> Figure:
+    """Caterpillar plots of a grouping factor's random effects, one panel per term."""
+    structures = result.matrices.random_structures
+    n_levels = next(
+        (s.n_levels for s in structures if group is None or s.grouping_factor == group), 0
+    )
+
+    def draw(ax: Axes, group: str, name: str) -> None:
+        plot_ranef(result, group=group, term=name, ax=ax, condVar=condVar, order=order)
+
+    return _ranef_panels(
+        result,
+        group,
+        term,
+        draw,
+        single_size=(8, max(6, n_levels * 0.3)),
+        panel_size=(6, max(6, n_levels * 0.25)),
+        figsize=figsize,
+    )
+
+
+def _ranef_qqmath(
+    result: LmerResult | GlmerResult,
+    group: str | None = None,
+    term: str | None = None,
+    figsize: tuple[float, float] | None = None,
+) -> Figure:
+    """Normal QQ plots of a grouping factor's random effects, one panel per term."""
+    ranefs = result.ranef()
+
+    def draw(ax: Axes, group: str, name: str) -> None:
+        values = np.sort(np.asarray(ranefs[group][name]))
+        n = len(values)
+        theoretical = stats.norm.ppf((np.arange(1, n + 1) - 0.5) / n)
+
+        ax.scatter(theoretical, values, alpha=0.7, edgecolors="black", linewidths=0.5)
+        slope, intercept = np.polyfit(theoretical, values, 1)
+        line_x = np.array([theoretical.min(), theoretical.max()])
+        ax.plot(line_x, slope * line_x + intercept, "r--", linewidth=1.5, label="Reference line")
+
+        ax.set_xlabel("Theoretical Quantiles")
+        ax.set_ylabel("Sample Quantiles")
+        ax.set_title(f"QQ Plot: {group} / {name}")
+        ax.axhline(0, color="gray", linestyle=":", alpha=0.5)
+        ax.axvline(0, color="gray", linestyle=":", alpha=0.5)
+
+    return _ranef_panels(
+        result, group, term, draw, single_size=(6, 5), panel_size=(5, 4), figsize=figsize
+    )
 
 
 def plot_diagnostics(
