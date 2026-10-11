@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-10-11
+
+### Migration notes
+
+- **LMM optimizer:** `lmer()` now defaults to `optimizer="auto"`, using exact native gradients with a COBYQA fallback. Pass `optimizer="COBYQA"` to keep the previous optimizer policy; `glmer()` still defaults to COBYQA.
+- **GLMM estimation:** Fits with `nAGQ>=1` jointly optimize fixed coefficients and covariance parameters against the integrated likelihood. Estimates can change and fits may take longer. Use `nAGQ=0` for the previous joint-PIRLS approximation.
+- **Parallel scripts:** Put calls with `n_jobs` greater than one under an `if __name__ == "__main__":` guard. Workers use forkserver on Linux and spawn on macOS and Windows; custom families, models, and worker arguments must be importable and picklable.
+- **Bundled datasets:** Loaders now return the original lme4 observations, including complete InstEval and VerbAgg tables, instead of altered, truncated, or synthetic data. Dataset sizes and fitted results can change. Canonical column names are restored; `total_fruits` and `cTICKS` remain documented aliases.
+- **Validation and failures:** Invalid formulas, confidence levels, prediction offsets, worker counts, and final fit estimates now raise clear errors. Use `n_jobs=-1` or a positive integer; confidence levels must be numeric and strictly between zero and one. Bootstrap and power summaries exclude failed or unconverged refits, so effective sample counts and intervals can change.
+
 ### Added
 
 - Cross-validation accepts reusable train/test partitions and buffered holdouts, validating row coverage and group leakage before refitting.
