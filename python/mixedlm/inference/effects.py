@@ -11,7 +11,7 @@ from numpy.typing import ArrayLike, NDArray
 from scipy import stats
 
 from mixedlm.formula.terms import InteractionTerm, PowerTerm, VariableTerm
-from mixedlm.utils.dataframe import _polars_column_numpy, select_columns
+from mixedlm.utils.dataframe import _polars_column_numpy, get_categories, select_columns
 from mixedlm.utils.validation import _validate_confidence_level
 
 if TYPE_CHECKING:
@@ -74,7 +74,7 @@ def _as_pandas_frame(frame: Any) -> pd.DataFrame:
             if values.dtype.kind == "f" and values.dtype.itemsize < 8:
                 values = values.astype(np.float64)
             if "Categorical" in str(column.dtype) or "Enum" in str(column.dtype):
-                categories = column.cat.get_categories().to_list()
+                categories = get_categories(frame, name)
                 columns[name] = pd.Categorical(values, categories=categories)
             else:
                 columns[name] = values

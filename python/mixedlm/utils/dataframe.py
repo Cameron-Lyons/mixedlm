@@ -82,10 +82,19 @@ def get_categories(data: Any, col_name: str) -> list:
     if _is_polars(data):
         col = data.get_column(col_name)
         dtype_name = str(col.dtype)
-        if "Categorical" in dtype_name or "Enum" in dtype_name:
-            cats = col.cat.get_categories().to_list()
-            return cats if cats else get_unique_sorted(data, col_name)
-        return get_unique_sorted(data, col_name)
+        if "Enum" in dtype_name:
+            cats = list(col.dtype.categories)
+        elif "Categorical" in dtype_name:
+            pool = getattr(col.dtype, "categories", None)
+            # Modern Polars stores the physical level order in the category pool.
+            cats = (
+                pool.to_series().drop_nulls().to_list()
+                if pool is not None and hasattr(pool, "to_series")
+                else col.cat.get_categories().to_list()
+            )
+        else:
+            return get_unique_sorted(data, col_name)
+        return cats if cats else get_unique_sorted(data, col_name)
 
     col = data[col_name]
     if hasattr(col.dtype, "name") and col.dtype.name == "category":

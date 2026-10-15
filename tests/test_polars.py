@@ -4,8 +4,32 @@ import mixedlm as mlm
 import numpy as np
 import pandas as pd
 import pytest
+from mixedlm.utils.dataframe import get_categories
 
 pl = pytest.importorskip("polars")
+
+
+@pytest.mark.parametrize("lazy", [False, True])
+def test_enum_categories_preserve_declared_order_and_unused_levels(lazy):
+    data = pl.DataFrame(
+        {"factor": pl.Series(["A", None, "B"]).cast(pl.Enum(["C", "B", "A", "unused"]))}
+    )
+
+    assert get_categories(data.lazy() if lazy else data, "factor") == ["C", "B", "A", "unused"]
+
+
+def test_categorical_categories_preserve_pool_order_after_filtering():
+    dtype = (
+        pl.Categorical(pl.Categories("mixedlm_category_levels"))
+        if hasattr(pl, "Categories")
+        else pl.Categorical
+    )
+    column = pl.Series("factor", ["C", "A", None, "B"], dtype=dtype)
+    if not hasattr(pl, "Categories"):
+        column = column.cat.to_local()
+    data = pl.DataFrame(column).filter(pl.col("factor") == "A")
+
+    assert get_categories(data, "factor") == ["C", "A", "B"]
 
 
 @pytest.fixture
