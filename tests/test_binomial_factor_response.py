@@ -45,8 +45,10 @@ def _factor_frame(frame, backend):
     result = pl.DataFrame(frame.to_dict(orient="list"))
     if backend == "polars_categorical":
         result = result.with_columns(pl.col("outcome").cast(pl.Categorical))
-        declared = result["outcome"].cat.get_categories().to_list()
-        levels = tuple(level for level in declared if level in ("N", "Y"))
+        observed = result["outcome"].unique()
+        levels = tuple(
+            value for _, value in sorted(zip(observed.to_physical(), observed, strict=True))
+        )
     elif backend != "polars_string":
         result = result.with_columns(pl.col("outcome").cast(pl.Enum(list(levels))))
     return result, levels
@@ -272,8 +274,10 @@ def test_polars_categorical_response_ignores_unrelated_shared_pool_levels():
                 "group": [0, 0, 1, 1],
             }
         ).with_columns(pl.col(["outcome", "treatment"]).cast(pl.Categorical))
-        declared = frame["outcome"].cat.get_categories().to_list()
-        expected_levels = tuple(level for level in declared if level in ("N", "Y"))
+        observed = frame["outcome"].unique()
+        expected_levels = tuple(
+            value for _, value in sorted(zip(observed.to_physical(), observed, strict=True))
+        )
         matrices = glFormula("outcome ~ treatment + (1 | group)", frame).matrices
     assert matrices.response_levels == expected_levels
     assert_array_equal(

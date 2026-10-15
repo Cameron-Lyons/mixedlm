@@ -59,10 +59,16 @@ def _list_based_frame(frame):
     result = pd.DataFrame(frame.to_dict(as_series=False))
     for name in frame.columns:
         column = frame.get_column(name)
-        if "Categorical" in str(column.dtype) or "Enum" in str(column.dtype):
-            result[name] = pd.Categorical(
-                result[name], categories=column.cat.get_categories().to_list()
+        if "Enum" in str(column.dtype):
+            result[name] = pd.Categorical(result[name], categories=list(column.dtype.categories))
+        elif "Categorical" in str(column.dtype):
+            categories = getattr(column.dtype, "categories", None)
+            levels = (
+                [value for value in categories if value is not None]
+                if categories is not None and hasattr(categories, "to_series")
+                else column.cat.get_categories().to_list()
             )
+            result[name] = pd.Categorical(result[name], categories=levels)
     return result
 
 
