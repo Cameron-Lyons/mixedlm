@@ -236,8 +236,9 @@ def independent_deviance(fitted, group, kind, order):
             else:
                 inverse = np.exp if kind == "poisson" else special.expit
                 mode = optimize.brentq(
-                    lambda u, w=ww, y=yy, e=eta, inv=inverse: u
-                    - theta * (w @ (y - inv(e + theta * u))),
+                    lambda u, w=ww, y=yy, e=eta, inv=inverse: (
+                        u - theta * (w @ (y - inv(e + theta * u)))
+                    ),
                     -30,
                     30,
                 )

@@ -240,9 +240,11 @@ def test_prepared_gradient_drives_the_same_scipy_fit_as_fresh_designs(kind, reml
         options=options,
     )
     fresh = minimize(
-        lambda current: _rust.LmmDesign(**arguments)
-        .with_response(matrices.y)
-        .deviance_with_gradient(current, reml),
+        lambda current: (
+            _rust.LmmDesign(**arguments)
+            .with_response(matrices.y)
+            .deviance_with_gradient(current, reml)
+        ),
         theta,
         method="L-BFGS-B",
         jac=True,
