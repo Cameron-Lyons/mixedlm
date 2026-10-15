@@ -42,8 +42,9 @@ def test_independent_scalar_modes_and_integrals(groups, slope, family, order):
         keep = group == level
         z, w, yy, off = values[keep], weights[keep], y[keep], offset[keep]
         mode = optimize.brentq(
-            lambda u, zz=z, ww=w, response=yy, oo=off: u
-            - theta * np.dot(ww * zz, response - inverse(oo + theta * zz * u)),
+            lambda u, zz=z, ww=w, response=yy, oo=off: (
+                u - theta * np.dot(ww * zz, response - inverse(oo + theta * zz * u))
+            ),
             -30,
             30,
         )
