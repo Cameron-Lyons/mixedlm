@@ -712,34 +712,41 @@ def _fit_and_predict_fold(
     """Refit on the training rows and predict the held-out rows of one fold."""
     from mixedlm.models.glmer import GlmerResult
 
-    train_data = _take_rows(frame, fold.train_indices)
-    test_data = _take_rows(frame, fold.test_indices)
-    fold_model = _fit_fold(
-        model,
-        train_data,
-        fit_weights[fold.train_indices],
-        offset[fold.train_indices],
-        fit_options,
-    )
-    if isinstance(fold_model, GlmerResult):
-        raw_predictions = fold_model.predict(
-            test_data,
-            type="response",
-            re_form=re_form,
-            allow_new_levels=True,
-            offset=offset[fold.test_indices],
+    try:
+        train_data = _take_rows(frame, fold.train_indices)
+        test_data = _take_rows(frame, fold.test_indices)
+        fold_model = _fit_fold(
+            model,
+            train_data,
+            fit_weights[fold.train_indices],
+            offset[fold.train_indices],
+            fit_options,
         )
-    else:
-        raw_predictions = fold_model.predict(
-            test_data,
-            re_form=re_form,
-            allow_new_levels=True,
-            offset=offset[fold.test_indices],
+        if isinstance(fold_model, GlmerResult):
+            raw_predictions = fold_model.predict(
+                test_data,
+                type="response",
+                re_form=re_form,
+                allow_new_levels=True,
+                offset=offset[fold.test_indices],
+            )
+        else:
+            raw_predictions = fold_model.predict(
+                test_data,
+                re_form=re_form,
+                allow_new_levels=True,
+                offset=offset[fold.test_indices],
+            )
+        fold_predictions: NDArray[np.float64] = np.asarray(raw_predictions, dtype=np.float64)
+        if fold_predictions.shape != fold.test_indices.shape:
+            raise ValueError("fold predictions are not aligned with held-out observations")
+        return fold, fold_predictions, bool(fold_model.converged), bool(fold_model.isSingular())
+    except Exception as exc:
+        exc.add_note(
+            f"Cross-validation fold {fold.fold} failed "
+            f"(n_train={len(fold.train_indices)}, n_test={len(fold.test_indices)})."
         )
-    fold_predictions: NDArray[np.float64] = np.asarray(raw_predictions, dtype=np.float64)
-    if fold_predictions.shape != fold.test_indices.shape:
-        raise ValueError("fold predictions are not aligned with held-out observations")
-    return fold, fold_predictions, bool(fold_model.converged), bool(fold_model.isSingular())
+        raise
 
 
 def cross_validate(

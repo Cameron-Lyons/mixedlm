@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import assert_never
 
 
 @dataclass(frozen=True)
@@ -150,8 +151,10 @@ def format_term(term: InterceptTerm | VariableTerm | PowerTerm | InteractionTerm
         return _format_identifier(term.name)
     elif isinstance(term, PowerTerm):
         return _format_factor(term)
-    else:
+    elif isinstance(term, InteractionTerm):
         return ":".join(_format_factor(factor) for factor in term.variables)
+    else:
+        assert_never(term)
 
 
 def _format_term(term: InterceptTerm | VariableTerm | PowerTerm | InteractionTerm) -> str:

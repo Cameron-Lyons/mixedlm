@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from dataclasses import dataclass
 from enum import Enum, auto
+from typing import assert_never
 
 from mixedlm.formula.terms import (
     FixedTerm,
@@ -328,7 +329,9 @@ class Parser:
             return (term.name,)
         if isinstance(term, PowerTerm):
             return (term,)
-        return term.variables
+        if isinstance(term, InteractionTerm):
+            return term.variables
+        assert_never(term)
 
     def _combine_interaction(
         self,

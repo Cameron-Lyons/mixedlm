@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Python 3.11 or later and pandas 1.5 or later are now required. The plotting extra requires Pillow 13.0 or later to include security fixes unavailable on Python 3.10.
+- Cross-validation refit and prediction errors retain their original exception and include the fold number and training/test row counts in traceback notes, including errors raised in worker processes.
 
 ## [1.3.0] - 2026-10-11
 

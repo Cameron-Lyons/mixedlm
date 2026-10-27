@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import replace
-from typing import TYPE_CHECKING, Any, ClassVar, TypeVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar, Self, cast
 
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
@@ -44,8 +44,6 @@ if TYPE_CHECKING:
     from mixedlm.models.glmer import GlmerResult
     from mixedlm.models.lmer import LmerResult
     from mixedlm.models.lmer_types import LogLik
-
-_Result = TypeVar("_Result", bound="MerResultMixin")
 
 
 class _ResultBase:
@@ -164,9 +162,7 @@ class MerResultMixin(_ResultBase):
             self, eta: NDArray[np.floating], rng: Any
         ) -> NDArray[np.floating]: ...
 
-        def _refit_from_matrices(
-            self: _Result, matrices: ModelMatrices, **kwargs: Any
-        ) -> _Result: ...
+        def _refit_from_matrices(self, matrices: ModelMatrices, **kwargs: Any) -> Self: ...
 
         def profile(
             self,
@@ -1485,7 +1481,7 @@ class MerResultMixin(_ResultBase):
 
         return self._simulate_from_eta(eta, rng)
 
-    def refit(self: _Result, newresp: ArrayLike | None = None, **kwargs: Any) -> _Result:
+    def refit(self, newresp: ArrayLike | None = None, **kwargs: Any) -> Self:
         """Refit the model with a new response vector.
 
         The formula, design matrices, weights and offset are reused, which
