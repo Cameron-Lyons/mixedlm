@@ -369,6 +369,25 @@ def test_fold_errors_preserve_original_exception_and_notes(weighted_lmm, monkeyp
     ]
 
 
+def test_fold_rejects_column_vector_predictions_with_context(weighted_lmm, monkeypatch):
+    model, _ = weighted_lmm
+    fold = make_folds(model.nobs(), cv=3, shuffle=False)[0]
+    monkeypatch.setattr(cv_module, "_fit_fold", lambda *args: model)
+
+    def predict_column_vector(self, data, **kwargs):
+        return np.zeros((len(data), 1))
+
+    monkeypatch.setattr(type(model), "predict", predict_column_vector)
+
+    with pytest.raises(ValueError, match="fold predictions are not aligned") as caught:
+        cross_validate(model, cv=3, shuffle=False)
+
+    assert caught.value.__notes__ == [
+        f"Cross-validation fold {fold.fold} failed "
+        f"(n_train={len(fold.train_indices)}, n_test={len(fold.test_indices)})."
+    ]
+
+
 def test_fold_error_notes_survive_worker_processes(weighted_lmm):
     model, _ = weighted_lmm
     fold = make_folds(model.nobs(), cv=3, shuffle=False)[0]
