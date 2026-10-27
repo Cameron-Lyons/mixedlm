@@ -137,7 +137,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@v7
 
@@ -232,7 +232,7 @@ jobs:
         run: uv run --no-sync pytest tests/ --strict-config --strict-markers -ra --ignore=tests/test_property.py --ignore=tests/test_benchmark.py
 
   test-minimum:
-    name: Minimum runtime dependencies (Python 3.10)
+    name: Minimum runtime dependencies (Python 3.11)
     needs: wheels
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -243,11 +243,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Set up Python 3.10
+      - name: Set up Python 3.11
         id: python
         uses: actions/setup-python@v7
         with:
-          python-version: "3.10"
+          python-version: "3.11"
 
       - name: Install uv
         uses: astral-sh/setup-uv@v7
@@ -264,7 +264,7 @@ jobs:
         run: |
           uv export --locked --only-group dev --no-emit-project --no-hashes --format requirements-txt --output-file test-tools.txt
           uv venv --python "$CI_PYTHON_EXECUTABLE" .venv-minimum
-          uv pip install --python .venv-minimum/bin/python --requirements test-tools.txt numpy==1.23.5 scipy==1.14.0 pandas==1.4.0
+          uv pip install --python .venv-minimum/bin/python --requirements test-tools.txt numpy==1.23.5 scipy==1.14.0 pandas==1.5.0
           uv pip install --python .venv-minimum/bin/python --no-deps dist/*.whl
 
       - name: Verify installed wheel with minimum runtime dependencies

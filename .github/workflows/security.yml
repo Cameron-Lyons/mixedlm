@@ -17,8 +17,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # uv.lock selects separate NumPy/SciPy versions for Python 3.10.
-        python-version: ["3.10", "3.12"]
+        # Audit the minimum supported Python and the complete-feature CI version.
+        python-version: ["3.11", "3.12"]
     steps:
       - uses: actions/checkout@v7
 

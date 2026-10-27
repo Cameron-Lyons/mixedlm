@@ -133,14 +133,16 @@ class _RandomEffectFactor:
         return float(2.0 * np.sum(np.log(np.diag(self.cholesky))))
 
     def solve(self, rhs: NDArray[np.floating]) -> NDArray[np.float64]:
-        rhs = np.asarray(rhs, dtype=np.float64)
-        if rhs.size == 0:
-            return rhs.copy()
+        rhs_array = np.asarray(rhs, dtype=np.float64)
+        if rhs_array.size == 0:
+            return rhs_array.copy()
         if self._sparse_factor is None:
-            return linalg.cho_solve((self.cholesky, True), rhs)
+            return linalg.cho_solve((self.cholesky, True), rhs_array)
         if isinstance(self._sparse_factor, sparse_linalg.SuperLU):
-            return self._sparse_factor.solve(rhs)
-        return self._sparse_factor.solve(rhs.reshape(len(rhs), -1)).reshape(rhs.shape)
+            return self._sparse_factor.solve(rhs_array)
+        return self._sparse_factor.solve(rhs_array.reshape(len(rhs_array), -1)).reshape(
+            rhs_array.shape
+        )
 
     @cached_property
     def _dense_inverse(self) -> NDArray[np.float64]:

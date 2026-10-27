@@ -36,7 +36,7 @@ A Python implementation of mixed-effects models inspired by R's [lme4](https://g
 pip install mixedlm
 ```
 
-mixedlm requires Python >= 3.10, NumPy >= 1.23.5, SciPy >= 1.14, and pandas >= 1.4.
+mixedlm requires Python >= 3.11, NumPy >= 1.23.5, SciPy >= 1.14, and pandas >= 1.5.
 Optional extras add polars input (`mixedlm[polars]`), plotting with matplotlib
 (`mixedlm[plots]`), and nlopt optimizers (`mixedlm[optimizers]`). Building from
 source requires a Rust toolchain; see the

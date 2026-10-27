@@ -2,10 +2,10 @@
 
 ## Requirements
 
-- Python 3.10 or later
+- Python 3.11 or later
 - NumPy >= 1.23.5
 - SciPy >= 1.14
-- pandas >= 1.4
+- pandas >= 1.5
 
 ## Basic Installation
 
@@ -39,7 +39,8 @@ For diagnostic plots and profile likelihood visualization:
 pip install mixedlm[plots]
 ```
 
-This installs matplotlib >= 3.5.
+This installs matplotlib >= 3.5 and Pillow >= 13.0, which includes image-processing
+security fixes unavailable in earlier Pillow releases.
 
 ### Additional Optimizers
 
