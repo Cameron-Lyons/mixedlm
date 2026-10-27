@@ -6,7 +6,7 @@ Thank you for your interest in contributing to mixedlm!
 
 ### Prerequisites
 
-- Python 3.10 or later
+- Python 3.11 or later
 - Rust toolchain (for building the Rust backend)
 - Git
 
@@ -151,7 +151,7 @@ CI uses `uv sync --locked --no-install-project` to install dependencies, builds
 the native backend explicitly, and runs tools with `uv run --no-sync`. This
 prevents a test command from quietly rebuilding or switching the backend under
 test. The native-source check is required before the Python suites execute.
-Standard Python jobs cover 3.10 through 3.14. Python 3.12 exercises plotting and
+Standard Python jobs cover 3.11 through 3.14. Python 3.12 exercises plotting and
 nlopt alongside the core suite, and standard Python jobs cover Polars.
 Free-threaded 3.14t also checks plotting and verifies
 that native imports keep the GIL disabled. It omits Polars and its runtime because
@@ -194,8 +194,9 @@ floor because they exercise different optional-feature combinations. The Python
 3.12 and Rust coverage reports are uploaded to Codecov with the repository's
 `CODECOV_TOKEN` secret; an upload failure does not fail CI.
 
-A separate Python 3.10 job runs the core suite with NumPy 1.23.5, SciPy 1.14.0,
-and pandas 1.4.0. NumPy 1.23.5 is SciPy 1.14's effective lower bound. This job
+A separate Python 3.11 job runs the core suite with NumPy 1.23.5, SciPy 1.14.0,
+and pandas 1.5.0, the first pandas release with Python 3.11 wheels.
+NumPy 1.23.5 is SciPy 1.14's effective lower bound. This job
 downloads the normal abi3 wheel and installs it in an isolated environment, so
 it checks an artifact built for modern Python against older NumPy and pandas
 without an editable installation hiding compatibility issues. Test tools and

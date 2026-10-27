@@ -1,5 +1,7 @@
 """Formula string utilities rewrite and report lme4 formulas exactly."""
 
+from types import SimpleNamespace
+
 import pytest
 from mixedlm import (
     dropOffset,
@@ -12,6 +14,19 @@ from mixedlm import (
     load_sleepstudy,
     parse_formula,
 )
+from mixedlm.formula.parser import Parser
+from mixedlm.formula.terms import format_term
+
+
+@pytest.mark.parametrize(
+    "dispatch", [format_term, Parser([])._term_variables], ids=["formatter", "parser"]
+)
+def test_unknown_terms_are_not_treated_as_interactions(dispatch):
+    # A future term needs explicit handling even if it exposes interaction-like fields.
+    unknown_term = SimpleNamespace(variables=("x", "z"))
+
+    with pytest.raises(AssertionError):
+        dispatch(unknown_term)
 
 
 @pytest.mark.parametrize(

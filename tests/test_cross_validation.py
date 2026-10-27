@@ -341,6 +341,72 @@ def test_worker_processes_for_all_cpus_match_serial_folds(request, model_name) -
     pd.testing.assert_frame_equal(parallel.fold_scores, serial.fold_scores)
 
 
+@pytest.mark.parametrize("stage", ["refit", "prediction"])
+def test_fold_errors_preserve_original_exception_and_notes(weighted_lmm, monkeypatch, stage):
+    model, _ = weighted_lmm
+    fold = make_folds(model.nobs(), cv=3, shuffle=False)[0]
+    original_error = ValueError("deliberate fold failure")
+    original_error.add_note("Original error context")
+
+    def fail(*args, **kwargs):
+        raise original_error
+
+    if stage == "refit":
+        monkeypatch.setattr(cv_module, "_fit_fold", fail)
+    else:
+        monkeypatch.setattr(cv_module, "_fit_fold", lambda *args: model)
+        monkeypatch.setattr(type(model), "predict", fail)
+
+    with pytest.raises(ValueError, match="deliberate fold failure") as caught:
+        cross_validate(model, cv=3, shuffle=False)
+
+    assert caught.value is original_error
+    assert caught.value.args == ("deliberate fold failure",)
+    assert caught.value.__notes__ == [
+        "Original error context",
+        f"Cross-validation fold {fold.fold} failed "
+        f"(n_train={len(fold.train_indices)}, n_test={len(fold.test_indices)}).",
+    ]
+
+
+def test_fold_rejects_column_vector_predictions_with_context(weighted_lmm, monkeypatch):
+    model, _ = weighted_lmm
+    fold = make_folds(model.nobs(), cv=3, shuffle=False)[0]
+    monkeypatch.setattr(cv_module, "_fit_fold", lambda *args: model)
+
+    def predict_column_vector(self, data, **kwargs):
+        return np.zeros((len(data), 1))
+
+    monkeypatch.setattr(type(model), "predict", predict_column_vector)
+
+    with pytest.raises(ValueError, match="fold predictions are not aligned") as caught:
+        cross_validate(model, cv=3, shuffle=False)
+
+    assert caught.value.__notes__ == [
+        f"Cross-validation fold {fold.fold} failed "
+        f"(n_train={len(fold.train_indices)}, n_test={len(fold.test_indices)})."
+    ]
+
+
+def test_fold_error_notes_survive_worker_processes(weighted_lmm):
+    model, _ = weighted_lmm
+    fold = make_folds(model.nobs(), cv=3, shuffle=False)[0]
+
+    with pytest.raises(TypeError, match="unexpected_fit_option") as caught:
+        cross_validate(
+            model,
+            cv=3,
+            shuffle=False,
+            n_jobs=2,
+            fit_kwargs={"unexpected_fit_option": True},
+        )
+
+    assert caught.value.__notes__ == [
+        f"Cross-validation fold {fold.fold} failed "
+        f"(n_train={len(fold.train_indices)}, n_test={len(fold.test_indices)})."
+    ]
+
+
 @pytest.mark.parametrize(
     ("n_jobs", "error"), [(True, TypeError), (-2, ValueError), (1.5, TypeError)]
 )
