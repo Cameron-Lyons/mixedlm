@@ -88,7 +88,11 @@ def test_deviance_uses_converged_random_effects(jobs, size, target):
     correction = 2 * (
         np.log1p(1.4 * gradient_information) + (size - 1) * np.log1p(gradient_information)
     )
-    expected_deviance = len(data["y"]) * (1 + np.log(2 * np.pi * expected_sigma**2)) + correction
+    expected_deviance = (
+        len(data["y"]) * (1 + np.log(2 * np.pi * expected_sigma**2))
+        + correction
+        - np.log(data["weights"]).sum()
+    )
     np.testing.assert_allclose(b, expected_b, atol=5e-7, rtol=1e-7)
     np.testing.assert_allclose(phi, 0.0, atol=1e-8)
     assert sigma == pytest.approx(expected_sigma, abs=5e-7, rel=1e-7)

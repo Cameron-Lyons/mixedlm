@@ -456,3 +456,31 @@ class TestProfilePlots:
 
         with pytest.raises(ValueError, match=r"zeta must have shape \(3, 4\)"):
             profile.plot()
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_excluded_rows_and_zero_slopes_in_residual_panels(legacy):
+    data = grouped_frame(5)
+    data.loc[::2, "x"] = 0
+    slopes = data["group"].map({f"G{i}": 1.5 * i for i in range(5)})
+    data["y"] += slopes * data["x"]
+    data.loc[[3, 19, 36], "y"] = np.nan
+    fit = lmer("y ~ x + (0 + x | group)", data, na_action="exclude")
+    if legacy:
+        struct = replace(fit.matrices.random_structures[0], level_indices=None)
+        fit = replace(fit, matrices=replace(fit.matrices, random_structures=[struct]))
+    clean = data.dropna()
+    resid = fit.residuals(na_expand=False)
+
+    ax = plot_resid_group(fit, point_kws={"patch_artist": False, "showmeans": True})
+    means = [line.get_ydata().item() for line in ax.lines if line.get_marker() == "^"]
+    assert_allclose(means, pd.Series(resid, index=clean.index).groupby(clean["group"]).mean())
+    qq = plot_qq(fit)
+    assert len(points(qq)) == len(clean)
+    assert np.all(np.isfinite(qq.lines[0].get_ydata()))
+
+
+@pytest.mark.parametrize("which", [[0], [5], [2.5], [True]])
+def test_invalid_diagnostic_panel_is_rejected(lmer_result, which):
+    with pytest.raises(ValueError, match="panel numbers"):
+        lmer_result.plot(which=which)

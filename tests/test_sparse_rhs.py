@@ -89,3 +89,28 @@ def test_sparse_solve_accepts_nested_sequences(cached):
 def test_sparse_solve_retains_array_dtype_validation(cached, dtype):
     with pytest.raises(TypeError):
         make_solver(np.eye(2), cached)(np.ones((2, 3), dtype=dtype))
+
+
+@pytest.mark.parametrize("ordering", ["natural", "amd"])
+def test_inverse_subset_on_fill_pattern(ordering):
+    # Eliminating the hub in natural order fills the first component.
+    # The isolated final node supplies a pair outside either fill pattern.
+    n = 13
+    dense = np.eye(n) * 3.0
+    dense[0, 1:-1] = dense[1:-1, 0] = np.linspace(-0.6, 0.5, n - 2)
+    lower = sparse.tril(dense, format="csc")
+    cache = rust.SparseCholeskySymbolic(
+        lower.indices.astype(np.int64), lower.indptr.astype(np.int64), n, ordering=ordering
+    )
+    factor = cache.factor(lower.data)
+    rows, cols = np.nonzero(dense)
+    actual = factor._inverse_subset(rows, cols)
+    inverse = np.linalg.inv(dense)
+    np.testing.assert_allclose(actual, inverse[rows, cols], atol=1e-14)
+    if ordering == "natural":
+        np.testing.assert_allclose(factor._inverse_subset([1, 2], [2, 1]), inverse[[1, 2], [2, 1]])
+    assert factor._inverse_subset([0], [n - 1]) is None
+    assert factor._inverse_subset([], []).size == 0
+    for i, j in (([0], []), ([n], [0]), ([0], [-1])):
+        with pytest.raises(ValueError):
+            factor._inverse_subset(i, j)

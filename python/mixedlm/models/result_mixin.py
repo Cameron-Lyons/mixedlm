@@ -437,6 +437,32 @@ class MerResultMixin(_ResultBase):
             return copy_dataframe(self.matrices.frame)
         return pd.DataFrame({"y": self.matrices.y})
 
+    def _formula_refit_options(self, data: Any) -> dict[str, Any]:
+        """Recover observation inputs and coding for optimizer and deletion refits."""
+        matrices = self.matrices
+        # Count formulas multiply the supplied prior weights by trials at fit time.
+        weights = matrices.weights
+        if matrices.trials is not None:
+            weights = weights / matrices.trials
+        offset = matrices.offset if np.any(matrices.offset != 0.0) else None
+        na_info = matrices.na_info
+        if (
+            na_info is not None
+            and na_info.n_omitted
+            and dataframe_length(data) == na_info.n_original
+        ):
+            # A deleted predictor may have been the reason a row was omitted.
+            # Mark those positions even when all the retained weights are one.
+            weights = na_info.expand_to_original(weights)
+            if offset is not None:
+                offset = na_info.expand_to_original(offset)
+        return {
+            "weights": weights if np.any(weights != 1.0) else None,
+            "offset": offset,
+            "contrasts": matrices.contrasts,
+            "na_action": na_info.action.value if na_info is not None else "omit",
+        }
+
     def weights(self, copy: bool = True) -> NDArray[np.floating]:
         """Get the prior weights used in model fitting.
 
@@ -1125,7 +1151,9 @@ class MerResultMixin(_ResultBase):
             - "flist", "cnms" : Grouping factors and their term names
             - "Gp" : Group pointers (cumulative random-effect columns)
             - "RX", "RZX" : Fixed-effect Cholesky factor and cross term
-            - "Lind" : Index map from theta to Lambda entries
+            - "Lind" : Theta indices for the stored entries of Lambdat in
+              column order. Multi-term compound symmetry and AR(1) factors
+              depend nonlinearly on theta and have no such map.
             - "devcomp" : Deviance components and dimensions
             Linear mixed models also provide "sigma" and "REML";
             generalized models provide "family" and "nAGQ".
@@ -1221,25 +1249,25 @@ class MerResultMixin(_ResultBase):
 
     def _build_Lind(self) -> NDArray[np.int64]:
         """Build Lind, the index mapping from theta to Lambda entries."""
-        indices = []
+        blocks = []
         theta_idx = 0
 
         for struct in self.matrices.random_structures:
             n_terms = struct.n_terms
-
-            if struct.correlated:
-                n_theta = n_terms * (n_terms + 1) // 2
-                template_indices = list(range(theta_idx, theta_idx + n_theta))
-            else:
-                n_theta = n_terms
-                template_indices = list(range(theta_idx, theta_idx + n_terms))
-
-            for _ in range(struct.n_levels):
-                indices.extend(template_indices)
-
+            if n_terms > 1 and struct.cov_type in {"cs", "ar1"}:
+                raise ValueError(
+                    f"Lind is undefined for multi-term {struct.cov_type} covariance factors. "
+                    "Use getME('Lambda') to obtain the fitted factor."
+                )
+            n_theta = n_terms * (n_terms + 1) // 2 if struct.correlated else n_terms
+            # The fitted sparse factor omits exact zeros, including boundary estimates.
+            indices = theta_idx + np.flatnonzero(self.theta[theta_idx : theta_idx + n_theta])
+            blocks.append(np.tile(indices, struct.n_levels))
             theta_idx += n_theta
 
-        return np.array(indices, dtype=np.int64)
+        if not blocks:
+            return np.empty(0, dtype=np.int64)
+        return np.concatenate(blocks).astype(np.int64, copy=False)
 
     def _get_devcomp(self) -> dict[str, Any]:
         """Return lme4-style deviance components ``cmp`` and dimensions ``dims``.
@@ -1265,40 +1293,6 @@ class MerResultMixin(_ResultBase):
             "ngrps": len(self.ngrps()),
         }
         return {"cmp": self._devcomp_cmp(), "dims": dims}
-
-    def _update_formula(self, new_formula: str) -> str:
-        """Process formula update syntax with '.' placeholders."""
-        original = str(self.formula)
-
-        if "." not in new_formula:
-            return new_formula
-
-        lhs, rhs = original.split("~", 1)
-        lhs = lhs.strip()
-        rhs = rhs.strip()
-
-        if "~" in new_formula:
-            new_lhs, new_rhs = new_formula.split("~", 1)
-            new_lhs = new_lhs.strip()
-            new_rhs = new_rhs.strip()
-
-            if new_lhs == ".":
-                new_lhs = lhs
-
-            if new_rhs.startswith(". +"):
-                new_rhs = rhs + " +" + new_rhs[3:]
-            elif new_rhs.startswith(". -"):
-                terms_to_remove = new_rhs[3:].strip().split("+")
-                terms_to_remove = [t.strip() for t in terms_to_remove]
-                rhs_terms = [t.strip() for t in rhs.split("+")]
-                rhs_terms = [t for t in rhs_terms if t not in terms_to_remove]
-                new_rhs = " + ".join(rhs_terms)
-            elif new_rhs == ".":
-                new_rhs = rhs
-
-            return f"{new_lhs} ~ {new_rhs}"
-        else:
-            return new_formula
 
     def get_formula(
         self,

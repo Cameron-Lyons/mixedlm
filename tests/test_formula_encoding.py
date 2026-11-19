@@ -12,6 +12,16 @@ from mixedlm.utils.contrasts import get_contrast_matrix
 LEVELS = {"a": ["c", "a", "b", "unused"], "b": ["v", "u"]}
 
 
+@pytest.mark.parametrize("n", [0, 4])
+def test_single_random_slope_with_missing_groups_and_zero_values(n):
+    frame = pd.DataFrame({"g": ["b", None, "a", "b"], "x": [2.0, 4.0, 0.0, np.nan]}).head(n)
+    matrix, _ = design.build_random_matrix(parse_formula("y ~ (0 + x | g)"), frame)
+    expected = np.array([[0, 2], [0, 0], [0, 0], [0, np.nan]]) if n else np.empty((0, 0))
+    np.testing.assert_array_equal(matrix.toarray(), expected)
+    assert matrix.format == "csc" and matrix.has_canonical_format
+    assert matrix.nnz == (2 if n else 0)
+
+
 def _data(backend):
     values = {
         "a": ["b", "c", None, "a", "c"],

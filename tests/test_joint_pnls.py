@@ -144,7 +144,11 @@ def test_nonlinear_solution_matches_independent_joint_least_squares(
     random_jacobian = reference.jac[:n, p:]
     block_factor = np.kron(np.eye(3), factor)
     system = np.eye(3 * q) + block_factor.T @ (random_jacobian.T @ random_jacobian) @ block_factor
-    expected_deviance = n * (1 + np.log(2 * np.pi * variance)) + np.linalg.slogdet(system)[1]
+    expected_deviance = (
+        n * (1 + np.log(2 * np.pi * variance))
+        + np.linalg.slogdet(system)[1]
+        - np.log(weights).sum()
+    )
     assert deviance == pytest.approx(expected_deviance, rel=1e-8, abs=1e-7)
 
 

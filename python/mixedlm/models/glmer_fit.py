@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -12,7 +13,7 @@ from mixedlm.formula.parser import parse_formula
 from mixedlm.formula.terms import Formula
 from mixedlm.matrices.design import build_model_matrices
 from mixedlm.models.glmer import GlmerResult
-from mixedlm.models.shared_utils import resolve_optional_vector
+from mixedlm.models.shared_utils import resolve_em_start, resolve_optional_vector
 from mixedlm.utils.dataframe import ensure_dataframe
 
 if TYPE_CHECKING:
@@ -75,23 +76,7 @@ class GlmerMod:
 
         self.matrices, self._dropped_cols = run_model_checks(self.matrices, ctrl)
 
-        if ctrl.em_init and start is None:
-            from mixedlm.estimation.em_reml import em_reml_simple
-
-            try:
-                em_result = em_reml_simple(
-                    self.matrices,
-                    max_iter=ctrl.em_maxiter,
-                    verbose=max(self.verbose - 1, 0),
-                )
-                start = em_result.theta
-            except (NotImplementedError, RuntimeError, ValueError, np.linalg.LinAlgError) as exc:
-                warnings.warn(
-                    f"EM initialization failed ({type(exc).__name__}: {exc}). "
-                    "Falling back to optimizer defaults.",
-                    RuntimeWarning,
-                    stacklevel=2,
-                )
+        start = resolve_em_start(start, self.matrices, ctrl, self.verbose)
 
         optimizer = GLMMOptimizer(
             self.matrices,
@@ -129,6 +114,7 @@ class GlmerMod:
             joint_fit=opt_result.joint_fit,
             message=opt_result.message,
             optimizer=opt_method,
+            control=deepcopy(ctrl),
         )
 
         if ctrl.check_conv and not result.converged:

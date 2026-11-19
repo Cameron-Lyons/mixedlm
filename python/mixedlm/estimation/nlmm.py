@@ -23,6 +23,7 @@ from mixedlm.nlme.models import (
     SSlogis,
     SSmicmen,
 )
+from mixedlm.utils.dataframe import _grouped_observation_indices
 
 try:
     from mixedlm._rust import nlmm_deviance_with_status as _rust_nlmm_deviance_with_status
@@ -139,23 +140,6 @@ def _build_psi_matrix(
     return factor @ factor.T
 
 
-def _grouped_observation_indices(
-    groups: NDArray[np.integer], *, n_groups: int | None = None
-) -> list[NDArray[np.intp]]:
-    """Return ordered rows for observed labels or each code in range(n_groups)."""
-    order = np.argsort(groups, kind="stable")
-    sorted_groups = groups[order]
-    if n_groups is not None:
-        codes = np.arange(n_groups)
-        starts = np.searchsorted(sorted_groups, codes, side="left")
-        ends = np.searchsorted(sorted_groups, codes, side="right")
-        return [order[start:end] for start, end in zip(starts, ends, strict=True)]
-    if len(order) == 0:
-        return []
-    boundaries = np.flatnonzero(sorted_groups[1:] != sorted_groups[:-1]) + 1
-    return list(np.split(order, boundaries))
-
-
 _GroupResult = TypeVar("_GroupResult")
 
 
@@ -166,6 +150,7 @@ class _NLMMWorkspace:
     group_rows: list[NDArray[np.intp]]
     weights: NDArray[np.float64]
     sqrt_weights: NDArray[np.float64]
+    logdet_weights: float
     executor: ThreadPoolExecutor | None
     workers: int
 
@@ -213,7 +198,14 @@ def _nlmm_workspace(
     use_parallel = workers > 1 and len(group_rows) >= workers
     with ThreadPoolExecutor(max_workers=workers) if use_parallel else nullcontext() as executor:
         yield _NLMMWorkspace(
-            y, x, group_rows, prior_weights, np.sqrt(prior_weights), executor, workers
+            y,
+            x,
+            group_rows,
+            prior_weights,
+            np.sqrt(prior_weights),
+            float(np.log(prior_weights).sum()),
+            executor,
+            workers,
         )
 
 
@@ -257,6 +249,7 @@ def _linearize_group(
     b: NDArray[np.floating],
     random_params: list[int],
     precision: NDArray[np.floating],
+    fix_phi: bool,
 ) -> _PNLSGroupLinearization:
     _, _, residual, gradient = _compute_group_resid_grad(
         g, rows, workspace.x, workspace.y, phi, b, random_params, model
@@ -266,6 +259,8 @@ def _linearize_group(
     weighted_gradient = gradient * sqrt_weight[:, None]
     weighted_residual = residual * sqrt_weight
     random_gradient = weighted_gradient[:, random_params]
+    if fix_phi:
+        weighted_gradient = weighted_gradient[:, :0]
     crossproduct = weighted_gradient.T @ random_gradient
     random_normal = random_gradient.T @ random_gradient + precision
     random_rhs = random_gradient.T @ weighted_residual - precision @ b[g]
@@ -347,10 +342,11 @@ def _pnls_step(
     random_params: list[int],
     maxiter: int,
     tol: float,
+    fix_phi: bool = False,
 ) -> tuple[NDArray[np.floating], NDArray[np.floating], float, bool]:
     """Return updated parameters and the profiled residual variance."""
     n = len(workspace.y)
-    n_phi = len(phi)
+    n_phi = 0 if fix_phi else len(phi)
     n_random = len(random_params)
     covariance = Psi + _PSI_REGULARIZATION * np.eye(n_random)
     try:
@@ -364,7 +360,9 @@ def _pnls_step(
     regularization = _PNLS_REGULARIZATION * np.eye(n_phi)
 
     def linearize(g: int, rows: NDArray[np.intp]) -> _PNLSGroupLinearization:
-        return _linearize_group(g, rows, workspace, model, phi, b, random_params, precision)
+        return _linearize_group(
+            g, rows, workspace, model, phi, b, random_params, precision, fix_phi
+        )
 
     def penalty(effects: NDArray[np.floating]) -> float:
         return float(np.einsum("gi,ij,gj->", effects, precision, effects, optimize=True))
@@ -421,7 +419,7 @@ def _pnls_step(
         for _backtrack in range(21):
             try:
                 with np.errstate(over="raise", invalid="raise"):
-                    trial_phi = phi + step * delta_phi
+                    trial_phi = phi if fix_phi else phi + step * delta_phi
                     trial_b = b + step * delta_b
                     candidate = objective(trial_phi, trial_b)
             except (FloatingPointError, OverflowError, ValueError, linalg.LinAlgError):
@@ -515,13 +513,14 @@ def _nlmm_deviance(
     random_params: list[int],
     pnls_maxiter: int,
     pnls_tol: float,
+    fix_phi: bool = False,
 ) -> tuple[float, NDArray[np.floating], NDArray[np.floating], float, bool]:
     n = len(workspace.y)
     n_random = len(random_params)
     Psi_factor = _build_psi_factor(theta, n_random)
     Psi = Psi_factor @ Psi_factor.T
     phi_new, b_new, sigma_sq, converged = _pnls_step(
-        workspace, model, phi, b, Psi, random_params, pnls_maxiter, pnls_tol
+        workspace, model, phi, b, Psi, random_params, pnls_maxiter, pnls_tol, fix_phi
     )
 
     laplace_correction = 0.0
@@ -540,7 +539,9 @@ def _nlmm_deviance(
             return _INVALID_OBJECTIVE, phi_new, b_new, np.sqrt(sigma_sq), False
         laplace_correction += logdet
 
-    deviance = n * (1.0 + np.log(2.0 * np.pi * sigma_sq)) + laplace_correction
+    deviance = (
+        n * (1.0 + np.log(2.0 * np.pi * sigma_sq)) + laplace_correction - workspace.logdet_weights
+    )
 
     return deviance, phi_new, b_new, np.sqrt(sigma_sq), converged
 
@@ -559,6 +560,7 @@ def _nlmm_deviance_rust_with_status(
     *,
     pnls_maxiter: int | None = None,
     pnls_tol: float = _PNLS_TOL,
+    fix_phi: bool = False,
 ) -> tuple[float, NDArray[np.floating], NDArray[np.floating], float, bool]:
     validate_pnls_controls(pnls_maxiter, pnls_tol)
     model_name = _get_rust_model_name(model)
@@ -577,6 +579,7 @@ def _nlmm_deviance_rust_with_status(
         np.ascontiguousarray(weights, dtype=np.float64),
         maxiter=_PNLS_MAX_ITER if pnls_maxiter is None else pnls_maxiter,
         tol=pnls_tol,
+        fix_phi=fix_phi,
     )
     return dev, np.array(phi_out), np.array(b_out), sigma_out, converged
 
@@ -618,7 +621,7 @@ class NLMMOptimizer:
         self._start_b = np.zeros((self.n_groups, self.n_random), dtype=np.float64)
         self._start_sigma = _weighted_standard_deviation(self.y, self.weights)
         self._workspace: _NLMMWorkspace | None = None
-        self._last_theta: NDArray[np.floating] | None = None
+        self._last_parameters: NDArray[np.floating] | None = None
         self._last_failure: str | None = None
         self._last_evaluation: (
             tuple[
@@ -647,10 +650,14 @@ class NLMMOptimizer:
     def _evaluate(
         self,
         theta: NDArray[np.floating],
+        *,
+        fixed_phi: NDArray[np.floating] | None = None,
     ) -> tuple[float, NDArray[np.floating], NDArray[np.floating], float, bool]:
+        parameters = theta if fixed_phi is None else np.concatenate((theta, fixed_phi))
         if (
-            self._last_theta is not None
-            and np.array_equal(theta, self._last_theta)
+            theta.shape == (self.n_theta,)
+            and self._last_parameters is not None
+            and np.array_equal(parameters, self._last_parameters)
             and self._last_evaluation is not None
         ):
             return self._last_evaluation
@@ -658,10 +665,15 @@ class NLMMOptimizer:
         if self._start_phi is None:
             self._start_phi = self.get_start_phi()
 
+        phi_trial = self._start_phi if fixed_phi is None else fixed_phi
         self._last_failure = None
         try:
+            if theta.shape != (self.n_theta,):
+                raise ValueError(f"expected {self.n_theta} variance parameters")
             if not np.all(np.isfinite(theta)):
                 raise ValueError("variance parameters must be finite")
+            if phi_trial.shape != (self.model.n_params,) or not np.all(np.isfinite(phi_trial)):
+                raise ValueError("expected a finite fixed effect for each nonlinear parameter")
             with np.errstate(divide="raise", invalid="raise", over="raise"):
                 if self.use_rust:
                     evaluation = _nlmm_deviance_rust_with_status(
@@ -670,41 +682,33 @@ class NLMMOptimizer:
                         self.x,
                         self.groups,
                         self.model,
-                        self._start_phi,
+                        phi_trial,
                         self._start_b,
                         self.random_params,
                         self._start_sigma,
                         self.weights,
                         pnls_maxiter=self.pnls_maxiter,
                         pnls_tol=self.pnls_tol,
-                    )
-                elif self._workspace is not None:
-                    evaluation = _nlmm_deviance(
-                        theta,
-                        self._workspace,
-                        self.model,
-                        self._start_phi,
-                        self._start_b,
-                        self.random_params,
-                        self.pnls_maxiter,
-                        self.pnls_tol,
+                        fix_phi=fixed_phi is not None,
                     )
                 else:
-                    evaluation = nlmm_deviance_with_status(
-                        theta,
-                        self.y,
-                        self.x,
-                        self.groups,
-                        self.model,
-                        self._start_phi,
-                        self._start_b,
-                        self.random_params,
-                        self._start_sigma,
-                        n_jobs=self.n_jobs,
-                        weights=self.weights,
-                        pnls_maxiter=self.pnls_maxiter,
-                        pnls_tol=self.pnls_tol,
+                    context = (
+                        nullcontext(self._workspace)
+                        if self._workspace is not None
+                        else _nlmm_workspace(self.y, self.x, self.groups, self.weights, self.n_jobs)
                     )
+                    with context as workspace:
+                        evaluation = _nlmm_deviance(
+                            theta,
+                            workspace,
+                            self.model,
+                            phi_trial,
+                            self._start_b,
+                            self.random_params,
+                            self.pnls_maxiter,
+                            self.pnls_tol,
+                            fix_phi=fixed_phi is not None,
+                        )
 
             deviance, phi, b, sigma, pnls_converged = evaluation
             if not isinstance(pnls_converged, (bool, np.bool_)):
@@ -740,7 +744,7 @@ class NLMMOptimizer:
                 False,
             )
 
-        self._last_theta = theta.copy()
+        self._last_parameters = parameters.copy()
         self._last_evaluation = evaluation
         return evaluation
 
@@ -778,7 +782,7 @@ class NLMMOptimizer:
             else float(start_sigma)
         )
         self._start_sigma = max(sigma, np.sqrt(_MIN_VARIANCE))
-        self._last_theta = None
+        self._last_parameters = None
         self._last_evaluation = None
         self._last_failure = None
 
@@ -788,12 +792,32 @@ class NLMMOptimizer:
             bounds[idx + i] = (1e-6, None)
             idx += i + 1
 
+        # The Laplace determinant depends on the fixed parameters through the
+        # nonlinear gradient. Optimize them in the marginal likelihood while
+        # PNLS solves for the conditional random modes at each trial point.
+        start = np.concatenate((start_theta, self._start_phi))
+        scales = np.concatenate((np.ones(self.n_theta), np.maximum(1.0, np.abs(self._start_phi))))
+        bounds.extend([(None, None)] * self.model.n_params)
+        options: dict[str, int | float] = {"maxiter": maxiter}
+        jac = None
+        if method.upper() == "L-BFGS-B":
+            # A centered derivative and a tighter reduction tolerance resolve
+            # small fixed-effect changes in a large marginal deviance.
+            options["ftol"] = 1e-12
+            jac = "3-point"
+
+        def joint_objective(scaled: NDArray[np.floating]) -> float:
+            parameters = scaled * scales
+            return float(
+                self._evaluate(parameters[: self.n_theta], fixed_phi=parameters[self.n_theta :])[0]
+            )
+
         callback: Callable[[NDArray[np.floating]], None] | None = None
         if self.verbose > 0:
 
             def callback(x: NDArray[np.floating]) -> None:
-                dev = self.objective(x)
-                print(f"theta = {x}, deviance = {dev:.6f}")
+                dev = joint_objective(x)
+                print(f"parameters = {x * scales}, deviance = {dev:.6f}")
 
         context = (
             nullcontext()
@@ -804,14 +828,18 @@ class NLMMOptimizer:
             self._workspace = workspace
             try:
                 result = minimize(
-                    self.objective,
-                    start_theta,
+                    joint_objective,
+                    start / scales,
                     method=method,
+                    jac=jac,
                     bounds=bounds,
-                    options={"maxiter": maxiter},
+                    options=options,
                     callback=callback,
                 )
-                deviance, phi, b, sigma, pnls_converged = self._evaluate(result.x)
+                parameters = result.x * scales
+                deviance, phi, b, sigma, pnls_converged = self._evaluate(
+                    parameters[: self.n_theta], fixed_phi=parameters[self.n_theta :]
+                )
             finally:
                 self._workspace = None
 
@@ -822,7 +850,7 @@ class NLMMOptimizer:
 
         return NLMMOptimizationResult(
             phi=phi,
-            theta=result.x,
+            theta=parameters[: self.n_theta],
             sigma=sigma,
             b=b,
             deviance=deviance,

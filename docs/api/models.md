@@ -131,9 +131,10 @@ result = mlm.nlmer(
   controls `pnls_maxiter` (positive integer, default 50) and `pnls_tol` (positive,
   finite tolerance for the full proposed parameter update, default `1e-6`).
 
-Fixed and random parameters are updated jointly. A line search checks the
-penalized residual error before accepting a step. The tolerance applies to the
-full proposed step before any shortening.
+The outer optimizer estimates the fixed effects and covariance parameters
+jointly. The inner solver estimates conditional random effects and checks the
+penalized residual error before accepting a step. Its tolerance applies to
+the full proposed change in the random effects before any shortening.
 
 Results expose `pnls_converged` separately; overall `converged` requires both
 inner and outer convergence. `refit()` and `update()` retain the inner controls

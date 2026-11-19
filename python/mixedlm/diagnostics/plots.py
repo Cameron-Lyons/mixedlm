@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import inspect
 from collections.abc import Callable
+from numbers import Integral
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from scipy import stats
+
+from mixedlm.utils.dataframe import _grouped_observation_indices
 
 if TYPE_CHECKING:
     from matplotlib.axes import Axes
@@ -61,8 +64,8 @@ def plot_resid_fitted(
     if ax is None:
         _, ax = plt.subplots(figsize=(8, 6))
 
-    fitted = result.fitted()
-    resid = result.residuals(type="response")
+    fitted = result.fitted(na_expand=False)
+    resid = result.residuals(type="response", na_expand=False)
 
     point_defaults: dict[str, Any] = {"alpha": 0.6, "s": 30, "edgecolors": "none"}
     if point_kws:
@@ -125,7 +128,7 @@ def plot_qq(
     if ax is None:
         _, ax = plt.subplots(figsize=(8, 6))
 
-    resid = result.residuals(type="pearson" if standardize else "response")
+    resid = result.residuals(type="pearson" if standardize else "response", na_expand=False)
 
     n = len(resid)
     theoretical_quantiles = stats.norm.ppf((np.arange(1, n + 1) - 0.5) / n)
@@ -191,8 +194,8 @@ def plot_scale_location(
     if ax is None:
         _, ax = plt.subplots(figsize=(8, 6))
 
-    fitted = result.fitted()
-    resid = result.residuals(type="pearson")
+    fitted = result.fitted(na_expand=False)
+    resid = result.residuals(type="pearson", na_expand=False)
     sqrt_abs_resid = np.sqrt(np.abs(resid))
 
     point_defaults: dict[str, Any] = {"alpha": 0.6, "s": 30, "edgecolors": "none"}
@@ -247,48 +250,54 @@ def plot_resid_group(
     Axes
         The matplotlib axes with the plot.
     """
-    plt = _get_pyplot()
-
-    if ax is None:
-        _, ax = plt.subplots(figsize=(10, 6))
-
+    structures = result.matrices.random_structures
+    if not structures:
+        raise ValueError("No random effects in model")
     if group is None:
-        if not result.matrices.random_structures:
-            raise ValueError("No random effects in model")
-        group = result.matrices.random_structures[0].grouping_factor
-
-    struct = None
-    for s in result.matrices.random_structures:
-        if s.grouping_factor == group:
-            struct = s
-            break
-
-    if struct is None:
+        group = structures[0].grouping_factor
+    index = next(
+        (i for i, structure in enumerate(structures) if structure.grouping_factor == group), None
+    )
+    if index is None:
         raise ValueError(f"Grouping factor '{group}' not found in model")
+    struct = structures[index]
 
-    resid = result.residuals(type="response")
+    resid = result.residuals(type="response", na_expand=False)
+    codes = struct.level_indices
+    if codes is None:
+        # Older results may only retain the fitted frame or the random design.
+        frame = result.matrices.frame
+        if frame is not None:
+            import pandas as pd
 
-    z_start = 0
-    for s in result.matrices.random_structures:
-        if s.grouping_factor == group:
-            break
-        z_start += s.n_levels * s.n_terms
+            from mixedlm.utils.dataframe import concat_columns_as_string, get_column_numpy
 
-    n_terms = struct.n_terms
-    Z_slice = result.matrices.Z[:, z_start : z_start + struct.n_levels * n_terms]
+            grouping = result.formula.random[index].grouping
+            values = (
+                get_column_numpy(frame, grouping)
+                if isinstance(grouping, str)
+                else concat_columns_as_string(frame, list(grouping), escape=True)
+            )
+            codes = pd.Series(values).map(struct.level_map).fillna(-1).to_numpy(dtype=np.intp)
+        else:
+            start = sum(s.n_levels * s.n_terms for s in structures[:index])
+            stop = start + struct.n_terms * struct.n_levels
+            rows, columns = result.matrices.Z[:, start:stop].nonzero()
+            codes = np.full(len(resid), -1, dtype=np.intp)
+            codes[rows] = columns // struct.n_terms
+            if np.any(codes < 0):
+                raise ValueError("Group membership for zero-slope rows requires the fitted frame")
 
-    if hasattr(Z_slice, "toarray"):
-        Z_slice = Z_slice.toarray()
-
+    grouped_rows = _grouped_observation_indices(codes, n_groups=struct.n_levels)
     group_resids: list[NDArray[np.floating]] = []
     group_labels: list[str] = []
+    for name, level in struct.level_map.items():
+        if grouped_rows[level].size:
+            group_resids.append(resid[grouped_rows[level]])
+            group_labels.append(str(name))
 
-    for level_name, level_idx in struct.level_map.items():
-        col_idx = level_idx * n_terms
-        mask = Z_slice[:, col_idx] != 0
-        if np.any(mask):
-            group_resids.append(resid[mask])
-            group_labels.append(str(level_name))
+    if ax is None:
+        _, ax = _get_pyplot().subplots(figsize=(10, 6))
 
     box_defaults: dict[str, Any] = {"patch_artist": True}
     if point_kws:
@@ -298,11 +307,13 @@ def plot_resid_group(
         "tick_labels" if "tick_labels" in inspect.signature(ax.boxplot).parameters else "labels"
     )
     box_defaults[label_parameter] = group_labels
-    bp = ax.boxplot(group_resids, **box_defaults)
-
-    for patch in bp["boxes"]:
-        patch.set_facecolor("lightblue")
-        patch.set_alpha(0.7)
+    if box_defaults["patch_artist"]:
+        box_defaults["boxprops"] = {
+            "facecolor": "lightblue",
+            "alpha": 0.7,
+            **(box_defaults.get("boxprops") or {}),
+        }
+    ax.boxplot(group_resids, **box_defaults)
 
     ax.axhline(y=0, color="gray", linestyle="--", linewidth=1)
     ax.set_xlabel(f"Group ({group})")
@@ -554,6 +565,8 @@ def plot_diagnostics(
 
     if which is None:
         which = [1, 2, 3, 4]
+    if any(isinstance(i, bool) or not isinstance(i, Integral) or not 1 <= i <= 4 for i in which):
+        raise ValueError("which must contain integer panel numbers from 1 to 4")
 
     has_random = bool(result.matrices.random_structures)
     if 4 in which and not has_random:

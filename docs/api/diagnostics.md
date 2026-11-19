@@ -137,8 +137,7 @@ print(result.p_value)
 ```
 
 The function computes each observation's probability of zero directly for
-Poisson, negative-binomial, or binomial families. For grouped-binomial models,
-integer model weights are interpreted as trial counts. It then uses the exact
+Poisson, negative-binomial, or binomial families. Grouped-binomial zero probabilities use the fitted trial counts. Numeric proportions without an explicit denominator use their trial weights. Binary responses use one trial per observation, including fits with prior weights. It then uses the exact
 Poisson-binomial mean and variance with a continuity-corrected normal
 approximation for the zero-count p-value.
 

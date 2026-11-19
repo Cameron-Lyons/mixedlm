@@ -138,7 +138,7 @@ class TestMkReTrms:
 
         assert terms.Zt.shape == (36, 180)
         assert_array_equal(terms.theta, [1.0, 0.0, 1.0])
-        assert_array_equal(np.bincount(terms.Lind), [18, 18, 18])
+        assert_array_equal(terms.Lind, np.tile([0, 1, 2], 18))
         assert terms.Gp == [0, 36]
 
     def test_crossed_grouping_factors(self) -> None:

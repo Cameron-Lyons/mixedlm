@@ -522,12 +522,43 @@ fn pnls_step_impl(
     random_params: &[usize],
     maxiter: usize,
     tol: f64,
+    fix_phi: bool,
 ) -> PnlsResult {
     // A compile-time parameter count lets the small per-group loops unroll.
     match phi.len() {
-        2 => pnls::<2>(data, model, phi, b, psi, random_params, maxiter, tol),
-        3 => pnls::<3>(data, model, phi, b, psi, random_params, maxiter, tol),
-        4 => pnls::<4>(data, model, phi, b, psi, random_params, maxiter, tol),
+        2 => pnls::<2>(
+            data,
+            model,
+            phi,
+            b,
+            psi,
+            random_params,
+            maxiter,
+            tol,
+            fix_phi,
+        ),
+        3 => pnls::<3>(
+            data,
+            model,
+            phi,
+            b,
+            psi,
+            random_params,
+            maxiter,
+            tol,
+            fix_phi,
+        ),
+        4 => pnls::<4>(
+            data,
+            model,
+            phi,
+            b,
+            psi,
+            random_params,
+            maxiter,
+            tol,
+            fix_phi,
+        ),
         n => unreachable!("built-in models have two to four parameters, not {n}"),
     }
 }
@@ -542,9 +573,11 @@ fn pnls<const P: usize>(
     random_params: &[usize],
     maxiter: usize,
     tol: f64,
+    fix_phi: bool,
 ) -> PnlsResult {
     let n_random = random_params.len();
-    let width = P + 1;
+    let n_fixed = if fix_phi { 0 } else { P };
+    let width = n_fixed + 1;
     let mut covariance = psi.clone();
     for i in 0..n_random {
         covariance[(i, i)] += 1e-8;
@@ -604,20 +637,20 @@ fn pnls<const P: usize>(
                     random_normal[r * n_random + s] =
                         fixed_normal[column][other] + precision[r * n_random + s];
                 }
-                for j in 0..P {
+                for j in 0..n_fixed {
                     solution[r * width + j] = fixed_normal[j][column];
                 }
-                solution[r * width + P] = fixed_rhs[column]
+                solution[r * width + n_fixed] = fixed_rhs[column]
                     - (0..n_random)
                         .map(|s| precision[r * n_random + s] * effects[s])
                         .sum::<f64>();
             }
             solve_spd(&random_normal, n_random, &mut factor, solution, width);
-            for i in 0..P {
+            for i in 0..n_fixed {
                 let crossproduct = |r: usize| fixed_normal[i][random_params[r]];
                 rhs[i] += fixed_rhs[i]
                     - (0..n_random)
-                        .map(|r| crossproduct(r) * solution[r * width + P])
+                        .map(|r| crossproduct(r) * solution[r * width + n_fixed])
                         .sum::<f64>();
                 for j in 0..P {
                     normal[i][j] += fixed_normal[i][j]
@@ -638,9 +671,14 @@ fn pnls<const P: usize>(
             })
         });
         let mut delta_phi = rhs;
-        solve_spd(normal.as_flattened(), P, &mut factor, &mut delta_phi, 1);
+        if !fix_phi {
+            solve_spd(normal.as_flattened(), P, &mut factor, &mut delta_phi, 1);
+        }
         for (delta, solution) in delta_b.iter_mut().zip(solutions.chunks_exact(width)) {
-            *delta = solution[P] - (0..P).map(|j| solution[j] * delta_phi[j]).sum::<f64>();
+            *delta = solution[n_fixed]
+                - (0..n_fixed)
+                    .map(|j| solution[j] * delta_phi[j])
+                    .sum::<f64>();
         }
         let mut max_delta: f64 = 0.0;
         for &value in delta_phi.iter().chain(&delta_b) {
@@ -794,9 +832,20 @@ fn nlmm_deviance_with_status_impl(
     random_params: &[usize],
     maxiter: usize,
     tol: f64,
+    fix_phi: bool,
 ) -> (f64, Vec<f64>, Vec<f64>, f64, bool) {
     let psi = psi_factor * psi_factor.transpose();
-    let result = pnls_step_impl(data, model, phi, b, &psi, random_params, maxiter, tol);
+    let result = pnls_step_impl(
+        data,
+        model,
+        phi,
+        b,
+        &psi,
+        random_params,
+        maxiter,
+        tol,
+        fix_phi,
+    );
     let sigma_sq = result.sigma_sq;
     let Some(correction) = laplace_correction(
         data,
@@ -808,8 +857,9 @@ fn nlmm_deviance_with_status_impl(
     ) else {
         return (1e100, result.phi, result.b, sigma_sq.sqrt(), false);
     };
-    let deviance =
-        data.n_obs() as f64 * (1.0 + (2.0 * std::f64::consts::PI * sigma_sq).ln()) + correction;
+    let deviance = data.n_obs() as f64 * (1.0 + (2.0 * std::f64::consts::PI * sigma_sq).ln())
+        + correction
+        - data.weights.iter().map(|w| w.ln()).sum::<f64>();
 
     (
         deviance,
@@ -947,7 +997,9 @@ fn estimates_to_numpy(
     sigma,
     weights=None,
     maxiter=PNLS_MAX_ITER,
-    tol=PNLS_TOLERANCE
+    tol=PNLS_TOLERANCE,
+    *,
+    fix_phi=false
 ))]
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn nlmm_deviance_with_status<'py>(
@@ -964,6 +1016,7 @@ pub fn nlmm_deviance_with_status<'py>(
     weights: Option<numpy::PyArrayLike1<'py, f64>>,
     maxiter: usize,
     tol: f64,
+    fix_phi: bool,
 ) -> PyResult<(
     f64,
     Bound<'py, PyArray1<f64>>,
@@ -987,6 +1040,7 @@ pub fn nlmm_deviance_with_status<'py>(
             &random_params,
             maxiter,
             tol,
+            fix_phi,
         ))
     })?;
     let (phi, b) = estimates_to_numpy(py, phi, b, inputs.b_shape)?;
@@ -1019,6 +1073,7 @@ mod tests {
             random_params,
             PNLS_MAX_ITER,
             PNLS_TOLERANCE,
+            false,
         );
         (deviance, phi, b, sigma)
     }
@@ -1133,6 +1188,7 @@ mod tests {
                 &random_params,
                 1,
                 1e-12,
+                false,
             );
             assert!(!result.converged);
             for j in 0..2 {
@@ -1180,6 +1236,7 @@ mod tests {
             &[0],
             1,
             1e-12,
+            false,
         );
         for j in 0..2 {
             assert!((result.phi[j] - phi[j] - 0.125 * delta[j]).abs() < 1e-11);
@@ -1211,6 +1268,7 @@ mod tests {
                 &[0],
                 maxiter,
                 tol,
+                false,
             )
         };
         let limited = evaluate(1, 1e-12);

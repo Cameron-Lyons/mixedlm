@@ -66,6 +66,21 @@ class TestFormulaParser:
         labels = self._fixed_term_labels("y ~ x1 * x2 * x3 + (1 | g)")
         assert labels == ["x1", "x2", "x1:x2", "x3", "x1:x3", "x2:x3", "x1:x2:x3"]
 
+    def test_colon_binds_before_star_in_fixed_and_random_effects(self) -> None:
+        abbreviated = parse_formula("y ~ a * b:c + (a:b*c:d | g)")
+        explicit = parse_formula("y ~ a + b:c + a:b:c + (a:b + c:d + a:b:c:d | g)")
+        assert abbreviated == explicit
+
+    def test_interactions_preserve_first_order_and_match_by_factor_set(self) -> None:
+        formula = parse_formula("y ~ z:x + x*z + z:z + I(x**2):I(x**2) + (a*b - b:a | g)")
+        assert formula == parse_formula("y ~ z:x + x + z + I(x**2) + (a + b | g)")
+        updated = update_formula(formula, ". ~ . - x:z + z:x + x:z")
+        assert updated == parse_formula("y ~ x + z + I(x**2) + z:x + (a + b | g)")
+        slopes = parse_formula("y ~ (a:b | g)")
+        assert update_formula(slopes, ". ~ . + (b:a | g)") == slopes
+        assert update_formula(slopes, ". ~ . - (b:a | g)").random == ()
+        assert parse_formula("y ~ (a:b | g) - (b:a | g)").random == ()
+
     def test_fixed_term_subtraction_is_sequential(self) -> None:
         labels = self._fixed_term_labels("y ~ x1 * x2 - x1:x2 - x1 + x1 + (1 | g)")
         assert labels == ["x2", "x1"]

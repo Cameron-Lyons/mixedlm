@@ -353,7 +353,7 @@ GLMMs are more prone to convergence issues than LMMs.
    control = mlm.GlmerControl(em_init=True, em_maxiter=50)
    model = mlm.glmer(..., control=control)
    ```
-   This runs a linear EM-REML algorithm to estimate starting theta values before the GLMM optimizer takes over. It is silently skipped for unsupported covariance types.
+   This runs a linear EM-REML algorithm to estimate starting theta values before the GLMM optimizer takes over. It supports unstructured, diagonal, compound-symmetry, and AR(1) random effects.
 
 ### Singular Fits
 

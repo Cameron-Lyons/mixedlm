@@ -892,3 +892,22 @@ class TestPrescribedFolds:
         changed_group.loc[0, "group"] = changed_group.loc[8, "group"]
         with pytest.raises(ValueError, match="random-effect values.*not aligned"):
             cv_module._validate_predictor_alignment(model, changed_group)
+
+
+def test_lmm_fold_refits_honor_fitted_checks_and_allow_overrides():
+    from mixedlm.models.checks import ModelCheckError
+
+    from tests._datasets import grouped_data
+
+    data = grouped_data(n_groups=8)
+    model = lmer("y ~ x + (1 | group)", data, control=lmerControl(check_nlev_gtreq_5="stop"))
+    with pytest.raises(ModelCheckError, match="only 4 levels"):
+        cross_validate(model, cv=2, group="group", shuffle=False)
+    result = cross_validate(
+        model,
+        cv=2,
+        group="group",
+        shuffle=False,
+        fit_kwargs={"control": lmerControl(check_nlev_gtreq_5="ignore", check_singular=False)},
+    )
+    assert np.isfinite(result.predictions).all()

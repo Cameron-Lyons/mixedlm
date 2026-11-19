@@ -452,3 +452,37 @@ class TestAnovaType3:
         assert_allclose(table.p_value, [p_value], rtol=1e-8)
         assert_allclose(table.sum_sq, table.f_value * model.sigma**2, rtol=1e-10)
         assert f"Type III Analysis of Variance Table with {method} DF" in str(table)
+
+
+@pytest.mark.parametrize("intercept", [True, False])
+def test_type3_joint_tests_use_surviving_formula_term_columns(intercept):
+    # arm.1 is both a numeric variable and the display name of an encoded arm
+    # coefficient. The unobserved arm removes one column from each factor term.
+    data = DDF_DATA.assign(
+        arm=pd.Categorical(
+            np.resize(["A", "B", "C"], len(DDF_DATA)), categories=["A", "B", "C", "D"]
+        ),
+        **{"arm.1": np.random.default_rng(179).normal(size=len(DDF_DATA))},
+    )
+    model = lmer(
+        f"y ~ {int(intercept)} + arm * x + arm.1 + (1 | group)",
+        data,
+        control=LmerControl(check_rankX="message+drop.cols"),
+    )
+    expected_groups = [list(range(int(intercept), 3)), [3], [4, 5], [6]]
+    cov = model.vcov()
+    expected = []
+    for indices in expected_groups:
+        beta = model.beta[indices]
+        expected.append(beta @ np.linalg.solve(cov[np.ix_(indices, indices)], beta) / len(indices))
+    for matrices in (
+        model.matrices,
+        # Before term provenance was persisted, fits saved the coding scheme
+        # and source column indices, including after serialization without data.
+        replace(model.matrices, fixed_term_labels=None, frame=None),
+    ):
+        result = anova_type3(replace(model, matrices=matrices))
+        assert result.terms == ["arm", "x", "arm:x", "arm.1"]
+        assert_array_equal(result.num_df, [len(group) for group in expected_groups])
+        assert_allclose(result.f_value, expected)
+        assert_allclose(result.p_value, stats.f.sf(expected, result.num_df, result.den_df))

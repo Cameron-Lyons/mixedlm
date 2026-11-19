@@ -10,6 +10,21 @@ from mixedlm.families.base import Family, Link
 from mixedlm.families.likelihood import likelihood_inputs, whole_counts
 
 
+def _binomial_trials(
+    y: NDArray[np.floating], weights: NDArray[np.floating], trials: NDArray[np.floating] | None
+) -> NDArray[np.float64] | None:
+    """Recover trial counts for proportions. Binary responses have one trial."""
+    if trials is None and np.all((y == 0) | (y == 1)):
+        return None
+    n = weights if trials is None else np.asarray(trials, dtype=np.float64)
+    if n.shape != y.shape or not np.all(np.isfinite(n)) or np.any(n <= 0):
+        raise ValueError("Binomial trials must be finite positive matching counts")
+    n = whole_counts(n, "binomial trial-count")
+    if np.any(n == 0):
+        raise ValueError("Binomial trial counts must be positive whole numbers")
+    return n
+
+
 class Binomial(Family):
     mean_bounds = (0.0, 1.0)
 
@@ -45,16 +60,11 @@ class Binomial(Family):
         if np.any((y < 0) | (y > 1)) or np.any((mu < 0) | (mu > 1)):
             raise ValueError("Binomial likelihood responses and means must be between zero and one")
 
-        if trials is None and np.all((y == 0) | (y == 1)):
+        n = _binomial_trials(y, wt, trials)
+        if n is None:
             # Bernoulli prior weights may be fractional power weights.
             return float(np.sum(wt * (xlogy(y, mu) + xlog1py(1 - y, -mu))))
 
-        n = wt if trials is None else np.asarray(trials, dtype=np.float64)
-        if n.shape != y.shape or not np.all(np.isfinite(n)) or np.any(n <= 0):
-            raise ValueError("Binomial likelihood trials must be finite positive matching counts")
-        n = whole_counts(n, "binomial trial-count")
-        if np.any(n == 0):
-            raise ValueError("Binomial likelihood trial counts must be positive whole numbers")
         successes = whole_counts(n * y, "binomial success-count")
         failures = n - successes
         log_density = (

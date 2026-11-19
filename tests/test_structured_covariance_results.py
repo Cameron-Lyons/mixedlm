@@ -5,7 +5,7 @@ from collections.abc import Callable
 import numpy as np
 import pandas as pd
 import pytest
-from mixedlm import families, lmer, load_sleepstudy, parse_formula, set_cov_type
+from mixedlm import families, glmer, lmer, load_sleepstudy, parse_formula, set_cov_type
 from mixedlm.matrices.design import build_model_matrices
 from mixedlm.models.glmer import GlmerResult
 from mixedlm.models.lmer import LmerResult
@@ -131,11 +131,6 @@ def test_structured_singularity_uses_covariance_eigenvalues(
     assert result.isSingular()
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=pytest.fail.Exception,
-    reason="getME('Lind') assumes one theta per Lambda entry, so cs/ar1 indices run past theta",
-)
 @pytest.mark.parametrize("cov_type", ["cs", "ar1"])
 def test_lind_is_rejected_for_nonlinear_covariance_maps(
     result_factory: Callable[[str, NDArray[np.floating]], Result],
@@ -188,6 +183,28 @@ def test_unstructured_covariance_results_are_unchanged(
 
     np.testing.assert_allclose(result.VarCorr().groups["group"].cov, factor @ factor.T * scale)
     np.testing.assert_allclose(result.getME("lower"), [0.0, -np.inf, 0.0, -np.inf, -np.inf, 0.0])
+
+
+def test_lind_matches_stored_entries_at_covariance_boundaries(result_factory) -> None:
+    theta = np.array([1.0, 0.0, 0.0, -0.1, 0.3, 0.6])
+    result = result_factory("us", theta)
+    stored = result.getME("Lambdat").tocsc()
+    np.testing.assert_array_equal(theta[result.getME("Lind")], stored.data)
+
+
+@pytest.mark.parametrize("fitter", [lmer, glmer])
+def test_model_updates_preserve_covariance_structure(fitter) -> None:
+    data = load_sleepstudy()
+    data = data.assign(Reaction=data.Reaction / 30, Days=(data.Days - 4.5) / 5)
+    formula = set_cov_type("Reaction ~ Days + I(Days**2) + (Days | Subject)", "cs")
+    options = {"family": families.Gaussian()} if fitter is glmer else {}
+    result = fitter(formula, data, **options)
+    for update in (None, ". ~ . - I(Days**2)"):
+        updated = result.update(update)
+        assert updated.converged
+        assert updated.formula.random == result.formula.random
+        assert updated.matrices.random_structures[0].cov_type == "cs"
+        assert updated.theta.shape == (2,)
 
 
 def test_covariance_reporting_does_not_expand_group_level_factors(

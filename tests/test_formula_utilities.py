@@ -34,6 +34,7 @@ def test_unknown_terms_are_not_treated_as_interactions(dispatch):
     [
         ("y ~ x + (1 + x || group)", "y ~ x + (1 | group) + (0 + x | group)"),
         ("y ~ x + (0 + x || group)", "y ~ x + (0 + x | group)"),
+        ("y / n ~ x + (x || g)", "y / n ~ x + (1 | g) + (0 + x | g)"),
         (
             "y ~ x + (1 + x || g1) + (1 + z || g2)",
             "y ~ x + (1 | g1) + (0 + x | g1) + (1 | g2) + (0 + z | g2)",
@@ -72,14 +73,11 @@ def test_expanded_quoted_names_round_trip_through_the_parser():
         ("y ~ x + offset(a) + z + offset(b)", "y ~ x + z"),
         ("y ~ x + offset(exposure)", "y ~ x"),
         ("y ~ x + (1 | group)", "y ~ x + (1 | group)"),
-        pytest.param(
-            "y ~ x + offset(log(t)) + (1 | group)",
-            "y ~ x + (1 | group)",
-            marks=pytest.mark.xfail(
-                strict=True,
-                reason="dropOffset stops at the first ')' and returns 'y ~ x ) + (1 | group)'",
-            ),
-        ),
+        ("y ~ x + offset(log(t)) + (1 | group)", "y ~ x + (1 | group)"),
+        ("y ~ offset(a) - offset(b)", "y ~ 1"),
+        ("y ~ offset(a) - 1 + x", "y ~ - 1 + x"),
+        ("`offset(y)` ~ `offset(x)` + offset(log(`t)`))", "`offset(y)` ~ `offset(x)`"),
+        ("y ~ myoffset(x) + offset(a)*I(x**2)", "y ~ myoffset(x) + offset(a)*I(x**2)"),
     ],
 )
 def test_dropOffset_removes_every_offset_term(formula, expected):

@@ -548,6 +548,14 @@ def test_benchmark_python_lmm_objective(benchmark, large_data, cached):
     assert result == pytest.approx(expected, abs=1e-10)
 
 
+@pytest.mark.benchmark(group="formula-expansion")
+def test_benchmark_factorial_formula(benchmark):
+    factors = [f"x{i}" for i in range(10)]
+    result = benchmark(parse_formula, "y ~ " + "*".join(factors))
+    assert len(result.fixed.terms) == 2 ** len(factors) - 1
+    assert result.fixed_variables == set(factors)
+
+
 @pytest.mark.benchmark(group="sparse-design")
 def test_benchmark_large_crossed_sparse_design_build(benchmark, large_crossed_sparse_data):
     formula = parse_formula("y ~ x + (1 | group1) + (1 | group2)")

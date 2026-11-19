@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum, auto
 from typing import assert_never
 
@@ -20,7 +20,8 @@ from mixedlm.formula.terms import (
 )
 
 ParsedTerm = InterceptTerm | VariableTerm | PowerTerm | InteractionTerm
-NoInterceptMarker = tuple[str]
+Factor = str | PowerTerm
+TermMap = dict[frozenset[Factor], ParsedTerm]
 
 
 class TokenType(Enum):
@@ -211,7 +212,7 @@ class Parser:
         list[RandomTerm],
         bool,
     ]:
-        fixed_terms: list[ParsedTerm] = []
+        fixed_terms: TermMap = {}
         random_terms: list[RandomTerm] = []
         has_intercept = True
 
@@ -228,84 +229,59 @@ class Parser:
             if self.peek().type == TokenType.LPAREN:
                 parsed_random = self._parse_random_term()
                 if subtracting:
-                    random_terms = [term for term in random_terms if term not in parsed_random]
+                    removed = {_bar_key(term) for term in parsed_random}
+                    random_terms = [term for term in random_terms if _bar_key(term) not in removed]
                 else:
                     random_terms.extend(parsed_random)
             elif self.peek().type in (TokenType.IDENTIFIER, TokenType.NUMBER):
-                terms = self._parse_term()
-                if subtracting:
-                    has_intercept = self._subtract_parsed_terms(fixed_terms, terms, has_intercept)
-                else:
-                    has_intercept = self._add_parsed_terms(fixed_terms, terms, has_intercept)
+                has_intercept = self._parse_effect(fixed_terms, has_intercept, subtracting)
             else:
                 self._unexpected("a formula term")
             first = False
 
-        return fixed_terms, random_terms, has_intercept
+        return list(fixed_terms.values()), random_terms, has_intercept
 
     def _unexpected(self, expected: str) -> None:
         token = self.peek()
         raise ValueError(f"Expected {expected}, got {token.type.name} at position {token.position}")
 
-    def _add_parsed_terms(
-        self,
-        target: list[ParsedTerm],
-        terms: list[ParsedTerm] | NoInterceptMarker | None,
-        has_intercept: bool,
-    ) -> bool:
-        if isinstance(terms, tuple):
-            return False
-        if terms is None:
-            return has_intercept
-        for term in terms:
-            if isinstance(term, InterceptTerm):
-                has_intercept = True
-            else:
-                self._append_unique(target, term)
-        return has_intercept
-
-    def _subtract_parsed_terms(
-        self,
-        target: list[ParsedTerm],
-        terms: list[ParsedTerm] | NoInterceptMarker | None,
-        has_intercept: bool,
-    ) -> bool:
-        if isinstance(terms, tuple):
-            return True
-        if terms is None:
-            return has_intercept
-        for term in terms:
-            if isinstance(term, InterceptTerm):
-                has_intercept = False
-            else:
-                target[:] = [existing for existing in target if existing != term]
-        return has_intercept
-
-    def _parse_term(
-        self,
-    ) -> list[ParsedTerm] | NoInterceptMarker | None:
+    def _parse_effect(self, target: TermMap, has_intercept: bool, subtracting: bool) -> bool:
+        """Apply one additive term, expanding colon interactions before star products."""
         if self.peek().type == TokenType.NUMBER:
             tok = self.advance()
-            if tok.value == "1":
-                return [InterceptTerm()]
-            elif tok.value == "0":
-                return ("no_intercept",)
-            else:
+            if tok.value not in ("0", "1"):
                 raise ValueError(f"Unexpected number {tok.value} in formula")
+            return (tok.value == "1") != subtracting
 
-        terms = self._parse_base_terms()
-        while self.peek().type in (TokenType.COLON, TokenType.STAR):
-            op = self.advance()
-            next_terms = self._parse_base_terms()
-
-            if op.type == TokenType.COLON:
-                terms = self._combine_colon(terms, next_terms)
+        factors = self._parse_interaction()
+        terms = {frozenset(factors): self._factor_term(factors)}
+        while self.peek().type == TokenType.STAR:
+            self.advance()
+            right = self._parse_interaction()
+            right_key = frozenset(right)
+            expanded = terms.copy()
+            expanded.setdefault(right_key, self._factor_term(right))
+            for key, term in terms.items():
+                combined = key | right_key
+                if combined not in expanded:
+                    factors = self._term_variables(term) + tuple(f for f in right if f not in key)
+                    expanded[combined] = self._factor_term(factors)
+            terms = expanded
+        for key, term in terms.items():
+            if subtracting:
+                target.pop(key, None)
             else:
-                terms = self._combine_star(terms, next_terms)
+                target.setdefault(key, term)
+        return has_intercept
 
-        return terms
+    def _parse_interaction(self) -> tuple[Factor, ...]:
+        factors = [self._parse_factor()]
+        while self.peek().type == TokenType.COLON:
+            self.advance()
+            factors.append(self._parse_factor())
+        return tuple(dict.fromkeys(factors))
 
-    def _parse_base_terms(self) -> list[ParsedTerm]:
+    def _parse_factor(self) -> Factor:
         if self.peek().type != TokenType.IDENTIFIER:
             self._unexpected("a variable or I(variable**exponent)")
         tok = self.advance()
@@ -315,14 +291,18 @@ class Parser:
             self.expect(TokenType.POWER)
             exponent_token = self.expect(TokenType.NUMBER)
             self.expect(TokenType.RPAREN)
-            return [PowerTerm(variable, int(exponent_token.value))]
-        return [VariableTerm(tok.value)]
+            return PowerTerm(variable, int(exponent_token.value))
+        return tok.value
 
-    def _append_unique(self, terms: list[ParsedTerm], term: ParsedTerm) -> None:
-        if term not in terms:
-            terms.append(term)
+    @staticmethod
+    def _factor_term(factors: tuple[Factor, ...]) -> ParsedTerm:
+        if len(factors) == 1:
+            factor = factors[0]
+            return VariableTerm(factor) if isinstance(factor, str) else factor
+        return InteractionTerm(factors)
 
-    def _term_variables(self, term: ParsedTerm) -> tuple[str | PowerTerm, ...]:
+    @staticmethod
+    def _term_variables(term: ParsedTerm) -> tuple[str | PowerTerm, ...]:
         if isinstance(term, InterceptTerm):
             return ()
         if isinstance(term, VariableTerm):
@@ -333,41 +313,10 @@ class Parser:
             return term.variables
         assert_never(term)
 
-    def _combine_interaction(
-        self,
-        left: ParsedTerm,
-        right: ParsedTerm,
-    ) -> InteractionTerm:
-        return InteractionTerm(self._term_variables(left) + self._term_variables(right))
-
-    def _combine_colon(
-        self,
-        left_terms: list[ParsedTerm],
-        right_terms: list[ParsedTerm],
-    ) -> list[ParsedTerm]:
-        result: list[ParsedTerm] = []
-        for left in left_terms:
-            for right in right_terms:
-                self._append_unique(result, self._combine_interaction(left, right))
-        return result
-
-    def _combine_star(
-        self,
-        left_terms: list[ParsedTerm],
-        right_terms: list[ParsedTerm],
-    ) -> list[ParsedTerm]:
-        result: list[ParsedTerm] = []
-        for term in left_terms + right_terms:
-            self._append_unique(result, term)
-        for left in left_terms:
-            for right in right_terms:
-                self._append_unique(result, self._combine_interaction(left, right))
-        return result
-
     def _parse_random_term(self) -> list[RandomTerm]:
         self.expect(TokenType.LPAREN)
 
-        expr_terms: list[ParsedTerm] = []
+        expr_terms: TermMap = {}
         has_intercept = True
 
         first = True
@@ -380,11 +329,7 @@ class Parser:
                     break
                 self._unexpected("'+' or '-' between random-effect terms")
             if self.peek().type in (TokenType.NUMBER, TokenType.IDENTIFIER):
-                terms = self._parse_term()
-                if subtracting:
-                    has_intercept = self._subtract_parsed_terms(expr_terms, terms, has_intercept)
-                else:
-                    has_intercept = self._add_parsed_terms(expr_terms, terms, has_intercept)
+                has_intercept = self._parse_effect(expr_terms, has_intercept, subtracting)
             else:
                 self._unexpected("a random-effect term")
             first = False
@@ -401,7 +346,7 @@ class Parser:
 
         return [
             RandomTerm(
-                expr=tuple(expr_terms),
+                expr=tuple(expr_terms.values()),
                 grouping=grouping,
                 correlated=correlated,
                 has_intercept=has_intercept,
@@ -438,6 +383,15 @@ def parse_formula(formula: str) -> Formula:
     return parser.parse()
 
 
+def _bar_key(
+    term: RandomTerm,
+) -> tuple[str | tuple[str, ...], bool, bool, tuple[frozenset[Factor], ...]]:
+    # Preserve slope order for structured covariance, while matching each
+    # interaction by its factors. Covariance types have no formula spelling.
+    slopes = tuple(frozenset(Parser._term_variables(slope)) for slope in term.expr)
+    return term.grouping, term.correlated, term.has_intercept, slopes
+
+
 def update_formula(old_formula: Formula, new_formula_str: str) -> Formula:
     new_formula_str = new_formula_str.strip()
 
@@ -463,11 +417,11 @@ def update_formula(old_formula: Formula, new_formula_str: str) -> Formula:
             response_denominator=response_denominator,
         )
 
-    updates = _split_update_rhs(rhs)
+    updates = _split_additive_terms(rhs)
     if not any(term == "." for _, term in updates):
         return parse_formula(f"{response_expression} ~ {rhs}")
 
-    new_fixed_terms = list(old_formula.fixed.terms)
+    new_fixed_terms = {frozenset(Parser._term_variables(t)): t for t in old_formula.fixed.terms}
     has_intercept = old_formula.fixed.has_intercept
     new_random = list(old_formula.random)
 
@@ -479,11 +433,13 @@ def update_formula(old_formula: Formula, new_formula_str: str) -> Formula:
         if term_str.startswith("("):
             parsed_random = parse_formula(f"y ~ 1 + {term_str}").random
             if adding:
+                existing = {_bar_key(term) for term in new_random}
                 for random_term in parsed_random:
-                    if random_term not in new_random:
+                    if _bar_key(random_term) not in existing:
                         new_random.append(random_term)
             else:
-                new_random = [term for term in new_random if term not in parsed_random]
+                removed = {_bar_key(term) for term in parsed_random}
+                new_random = [term for term in new_random if _bar_key(term) not in removed]
             continue
 
         if term_str == "1":
@@ -494,14 +450,14 @@ def update_formula(old_formula: Formula, new_formula_str: str) -> Formula:
             continue
 
         parsed_terms = parse_formula(f"y ~ 0 + {term_str}").fixed.terms
-        if adding:
-            for term in parsed_terms:
-                if term not in new_fixed_terms:
-                    new_fixed_terms.append(term)
-        else:
-            new_fixed_terms = [term for term in new_fixed_terms if term not in parsed_terms]
+        for term in parsed_terms:
+            key = frozenset(Parser._term_variables(term))
+            if adding:
+                new_fixed_terms.setdefault(key, term)
+            else:
+                new_fixed_terms.pop(key, None)
 
-    new_fixed = FixedTerm(terms=tuple(new_fixed_terms), has_intercept=has_intercept)
+    new_fixed = FixedTerm(terms=tuple(new_fixed_terms.values()), has_intercept=has_intercept)
     return Formula(
         response=response,
         fixed=new_fixed,
@@ -511,73 +467,66 @@ def update_formula(old_formula: Formula, new_formula_str: str) -> Formula:
 
 
 def _split_formula_parts(formula: str) -> tuple[str, str]:
-    quoted = False
-    escaped = False
-    for index, char in enumerate(formula):
-        if quoted:
-            if escaped:
-                escaped = False
-            elif char == "\\":
-                escaped = True
-            elif char == "`":
-                quoted = False
-        elif char == "`":
-            quoted = True
-        elif char == "~":
-            return formula[:index], formula[index + 1 :]
-
+    i = 0
+    while i < len(formula):
+        if formula[i] == "`":
+            i = _group_end(formula, i)
+        elif formula[i] == "~":
+            return formula[:i], formula[i + 1 :]
+        else:
+            i += 1
     raise ValueError("Formula must contain '~'")
 
 
-def _split_update_rhs(rhs: str) -> list[tuple[str, str]]:
-    updates: list[tuple[str, str]] = []
-    operation = "+"
-    current: list[str] = []
+def _group_end(text: str, start: int) -> int:
+    """Find the end of a parenthesized expression or quoted name in one pass."""
     depth = 0
-    quoted = False
-    escaped = False
-    seen_operator = False
-
-    def append_current(*, allow_empty: bool = False) -> None:
-        term = "".join(current).strip()
-        if term:
-            updates.append((operation, term))
-        elif not allow_empty:
-            raise ValueError("Expected a formula update term between '+' and '-' operators")
-        current.clear()
-
-    for char in rhs:
-        if quoted:
-            current.append(char)
-            if escaped:
-                escaped = False
-            elif char == "\\":
-                escaped = True
-            elif char == "`":
-                quoted = False
-            continue
-
-        if char == "`":
-            quoted = True
-            current.append(char)
+    quote = ""
+    i = start
+    while i < len(text):
+        char = text[i]
+        i += 1
+        if quote:
+            if char == "\\":
+                i += 1
+            elif char == quote:
+                quote = ""
+        elif char in ("`", "'", '"'):
+            quote = char
         elif char == "(":
             depth += 1
-            current.append(char)
         elif char == ")":
             depth -= 1
-            if depth < 0:
-                raise ValueError("Unexpected ')' in formula update")
-            current.append(char)
-        elif depth == 0 and char in "+-":
-            append_current(allow_empty=not updates and not seen_operator)
-            seen_operator = True
-            operation = char
-        else:
-            current.append(char)
+        if depth == 0 and not quote:
+            return i
+    raise ValueError("Unterminated quoted identifier or parenthesis in formula")
 
-    if quoted or depth:
-        raise ValueError("Unterminated quoted identifier or parenthesis in formula update")
-    append_current()
+
+def _split_additive_terms(rhs: str) -> list[tuple[str, str]]:
+    updates: list[tuple[str, str]] = []
+    operation = "+"
+    start = i = 0
+    while i < len(rhs):
+        char = rhs[i]
+        if char in ("(", "`", "'", '"'):
+            i = _group_end(rhs, i)
+            continue
+        if char == ")":
+            raise ValueError(f"Unexpected ')' at position {i}")
+        if char in "+-":
+            term = rhs[start:i].strip()
+            if term:
+                updates.append((operation, term))
+            elif start:
+                raise ValueError("Expected a formula update term between '+' and '-' operators")
+            operation = char
+            start = i + 1
+        i += 1
+
+    term = rhs[start:].strip()
+    if not term:
+        raise ValueError("Expected a formula update term")
+    updates.append((operation, term))
     return updates
 
 
@@ -800,6 +749,9 @@ def expandDoubleVerts(formula: str) -> str:
 
     The || notation in lme4 specifies uncorrelated random effects.
     For example, (1 + x || group) is equivalent to (1 | group) + (0 + x | group).
+    This expansion preserves the fitted model for single-column slopes such
+    as numeric predictors. A categorical slope can encode multiple columns.
+    Fit the original || formula to keep those columns independent.
 
     Parameters
     ----------
@@ -852,7 +804,7 @@ def expandDoubleVerts(formula: str) -> str:
             if not isinstance(term, InterceptTerm)
         )
 
-    return str(Formula(response=parsed.response, fixed=parsed.fixed, random=tuple(expanded)))
+    return str(replace(parsed, random=tuple(expanded)))
 
 
 def dropOffset(formula: str | Formula) -> str:
@@ -878,19 +830,25 @@ def dropOffset(formula: str | Formula) -> str:
     >>> dropOffset("y ~ x + offset(exposure)")
     'y ~ x'
     """
-    import re
+    formula_str = str(formula)
+    if "offset" not in formula_str:
+        return formula_str
+    lhs, rhs = _split_formula_parts(formula_str)
+    terms = _split_additive_terms(rhs)
+    kept = []
+    for sign, term in terms:
+        if term.startswith("offset"):
+            args = term[len("offset") :].lstrip()
+            if args.startswith("(") and _group_end(args, 0) == len(args):
+                continue
+        kept.append((sign, term))
 
-    formula_str = str(formula) if isinstance(formula, Formula) else formula
-
-    pattern = r"\s*\+?\s*offset\s*\([^)]+\)\s*"
-    result = re.sub(pattern, " ", formula_str)
-
-    result = re.sub(r"\s+\+\s*$", "", result)
-    result = re.sub(r"~\s*\+", "~ ", result)
-
-    result = re.sub(r"\s+", " ", result).strip()
-
-    return result
+    if len(kept) == len(terms):
+        return formula_str
+    pieces = [
+        term if i == 0 and sign == "+" else f"{sign} {term}" for i, (sign, term) in enumerate(kept)
+    ]
+    return f"{lhs.strip()} ~ {' '.join(pieces) or '1'}"
 
 
 def getResponseName(formula: Formula | str) -> str:

@@ -646,7 +646,9 @@ class LmerResult(MerResultMixin):
                     "No data available. Either provide data or ensure model_frame was stored."
                 )
 
-        new_formula = str(self.formula) if formula is None else self._update_formula(formula)
+        from mixedlm.formula.parser import update_formula
+
+        new_formula = self.formula if formula is None else update_formula(self.formula, formula)
 
         if REML is None:
             REML = self.REML
@@ -658,6 +660,7 @@ class LmerResult(MerResultMixin):
         if offset is None and not data_size_changed:
             offset = self.matrices.offset
 
+        kwargs.setdefault("contrasts", self.matrices.contrasts)
         kwargs.setdefault("control", self._refit_control())
 
         return lmer(new_formula, data, REML=REML, weights=weights, offset=offset, **kwargs)

@@ -19,12 +19,13 @@ def _fit_formula(
     REML: bool,
     control: LmerControl | None,
     kwargs: dict[str, Any],
-    optimizer: str,
+    *,
+    method: str,
 ) -> LmerResult:
     from mixedlm.models.control import LmerControl
     from mixedlm.models.lmer import lmer
 
-    control = replace(control if control is not None else LmerControl(), optimizer=optimizer)
+    control = replace(control if control is not None else LmerControl(), optimizer=method)
     return lmer(formula, data, REML=REML, control=control, verbose=0, **kwargs)
 
 

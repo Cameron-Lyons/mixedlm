@@ -95,8 +95,8 @@ def validate_family(family: Family, test_mu: NDArray[np.floating] | None = None)
     family : Family
         The family object to validate.
     test_mu : NDArray, optional
-        Test values for mu. If None, uses [0.1, 0.5, 0.9] for bounded families
-        or [0.5, 1.0, 5.0] for unbounded families.
+        Test values for mu. By default, chooses three interior values using
+        the family and link's mean bounds.
 
     Returns
     -------
@@ -126,57 +126,59 @@ def validate_family(family: Family, test_mu: NDArray[np.floating] | None = None)
             raise ValueError(f"Family must have a callable '{method}' method")
 
     if test_mu is None:
-        from mixedlm.families.base import CloglogLink, LogitLink, ProbitLink
-
-        if isinstance(family.link, (LogitLink, ProbitLink, CloglogLink)):
-            test_mu = np.array([0.1, 0.5, 0.9])
+        lower, upper = family._mean_bounds()
+        if lower == -np.inf:
+            lower = None
+        if upper == np.inf:
+            upper = None
+        distances = np.array([0.5, 1.0, 5.0])
+        if lower is not None and upper is not None:
+            fractions = np.array([0.1, 0.5, 0.9])
+            test_mu = (1 - fractions) * lower + fractions * upper
+        elif upper is not None:
+            test_mu = upper - distances
         else:
-            test_mu = np.array([0.5, 1.0, 5.0])
+            test_mu = distances if lower is None else lower + distances
+        test_mu = family.clamp_mu(test_mu)
 
-    test_y = test_mu * 1.1
+    test_y = np.roll(test_mu, 1)
     test_wt = np.ones_like(test_mu)
 
+    expected_shape = test_mu.shape
+
+    def check_output(method: str, values: NDArray[np.floating]) -> NDArray[np.floating]:
+        result = np.asarray(values)
+        if result.shape != expected_shape:
+            raise ValueError(f"{method}() returned wrong shape: {result.shape} vs {expected_shape}")
+        if not np.all(np.isfinite(result)):
+            raise ValueError(f"{method}() returned non-finite values")
+        return result
+
     try:
-        var = family.variance(test_mu)
-        if var.shape != test_mu.shape:
-            raise ValueError(f"variance() returned wrong shape: {var.shape} vs {test_mu.shape}")
-        if not np.all(np.isfinite(var)):
-            raise ValueError("variance() returned non-finite values")
+        var = check_output("variance", family.variance(test_mu))
         if np.any(var <= 0):
             raise ValueError("variance() must return positive values")
     except Exception as e:
         raise ValueError(f"variance() failed: {e}") from e
 
     try:
-        dev = family.deviance_resids(test_y, test_mu, test_wt)
-        if dev.shape != test_mu.shape:
-            raise ValueError(
-                f"deviance_resids() returned wrong shape: {dev.shape} vs {test_mu.shape}"
-            )
-        if not np.all(np.isfinite(dev)):
-            raise ValueError("deviance_resids() returned non-finite values")
+        check_output("deviance_resids", family.deviance_resids(test_y, test_mu, test_wt))
     except Exception as e:
         raise ValueError(f"deviance_resids() failed: {e}") from e
 
     try:
-        wts = family.weights(test_mu)
-        if wts.shape != test_mu.shape:
-            raise ValueError(f"weights() returned wrong shape: {wts.shape} vs {test_mu.shape}")
-        if not np.all(np.isfinite(wts)):
-            raise ValueError("weights() returned non-finite values")
+        wts = check_output("weights", family.weights(test_mu))
         if np.any(wts <= 0):
             raise ValueError("weights() must return positive values")
     except Exception as e:
         raise ValueError(f"weights() failed: {e}") from e
 
     try:
-        eta = family.link.link(test_mu)
-        mu_back = family.link.inverse(eta)
+        eta = check_output("link.link", family.link.link(test_mu))
+        mu_back = check_output("link.inverse", family.link.inverse(eta))
         if not np.allclose(test_mu, mu_back, rtol=1e-6):
             raise ValueError("link.inverse(link.link(mu)) != mu")
-        deriv = family.link.deriv(test_mu)
-        if not np.all(np.isfinite(deriv)):
-            raise ValueError("link.deriv() returned non-finite values")
+        check_output("link.deriv", family.link.deriv(test_mu))
     except Exception as e:
         raise ValueError(f"Link validation failed: {e}") from e
 

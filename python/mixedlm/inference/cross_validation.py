@@ -669,7 +669,11 @@ def _fit_fold(
 
     formula = str(model.formula)
     if isinstance(model, LmerResult):
-        kwargs: dict[str, Any] = {"REML": model.REML, "contrasts": model.matrices.contrasts}
+        kwargs: dict[str, Any] = {
+            "REML": model.REML,
+            "control": model._refit_control(),
+            "contrasts": model.matrices.contrasts,
+        }
         kwargs.update(fit_kwargs)
         return lmer(
             formula,

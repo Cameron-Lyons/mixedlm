@@ -79,11 +79,6 @@ class TestAccessorFunctions:
             assert_array_equal(getME(model, name), model.getME(name))
         assert_array_equal(getME(model, "Z").toarray(), model.getME("Z").toarray())
 
-    @pytest.mark.xfail(
-        strict=True,
-        raises=AttributeError,
-        reason="ranef(model, condVar=True) returns only the modes and drops condVar",
-    )
     @pytest.mark.parametrize("fixture", ["lmer_model", "glmer_model"])
     def test_ranef_function_keeps_conditional_variances(self, fixture, request) -> None:
         model = request.getfixturevalue(fixture)

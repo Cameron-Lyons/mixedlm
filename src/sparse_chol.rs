@@ -224,6 +224,50 @@ impl SymbolicCholeskyCache {
     }
 }
 
+/// Takahashi recurrence on a sorted simplicial LDL' factor. Off-diagonal
+/// inverse entries occupy their factor slots, followed by the inverse diagonal.
+/// faer stores D in the first slot of each column; the tile solver stores it separately.
+pub(crate) fn inverse_on_factor_pattern(
+    offsets: &[usize],
+    rows: &[usize],
+    lower: &[f64],
+    stored_diagonal: bool,
+    pivot: impl Fn(usize) -> f64,
+) -> Vec<f64> {
+    let n = offsets.len() - 1;
+    let skip = usize::from(stored_diagonal);
+    let entries = rows.len();
+    let mut inverse = vec![0.0; entries + n];
+    let mut column = Vec::new();
+    for j in (0..n).rev() {
+        let span = offsets[j] + skip..offsets[j + 1];
+        let (rows_j, lower_j) = (&rows[span.clone()], &lower[span.clone()]);
+        column.clear();
+        column.resize(rows_j.len(), 0.0);
+        for (b, (&row_b, &lower_b)) in rows_j.iter().zip(lower_j).enumerate() {
+            column[b] += inverse[entries + row_b] * lower_b;
+            // Merge the later rows of column j with the sorted rows of column row_b.
+            let mut position = offsets[row_b] + skip;
+            for a in b + 1..rows_j.len() {
+                while rows[position] != rows_j[a] {
+                    position += 1;
+                }
+                debug_assert!(position < offsets[row_b + 1]);
+                let value = inverse[position];
+                column[a] += value * lower_b;
+                column[b] += value * lower_j[a];
+            }
+        }
+        let mut diagonal = 1.0 / pivot(j);
+        for ((output, &value), &lower) in inverse[span].iter_mut().zip(&column).zip(lower_j) {
+            *output = -value;
+            diagonal += value * lower;
+        }
+        inverse[entries + j] = diagonal;
+    }
+    inverse
+}
+
 pub struct NumericFactorization {
     symbolic: Arc<SymbolicCholesky<usize>>,
     permutation: Option<Arc<Permutation>>,
@@ -330,6 +374,45 @@ impl NumericFactorization {
             permutation.perm().inverse(),
         );
         Ok(result)
+    }
+
+    /// Return requested entries when every pair lies in the filled factor pattern.
+    /// The caller can solve individual columns for pairs outside that pattern.
+    pub fn inverse_subset(
+        &self,
+        rows: &[usize],
+        columns: &[usize],
+    ) -> Result<Option<Vec<f64>>, LinalgError> {
+        if rows.len() != columns.len() || rows.iter().chain(columns).any(|&i| i >= self.n) {
+            return Err(LinalgError::DimensionMismatch(
+                "inverse entry indices must be paired and in range".into(),
+            ));
+        }
+        if rows.is_empty() {
+            return Ok(Some(Vec::new()));
+        }
+        let symbolic = self.simplicial();
+        let offsets = symbolic.col_ptr();
+        let indices = symbolic.row_idx();
+        let permute = |i: usize| self.permutation.as_ref().map_or(i, |p| p.inverse[i]);
+        let mut positions = Vec::with_capacity(rows.len());
+        for (&row, &column) in rows.iter().zip(columns) {
+            let (i, j) = (permute(row), permute(column));
+            if i == j {
+                positions.push(indices.len() + i);
+            } else {
+                let col = i.min(j);
+                let start = offsets[col] + 1;
+                let Ok(pos) = indices[start..offsets[col + 1]].binary_search(&i.max(j)) else {
+                    return Ok(None);
+                };
+                positions.push(start + pos);
+            }
+        }
+        let inverse = inverse_on_factor_pattern(offsets, indices, &self.values, true, |j| {
+            self.values[offsets[j]]
+        });
+        Ok(Some(positions.into_iter().map(|i| inverse[i]).collect()))
     }
 
     pub fn logdet(&self) -> f64 {

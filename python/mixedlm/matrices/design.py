@@ -34,6 +34,7 @@ from mixedlm.formula.terms import (
     RandomTerm,
     VariableTerm,
     _format_grouping,
+    format_term,
 )
 
 
@@ -71,6 +72,15 @@ class ModelMatrices:
     fixed_source_names: tuple[str, ...] | None = field(default=None, repr=False)
     fixed_column_indices: tuple[int, ...] | None = field(default=None, repr=False)
     response_levels: tuple[Any, Any] | None = field(default=None)
+    fixed_term_labels: tuple[str, ...] | None = field(default=None, repr=False)
+
+    # Numeric binomial proportions use the supplied weights as trial counts.
+    # Retain that interpretation when a refit happens to draw only 0s and 1s.
+    binomial_trial_weights: bool = False
+
+    @property
+    def response_trials(self) -> NDArray[np.floating] | None:
+        return self.weights if self.binomial_trial_weights else self.trials
 
     @cached_property
     def Zt(self) -> sparse.csc_matrix:
@@ -151,11 +161,13 @@ def build_model_matrices(
     y, trials = _build_response(
         formula, clean_data, grouped_binomial=grouped_binomial, response_levels=response_levels
     )
+    fixed_term_labels: list[str] = []
     X, fixed_names = build_fixed_matrix(
         formula,
         clean_data,
         contrasts=stored_contrasts,
         category_levels=category_levels,
+        term_labels=fixed_term_labels,
     )
     Z, random_structures = build_random_matrix(
         formula,
@@ -182,6 +194,7 @@ def build_model_matrices(
         X=X,
         Z=Z,
         fixed_names=fixed_names,
+        fixed_term_labels=tuple(fixed_term_labels),
         random_structures=random_structures,
         n_obs=n,
         n_fixed=X.shape[1],
@@ -191,6 +204,9 @@ def build_model_matrices(
         frame=model_frame,
         na_info=na_info,
         trials=trials,
+        binomial_trial_weights=grouped_binomial
+        and trials is None
+        and bool(np.any((y > 0) & (y < 1))),
         response_levels=response_levels,
         category_levels=category_levels,
         contrasts=stored_contrasts,
@@ -325,7 +341,10 @@ def build_fixed_matrix(
     data: Any,
     contrasts: dict[str, str | NDArray[np.floating]] | None = None,
     category_levels: dict[str, list[Any]] | None = None,
+    *,
+    term_labels: list[str] | None = None,
 ) -> tuple[NDArray[np.floating], list[str]]:
+    """Encode fixed effects and optionally collect the source term for each column."""
     n = dataframe_length(data)
     factors = list(
         _term_factors(
@@ -337,8 +356,13 @@ def build_fixed_matrix(
         )
     )
     names = ["(Intercept)"] if formula.fixed.has_intercept else []
-    for term_factors in factors:
+    if term_labels is not None:
+        term_labels.extend(names)
+    for term, term_factors in factors:
+        start = len(names)
         names.extend(_factor_names(term_factors))
+        if term_labels is not None:
+            term_labels.extend([format_term(term)] * (len(names) - start))
 
     if not names:
         return np.empty((n, 0), dtype=np.float64), names
@@ -350,7 +374,7 @@ def build_fixed_matrix(
     if formula.fixed.has_intercept:
         X[:, 0] = 1.0
         column_index = 1
-    for term_factors in factors:
+    for _, term_factors in factors:
         for column in _factor_columns(term_factors, n):
             X[:, column_index] = column
             column_index += 1
@@ -430,7 +454,7 @@ def _term_factors(
     has_intercept: bool,
     contrasts: dict[str, str | NDArray[np.floating]] | None = None,
     category_levels: dict[str, list[Any]] | None = None,
-) -> Iterator[list[_EncodedFactor]]:
+) -> Iterator[tuple[VariableTerm | PowerTerm | InteractionTerm, list[_EncodedFactor]]]:
     """Encode each base factor once, keeping full and reduced rank encodings distinct."""
     cache: dict[tuple[str | PowerTerm, bool], _EncodedFactor] = {}
 
@@ -456,13 +480,13 @@ def _term_factors(
                 data, term.name
             )
             full_rank = use_full_rank_factor and is_categorical
-            yield [encode(term.name, full_rank)]
+            yield term, [encode(term.name, full_rank)]
             if full_rank:
                 use_full_rank_factor = False
         elif isinstance(term, PowerTerm):
-            yield [encode(term)]
+            yield term, [encode(term)]
         else:
-            yield [encode(variable) for variable in term.variables]
+            yield term, [encode(variable) for variable in term.variables]
 
 
 def _factor_names(factors: list[_EncodedFactor]) -> Iterator[str]:
@@ -513,7 +537,7 @@ def _encode_terms(
     columns: list[NDArray[np.floating]] = []
     names: list[str] = []
     n = dataframe_length(data)
-    for factors in _term_factors(terms, data, has_intercept, contrasts, category_levels):
+    for _, factors in _term_factors(terms, data, has_intercept, contrasts, category_levels):
         columns.extend(_factor_columns(factors, n))
         names.extend(_factor_names(factors))
     return columns, names
@@ -531,6 +555,25 @@ def _build_sparse_Z_block(
 
     valid_mask = level_indices >= 0
 
+    if n_terms == 1:
+        # Each row has at most one entry. Its group code is already the CSR
+        # column index, so no coordinate arrays or intermediate sort are needed.
+        values = term_cols[0]
+        present = valid_mask & (values != 0)
+        index_dtype = np.int32 if max(n, n_levels) <= np.iinfo(np.int32).max else np.int64
+        if present.all():
+            indptr = np.arange(n + 1, dtype=index_dtype)
+            indices = level_indices
+        else:
+            indptr = np.empty(n + 1, dtype=index_dtype)
+            indptr[0] = 0
+            np.cumsum(present, out=indptr[1:])
+            indices = level_indices[present]
+            values = values[present]
+        return sparse.csr_matrix(
+            (values, indices, indptr), shape=(n, n_levels), dtype=np.float64
+        ).tocsc()
+
     all_rows: list[NDArray[np.int64]] = []
     all_cols: list[NDArray[np.int64]] = []
     all_vals: list[NDArray[np.floating]] = []
@@ -540,8 +583,8 @@ def _build_sparse_Z_block(
         row_idx = np.where(nonzero_mask)[0]
         if len(row_idx) > 0:
             col_idx = level_indices[row_idx] * n_terms + j
-            all_rows.append(row_idx.astype(np.int64))
-            all_cols.append(col_idx.astype(np.int64))
+            all_rows.append(row_idx)
+            all_cols.append(col_idx)
             all_vals.append(term_col[row_idx])
 
     if all_rows:
@@ -608,8 +651,9 @@ def build_random_matrix(
     if not Z_blocks:
         return sparse.csc_matrix((n, 0), dtype=np.float64), []
 
-    Z = sparse.hstack(Z_blocks, format="csc")
-    return Z, structures
+    if len(Z_blocks) == 1:
+        return Z_blocks[0], structures
+    return sparse.hstack(Z_blocks, format="csc"), structures
 
 
 def _build_random_block(
@@ -619,47 +663,11 @@ def _build_random_block(
     contrasts: dict[str, str | NDArray[np.floating]] | None = None,
     category_levels: dict[str, list[Any]] | None = None,
 ) -> tuple[sparse.csc_matrix, RandomEffectStructure]:
-    if rterm.is_nested:
-        return _build_nested_random_block(rterm, data, n, contrasts, category_levels)
-
-    grouping_factor = rterm.grouping
-    assert isinstance(grouping_factor, str)
-
-    group_values = get_column_numpy(data, grouping_factor)
+    if isinstance(rterm.grouping, str):
+        group_values = get_column_numpy(data, rterm.grouping)
+    else:
+        group_values = concat_columns_as_string(data, list(rterm.grouping), escape=True)
     level_indices, level_map = factorize_levels(group_values)
-    n_levels = len(level_map)
-
-    term_cols, term_names = _random_term_columns(rterm, data, n, contrasts, category_levels)
-
-    n_terms = len(term_cols)
-
-    Z_block = _build_sparse_Z_block(level_indices, term_cols, n, n_levels, n_terms)
-
-    structure = RandomEffectStructure(
-        grouping_factor=_format_grouping(grouping_factor),
-        term_names=term_names,
-        n_levels=n_levels,
-        n_terms=n_terms,
-        correlated=rterm.correlated,
-        level_map=level_map,
-        cov_type=rterm.cov_type,
-        level_indices=level_indices,
-    )
-
-    return Z_block, structure
-
-
-def _build_nested_random_block(
-    rterm: RandomTerm,
-    data: Any,
-    n: int,
-    contrasts: dict[str, str | NDArray[np.floating]] | None = None,
-    category_levels: dict[str, list[Any]] | None = None,
-) -> tuple[sparse.csc_matrix, RandomEffectStructure]:
-    grouping_factors = rterm.grouping_factors
-    combined_group = concat_columns_as_string(data, list(grouping_factors), escape=True)
-
-    level_indices, level_map = factorize_levels(combined_group)
     n_levels = len(level_map)
 
     term_cols, term_names = _random_term_columns(rterm, data, n, contrasts, category_levels)

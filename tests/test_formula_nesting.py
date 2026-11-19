@@ -67,6 +67,10 @@ def test_joint_grouping_only_adds_one_factor_and_covariance_can_be_selected():
     formula = parse_formula("y ~ x + (x | school) + (x | school:classroom)")
     specified = set_cov_type(formula, {"school:classroom": "ar1"})
     assert [term.cov_type for term in specified.random] == ["us", "ar1"]
+    assert update_formula(specified, ". ~ . + (x | school:classroom)") == specified
+    assert update_formula(specified, ". ~ . - (x | school:classroom)").random == (
+        specified.random[0],
+    )
     assert specified.all_variables == {"y", "x", "school", "classroom"}
     assert parse_formula(str(formula)) == formula
 

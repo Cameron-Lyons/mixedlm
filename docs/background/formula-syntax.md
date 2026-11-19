@@ -56,6 +56,11 @@ names also work with formula utilities and model updates.
 "y ~ x1 * x2"
 ```
 
+`:` binds more tightly than `*`. For example, `a*b:c` expands to
+`a + b:c + a:b:c`. Interactions use each factor once and retain the
+first spelling of the term. Thus `a*b - b:a` leaves `a + b`, and `x:x`
+gives `x`. Use `I(x**2)` for a squared predictor.
+
 ### Polynomial Terms
 
 Use `I()` with a non-negative integer exponent to include raw polynomial columns:
@@ -184,6 +189,10 @@ Uses `||` instead of `|`. This estimates:
 - Variance of random intercepts: \(\sigma^2_{u_0}\)
 - Variance of random slopes: \(\sigma^2_{u_1}\)
 - No correlation parameter
+
+For numeric slopes, `expandDoubleVerts()` can write the equivalent formula
+with separate `|` terms. For categorical slopes, fit the original `||`
+formula to keep all encoded random-effect columns independent.
 
 **When to use:**
 

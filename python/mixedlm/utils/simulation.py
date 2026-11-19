@@ -9,7 +9,7 @@ from numpy.typing import NDArray
 
 from mixedlm.estimation.reml import _build_lambda_blocks, _count_theta
 from mixedlm.families.base import Family
-from mixedlm.matrices.design import RandomEffectStructure
+from mixedlm.matrices.design import ModelMatrices, RandomEffectStructure
 
 
 def _accepts_sampling_inputs(simulate: Callable[..., Any]) -> bool:
@@ -30,12 +30,14 @@ def simulate_glmm_response(
     weights: NDArray[np.floating],
     *,
     trials: NDArray[np.floating] | None = None,
+    proportion_scale: bool = False,
     rng: Any | None = None,
 ) -> NDArray[np.floating]:
     """Draw conditional responses with the fitted trials and precision weights.
 
     Two-dimensional means hold one replicate per column. Grouped binomial
-    draws are success counts.
+    draws are success counts for explicit denominators and proportions when
+    the fitted numeric response used trial weights.
     """
     rng = np.random if rng is None else rng
     if mu.ndim > 1:
@@ -43,10 +45,34 @@ def simulate_glmm_response(
         trials = None if trials is None else trials[:, None]
     # Inspect the underlying function, which outlives the bound method.
     if _accepts_sampling_inputs(getattr(family.simulate, "__func__", family.simulate)):
-        return family.simulate(mu, rng=rng, weights=weights, trials=trials)
-    # Overrides written for the original simulate(mu, rng) hook keep control
-    # of their draws.
+        draws = family.simulate(mu, rng=rng, weights=weights, trials=trials)
+        if proportion_scale and trials is not None:
+            return draws / trials
+        return draws
+    # Legacy overrides supply their own draws on the fitted response scale.
     return family.simulate(mu, rng=rng)
+
+
+def simulate_fitted_glmm_response(
+    family: Family,
+    mu: NDArray[np.floating],
+    matrices: ModelMatrices,
+    rng: Any | None = None,
+) -> NDArray[np.floating]:
+    """Draw on the original response scale, keeping trial counts separate from prior weights."""
+    from mixedlm.families.binomial import Binomial, _binomial_trials
+
+    trials = matrices.response_trials
+    if isinstance(family, Binomial):
+        trials = _binomial_trials(matrices.y, matrices.weights, trials)
+    return simulate_glmm_response(
+        family,
+        mu,
+        matrices.weights,
+        trials=trials,
+        proportion_scale=trials is not None and matrices.trials is None,
+        rng=rng,
+    )
 
 
 def simulate_random_effects(

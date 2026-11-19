@@ -17,7 +17,7 @@ from scipy import stats
 from mixedlm._parallel import process_pool, resolve_n_jobs
 from mixedlm.utils.names import _check_unique_coefficient_names
 from mixedlm.utils.random import RandomSeed, random_seeds, random_stream, validate_simulation_count
-from mixedlm.utils.simulation import simulate_glmm_response, simulate_random_effects
+from mixedlm.utils.simulation import simulate_fitted_glmm_response, simulate_random_effects
 from mixedlm.utils.validation import _validate_confidence_level
 
 if TYPE_CHECKING:
@@ -751,7 +751,7 @@ def _simulate_glmer_components(
         eta = matrices.X @ beta + matrices.offset
 
     mu = family.link.inverse(eta)
-    response = simulate_glmm_response(family, mu, matrices.weights, trials=matrices.trials, rng=rng)
+    response = simulate_fitted_glmm_response(family, mu, matrices, rng)
     if matrices.trials is not None:
         # Grouped binomial draws are counts; refits use success proportions.
         return response / matrices.trials

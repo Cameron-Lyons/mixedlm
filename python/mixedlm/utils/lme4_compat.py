@@ -11,6 +11,7 @@ if TYPE_CHECKING:
     from mixedlm.matrices.design import RandomEffectStructure
     from mixedlm.models.glmer import GlmerResult
     from mixedlm.models.lmer import LmerResult
+    from mixedlm.models.lmer_types import RanefResult
     from mixedlm.models.nlmer import NlmerResult
 
 MerMod = Union["LmerResult", "GlmerResult", "NlmerResult"]
@@ -101,7 +102,9 @@ def fixef(model: MerMod) -> dict[str, float]:
     return model.fixef()
 
 
-def ranef(model: MerMod, condVar: bool = False) -> dict[str, dict[str, NDArray[np.floating]]]:
+def ranef(
+    model: MerMod, condVar: bool = False
+) -> dict[str, dict[str, NDArray[np.floating]]] | RanefResult:
     """Extract random effects (BLUPs) from a fitted model.
 
     Parameters
@@ -114,8 +117,10 @@ def ranef(model: MerMod, condVar: bool = False) -> dict[str, dict[str, NDArray[n
 
     Returns
     -------
-    dict
-        Nested dictionary of random effects by grouping factor and term.
+    dict or RanefResult
+        Random effects by grouping factor and term. Linear and generalized
+        models also return the conditional variances in ``result.condVar``
+        when requested.
 
     Examples
     --------
@@ -123,11 +128,9 @@ def ranef(model: MerMod, condVar: bool = False) -> dict[str, dict[str, NDArray[n
     >>> ranef(result)
     {'group': {'(Intercept)': array([...])}}
     """
-    from mixedlm.models.lmer_types import RanefResult
     from mixedlm.models.nlmer import NlmerResult
 
-    result = model.ranef() if isinstance(model, NlmerResult) else model.ranef(condVar=condVar)
-    return result.values if isinstance(result, RanefResult) else result
+    return model.ranef() if isinstance(model, NlmerResult) else model.ranef(condVar=condVar)
 
 
 def VarCorr(model: MerMod):

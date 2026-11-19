@@ -52,7 +52,7 @@ def linear_oracle(data, factor):
     correction = np.linalg.slogdet(
         np.eye(4 * q) + block_factor.T @ (z.T @ (weights[:, None] * z)) @ block_factor
     )[1]
-    deviance = len(y) * (1 + np.log(2 * np.pi * sigma_sq)) + correction
+    deviance = len(y) * (1 + np.log(2 * np.pi * sigma_sq)) + correction - np.log(weights).sum()
     return deviance, solution[:2], solution[2:].reshape(4, q), np.sqrt(sigma_sq)
 
 
