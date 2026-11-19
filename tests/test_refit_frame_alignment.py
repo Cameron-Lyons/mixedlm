@@ -98,11 +98,7 @@ def test_refit_update_cv_and_drop1_use_current_response(kind, backend):
     assert_allclose(refitted_cv.predictions, fresh_cv.predictions, rtol=1e-9, atol=1e-9)
     assert refitted_cv.scores == pytest.approx(fresh_cv.scores, rel=1e-9)
 
-    with warnings.catch_warnings():
-        # Without x the binary response shows no group variation, and GLMM deletions
-        # drop the fitted check_singular=False (see the xfail below).
-        warnings.filterwarnings("ignore", "Model is singular", UserWarning)
-        deletions = dropper(refitted, refitted.model_frame())
+    deletions = dropper(refitted, refitted.model_frame())
     assert deletions.terms == ["x", "z"]
     assert deletions.full_model_aic == pytest.approx(fresh.AIC(), rel=1e-7)
     for index, retained in enumerate(["z", "x"]):
@@ -120,12 +116,6 @@ def test_refit_update_cv_and_drop1_use_current_response(kind, backend):
         assert deletions.p_value[index] == pytest.approx(chi2.sf(lrt, 1), rel=1e-6)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="GLMM update() and drop1 rebuild glmerControl from the PIRLS settings only, "
-    "so check_singular=False is lost",
-)
 def test_glmm_update_and_drop1_keep_the_fitted_control():
     rng = np.random.default_rng(0)
     data = pd.DataFrame(
@@ -138,9 +128,88 @@ def test_glmm_update_and_drop1_keep_the_fitted_control():
     control = glmerControl(check_singular=False)
     model = glmer("y ~ x + (1 | group)", data, family=families.Binomial(), control=control)
     assert_array_equal(model.theta, [0.0])
+    control.check_singular = True
 
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        model.update()
+        assert not model.update()._refit_control().check_singular
+        assert not model.refit()._refit_control().check_singular
         drop1_glmer(model, data)
     assert [str(warning.message) for warning in caught] == []
+
+
+@pytest.mark.parametrize("generalized", [False, True], ids=["lmer", "glmer"])
+def test_formula_refits_keep_the_fitted_contrast_basis(generalized):
+    rng = np.random.default_rng(164)
+    groups = np.repeat(np.arange(8), 18)
+    arms = np.tile(["a", "b", "c"], len(groups) // 3)
+    x = rng.normal(size=len(groups))
+    z = rng.normal(size=len(groups))
+    slopes = np.select([arms == "a", arms == "b"], [0.7, -0.1], default=-0.6)
+    eta = 0.5 + rng.normal(scale=0.45, size=8)[groups] + x * slopes + 0.15 * z
+    y = rng.poisson(np.exp(eta)) if generalized else eta + rng.normal(scale=0.3, size=len(groups))
+    data = pd.DataFrame({"y": y, "x": x, "z": z, "arm": arms, "group": groups})
+    fit = glmer if generalized else lmer
+    options = {"family": families.Poisson(), "nAGQ": 0} if generalized else {"REML": False}
+    formula = "y ~ x:arm + z + (1 | group)"
+    contrasts = {"arm": np.array([[1, 0], [0, 1], [-1, -1]], dtype=float)}
+    full = fit(formula, data, contrasts=contrasts, method="COBYQA", **options)
+
+    updated = full.update(method="COBYQA")
+    optimizer_refit = full.allFit(data, ["COBYQA"]).fits["COBYQA"]
+    for refit in (updated, optimizer_refit):
+        assert_array_equal(refit.matrices.X, full.matrices.X)
+        assert_allclose(refit.beta, full.beta, rtol=1e-9)
+    overridden = full.update(contrasts={"arm": "treatment"})
+    assert not np.array_equal(overridden.matrices.X, full.matrices.X)
+
+    # Without an x main effect the fitted interaction constrains the slopes.
+    # Substituting treatment coding tests a different reduced model.
+    deletions = full.drop1(data)
+    reduced = fit("y ~ x:arm + (1 | group)", data, contrasts=contrasts, start=full.theta, **options)
+    i = deletions.terms.index("z")
+    assert deletions.aic[i] == pytest.approx(reduced.AIC(), rel=1e-8)
+    assert deletions.lrt[i] == pytest.approx(2 * (full.logLik().value - reduced.logLik().value))
+
+
+@pytest.mark.parametrize("generalized", [False, True], ids=["lmer", "glmer"])
+def test_refits_on_original_rows_keep_full_models_omissions(generalized):
+    rng = np.random.default_rng(683)
+    groups = np.repeat(np.arange(8), 10)
+    x = rng.normal(size=len(groups))
+    z = rng.normal(size=len(groups))
+    eta = 0.4 + 0.35 * x + 0.2 * z + rng.normal(scale=0.5, size=8)[groups]
+    y = rng.poisson(np.exp(eta)) if generalized else eta + rng.normal(scale=0.3, size=len(groups))
+    data = pd.DataFrame({"y": y, "x": x, "z": z, "g": groups})
+    weights = rng.uniform(0.7, 1.3, size=len(data))
+    offset = rng.normal(scale=0.1, size=len(data))
+    data.loc[2, "z"] = weights[5] = offset[9] = np.nan
+    keep = np.ones(len(data), dtype=bool)
+    keep[[2, 5, 9]] = False
+    fit = glmer if generalized else lmer
+    options = {"family": families.Poisson(), "nAGQ": 0} if generalized else {"REML": False}
+    full = fit(
+        "y ~ x + z + (1 | g)",
+        data,
+        weights=weights,
+        offset=offset,
+        na_action="exclude",
+        **options,
+    )
+    reduced = fit(
+        "y ~ x + (1 | g)",
+        data[keep],
+        weights=weights[keep],
+        offset=offset[keep],
+        start=full.theta,
+        **options,
+    )
+    for frame in (data, full.model_frame()):
+        deletion = full.drop1(frame)
+        assert deletion.aic[deletion.terms.index("z")] == pytest.approx(reduced.AIC(), rel=1e-8)
+        alternative = full.allFit(frame, ["COBYQA"]).fits["COBYQA"]
+        assert alternative.nobs() == keep.sum()
+        assert_allclose(alternative.matrices.weights, weights[keep])
+        assert_allclose(alternative.matrices.offset, offset[keep])
+        if frame is data:
+            assert_array_equal(np.isnan(alternative.fitted()), ~keep)

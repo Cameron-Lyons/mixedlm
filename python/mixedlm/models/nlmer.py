@@ -1124,10 +1124,10 @@ def nlmer(
     offset : array-like, optional
         Known offset added to the fitted nonlinear mean.
     **kwargs
-        Additional optimizer arguments: ``method`` and ``maxiter`` for outer
-        covariance optimization, and ``pnls_maxiter`` (default 50) and
-        ``pnls_tol`` (default 1e-6) for the inner parameter updates. The inner
-        tolerance bounds the largest absolute proposed fixed or random parameter update.
+        ``method`` and ``maxiter`` control the joint optimization of fixed effects
+        and covariance parameters. ``pnls_maxiter`` (default 50) and ``pnls_tol``
+        (default 1e-6) control the conditional random-effect solve. The inner
+        tolerance bounds the largest absolute proposed random-effect update.
 
     Returns
     -------

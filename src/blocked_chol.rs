@@ -802,36 +802,13 @@ impl SparseLdl<'_> {
     /// column j. Those rows form a clique, so every Z_ik lies in L's pattern.
     pub fn selected_inverse(&self) -> Vec<f64> {
         let analysis = self.analysis;
-        let (offsets, rows) = (&analysis.factor_offsets, &analysis.factor_rows);
-        let entries = rows.len();
-        let mut inverse = vec![0.0; entries + self.diagonal.len()];
-        let mut column = Vec::new();
-        for j in (0..self.diagonal.len()).rev() {
-            let span = offsets[j]..offsets[j + 1];
-            let (rows_j, lower_j) = (&rows[span.clone()], &self.lower[span.clone()]);
-            column.clear();
-            column.resize(rows_j.len(), 0.0);
-            for (b, (&row_b, &lower_b)) in rows_j.iter().zip(lower_j).enumerate() {
-                column[b] += inverse[entries + row_b] * lower_b;
-                // Merge the later rows of column j with the sorted rows of column row_b.
-                let mut position = offsets[row_b];
-                for a in b + 1..rows_j.len() {
-                    while rows[position] != rows_j[a] {
-                        position += 1;
-                    }
-                    debug_assert!(position < offsets[row_b + 1]);
-                    let value = inverse[position];
-                    column[a] += value * lower_b;
-                    column[b] += value * lower_j[a];
-                }
-            }
-            let mut diagonal = 1.0 / self.diagonal[j];
-            for ((output, &value), &lower) in inverse[span].iter_mut().zip(&column).zip(lower_j) {
-                *output = -value;
-                diagonal += value * lower;
-            }
-            inverse[entries + j] = diagonal;
-        }
+        let inverse = crate::sparse_chol::inverse_on_factor_pattern(
+            &analysis.factor_offsets,
+            &analysis.factor_rows,
+            &self.lower,
+            false,
+            |j| self.diagonal[j],
+        );
         analysis
             .inverse_sources
             .iter()

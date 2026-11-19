@@ -314,10 +314,10 @@ result = em_reml_simple(parsed.matrices, max_iter=100, tol=1e-5)
 
 **Returns:** `EMResult` with fields `theta`, `beta`, `sigma`, `converged`, `n_iter`, `final_loglik`
 
-**Supported models:** Random intercepts, correlated and uncorrelated random slopes, multiple random effect terms, and compound-symmetry covariance (`cov_type='cs'`).
+**Supported models:** Random intercepts, correlated and uncorrelated random slopes, multiple random effect terms, and structured covariances (`cov_type='cs'` or `'ar1'`). The returned fixed effects and restricted log likelihood use the final variance estimates, including when the iteration limit is reached.
 
 !!! tip
-    For most users, `em_init=True` in `LmerControl` or `GlmerControl` is the easier way to use EM-REML. The standalone function is for advanced workflows.
+    For most users, `em_init=True` in `LmerControl` or `GlmerControl` is the easier way to use EM-REML. The modular deviance functions also honor this control when calculating starting values. An explicit optimizer start takes precedence.
 
 ## Formula Utilities
 

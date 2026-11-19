@@ -322,10 +322,10 @@ for expensive prediction and gradient functions and adds overhead for small mode
 
 ## Convergence Issues
 
-Both backends update fixed and random parameters together using small group
-systems. A line search checks the penalized residual error and shortens a step
-when needed. This avoids the slow alternating updates that previously required
-large inner iteration budgets for many models.
+Both backends optimize the fixed effects and covariance parameters jointly
+in the approximate marginal likelihood. At each trial point, penalized
+nonlinear least squares estimates the conditional random effects. A line
+search checks the penalized residual error and shortens a step when needed.
 
 During optimization, a failed trial evaluation receives a finite penalty so the
 optimizer can try other parameter values. If the final evaluation fails,
@@ -339,11 +339,11 @@ iteration limits and failed line searches leave it false. `nlmer()` warns
 when the final inner solve is unfinished, and the summary identifies that case.
 
 `pnls_maxiter` sets the inner iteration budget (default 50). `pnls_tol` sets the
-largest allowed absolute proposed change in any fixed or random parameter
+largest allowed absolute proposed change in any conditional random effect
 (default `1e-6`). The tolerance applies to the full proposal, so a heavily
 shortened step cannot falsely establish convergence. Both controls apply to
-Python and native fitting. The existing `maxiter` argument limits outer
-covariance optimization independently. Results retain the
+Python and native fitting. The `maxiter` argument limits the outer
+likelihood optimization independently. Results retain the
 inner controls for `refit()` and `update()`, which accept overrides:
 
 ```python
@@ -386,9 +386,8 @@ Start simple and add complexity:
 
 ### Optimizer Settings
 
-`nlmer()` takes optimizer settings as keyword arguments: `method` and `maxiter`
-for the outer covariance optimization, and `pnls_maxiter` and `pnls_tol` for the
-inner parameter updates:
+`method` and `maxiter` control the outer likelihood optimization in `nlmer()`.
+`pnls_maxiter` and `pnls_tol` control the inner random-effect updates.
 
 ```python
 model = mlm.nlmer(

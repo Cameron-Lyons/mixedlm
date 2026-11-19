@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Collection
 from typing import Any
 
+import numpy as np
 from numpy.typing import NDArray
 
 
@@ -200,6 +201,23 @@ def concat_columns_as_string(
     for column_index in range(1, string_values.shape[1]):
         combined = combine(combined, string_values[:, column_index])
     return np.asarray(combined, dtype=object)
+
+
+def _grouped_observation_indices(
+    groups: NDArray[np.integer], *, n_groups: int | None = None
+) -> list[NDArray[np.intp]]:
+    """Return ordered rows for observed labels or each code in range(n_groups)."""
+    order = np.argsort(groups, kind="stable")
+    sorted_groups = groups[order]
+    if n_groups is not None:
+        codes = np.arange(n_groups)
+        starts = np.searchsorted(sorted_groups, codes, side="left")
+        ends = np.searchsorted(sorted_groups, codes, side="right")
+        return [order[start:end] for start, end in zip(starts, ends, strict=True)]
+    if len(order) == 0:
+        return []
+    boundaries = np.flatnonzero(sorted_groups[1:] != sorted_groups[:-1]) + 1
+    return list(np.split(order, boundaries))
 
 
 def factorize_levels(values: NDArray) -> tuple[NDArray, dict[Any, int]]:

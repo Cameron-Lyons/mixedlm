@@ -194,8 +194,8 @@ def test_quasi_family_zero_check_is_rejected() -> None:
 
 
 def test_noninteger_binomial_trials_are_rejected() -> None:
-    model = _GeneralizedModel([0, 1], [0.2, 0.8], families.Binomial(), weights=[1.5, 2.0])
-    with pytest.raises(ValueError, match="integer trial-count"):
+    model = _GeneralizedModel([0, 0.5], [0.2, 0.8], families.Binomial(), weights=[1.5, 2.0])
+    with pytest.raises(ValueError, match="trial-count"):
         check_zero_inflation(model)
 
 
@@ -226,3 +226,23 @@ def test_fitted_poisson_model_diagnostics_are_finite() -> None:
         assert_allclose(zeros.observed_to_expected, zeros.observed_zeros / zeros.expected_zeros)
     else:
         assert np.isinf(zeros.observed_to_expected)
+
+
+def test_weighted_binary_zero_probabilities_are_bernoulli():
+    model = _GeneralizedModel([0, 1], [0.2, 0.8], families.Binomial(), weights=[1.5, 4.0])
+    result = check_zero_inflation(model)
+    assert result.expected_zeros == pytest.approx(1.0)
+
+
+def test_grouped_binomial_zero_check_with_fractional_prior_weights():
+    from mixedlm import load_cbpp
+
+    data = load_cbpp()
+    prior = np.linspace(0.5, 1.5, len(data))
+    fit = glmer(
+        "incidence / size ~ period + (1 | herd)", data, family=families.Binomial(), weights=prior
+    )
+    result = check_zero_inflation(fit)
+    expected = (1 - fit.fitted()) ** data["size"].to_numpy()
+    assert result.expected_zeros == pytest.approx(expected.sum())
+    assert result.variance == pytest.approx((expected * (1 - expected)).sum())

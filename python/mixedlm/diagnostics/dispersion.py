@@ -249,6 +249,7 @@ def _zero_probabilities(
     y: NDArray[np.float64],
     mu: NDArray[np.float64],
     weights: NDArray[np.float64],
+    trials: NDArray[np.floating] | None,
 ) -> NDArray[np.float64]:
     if isinstance(family, QuasiFamily):
         raise TypeError(
@@ -269,13 +270,15 @@ def _zero_probabilities(
         return np.exp(-theta * np.log1p(mu / theta))
 
     if isinstance(family, Binomial):
-        trials = np.round(weights)
-        if not np.allclose(weights, trials, rtol=0, atol=1e-8):
-            raise ValueError("binomial zero checks require integer trial-count weights")
+        from mixedlm.families.binomial import _binomial_trials
+        from mixedlm.families.likelihood import whole_counts
+
         if np.any(mu < 0) or np.any(mu > 1) or np.any(y < 0) or np.any(y > 1):
             raise ValueError("binomial responses and fitted probabilities must be between 0 and 1")
-        if not np.allclose(y * trials, np.round(y * trials), rtol=0, atol=1e-8):
-            raise ValueError("weighted binomial responses must represent integer success counts")
+        trials = _binomial_trials(y, weights, trials)
+        if trials is None:
+            return 1 - mu
+        whole_counts(y * trials, "binomial success-count")
         with np.errstate(divide="ignore", invalid="ignore"):
             return np.exp(trials * np.log1p(-mu))
 
@@ -345,7 +348,13 @@ def check_zero_inflation(
     """
     alternative = _validate_options(alpha, alternative)
     y, mu, weights, family = _validate_model(model)
-    zero_probabilities = _zero_probabilities(family, y, mu, weights)
+    zero_probabilities = _zero_probabilities(
+        family,
+        y,
+        mu,
+        weights,
+        getattr(model.matrices, "response_trials", getattr(model.matrices, "trials", None)),
+    )
     if (
         not np.all(np.isfinite(zero_probabilities))
         or np.any(zero_probabilities < 0)

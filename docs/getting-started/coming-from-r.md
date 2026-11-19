@@ -253,11 +253,11 @@ CPUs. Workers start without forking the Python process, so scripts must call
 these functions under an `if __name__ == "__main__":` guard. See
 [parallel execution](../api/inference.md#parallel-execution).
 
-## Functions Not Yet Available
+### Diagnostic Plots
 
-These lme4/related functions are not yet implemented:
-
-- `plot.merMod` (use `mixedlm.diagnostics.plot_diagnostics` instead)
+For a fitted linear or generalized model, the Python equivalent of R’s `plot(m)`
+is `m.plot()`. Use `m.plot(which=[1, 2])` for residuals versus fitted values and
+the normal Q–Q plot. Install the `plots` extra to enable plotting.
 
 ## Getting Help
 

@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 
 use numpy::ndarray::Array2;
-use numpy::{PyArray2, PyArrayLike1, PyArrayLike2};
+use numpy::{PyArray1, PyArray2, PyArrayLike1, PyArrayLike2};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
@@ -30,9 +30,12 @@ fn owned_array2<'py>(
     Ok(PyArray2::from_owned_array(py, array).into())
 }
 
-fn checked_i64_vec_to_usize(values: &[i64], field_name: &str) -> PyResult<Vec<usize>> {
+fn checked_i64_vec_to_usize<'a>(
+    values: impl IntoIterator<Item = &'a i64>,
+    field_name: &str,
+) -> PyResult<Vec<usize>> {
     values
-        .iter()
+        .into_iter()
         .enumerate()
         .map(|(idx, &value)| {
             usize::try_from(value).map_err(|_| {
@@ -116,6 +119,18 @@ impl SparseCholeskyNumeric {
         let rhs = b.as_array().iter().copied().collect();
         let result = py.detach(|| self.inner.solve_owned(rhs, shape))?;
         owned_array2(py, result, shape)
+    }
+
+    fn _inverse_subset(
+        &self,
+        py: Python<'_>,
+        rows: PyArrayLike1<'_, i64>,
+        columns: PyArrayLike1<'_, i64>,
+    ) -> PyResult<Option<Py<PyArray1<f64>>>> {
+        let rows = checked_i64_vec_to_usize(rows.as_array(), "rows")?;
+        let columns = checked_i64_vec_to_usize(columns.as_array(), "columns")?;
+        let values = py.detach(|| self.inner.inverse_subset(&rows, &columns))?;
+        Ok(values.map(|entries| PyArray1::from_vec(py, entries).unbind()))
     }
 
     fn logdet(&self, py: Python<'_>) -> f64 {

@@ -150,3 +150,21 @@ def test_clip_mu_is_deprecated_in_favor_of_clamp_mu() -> None:
         clipped = families.Binomial().clip_mu(mu, eps=0.01)
     assert clipped is mu
     np.testing.assert_array_equal(mu, [0.01, 0.25, 0.99])
+
+
+def test_trial_weighted_proportion_draws_match_explicit_counts():
+    data = CBPP.assign(proportion=CBPP.incidence / CBPP["size"])
+    grouped = glmer(CBPP_FORMULA, data, family=families.Binomial())
+    prop = glmer(
+        "proportion ~ period + (1 | herd)", data, family=families.Binomial(), weights="size"
+    )
+    n = data["size"].to_numpy()
+    for nsim in (1, 4):
+        counts = grouped.simulate(nsim=nsim, seed=45, use_re=False)
+        draws = prop.simulate(nsim=nsim, seed=45, use_re=False)
+        np.testing.assert_array_equal(draws, counts / (n if nsim == 1 else n[:, None]))
+        assert np.any((draws > 0) & (draws < 1))
+    np.testing.assert_array_equal(
+        _simulate_glmer(grouped, np.random.RandomState(3)),
+        _simulate_glmer(prop, np.random.RandomState(3)),
+    )

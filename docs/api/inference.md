@@ -301,7 +301,12 @@ print(mlm.anova(m1, m2))
 
 ### anova_type3
 
-Type III ANOVA for a single model.
+Test each fixed-effect formula term in a single LMM. For a factor or
+interaction with several fitted coefficients, the table reports one joint
+Wald F test. The numerator degrees of freedom count the retained coefficients.
+For these joint tests the denominator degrees of freedom are approximated by
+the mean of the coefficient-level Satterthwaite or Kenward-Roger values.
+With interactions, the tested coefficients depend on the fitted contrast coding.
 
 ```py
 result = mlm.anova_type3(model)

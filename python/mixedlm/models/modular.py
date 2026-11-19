@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
@@ -27,6 +28,7 @@ from mixedlm.estimation.reml import (
 from mixedlm.formula.parser import parse_formula
 from mixedlm.formula.terms import InteractionTerm, PowerTerm, VariableTerm
 from mixedlm.matrices.design import ModelMatrices, build_model_matrices, build_random_matrix
+from mixedlm.models.shared_utils import resolve_em_start
 
 
 def _coerce_formula(formula: Formula | str) -> Formula:
@@ -161,7 +163,8 @@ class LmerDevfun:
         NDArray
             Starting values (ones by default).
         """
-        return self.optimizer.get_start_theta()
+        start = resolve_em_start(None, self.parsed.matrices, self.control, self.optimizer.verbose)
+        return self.optimizer.get_start_theta() if start is None else start
 
     def get_bounds(self) -> list[tuple[float | None, float | None]]:
         """Get bounds for theta parameters.
@@ -251,7 +254,9 @@ class GlmerDevfun:
         NDArray
             Starting covariance parameters, optionally followed by PIRLS beta.
         """
-        theta = self.optimizer.get_start_theta()
+        theta = resolve_em_start(None, self.parsed.matrices, self.control, self.optimizer.verbose)
+        if theta is None:
+            theta = self.optimizer.get_start_theta()
         if joint:
             _, beta, _, _ = self.optimizer._final_evaluation_with_status(theta, nAGQ=1)
             return np.r_[theta, beta]
@@ -717,6 +722,8 @@ def optimizeGlmer(
     """
     from copy import copy
 
+    if start is None:
+        start = devfun.get_start()
     optimizer = copy(devfun.optimizer)
     optimizer.verbose = verbose
     options = (
@@ -876,6 +883,15 @@ def mkGlmerMod(
         nAGQ=nAGQ,
         message=opt.message,
         optimizer=opt.optimizer,
+        control=replace(
+            devfun.control,
+            pirls_maxiter=devfun.optimizer.pirls_maxiter,
+            tolPwrss=devfun.optimizer.pirls_tol,
+            nAGQ0initStep=devfun.optimizer.nAGQ0initStep,
+            optCtrl=deepcopy(devfun.control.optCtrl),
+        )
+        if devfun.control is not None
+        else None,
     )
 
 
@@ -964,16 +980,14 @@ def mkReTrms(
     parsed_formula = parse_formula(formula)
     matrices = build_model_matrices(parsed_formula, data)
 
-    theta = []
-    Lind = []
+    theta: list[float] = []
+    index_blocks = []
     Gp = [0]
     flist = {}
     cnms = {}
     nl = []
 
     current_idx = 0
-    theta_idx = 0
-
     for struct in matrices.random_structures:
         group_name = struct.grouping_factor
         n_levels = struct.n_levels
@@ -984,22 +998,14 @@ def mkReTrms(
         cnms[group_name] = struct.term_names
         nl.append(n_levels)
 
+        theta_start = len(theta)
         if struct.correlated:
-            for i in range(n_terms):
-                for j in range(i + 1):
-                    if i == j:
-                        theta.append(1.0)
-                    else:
-                        theta.append(0.0)
-                    for _ in range(n_levels):
-                        Lind.append(theta_idx)
-                    theta_idx += 1
+            rows, cols = np.tril_indices(n_terms)
+            theta.extend((rows == cols).astype(np.float64))
         else:
-            for _ in range(n_terms):
-                theta.append(1.0)
-                for _ in range(n_levels):
-                    Lind.append(theta_idx)
-                theta_idx += 1
+            theta.extend(np.ones(n_terms))
+        # Lambdat repeats the whole triangular template for each grouping level.
+        index_blocks.append(np.tile(np.arange(theta_start, len(theta)), n_levels))
 
         current_idx += n_levels * n_terms
         Gp.append(current_idx)
@@ -1009,7 +1015,7 @@ def mkReTrms(
     return ReTrms(
         Zt=Zt,
         theta=np.array(theta),
-        Lind=np.array(Lind),
+        Lind=np.concatenate(index_blocks) if index_blocks else np.empty(0, dtype=np.int_),
         Gp=Gp,
         flist=flist,
         cnms=cnms,

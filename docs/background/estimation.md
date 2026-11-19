@@ -429,14 +429,12 @@ where \(\boldsymbol{\phi}_j = \boldsymbol{\beta} + \mathbf{b}_j\) are group-spec
 
 ### Estimation Approach
 
-mixedlm uses a first-order linearization approach:
-
-1. Linearize \(f\) around current parameter estimates
-2. Solve the resulting approximate LMM
-3. Update parameters
-4. Iterate until convergence
-
-This is similar to the Lindstrom-Bates algorithm.
+`nlmer()` minimizes the approximate marginal deviance over the fixed effects
+and random-effect covariance parameters. At each trial point it estimates the
+conditional random effects by penalized nonlinear least squares. It then profiles
+the residual variance and includes the log determinant of the linearized random-effect
+system in the deviance. Positive prior weights give each observation residual
+variance \(\sigma^2/w_i\), contributing \(-\sum_i \log w_i\) to the deviance.
 
 The low-level `pnls_step()` and `nlmm_deviance()` functions, and
 `NLMMOptimizer`, accept integer grouping labels with gaps or negative values.
@@ -445,11 +443,9 @@ both the Python and native implementations; observations within each group
 keep their input order. The native evaluation checks that its inputs have
 consistent shapes and releases the interpreter lock while it solves.
 
-The inner penalized nonlinear least-squares loop checks changes in both the
-fixed parameters and every group-specific random effect. Each change is
-measured against the preceding iteration before deciding whether to stop;
-stationary fixed parameters alone do not establish convergence. The iteration
-limit still bounds the work for problems that do not converge.
+The standalone `pnls_step()` and `nlmm_deviance()` functions estimate the fixed
+and random parameters together for a supplied covariance. Their convergence
+check includes the proposed changes in both sets of parameters.
 
 ## EM-REML Initialization
 
@@ -460,7 +456,7 @@ The EM-REML (Expectation-Maximization Restricted Maximum Likelihood) algorithm p
 1. **E-step:** Compute conditional expectations of random effects given current variance parameters
 2. **M-step:** Update each random effect structure's covariance matrix and the residual variance
 
-The E-step solves a joint linear system for fixed effects \(\hat{\boldsymbol{\beta}}\) and BLUPs \(\hat{\mathbf{b}}\), and computes the posterior variance \(\text{Var}(\mathbf{b} | \mathbf{y})\) via the Schur complement. The M-step updates each structure's covariance:
+The E-step solves a joint linear system for fixed effects \(\hat{\boldsymbol{\beta}}\) and BLUPs \(\hat{\mathbf{b}}\), and extracts the within-group posterior covariances from the same factorization. The residual variance update includes uncertainty in both fixed and random effects. The M-step updates each structure's covariance:
 
 \[
 \hat{\boldsymbol{\Sigma}}_k = \frac{1}{n_k}\sum_{i=1}^{n_k}\left(\hat{\mathbf{b}}_{ki}\hat{\mathbf{b}}_{ki}^T + \text{Var}(\mathbf{b}_{ki} | \mathbf{y})\right)
@@ -495,8 +491,7 @@ EM-REML supports:
 - Uncorrelated random slopes: `(x || group)`
 - Multiple random effects: `(1 | group1) + (1 | group2)`
 - Compound symmetry via `set_cov_type(formula, "cs")`
-
-AR(1) covariance is not supported; EM initialization falls back to the direct optimizer for these models.
+- First-order autoregressive covariance via `set_cov_type(formula, "ar1")`
 
 ### Trade-offs
 

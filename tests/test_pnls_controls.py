@@ -55,7 +55,7 @@ def first_update_oracle(data, theta):
         correction += np.log1p(theta[0] ** 2 * info)
     residual = y - (phi[0] + b[group]) * x / (phi[1] + x)
     variance = (weights @ residual**2 + precision * (b @ b)) / len(y)
-    deviance = len(y) * (1 + np.log(2 * np.pi * variance)) + correction
+    deviance = len(y) * (1 + np.log(2 * np.pi * variance)) + correction - np.log(weights).sum()
     return deviance, phi, b[:, None], np.sqrt(variance)
 
 
@@ -123,7 +123,8 @@ def test_public_fit_refit_and_update_retain_independent_inner_controls(backend):
         assert not fit.converged and not fit.pnls_converged
         assert fit.pnls_maxiter == 1 and fit.pnls_tol == 1e-12
         assert "inner PNLS convergence: no" in fit.summary()
-        repeated = fit.refit()
+        # Perturb the response so the inherited random modes need an update.
+        repeated = fit.refit(fit.y + 0.1)
         assert not repeated.converged and not repeated.pnls_converged
         assert repeated.pnls_maxiter == 1 and repeated.pnls_tol == 1e-12
         loose = fit.refit(pnls_tol=1e6)
@@ -236,23 +237,12 @@ def test_joint_updates_complete_the_previously_unfinished_default_fit(backend):
     result = optimizer.optimize(start_phi=phi)
     assert result.converged and result.pnls_converged
     assert result.n_iter > 0 and np.isfinite(result.deviance)
-    # Verify stationarity using an additional update at the final covariance.
-    advanced_phi, advanced_b, _ = nlmm.pnls_step(
-        y,
-        x,
-        groups,
-        model,
-        result.phi,
-        result.b,
-        np.array([[result.theta[0] ** 2]]),
-        result.sigma,
-        [0],
-        maxiter=1,
-    )
-    remaining = max(
-        np.max(np.abs(advanced_phi - result.phi)), np.max(np.abs(advanced_b - result.b))
-    )
-    assert remaining < 1e-6
+    # Asym enters the mean linearly. Its conditional mode solves a scalar
+    # normal equation per group at the marginal fixed-effect estimate.
+    z = 1 - np.exp(-np.exp(result.phi[2]) * x[:10])
+    residual = (y - model.predict(result.phi, x)).reshape(5, 10)
+    precision = 1 / (result.theta[0] ** 2 + nlmm._PSI_REGULARIZATION)
+    np.testing.assert_allclose(result.b[:, 0], (residual @ z) / (z @ z + precision), atol=1e-10)
 
 
 @pytest.mark.parametrize("backend", ["1", "2", "native"])

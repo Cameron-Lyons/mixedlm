@@ -256,7 +256,8 @@ def anova_type3(
     -----
     This function tests terms (factors/covariates) rather than individual
     coefficients. For factors with multiple levels, it computes a joint
-    F-test across all associated coefficients.
+    F-test across the retained coefficients and approximates its denominator
+    degrees of freedom by the mean of their coefficient-level values.
 
     For continuous covariates, the test is equivalent to the t-test
     from summary() but expressed as an F-test (F = t^2).
@@ -350,28 +351,44 @@ def anova_type3(
 
 def _get_term_groups(model: LmerResult) -> dict[str, list[int]]:
     """Group coefficient indices by their originating term."""
-    fixed_names = list(model.matrices.fixed_names)
+    matrices = model.matrices
+    labels = matrices.fixed_term_labels
+    if labels is None:
+        # Older fits lack term labels. Replay the encoder on zero rows using
+        # the fitted levels and contrasts, so no training matrix is rebuilt.
+        import pandas as pd
+
+        from mixedlm.matrices.design import build_fixed_matrix
+        from mixedlm.utils.dataframe import get_categories, is_categorical_or_string
+
+        predictors = model.formula.fixed_variables
+        levels = dict(getattr(matrices, "category_levels", {}))
+        if matrices.frame is not None:
+            for name in predictors - levels.keys():
+                if is_categorical_or_string(matrices.frame, name):
+                    levels[name] = get_categories(matrices.frame, name)
+        empty = pd.DataFrame(columns=sorted(predictors), dtype=np.float64)
+        recovered: list[str] = []
+        _, names = build_fixed_matrix(
+            model.formula, empty, matrices.contrasts, levels, term_labels=recovered
+        )
+        indices = matrices.fixed_column_indices
+        if indices is None and names != matrices.fixed_names:
+            # Some old rank-reduced fits only store the surviving column names.
+            from mixedlm.utils.names import _check_unique_coefficient_names
+
+            _check_unique_coefficient_names(
+                names,
+                matrices.fixed_names,
+                alternative="Refit to recover the source formula terms.",
+            )
+            by_name = dict(zip(names, recovered, strict=True))
+            recovered = [by_name[name] for name in matrices.fixed_names]
+        labels = tuple(recovered)
+
+    indices = matrices.fixed_column_indices
+    fitted_labels = labels if indices is None else tuple(labels[i] for i in indices)
     groups: dict[str, list[int]] = {}
-
-    for i, name in enumerate(fixed_names):
-        if name == "(Intercept)":
-            term = "(Intercept)"
-        elif ":" in name:
-            parts = name.split(":")
-            base_parts = []
-            for p in parts:
-                if "[" in p:
-                    base_parts.append(p.split("[")[0])
-                else:
-                    base_parts.append(p)
-            term = ":".join(sorted(base_parts))
-        elif "[" in name:
-            term = name.split("[")[0]
-        else:
-            term = name
-
-        if term not in groups:
-            groups[term] = []
-        groups[term].append(i)
-
+    for index, label in enumerate(fitted_labels):
+        groups.setdefault(label, []).append(index)
     return groups

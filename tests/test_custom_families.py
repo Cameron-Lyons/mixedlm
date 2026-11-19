@@ -16,12 +16,6 @@ from mixedlm.families import (
 )
 from numpy.testing import assert_allclose
 
-_UNBOUNDED_TEST_MEANS = pytest.mark.xfail(
-    strict=True,
-    reason="validate_family picks its test means from the link type, so binomial "
-    "links other than logit/probit/cloglog are checked at means above 1",
-)
-
 
 @pytest.mark.parametrize(
     "family",
@@ -31,8 +25,9 @@ _UNBOUNDED_TEST_MEANS = pytest.mark.xfail(
         Binomial(),
         Binomial(link="probit"),
         Binomial(link="cloglog"),
-        pytest.param(Binomial(link="cauchit"), marks=_UNBOUNDED_TEST_MEANS),
-        pytest.param(Binomial(link="log"), marks=_UNBOUNDED_TEST_MEANS),
+        Binomial(link="cauchit"),
+        Binomial(link="log"),
+        QuasiFamily(Binomial(link="log")),
         Poisson(),
         Poisson(link="sqrt"),
         Gamma(),
@@ -77,6 +72,29 @@ def test_validate_family_evaluates_the_supplied_means():
     with pytest.raises(ValueError, match=r"variance\(\) must return positive"):
         validate_family(Poisson(), test_mu=np.array([0.0, 1.0]))
     assert validate_family(Binomial(link="cauchit"), test_mu=np.array([0.1, 0.5, 0.9])) is True
+
+
+@pytest.mark.parametrize("method", ["link", "inverse", "deriv"])
+def test_validate_family_rejects_broadcastable_link_shapes(method, monkeypatch):
+    family = Gaussian()
+    monkeypatch.setattr(family.link, method, lambda x: x[None, :])
+    monkeypatch.setattr(family, "weights", np.ones_like)
+    with pytest.raises(ValueError, match=rf"link\.{method}\(\) returned wrong shape"):
+        validate_family(family)
+
+
+@pytest.mark.parametrize("bounds", [(0.0, np.inf), (-np.inf, 0.0), (-np.inf, np.inf), (2.0, 3.0)])
+def test_validate_family_uses_interior_means_and_responses(bounds):
+    family = Gaussian()
+    family.mean_bounds = bounds
+
+    def deviance(y, mu, wt):
+        for values in (y, mu):
+            assert np.all((bounds[0] < values) & (values < bounds[1]))
+        return wt * (y - mu) ** 2
+
+    family.deviance_resids = deviance
+    assert validate_family(family)
 
 
 def test_quasi_family_scales_the_base_family_by_its_dispersion():

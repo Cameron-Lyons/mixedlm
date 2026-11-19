@@ -7,16 +7,12 @@ from functools import partial
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
-from numpy.typing import NDArray
 
 from mixedlm._parallel import process_pool, resolve_n_jobs
 
 if TYPE_CHECKING:
     import pandas as pd
 
-    from mixedlm.families.base import Family
-    from mixedlm.formula.terms import Formula
-    from mixedlm.models.control import GlmerControl, LmerControl
     from mixedlm.models.glmer import GlmerResult
     from mixedlm.models.lmer import LmerResult
 
@@ -154,10 +150,10 @@ class AllFitResult:
 
 
 def _fit_with_optimizer(
-    fit: Callable[[str], LmerResult | GlmerResult], optimizer: str
+    fit: Callable[..., LmerResult | GlmerResult], optimizer: str
 ) -> tuple[LmerResult | GlmerResult | None, str | None, list[str]]:
     try:
-        result = fit(optimizer)
+        result = fit(method=optimizer)
         messages = []
         if not result.converged:
             messages.append("Did not converge")
@@ -169,7 +165,7 @@ def _fit_with_optimizer(
 
 
 def _run_allfit(
-    fit: Callable[[str], LmerResult | GlmerResult],
+    fit: Callable[..., LmerResult | GlmerResult],
     optimizers: list[str],
     n_jobs: int,
     verbose: bool,
@@ -195,37 +191,6 @@ def _run_allfit(
     return AllFitResult(fits=fits, errors=errors, warnings=warnings)
 
 
-def _refit_lmer(
-    formula: Formula,
-    data: pd.DataFrame,
-    REML: bool,
-    weights: NDArray[np.floating] | None,
-    offset: NDArray[np.floating] | None,
-    control: LmerControl,
-    optimizer: str,
-) -> LmerResult:
-    from mixedlm.models.lmer import LmerMod
-
-    model = LmerMod(formula, data, REML=REML, weights=weights, offset=offset, control=control)
-    return model.fit(method=optimizer)
-
-
-def _refit_glmer(
-    formula: Formula,
-    data: pd.DataFrame,
-    family: Family,
-    weights: NDArray[np.floating] | None,
-    offset: NDArray[np.floating] | None,
-    nAGQ: int,
-    control: GlmerControl,
-    optimizer: str,
-) -> GlmerResult:
-    from mixedlm.models.glmer import GlmerMod
-
-    model = GlmerMod(formula, data, family=family, control=control, weights=weights, offset=offset)
-    return model.fit(method=optimizer, nAGQ=nAGQ)
-
-
 def allfit_lmer(
     model: LmerResult,
     data: pd.DataFrame,
@@ -239,12 +204,17 @@ def allfit_lmer(
     started without forking, so scripts need an ``if __name__ == "__main__":``
     guard.
     """
+    from mixedlm.models.lmer import lmer
+
     if optimizers is None:
         optimizers = _default_optimizers()
-    weights = model.matrices.weights if np.any(model.matrices.weights != 1.0) else None
-    offset = model.matrices.offset if np.any(model.matrices.offset != 0.0) else None
     fit = partial(
-        _refit_lmer, model.formula, data, model.REML, weights, offset, model._refit_control()
+        lmer,
+        model.formula,
+        data,
+        REML=model.REML,
+        control=model._refit_control(),
+        **model._formula_refit_options(data),
     )
     return _run_allfit(fit, optimizers, n_jobs, verbose)
 
@@ -262,24 +232,17 @@ def allfit_glmer(
     started without forking, so scripts need an ``if __name__ == "__main__":``
     guard.
     """
+    from mixedlm.models.glmer import glmer
+
     if optimizers is None:
         optimizers = _default_optimizers()
-    # Count-response formulas apply trial counts when rebuilding the matrices.
-    prior_weights = (
-        model.matrices.weights
-        if model.matrices.trials is None
-        else model.matrices.weights / model.matrices.trials
-    )
-    weights = prior_weights if np.any(prior_weights != 1.0) else None
-    offset = model.matrices.offset if np.any(model.matrices.offset != 0.0) else None
     fit = partial(
-        _refit_glmer,
+        glmer,
         model.formula,
         data,
-        model.family,
-        weights,
-        offset,
-        model.nAGQ,
-        model._refit_control(),
+        family=model.family,
+        nAGQ=model.nAGQ,
+        control=model._refit_control(),
+        **model._formula_refit_options(data),
     )
     return _run_allfit(fit, optimizers, n_jobs, verbose)

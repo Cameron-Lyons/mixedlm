@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import cached_property
 from typing import TYPE_CHECKING, Any, ClassVar
 
@@ -32,7 +32,7 @@ from mixedlm.models.shared_utils import (
     symmetric_inverse,
 )
 from mixedlm.utils import _format_pvalue, _get_signif_code
-from mixedlm.utils.simulation import simulate_glmm_response
+from mixedlm.utils.simulation import simulate_fitted_glmm_response
 from mixedlm.utils.validation import _validate_confidence_level
 
 
@@ -125,9 +125,12 @@ class GlmerResult(MerResultMixin):
     joint_fit: bool = False
     message: str = ""
     optimizer: str = ""
+    control: GlmerControl | None = None
 
     def _refit_control(self) -> GlmerControl:
-        """Carry the fitted inner settings into formula-based refitting paths."""
+        """Return the formula-refit controls, including PIRLS settings from older fits."""
+        if self.control is not None:
+            return self.control
         return GlmerControl(tolPwrss=self.pirls_tol, pirls_maxiter=self.pirls_maxiter)
 
     def _compute_condVar(
@@ -575,7 +578,8 @@ class GlmerResult(MerResultMixin):
         nAGQ : int, optional
             Number of quadrature points. If None, uses original.
         **kwargs
-            Additional arguments passed to glmer().
+            Additional arguments passed to glmer(). The fit's control settings
+            are reused unless a new control is supplied.
 
         Returns
         -------
@@ -604,18 +608,14 @@ class GlmerResult(MerResultMixin):
                     "No data available. Either provide data or ensure model_frame was stored."
                 )
 
-        new_formula = str(self.formula) if formula is None else self._update_formula(formula)
-
         if family is None:
             family = self.family
 
         from mixedlm.families.binomial import Binomial
-        from mixedlm.formula.parser import parse_formula
+        from mixedlm.formula.parser import update_formula
 
-        if (
-            isinstance(family, Binomial)
-            and parse_formula(new_formula).response == self.formula.response
-        ):
+        new_formula = self.formula if formula is None else update_formula(self.formula, formula)
+        if isinstance(family, Binomial) and new_formula.response == self.formula.response:
             data = _restore_binomial_factor(
                 data, self.formula.response, self.matrices.response_levels
             )
@@ -633,6 +633,7 @@ class GlmerResult(MerResultMixin):
         if nAGQ is None:
             nAGQ = self.nAGQ
 
+        kwargs.setdefault("contrasts", self.matrices.contrasts)
         kwargs.setdefault("control", self._refit_control())
 
         return glmer(
@@ -645,7 +646,7 @@ class GlmerResult(MerResultMixin):
             self.matrices.y,
             self.matrices.y,
             self.matrices.weights,
-            trials=self.matrices.trials,
+            trials=self.matrices.response_trials,
         )
 
     def logLik(self) -> LogLik:
@@ -781,15 +782,10 @@ class GlmerResult(MerResultMixin):
         mu: NDArray[np.floating],
         rng: Any | None = None,
     ) -> NDArray[np.floating]:
-        return simulate_glmm_response(
-            self.family,
-            mu,
-            self.matrices.weights,
-            trials=self.matrices.trials,
-            rng=rng,
-        )
+        return simulate_fitted_glmm_response(self.family, mu, self.matrices, rng)
 
     def _refit_from_matrices(self, matrices: ModelMatrices, **kwargs) -> GlmerResult:
+        control = self._refit_control()
         optimizer = GLMMOptimizer(
             matrices,
             self.family,
@@ -797,7 +793,7 @@ class GlmerResult(MerResultMixin):
             nAGQ=self.nAGQ,
             pirls_maxiter=kwargs.pop("pirls_maxiter", self.pirls_maxiter),
             pirls_tol=kwargs.pop("pirls_tol", self.pirls_tol),
-            nAGQ0initStep=kwargs.pop("nAGQ0initStep", True),
+            nAGQ0initStep=kwargs.pop("nAGQ0initStep", control.nAGQ0initStep),
         )
 
         start = kwargs.pop("start", self.theta)
@@ -821,6 +817,12 @@ class GlmerResult(MerResultMixin):
             joint_fit=opt_result.joint_fit,
             message=opt_result.message,
             optimizer=kwargs["method"],
+            control=replace(
+                control,
+                pirls_maxiter=optimizer.pirls_maxiter,
+                tolPwrss=optimizer.pirls_tol,
+                nAGQ0initStep=optimizer.nAGQ0initStep,
+            ),
         )
 
     def refitML(self) -> GlmerResult:

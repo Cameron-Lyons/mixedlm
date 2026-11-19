@@ -348,7 +348,7 @@ the supplied stream. Families without a response distribution, such as quasi
 families and custom families that do not implement `simulate()`, raise
 `NotImplementedError`; see [custom families](families.md#customfamily).
 
-Grouped-binomial GLMM simulations return success counts.
+Grouped-binomial GLMM simulations return success counts for a `successes / trials` response. A numeric proportion fitted with trial weights returns simulated proportions on the same scale.
 
 #### confint
 
@@ -423,7 +423,9 @@ For `joint_fit=False`, the callable retains the theta-only PIRLS objective.
 result.drop1(data, test="Chisq", n_jobs=1)
 ```
 
-Test single term deletions. LMM refits reuse the fitted control.
+Test single term deletions using the fitted contrasts and controls. Passing
+the original data preserves the full model's row omissions when the deleted
+term contains missing values. You can also pass the cleaned model frame.
 `n_jobs` refits the reduced models in worker processes; see
 [parallel execution](inference.md#parallel-execution).
 
@@ -435,7 +437,7 @@ Test single term deletions. LMM refits reuse the fitted control.
 result.allFit(data, optimizers=None, verbose=False, n_jobs=1)
 ```
 
-Refit the model with each optimizer, keeping the other control settings. The
+Refit the model with each optimizer, keeping its contrast coding, row omissions, and controls. The
 default list is every solver from `mixedlm.estimation.available_optimizers()`.
 `n_jobs` runs the refits in worker processes.
 

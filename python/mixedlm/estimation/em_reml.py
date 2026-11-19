@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import cast
+from numbers import Integral, Real
 
 import numpy as np
 from numpy.typing import NDArray
-from scipy import linalg, sparse
+from scipy import linalg, optimize, sparse
 
-from mixedlm.matrices.design import ModelMatrices, RandomEffectStructure
+from mixedlm.matrices.design import ModelMatrices, RandomEffectStructure, validate_prior_weights
+from mixedlm.models import shared_utils
 
 
 @dataclass
@@ -27,7 +28,7 @@ class EMResult:
     n_iter : int
         Number of iterations performed.
     final_loglik : float
-        Final log-likelihood value.
+        Restricted log likelihood evaluated at the returned variance estimates.
     """
 
     theta: NDArray[np.floating]
@@ -38,155 +39,72 @@ class EMResult:
     final_loglik: float
 
 
-def _safe_inverse(A: NDArray[np.floating]) -> NDArray[np.floating]:
-    """Compute a numerically stable matrix inverse with fallbacks."""
-    n = A.shape[0]
-    ident = np.eye(n, dtype=np.float64)
-    try:
-        L = linalg.cholesky(A, lower=True)
-        return linalg.cho_solve((L, True), ident)
-    except linalg.LinAlgError:
-        try:
-            return linalg.solve(A, ident)
-        except linalg.LinAlgError:
-            return linalg.pinv(A)
+def _ar1_covariance(moment: NDArray[np.floating], floor: float) -> NDArray[np.floating]:
+    """Maximize the expected Gaussian log likelihood for a stationary AR(1) block."""
+    q = len(moment)
+    trace = float(np.trace(moment))
+    adjacent = float(np.diag(moment, 1).sum())
+    interior = float(np.diag(moment)[1:-1].sum())
+    distances = np.abs(np.arange(q)[:, None] - np.arange(q))
 
+    # R(rho)^-1 is tridiagonal. Profiling out the common variance gives
+    # q log(trace - 2 adjacent rho + interior rho^2) - log(1 - rho^2).
+    # Every interior stationary point is a real root of this cubic.
+    roots = np.roots([(1 - q) * interior, (q - 2) * adjacent, trace + q * interior, -q * adjacent])
+    candidates = [0.0, *(float(r.real) for r in roots if r.imag == 0 and abs(r.real) < 1)]
 
-def _compound_symmetry_moments(cov: NDArray[np.floating]) -> tuple[float, float]:
-    """Return the common variance and off-diagonal covariance."""
-    q = cov.shape[0]
-    trace = float(np.trace(cov))
-    variance = trace / q
-    if q == 1:
-        return variance, 0.0
-    covariance = float((np.sum(cov) - trace) / (q * (q - 1)))
-    return variance, covariance
+    def innovation_sum(rho: float) -> float:
+        return trace - 2 * adjacent * rho + interior * rho**2
 
+    rho = min(candidates, key=lambda r: q * np.log(innovation_sum(r)) - np.log1p(-r * r))
 
-def _positive_definite_logdet(A: NDArray[np.floating]) -> float:
-    """Compute a stable log determinant for an expected positive-definite matrix."""
-    try:
-        factor = linalg.cholesky(A, lower=True, check_finite=False)
-    except linalg.LinAlgError:
-        with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
-            sign, logabsdet = np.linalg.slogdet(A)
-        return float(logabsdet) if sign > 0 else -np.inf
-    return float(2.0 * np.sum(np.log(np.diag(factor))))
+    def scales(r: float) -> tuple[float, float]:
+        correlation = r**distances
+        minimum = linalg.eigvalsh(correlation, subset_by_index=[0, 0])[0]
+        variance = innovation_sum(r) / (q * (1 - r * r))
+        return variance, floor / max(minimum, np.finfo(float).tiny)
 
-
-def _init_sigma_k(
-    struct: RandomEffectStructure,
-    sigma2_e: float,
-    sigma2_u_init_scale: float,
-    sigma2_u_init_min: float,
-) -> NDArray[np.floating]:
-    """Initialize per-structure covariance matrix."""
-    q = struct.n_terms
-    init_var = max(sigma2_e * sigma2_u_init_scale, sigma2_u_init_min)
-    return np.eye(q, dtype=np.float64) * init_var
-
-
-def _add_random_precision(
-    precision: NDArray[np.floating],
-    structures: list[RandomEffectStructure],
-    sigma_list: list[NDArray[np.floating]],
-) -> None:
-    """Add each repeated prior-precision block in place without expanding it."""
-    offset = 0
-    for struct, sigma_k in zip(structures, sigma_list, strict=True):
-        q = struct.n_terms
-        sigma_k_inv = _safe_inverse(sigma_k) if q > 1 else np.array([[1.0 / sigma_k[0, 0]]])
-        level_starts = offset + np.arange(struct.n_levels) * q
-        indices = level_starts[:, None] + np.arange(q)
-        precision[indices[:, :, None], indices[:, None, :]] += sigma_k_inv
-        offset += struct.n_levels * q
-
-
-def _weighted_crossproducts(
-    X: NDArray[np.floating],
-    Z: NDArray[np.floating] | sparse.spmatrix,
-    y: NDArray[np.floating],
-    weights: NDArray[np.floating],
-) -> tuple[
-    NDArray[np.floating],
-    NDArray[np.floating],
-    NDArray[np.floating],
-    NDArray[np.floating],
-    NDArray[np.floating],
-]:
-    """Compute the iteration-invariant weighted normal-equation products."""
-    weighted_y = weights * y
-    XtWX = X.T @ (weights[:, None] * X)
-    XtWy = X.T @ weighted_y
-
-    if sparse.issparse(Z):
-        sparse_Z = cast(sparse.spmatrix, Z)
-        weighted_Z = sparse_Z.multiply(weights[:, None])
-        XtWZ = np.asarray(X.T @ weighted_Z)
-        ZtWZ = (sparse_Z.T @ weighted_Z).toarray()
-        ZtWy = np.asarray(sparse_Z.T @ weighted_y).ravel()
-    else:
-        weighted_Z = weights[:, None] * Z
-        XtWZ = X.T @ weighted_Z
-        ZtWZ = Z.T @ weighted_Z
-        ZtWy = Z.T @ weighted_y
-
-    return XtWX, XtWZ, ZtWZ, XtWy, ZtWy
-
-
-def _m_step_update_sigma(
-    struct: RandomEffectStructure,
-    u_block: NDArray[np.floating],
-    Var_u_block: NDArray[np.floating],
-    variance_floor: float,
-) -> NDArray[np.floating]:
-    """M-step update for a single structure's covariance matrix.
-
-    Parameters
-    ----------
-    struct : RandomEffectStructure
-        The random effect structure.
-    u_block : NDArray
-        Random effects for this structure, shape (n_levels * q,).
-    Var_u_block : NDArray
-        Posterior variance block for this structure, shape (n_levels*q, n_levels*q).
-    variance_floor : float
-        Minimum eigenvalue for numerical stability.
-    """
-    q = struct.n_terms
-    n_levels = struct.n_levels
-
-    U = u_block.reshape(n_levels, q)
-    S = U.T @ U
-
-    # Split the two axes into level/term pairs and sum only matching levels.
-    var_sum = np.einsum("ijik->jk", Var_u_block.reshape(n_levels, q, n_levels, q))
-
-    Sigma_new = (S + var_sum) / n_levels
-
-    cov_type = getattr(struct, "cov_type", "us")
-    if cov_type == "cs" and q > 1:
-        variance, covariance = _compound_symmetry_moments(Sigma_new)
-        variance = max(variance, variance_floor)
-        covariance = float(
-            np.clip(
-                covariance,
-                (variance_floor - variance) / (q - 1),
-                variance - variance_floor,
+    variance, lower = scales(rho)
+    if variance < lower:
+        # On the eigenvalue floor, profile the scale subject to that same bound.
+        def objective(r: float) -> float:
+            scale = max(scales(r))
+            return float(
+                q * np.log(scale)
+                + (q - 1) * np.log1p(-r * r)
+                + innovation_sum(r) / ((1 - r * r) * scale)
             )
-        )
-        Sigma_new = np.full((q, q), covariance, dtype=np.float64)
-        np.fill_diagonal(Sigma_new, variance)
-        return Sigma_new
 
-    if not struct.correlated and q > 1:
-        Sigma_new = np.diag(np.diag(Sigma_new))
+        bound = np.copysign(1 - np.finfo(float).eps, adjacent)
+        optimum = optimize.minimize_scalar(objective, bounds=sorted((0.0, bound)), method="bounded")
+        rho = min((0.0, rho, float(optimum.x)), key=objective)
+        variance = max(scales(rho))
+    return variance * rho**distances
 
-    eigvals, eigvecs = linalg.eigh(Sigma_new)
-    eigvals = np.maximum(eigvals, variance_floor)
-    Sigma_new = eigvecs @ np.diag(eigvals) @ eigvecs.T
 
-    return Sigma_new
+def _m_step_covariance(
+    struct: RandomEffectStructure, moment: NDArray[np.floating], variance_floor: float
+) -> NDArray[np.floating]:
+    """Fit a structured covariance to the mean posterior second moment."""
+    q = struct.n_terms
+    cov_type = struct.cov_type
+    if q == 1 or (cov_type == "us" and not struct.correlated):
+        return np.diag(np.maximum(np.diag(moment), variance_floor))
+    if cov_type == "ar1" and q > 2:
+        return _ar1_covariance(moment, variance_floor)
+    # With two terms, AR(1) and compound symmetry have the same covariance.
+    if cov_type in ("cs", "ar1"):
+        # The mean direction and its orthogonal contrasts are the two
+        # eigenspaces of a CS matrix. Constrain their variances separately.
+        common = float(moment.sum() / q)
+        contrast = max((np.trace(moment) - common) / (q - 1), variance_floor)
+        common = max(common, variance_floor)
+        covariance = np.full((q, q), (common - contrast) / q)
+        covariance.flat[:: q + 1] += contrast
+        return covariance
+
+    eigvals, eigvecs = linalg.eigh(moment)
+    return (eigvecs * np.maximum(eigvals, variance_floor)) @ eigvecs.T
 
 
 def _sigma_to_theta(
@@ -203,30 +121,17 @@ def _sigma_to_theta(
 
     for struct, sigma_k in zip(structures, sigma_list, strict=True):
         q = struct.n_terms
-        cov_type = getattr(struct, "cov_type", "us")
+        cov_type = struct.cov_type
 
         relative_cov = sigma_k / sigma2_e
 
-        if cov_type == "cs":
-            variance, covariance = _compound_symmetry_moments(relative_cov)
-            variance = max(variance, 1e-10)
+        if cov_type in ("cs", "ar1"):
+            variance = relative_cov[0, 0]
             theta_k = [np.sqrt(variance)]
             if q > 1:
-                rho = covariance / variance
-                rho = float(np.clip(rho, -1.0 / (q - 1) + 1e-10, 1.0 - 1e-10))
-                theta_k.append(rho)
+                theta_k.append(relative_cov[0, 1] / variance)
             theta_parts.append(np.asarray(theta_k, dtype=np.float64))
             continue
-
-        if cov_type != "us":
-            raise NotImplementedError(
-                f"EM-REML does not support cov_type='{cov_type}'. "
-                "Use direct optimization via lmer() with optimizer='COBYQA' instead."
-            )
-
-        eigvals, eigvecs = linalg.eigh(relative_cov)
-        eigvals = np.maximum(eigvals, 1e-10)
-        relative_cov = eigvecs @ np.diag(eigvals) @ eigvecs.T
 
         L = linalg.cholesky(relative_cov, lower=True)
 
@@ -236,7 +141,62 @@ def _sigma_to_theta(
         else:
             theta_parts.append(np.diag(L))
 
-    return np.concatenate(theta_parts)
+    return np.concatenate(theta_parts) if theta_parts else np.empty(0)
+
+
+def _validate_em_controls(
+    max_iter: int,
+    min_iter_converge: int,
+    tol: float,
+    variance_floor: float,
+    sigma2_u_init_min: float,
+    sigma2_u_init_scale: float,
+) -> None:
+    if isinstance(max_iter, bool) or not isinstance(max_iter, Integral) or max_iter < 1:
+        raise ValueError("max_iter must be at least 1 and an integer")
+    if (
+        isinstance(min_iter_converge, bool)
+        or not isinstance(min_iter_converge, Integral)
+        or min_iter_converge < 0
+    ):
+        raise ValueError("min_iter_converge must be a nonnegative integer")
+    for name, value in (("variance_floor", variance_floor), ("tol", tol)):
+        if (
+            not isinstance(value, Real)
+            or isinstance(value, bool)
+            or not np.isfinite(value)
+            or value <= 0
+        ):
+            raise ValueError(f"{name} must be finite and strictly positive")
+    for name, value in (
+        ("sigma2_u_init_min", sigma2_u_init_min),
+        ("sigma2_u_init_scale", sigma2_u_init_scale),
+    ):
+        if (
+            not isinstance(value, Real)
+            or isinstance(value, bool)
+            or not np.isfinite(value)
+            or value < 0
+        ):
+            raise ValueError(f"{name} must be finite and nonnegative")
+
+
+def _relative_precision(
+    structures: list[RandomEffectStructure],
+    covariances: list[NDArray[np.floating]],
+    sigma2: float,
+) -> tuple[NDArray[np.floating], float]:
+    """Return the repeated precision blocks and log determinant of G/sigma²."""
+    blocks = []
+    logdet = 0.0
+    for struct, covariance in zip(structures, covariances, strict=True):
+        chol = linalg.cholesky(covariance, lower=True)
+        inverse = linalg.cho_solve((chol, True), np.eye(struct.n_terms))
+        blocks.append(np.tile((sigma2 * inverse).ravel(), struct.n_levels))
+        logdet += struct.n_levels * (
+            2 * np.log(np.diag(chol)).sum() - struct.n_terms * np.log(sigma2)
+        )
+    return np.concatenate(blocks), float(logdet)
 
 
 def em_reml_simple(
@@ -288,7 +248,7 @@ def em_reml_simple(
     -----
     This implementation supports random intercepts, random slopes (correlated
     and uncorrelated), and multiple random effect structures with unstructured
-    covariance (cov_type='us') and compound symmetry (cov_type='cs').
+    covariance (cov_type='us'), compound symmetry ('cs'), or AR(1) ('ar1').
 
     The EM algorithm tends to be more robust to poor starting values but
     converges more slowly than direct optimization methods.
@@ -307,155 +267,138 @@ def em_reml_simple(
     >>> parsed = lFormula("Reaction ~ Days + (Days | Subject)", data)
     >>> result = em_reml_simple(parsed.matrices, max_iter=50, verbose=1)
     """
-    if max_iter < 1:
-        raise ValueError("max_iter must be at least 1")
-
+    _validate_em_controls(
+        max_iter, min_iter_converge, tol, variance_floor, sigma2_u_init_min, sigma2_u_init_scale
+    )
     structures = matrices.random_structures
-
     for struct in structures:
-        cov_type = getattr(struct, "cov_type", "us")
-        if cov_type not in ("us", "cs"):
-            raise NotImplementedError(
-                f"EM-REML does not support cov_type='{cov_type}'. "
-                "Use direct optimization via lmer() with optimizer='COBYQA' instead."
-            )
+        if struct.cov_type not in ("us", "cs", "ar1"):
+            raise ValueError(f"Unknown covariance type '{struct.cov_type}'")
 
-    y = matrices.y
-    X = matrices.X
-    Z = matrices.Z
-    weights = matrices.weights
-    offset = matrices.offset
+    X, Z = matrices.X, matrices.Z
+    n, p = X.shape
+    q = Z.shape[1]
+    if n <= p:
+        raise ValueError("REML requires more observations than fixed effects")
+    y = matrices.y - matrices.offset
+    weights = validate_prior_weights(matrices.weights, n)
+    sqrt_w = np.sqrt(weights)
+    Xw = X * sqrt_w[:, None]
+    yw = y * sqrt_w
+    # Work in an orthonormal fixed-effect basis. Forming X'WX directly can
+    # lose the intercept/slope separation when a predictor has a large origin.
+    scales = np.max(np.abs(Xw), axis=0)
+    if np.any(scales == 0):
+        raise ValueError("EM-REML requires a full-rank fixed-effects design")
+    Q, R, pivots = linalg.qr(Xw / scales, mode="economic", pivoting=True)
+    diagonal = np.abs(np.diag(R))
+    if p and np.any(diagonal <= diagonal[0] * n * np.finfo(float).eps):
+        raise ValueError("EM-REML requires a full-rank fixed-effects design")
+    logdet_fixed = 2 * (np.log(diagonal).sum() + np.log(scales).sum())
+    alpha_ols = Q.T @ yw
 
-    y_adj = y - offset
-    n = len(y)
-    p = X.shape[1]
+    def coefficients(alpha: NDArray[np.floating]) -> NDArray[np.floating]:
+        beta = np.empty(p)
+        beta[pivots] = linalg.solve_triangular(R, alpha) / scales[pivots]
+        return beta
 
-    try:
-        sqrt_w = np.sqrt(weights)
-        Xw = X * sqrt_w[:, None]
-        yw = y_adj * sqrt_w
-        beta = linalg.lstsq(Xw, yw)[0]
-        residuals = y_adj - X @ beta
-        sigma2_e = float(np.sum(weights * residuals**2) / n)
-    except Exception:
-        beta = np.zeros(p)
-        sigma2_e = 1.0
+    weighted_residual = yw - Q @ alpha_ols
+    initial_rss = float(weighted_residual @ weighted_residual)
+    logdet_weights = np.log(weights).sum()
+    if not q:
+        sigma2 = max(initial_rss / (n - p), variance_floor)
+        loglik = -0.5 * (
+            (n - p) * np.log(2 * np.pi * sigma2)
+            + initial_rss / sigma2
+            + logdet_fixed
+            - logdet_weights
+        )
+        return EMResult(
+            np.empty(0), coefficients(alpha_ols), np.sqrt(sigma2), True, 0, float(loglik)
+        )
 
-    sigma_list = [
-        _init_sigma_k(struct, sigma2_e, sigma2_u_init_scale, sigma2_u_init_min)
-        for struct in structures
-    ]
+    sigma2 = max(initial_rss / n, variance_floor)
+    initial_variance = max(sigma2 * sigma2_u_init_scale, sigma2_u_init_min, variance_floor)
+    covariances = [np.eye(s.n_terms) * initial_variance for s in structures]
+    Zw = sparse.csc_matrix(Z).multiply(sqrt_w[:, None]).tocsc()
+    cross = sparse.csc_matrix(Zw.T @ Q)
+    gram = sparse.bmat(
+        [[sparse.eye(p), cross.T], [cross, Zw.T @ Zw]],
+        format="csc",
+    )
+    rhs = np.concatenate([Q.T @ weighted_residual, Zw.T @ weighted_residual])
+
+    # Request only the within-level blocks of the joint posterior covariance.
+    rows, columns = [], []
+    start = p
+    for struct in structures:
+        levels, terms = struct.n_levels, struct.n_terms
+        indices = np.arange(start, start + levels * terms).reshape(levels, terms)
+        rows.append(np.repeat(indices, terms, axis=1).ravel())
+        columns.append(np.tile(indices, (1, terms)).ravel())
+        start += levels * terms
+    block_rows, block_cols = np.concatenate(rows), np.concatenate(columns)
+    pattern = None
+    if shared_utils._HAS_RUST and p + q >= shared_utils._SPARSE_PROJECTION_MIN_RANDOM:
+        structural_prior = sparse.csc_matrix(
+            (np.ones(len(block_rows)), (block_rows, block_cols)), shape=gram.shape
+        )
+        pattern = shared_utils._SparseCholeskyPattern(abs(gram) + structural_prior)
 
     prev_loglik = -np.inf
     converged = False
-
-    col_offsets: list[int] = []
-    offset_val = 0
-    for struct in structures:
-        col_offsets.append(offset_val)
-        offset_val += struct.n_levels * struct.n_terms
-
-    XtWX_base, XtWZ_base, ZtWZ_base, XtWy_base, ZtWy_base = _weighted_crossproducts(
-        X,
-        Z,
-        y_adj,
-        weights,
-    )
-    logdet_weights = float(np.sum(np.log(weights)))
-    system_size = p + Z.shape[1]
-    LHS = np.empty((system_size, system_size), dtype=np.float64)
-    XtWX = LHS[:p, :p]
-    XtWZ = LHS[:p, p:]
-    random_precision = LHS[p:, p:]
-
-    for iteration in range(max_iter):
-        inverse_sigma2_e = 1.0 / sigma2_e
-        np.multiply(XtWX_base, inverse_sigma2_e, out=XtWX)
-        np.multiply(XtWZ_base, inverse_sigma2_e, out=XtWZ)
-        LHS[p:, :p] = XtWZ.T
-        np.multiply(ZtWZ_base, inverse_sigma2_e, out=random_precision)
-        _add_random_precision(random_precision, structures, sigma_list)
-
-        XtWy = XtWy_base * inverse_sigma2_e
-        ZtWy = ZtWy_base * inverse_sigma2_e
-
-        RHS = np.concatenate([XtWy, ZtWy])
-
-        try:
-            solution = linalg.solve(LHS, RHS, assume_a="pos")
-        except linalg.LinAlgError:
-            solution = linalg.lstsq(LHS, RHS)[0]
-
-        beta_new = solution[:p]
-        u_hat = solution[p:]
-
-        try:
-            XtWX_inv_XtWZ = linalg.solve(XtWX, XtWZ, assume_a="pos")
-            schur_complement = random_precision - XtWZ.T @ XtWX_inv_XtWZ
-            Var_u = _safe_inverse(schur_complement)
-        except linalg.LinAlgError:
-            Var_u = _safe_inverse(random_precision)
-
-        sigma_list_new: list[NDArray[np.floating]] = []
-        for k, struct in enumerate(structures):
-            block_size = struct.n_levels * struct.n_terms
-            start = col_offsets[k]
-            end = start + block_size
-            u_block = u_hat[start:end]
-            Var_u_block = Var_u[start:end, start:end]
-            sigma_k_new = _m_step_update_sigma(struct, u_block, Var_u_block, variance_floor)
-            sigma_list_new.append(sigma_k_new)
-
-        residuals = y_adj - X @ beta_new - Z @ u_hat
-        wrss = float(np.sum(weights * residuals**2))
-        # trace(A @ B) = sum_ij A_ij B_ji, without a cubic matrix product.
-        uncertainty_term = float(np.einsum("ij,ji->", ZtWZ_base, Var_u))
-        sigma2_e_new = max((wrss + uncertainty_term) / n, variance_floor)
-
+    for iteration in range(max_iter + 1):
+        # H = D'D + diag(0, sigma^2 G^-1) for D = [Q sqrt(W)Z]. Its factor gives
+        # the joint mode, posterior covariance sigma^2 H^-1 and REML determinant.
+        precision_values, logdet_relative = _relative_precision(structures, covariances, sigma2)
+        prior = sparse.csc_matrix((precision_values, (block_rows, block_cols)), shape=gram.shape)
+        factor = shared_utils._RandomEffectFactor(gram + prior, pattern=pattern)
+        mode = factor.solve(rhs)
+        alpha, u = mode[:p], mode[p:]
+        residual = weighted_residual - Q @ alpha - Zw @ u
+        wrss = residual @ residual
+        penalty = mode @ (prior @ mode)
         loglik = -0.5 * (
-            (n - p) * np.log(2 * np.pi * sigma2_e_new)
-            + wrss / sigma2_e_new
-            + _positive_definite_logdet(random_precision)
-            + _positive_definite_logdet(XtWX)
+            (n - p) * np.log(2 * np.pi * sigma2)
+            + factor.logdet
+            + logdet_relative
+            + logdet_fixed
             - logdet_weights
+            + (wrss + penalty) / sigma2
         )
-
         if not np.isfinite(loglik):
+            raise ValueError("EM-REML produced a nonfinite restricted log likelihood")
+        if iteration:
+            change = abs(loglik - prev_loglik) / max(abs(prev_loglik), variance_floor)
             if verbose >= 1:
-                print(f"Warning: Non-finite log-likelihood at iteration {iteration + 1}")
-            break
-
-        loglik_change = abs(loglik - prev_loglik)
-        rel_change = (
-            loglik_change / (abs(prev_loglik) + variance_floor) if prev_loglik != -np.inf else 1.0
-        )
-
-        if verbose >= 1:
-            print(
-                f"EM iter {iteration + 1}: loglik={loglik:.4f}, "
-                f"sigma2_e={sigma2_e_new:.4f}, "
-                f"rel_change={rel_change:.6f}"
-            )
-
-        beta = beta_new
-        sigma2_e = sigma2_e_new
-        sigma_list = sigma_list_new
+                print(
+                    f"EM iter {iteration}: loglik={loglik:.4f}, "
+                    f"sigma2_e={sigma2:.4f}, rel_change={change:.6f}"
+                )
+            converged = iteration >= min_iter_converge and bool(change < tol)
+            if converged or iteration == max_iter:
+                break
         prev_loglik = loglik
 
-        if rel_change < tol and iteration >= min_iter_converge:
-            converged = True
-            if verbose >= 1:
-                print(f"Converged after {iteration + 1} iterations")
-            break
+        entries = factor.inverse_entries(block_rows, block_cols)
+        # tr(D'D H^-1) = p + q - tr(diag(0, sigma^2 G^-1) H^-1).
+        # This includes uncertainty in beta and its covariance with u.
+        uncertainty = sigma2 * (p + q - precision_values @ entries)
+        sigma2_new = max(float((wrss + uncertainty) / n), variance_floor)
+        offset = 0
+        start = 0
+        for k, struct in enumerate(structures):
+            levels, terms = struct.n_levels, struct.n_terms
+            stop = start + levels * terms
+            end = offset + levels * terms**2
+            U = u[start:stop].reshape(levels, terms)
+            posterior_sum = entries[offset:end].reshape(levels, terms, terms).sum(axis=0)
+            moment = (U.T @ U + sigma2 * posterior_sum) / levels
+            covariances[k] = _m_step_covariance(struct, moment, variance_floor)
+            start, offset = stop, end
+        sigma2 = sigma2_new
 
-    sigma = np.sqrt(sigma2_e)
-    theta = _sigma_to_theta(structures, sigma_list, sigma2_e)
-
+    theta = _sigma_to_theta(structures, covariances, sigma2)
     return EMResult(
-        theta=theta,
-        beta=beta,
-        sigma=sigma,
-        converged=converged,
-        n_iter=iteration + 1,
-        final_loglik=prev_loglik,
+        theta, coefficients(alpha_ols + alpha), np.sqrt(sigma2), converged, iteration, float(loglik)
     )

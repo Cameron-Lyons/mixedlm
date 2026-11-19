@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Binomial zero-count diagnostics and response simulations distinguish prior weights from trial counts. Numeric proportion responses with trial weights are simulated on their fitted proportion scale.
+- Residual diagnostic plots use the observations included in the fit. Grouped residual boxplots retain zero-slope observations and read fitted group membership without building a dense random-effects design.
+- EM-REML now reports the restricted likelihood and fixed effects at the returned variance estimates. Its residual variance update accounts for fixed and random effect uncertainty, including their covariance. This can change standalone estimates and EM starting values.
+- EM initialization supports AR(1) covariance, honors `em_init` in modular fits, and uses sparse joint factorizations for large models. Native sparse factors can extract within-group posterior covariance entries without solving separately for each group.
+- Nonlinear fits now optimize fixed effects and covariance parameters together in the marginal likelihood and include the Gaussian precision-weight normalization. Weighted log likelihoods and information criteria can change.
+- Formula expansion respects the precedence of `:` over `*` and recognizes repeated or reordered interactions. Use `I(x**2)` for a raw square. Large factorial formulas expand faster, and single-term random-effect designs use less temporary memory.
+- LMM and GLMM formula updates preserve fitted contrasts and structured covariances. GLMM refits retain the fitted controls, and optimizer and term-deletion comparisons reuse the fitted rows. Type III ANOVA jointly tests the surviving coefficients of each formula term, including categorical interactions.
+- `ranef(model, condVar=True)` exposes conditional variances for linear and generalized mixed models. Binomial family validation accepts log and cauchit links, and formula utilities preserve grouped responses and handle nested offset expressions.
 - Python 3.11 or later and pandas 1.5 or later are now required. The plotting extra requires Pillow 13.0 or later to include security fixes unavailable on Python 3.10.
 - Cross-validation refit and prediction errors retain their original exception and include the fold number and training/test row counts in traceback notes, including errors raised in worker processes.
 

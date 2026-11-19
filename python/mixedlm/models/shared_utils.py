@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import warnings
 from functools import cached_property
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
@@ -15,6 +16,10 @@ from mixedlm.utils.dataframe import (
     get_columns,
 )
 
+if TYPE_CHECKING:
+    from mixedlm.matrices.design import ModelMatrices
+    from mixedlm.models.control import GlmerControl, LmerControl
+
 try:
     from mixedlm._rust import SparseCholeskySymbolic
 
@@ -26,6 +31,31 @@ _MAX_QUADRATIC_FORM_ELEMENTS = 1_000_000
 # Random-effect precisions of at least this order use a sparse Cholesky factor
 # (native with a fill-reducing ordering, else SuperLU); smaller ones are dense.
 _SPARSE_PROJECTION_MIN_RANDOM = 256
+
+
+def resolve_em_start(
+    start: NDArray[np.floating] | None,
+    matrices: ModelMatrices,
+    control: LmerControl | GlmerControl | None,
+    verbose: int,
+) -> NDArray[np.floating] | None:
+    """Apply optional EM initialization when the caller omitted a start."""
+    if start is not None or control is None or not control.em_init:
+        return start
+    from mixedlm.estimation.em_reml import em_reml_simple
+
+    try:
+        return em_reml_simple(
+            matrices, max_iter=control.em_maxiter, verbose=max(verbose - 1, 0)
+        ).theta
+    except (NotImplementedError, RuntimeError, ValueError, np.linalg.LinAlgError) as exc:
+        warnings.warn(
+            f"EM initialization failed ({type(exc).__name__}: {exc}). "
+            "Falling back to optimizer defaults.",
+            RuntimeWarning,
+            stacklevel=3,
+        )
+        return None
 
 
 def _lower_triangle(matrix: sparse.spmatrix) -> sparse.csc_matrix:
@@ -153,14 +183,24 @@ class _RandomEffectFactor:
     ) -> NDArray[np.float64]:
         """Return the paired entries C^-1[rows, columns].
 
-        Sparse factors solve for the requested unit columns in bounded batches.
+        Native factors use the selected inverse for bulk requests on their fill pattern.
+        Other requests solve for the needed unit columns in bounded batches.
         """
         if self._sparse_factor is None:
             return self._dense_inverse[rows, columns]
         q = self.precision.shape[0]
-        values = np.empty(len(rows), dtype=np.float64)
         order = np.argsort(columns, kind="stable")
         needed, first = np.unique(columns[order], return_index=True)
+        # For a few columns, direct solves are cheaper than computing the
+        # inverse on the entire fill pattern.
+        if len(needed) * 4 >= q and not isinstance(self._sparse_factor, sparse_linalg.SuperLU):
+            entries = self._sparse_factor._inverse_subset(
+                np.ascontiguousarray(rows, dtype=np.int64),
+                np.ascontiguousarray(columns, dtype=np.int64),
+            )
+            if entries is not None:
+                return entries
+        values = np.empty(len(rows), dtype=np.float64)
         first = np.append(first, len(order))
         batch = max(1, _MAX_QUADRATIC_FORM_ELEMENTS // q)
         for start in range(0, len(needed), batch):

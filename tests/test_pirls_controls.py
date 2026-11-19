@@ -1,5 +1,6 @@
 """Fitting controls govern the inner solve through every likelihood route."""
 
+import warnings
 from functools import partial
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -288,7 +289,8 @@ def test_objective_reconstruction_and_model_update_retain_inner_controls(backend
     ):
         data, result = fitted_with_controls()
         assert result.as_function()(result.theta) == result.deviance
-        with pytest.warns(UserWarning, match="inner PIRLS solver"):
+        with warnings.catch_warnings():
+            warnings.filterwarnings("error", message="Model failed to converge")
             updated = result.update(data=data, start=result.theta)
         assert updated.pirls_maxiter == 1
         assert updated.pirls_tol == 1e-12
@@ -318,7 +320,8 @@ def test_cross_validation_inherits_controls_and_accepts_explicit_override(backen
         patch.object(cross_validation, "process_pool", ThreadPoolExecutor),
     ):
         data, result = fitted_with_controls()
-        with pytest.warns(UserWarning, match="inner PIRLS solver"):
+        with warnings.catch_warnings():
+            warnings.filterwarnings("error", message="Model failed to converge")
             limited = cross_validate(result, data, cv=2, random_state=23, n_jobs=n_jobs)
         assert not limited.all_converged
         recovered = cross_validate(
