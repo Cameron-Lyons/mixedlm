@@ -370,7 +370,13 @@ def _get_term_groups(model: LmerResult) -> dict[str, list[int]]:
         empty = pd.DataFrame(columns=sorted(predictors), dtype=np.float64)
         recovered: list[str] = []
         _, names = build_fixed_matrix(
-            model.formula, empty, matrices.contrasts, levels, term_labels=recovered
+            model.formula,
+            empty,
+            matrices.contrasts,
+            levels,
+            term_labels=recovered,
+            transform_state=getattr(matrices, "transform_state", None),
+            coding=matrices.factor_coding,
         )
         indices = matrices.fixed_column_indices
         if indices is None and names != matrices.fixed_names:

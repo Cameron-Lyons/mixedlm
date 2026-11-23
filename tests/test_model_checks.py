@@ -68,11 +68,12 @@ def test_rank_deficient_fixed_effects_keep_model_metadata_consistent():
 def test_rank_deficiency_drop_supports_more_columns_than_rows():
     matrices = SimpleNamespace(X=np.array([[1.0, 0.0, 1.0], [0.0, 1.0, 1.0]]))
 
-    with pytest.warns(UserWarning, match=r"Dropping columns: \[1\]"):
+    # As R's qr(): the later of two aliased columns is the one dropped.
+    with pytest.warns(UserWarning, match=r"Dropping columns: \[2\]"):
         reduced, dropped = check_rankX(matrices, "warning+drop.cols")
 
-    assert dropped == [1]
-    np.testing.assert_array_equal(reduced, matrices.X[:, [0, 2]])
+    assert dropped == [2]
+    np.testing.assert_array_equal(reduced, matrices.X[:, [0, 1]])
 
 
 def test_single_level_grouping_stops_by_default_and_reduces_to_ols_when_ignored():
@@ -127,3 +128,56 @@ def test_predictors_on_very_different_scales_warn():
                 check_scaleX="warning", check_nlev_gtreq_5="ignore", check_singular=False
             ),
         )
+
+
+@pytest.mark.parametrize(
+    ("formula", "kept"),
+    [
+        ("y ~ c + (1 | g)", ["(Intercept)"]),
+        ("y ~ x + x2 + (1 | g)", ["(Intercept)", "x"]),
+        ("y ~ x2 + x + (1 | g)", ["(Intercept)", "x2"]),
+        ("y ~ c + x + (1 | g)", ["(Intercept)", "x"]),
+    ],
+)
+def test_rank_deficient_designs_drop_the_later_columns_as_lme4_does(formula, kept):
+    rng = np.random.default_rng(0)
+    x = rng.normal(size=60)
+    data = pd.DataFrame(
+        {
+            "y": rng.normal(size=60),
+            "c": np.full(60, np.log(10)),
+            "x": x,
+            "x2": 2 * x,
+            "g": np.repeat(np.arange(10), 6).astype(str),
+        }
+    )
+    control = LmerControl(check_rankX="silent.drop.cols", check_singular=False)
+    fit = lmer(formula, data, control=control)
+    assert list(fit.fixef()) == kept
+
+
+def test_rank_checks_use_r_tolerance_and_order():
+    from mixedlm.models.checks import kept_columns
+
+    rng = np.random.default_rng(1)
+    X = rng.normal(size=(50, 3))
+    near = X[:, 2] + 1e-9 * rng.normal(size=50)
+    far = X[:, 2] + 1e-5 * rng.normal(size=50)
+    np.testing.assert_array_equal(kept_columns(np.column_stack([X, near])), [0, 1, 2])
+    np.testing.assert_array_equal(kept_columns(np.column_stack([X, far])), [0, 1, 2, 3])
+    np.testing.assert_array_equal(kept_columns(np.column_stack([X[:, :1] * 0, X])), [1, 2, 3])
+    np.testing.assert_array_equal(kept_columns(np.ones((2, 4))), [0])
+
+
+@pytest.mark.parametrize(
+    ("action", "expected"),
+    [("warn+drop.cols", UserWarning), ("stop.deficient", ModelCheckError)],
+)
+def test_rank_checks_accept_lme4_spellings(action, expected):
+    matrices = SimpleNamespace(X=np.array([[1.0, 2.0], [1.0, 2.0], [1.0, 2.0]]))
+    if expected is UserWarning:
+        with pytest.warns(UserWarning, match=r"Dropping columns: \[1\]"):
+            assert check_rankX(matrices, action)[1] == [1]
+    else:
+        with pytest.raises(ModelCheckError, match="rank deficient"):
+            check_rankX(matrices, action)

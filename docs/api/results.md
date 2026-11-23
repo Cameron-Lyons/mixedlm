@@ -34,6 +34,16 @@ For linear mixed models, `ddf_method` accepts `"Satterthwaite"` (the default),
 `"Kenward-Roger"`, or `"normal"`. Generalized models use Wald z tests, while nonlinear
 models use residual degrees of freedom.
 
+`conf_method` chooses the confidence limits, as in broom.mixed. The default
+`"Wald"` gives fixed effects t-based limits with `ddf_method` degrees of freedom
+and leaves `ran_pars` limits missing. `"profile"` and `"boot"` take both fixed and
+`ran_pars` limits from [confint](#confint), with `n_boot` and `seed` for the
+bootstrap:
+
+```python
+intervals = result.tidy(["fixed", "ran_pars"], conf_int=True, conf_method="profile")
+```
+
 Fixed-effect rows follow the fitted coefficient order, including repeated `term`
 labels. For example, a generated categorical contrast and a quoted numeric variable
 can both be named `a.1`. Use row positions to distinguish these coefficients;
@@ -306,8 +316,10 @@ new_groups = result.predict(
 
 #### simulate
 
-```python
-result.simulate(nsim=1, seed=None, use_re=True, re_form=None)
+```py
+result.simulate(
+    nsim=1, seed=None, use_re=True, re_form=None, newdata=None, newparams=None, weights=None
+)
 ```
 
 Simulate responses from the fitted model, including its offsets and random-effect
@@ -321,9 +333,39 @@ These weights do not rescale the random effects.
 - `seed`: Integer seed, NumPy `RandomState` or `Generator`, or `None` for a fresh stream.
 - `use_re`: Include newly sampled random effects (default `True`).
 - `re_form`: `"~0"` or `"NA"` excludes random effects.
+- `newdata` (keyword only, like `newparams` and `weights`): Rows to simulate instead of the fitted observations. Predictors use
+  the fitted coding, including transforms such as `scale(x)` and the formula's
+  `offset()` terms. Grouping levels need not appear in the fitted data, because
+  random effects are drawn afresh. Binomial count responses read their trials
+  from `newdata`.
+- `newparams`: A mapping that replaces fitted parameters, as in lme4: `"beta"`
+  (an array, or a mapping that names every coefficient), `"theta"`, and for
+  linear models `"sigma"`.
+- `weights`: Prior weights for `newdata` rows: a scalar, an array, or a column
+  name. Defaults to one.
 
 **Returns:** A vector of shape `(n_obs,)` for one simulation, or an array of shape
-`(n_obs, nsim)` for multiple simulations.
+`(n_obs, nsim)` for multiple simulations, with one row for each simulated observation.
+
+Simulating a planned design with assumed effects is a common first step of a
+power analysis:
+
+```python
+import pandas as pd
+
+sleep = mlm.load_sleepstudy()
+pilot = mlm.lmer("Reaction ~ Days + (Days | Subject)", sleep)
+design = pd.DataFrame(
+    {
+        "Days": list(range(10)) * 30,
+        "Subject": [f"s{i}" for i in range(30) for _ in range(10)],
+    }
+)
+responses = pilot.simulate(
+    nsim=100, seed=1, newdata=design, newparams={"beta": [250.0, 8.0]}
+)
+responses.shape  # (300, 100)
+```
 
 For linear and generalized models, simulation leaves NumPy's global random state
 unchanged. Pass an integer seed for repeatable calls, or reuse a stream to continue
@@ -352,18 +394,55 @@ Grouped-binomial GLMM simulations return success counts for a `successes / trial
 
 #### confint
 
-```python
-result.confint(method="Wald", level=0.95)
+```py
+result.confint(parm=None, level=0.95, method="Wald", n_boot=1000, seed=None)
 ```
 
-Compute confidence intervals.
+Compute confidence intervals for fixed effects and variance parameters.
 
 **Parameters:**
 
-- `method`: CI method. Options: `"Wald"`, `"profile"`, `"boot"`.
+- `parm`: Parameter names, or every fixed effect by default. As in lme4,
+  `".sig01"`, `".sig02"`, ... name the random-effect standard deviations and
+  correlations and `".sigma"` the residual standard deviation of a linear model.
+  lme4's descriptive labels, such as `"sd_Days|Subject"`,
+  `"cor_Days.(Intercept)|Subject"` and `"sigma"`, also work. `"theta_"` selects
+  all of them and `"beta_"` every fixed effect.
+- `method`: CI method. Options: `"Wald"`, `"profile"`, `"boot"`. Wald intervals
+  for variance parameters are NaN, as in lme4.
 - `level`: Confidence level.
+- `n_boot`, `seed`: Bootstrap replicates and seed for `method="boot"`.
 
-**Returns:** Dictionary mapping parameter names to `(lower, upper)` tuples.
+**Returns:** Dictionary mapping parameter names to `(lower, upper)` tuples, with
+variance parameters first.
+
+The `.sig` numbering follows lme4 2: each covariance block lists its standard
+deviations in term order and then its correlations, and blocks are ordered by
+decreasing number of grouping levels unless the formula already lists them that
+way. For `(Days | Subject)`, `.sig01` is the intercept SD, `.sig02` the `Days` SD
+and `.sig03` their correlation. `result.variance_parameters()` gives each
+parameter's name, descriptive `label`, kind, group and terms.
+
+Profile intervals for variance parameters fix one parameter and re-optimize
+the others and the fixed effects. Linear models use the ML deviance, as lme4
+does for REML fits too, and generalized models use the integrated likelihood
+with the fitted quadrature. The other parameters are optimized over valid
+covariance factors, so correlations stay consistent in blocks of three or more
+terms. Endpoints are found by root finding rather than lme4's spline
+interpolation; they agree with lme4 to about 1e-3 or better, except where lme4's
+profile itself is approximate. An SD whose likelihood-ratio limit lies below
+zero reports a lower bound of 0, and a correlation whose limit lies beyond ±1
+reports the bound. Bootstrap intervals are percentiles of the replicates'
+standard deviations and correlations.
+
+```python
+sleep = mlm.load_sleepstudy()
+fit = mlm.lmer("Reaction ~ Days + (Days | Subject)", sleep)
+fit.confint(parm=["theta_", "beta_"], method="profile")
+# lme4's confint(fit): .sig01 (14.38, 37.72), .sig02 (3.80, 8.75),
+# .sig03 (-0.48, 0.68), .sigma (22.90, 28.86), (Intercept) (237.68, 265.13),
+# Days (7.36, 13.58)
+```
 
 #### logLik
 
@@ -393,8 +472,10 @@ Compute information criteria.
 result.profile(which=None, n_points=20, level=0.95, n_jobs=1)
 ```
 
-Compute fixed-effect likelihood profiles; `which=None` profiles every fixed
-coefficient. LMM profiles re-optimize covariance
+Compute likelihood profiles; `which=None` profiles every fixed coefficient.
+`which` also accepts the variance-parameter names and selectors of
+[confint](#confint), so `result.profile(which="theta_")` profiles every
+standard deviation, correlation and the residual scale. LMM profiles re-optimize covariance
 parameters, other fixed coefficients, and residual scale using ML, including for
 REML inputs. The returned center records the ML estimate. GLMM profiles re-optimize nuisance
 fixed coefficients and covariance parameters using the fitted quadrature and
@@ -491,6 +572,12 @@ The distribution family used.
 ## NlmerResult
 
 The result object returned by `nlmer()`. Has similar methods to LmerResult.
+
+`vcov()` returns the conditional Gauss–Newton covariance of the fixed effects.
+It evaluates the model gradient at each group's fitted parameters and uses the
+observation precision weights. For a rank-deficient gradient, the pseudoinverse
+gives covariance on the identifiable parameter combinations. Wald intervals
+and leverage use this same linearization.
 
 ### predict
 

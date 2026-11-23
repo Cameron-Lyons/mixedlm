@@ -259,4 +259,5 @@ class TestDrop1EdgeCases:
         model = lmer("y ~ x1 * x2 + x3 + (1|group)", data)
         result = drop1_lmer(model, data)
 
-        assert result.terms == ["x1:x2", "x3"]
+        # Terms are listed in R's order, by degree.
+        assert result.terms == ["x3", "x1:x2"]

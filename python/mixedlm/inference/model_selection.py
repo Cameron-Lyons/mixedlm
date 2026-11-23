@@ -366,17 +366,14 @@ def _comparison_data(
 
 def _comparison_trials(model: Any) -> NDArray[np.float64] | None:
     """Distinguish response distributions with identical effective fit weights."""
-    from mixedlm.families.binomial import Binomial
+    from mixedlm.families.binomial import Binomial, _binomial_trials
 
     matrices = getattr(model, "matrices", None)
     if matrices is None or not isinstance(getattr(model, "family", None), Binomial):
         return None
-    if matrices.trials is not None:
-        return np.asarray(matrices.trials, dtype=np.float64)
     y = np.asarray(matrices.y, dtype=np.float64)
-    if np.all((y == 0.0) | (y == 1.0)):
-        return np.ones_like(y)
-    return np.asarray(matrices.weights, dtype=np.float64)
+    trials = _binomial_trials(y, matrices.weights, matrices.response_trials)
+    return np.ones_like(y) if trials is None else trials
 
 
 def _fixed_design(

@@ -439,6 +439,7 @@ def extend(
         model.model_frame() if data is None else data,
         response=model.formula.response,
         response_levels=model.matrices.response_levels,
+        category_levels=model.matrices.category_levels,
     )
     groups = list(model.ngrps())
     if along == "within":
@@ -454,16 +455,24 @@ def extend(
 
 
 def _power_frame(
-    data: Any, *, response: str | None = None, response_levels: tuple[Any, Any] | None = None
+    data: Any,
+    *,
+    response: str | None = None,
+    response_levels: tuple[Any, Any] | None = None,
+    category_levels: dict[str, list[Any]] | None = None,
 ) -> pd.DataFrame:
-    """Convert a stored model frame without requiring a Polars Arrow dependency."""
+    """Convert a stored model frame without requiring a Polars Arrow dependency.
+
+    Polars categoricals take the fitted levels, since their category pool may
+    hold labels of unrelated columns.
+    """
     import pandas as pd
 
     from mixedlm.utils.dataframe import (
         ensure_dataframe,
-        get_categories,
         get_column_numpy,
         get_columns,
+        get_observed_categories,
     )
 
     frame = ensure_dataframe(data)
@@ -473,11 +482,14 @@ def _power_frame(
     for name in converted.columns:
         dtype_name = str(frame[name].dtype)
         if "Categorical" in dtype_name or "Enum" in dtype_name:
-            levels = (
-                list(response_levels)
-                if name == response and response_levels is not None
-                else get_categories(frame, name)
-            )
+            if name == response and response_levels is not None:
+                levels = list(response_levels)
+            else:
+                # Keep labels the fit did not see, so they are not silently missing.
+                fitted = list((category_levels or {}).get(name, []))
+                levels = fitted + [
+                    level for level in get_observed_categories(frame, name) if level not in fitted
+                ]
             converted[name] = pd.Categorical(converted[name], categories=levels)
     return converted
 
@@ -542,6 +554,7 @@ def _resize_power_model(
             model.matrices.frame,
             response=model.formula.response,
             response_levels=model.matrices.response_levels,
+            category_levels=model.matrices.category_levels,
         ),
         group,
         n,
@@ -550,7 +563,12 @@ def _resize_power_model(
     )
     source = model.matrices
     Z, structures = build_random_matrix(
-        model.formula, frame, contrasts=source.contrasts, category_levels=source.category_levels
+        model.formula,
+        frame,
+        contrasts=source.contrasts,
+        category_levels=source.category_levels,
+        transform_state=source.transform_state,
+        coding=source.factor_coding,
     )
     # Reuse fitted encodings and rank reduction, including fixed factors absent
     # from a smaller design. Only a grouping predictor needs to be re-encoded.
@@ -569,6 +587,7 @@ def _resize_power_model(
         n_random=Z.shape[1],
         weights=source.weights[rows],
         offset=source.offset[rows],
+        supplied_offset=None if source.supplied_offset is None else source.supplied_offset[rows],
         trials=None if source.trials is None else source.trials[rows],
         frame=frame,
         na_info=None,
@@ -672,7 +691,9 @@ def powerCurve(
     if values is None:
         if design_curve:
             if within:
-                frame = _power_frame(model.matrices.frame)
+                frame = _power_frame(
+                    model.matrices.frame, category_levels=model.matrices.category_levels
+                )
                 current = int(frame.groupby(group, observed=True).size().min())
                 minimum = 1
             else:

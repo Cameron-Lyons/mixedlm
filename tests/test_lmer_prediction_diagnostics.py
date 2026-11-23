@@ -530,3 +530,23 @@ class TestContrasts:
         g1_code = np.where(group1 == "A", 1.0, -1.0)
         g2_code = (group2 == "Y").astype(float)
         assert_allclose(X, np.column_stack((np.ones(240), g1_code, g2_code, g1_code * g2_code)))
+
+
+def test_working_and_deviance_residuals_follow_lme4(sleepstudy_lmm, cbpp_glmm):
+    response = sleepstudy_lmm.residuals(type="response")
+    assert_allclose(sleepstudy_lmm.residuals(type="working"), response)
+    weights = sleepstudy_lmm.weights()
+    assert_allclose(sleepstudy_lmm.residuals(type="deviance"), np.sqrt(weights) * response)
+    assert_allclose(
+        sleepstudy_lmm.residuals(type="pearson"),
+        sleepstudy_lmm.residuals(type="deviance") / sleepstudy_lmm.sigma,
+    )
+
+    mu = cbpp_glmm.fitted(type="response")
+    # Logit link: deta/dmu = 1 / (mu (1 - mu)).
+    assert_allclose(
+        cbpp_glmm.residuals(type="working"),
+        (cbpp_glmm.matrices.y - mu) / (mu * (1.0 - mu)),
+    )
+    with pytest.raises(ValueError, match="Unknown residual type"):
+        cbpp_glmm.residuals(type="partial")

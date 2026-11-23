@@ -70,7 +70,7 @@ def contr_sum(n: int) -> NDArray[np.floating]:
     return contrasts
 
 
-def contr_helmert(n: int) -> NDArray[np.floating]:
+def contr_helmert(n: int, *, scale: bool = True) -> NDArray[np.floating]:
     """Helmert contrasts.
 
     Compares each level to the mean of subsequent levels.
@@ -81,6 +81,10 @@ def contr_helmert(n: int) -> NDArray[np.floating]:
     ----------
     n : int
         Number of levels.
+    scale : bool, default True
+        Scale each column to unit length. With ``scale=False`` the columns are
+        R's ``contr.helmert()``, which ``C(x, helmert)`` in a formula and the
+        ``"contr.helmert"`` contrast name use.
 
     Returns
     -------
@@ -95,8 +99,8 @@ def contr_helmert(n: int) -> NDArray[np.floating]:
         contrasts[: j + 1, j] = -1
         contrasts[j + 1, j] = j + 1
 
-    for j in range(n - 1):
-        contrasts[:, j] = contrasts[:, j] / np.sqrt(np.sum(contrasts[:, j] ** 2))
+    if scale:
+        contrasts /= np.sqrt(np.sum(contrasts**2, axis=0))
 
     return contrasts
 
@@ -166,8 +170,10 @@ def get_contrast_matrix(
         Type of contrasts to use. Can be:
         - "treatment" (default): Treatment/dummy contrasts
         - "sum": Sum/deviation contrasts
-        - "helmert": Helmert contrasts
+        - "helmert": Helmert contrasts with unit-length columns
         - "poly": Polynomial contrasts for ordered factors
+        - R's names "contr.treatment", "contr.sum", "contr.helmert" and
+          "contr.poly" give R's matrices; "contr.helmert" is not scaled
         - A custom contrast matrix (NDArray of shape (n_levels, n_levels-1))
     base : int, default 0
         Reference level for treatment contrasts (0-indexed).
@@ -192,6 +198,9 @@ def get_contrast_matrix(
         contrast_type = contrast_type.value
 
     contrast_type = contrast_type.lower()
+    if contrast_type == "contr.helmert":
+        return contr_helmert(n_levels, scale=False)
+    contrast_type = contrast_type.removeprefix("contr.")
 
     if contrast_type == "treatment":
         return contr_treatment(n_levels, base=base)

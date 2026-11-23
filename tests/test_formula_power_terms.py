@@ -113,13 +113,24 @@ def test_drop1_marginality_distinguishes_power_factors() -> None:
 
 
 @pytest.mark.parametrize(
-    "formula",
+    ("formula", "transform"),
     [
-        "y ~ I(x)",
-        "y ~ I(x**-2)",
-        "y ~ I(x**2.5)",
+        ("y ~ I(x)", lambda x: x),
+        ("y ~ I(x**-2)", lambda x: x**-2.0),
+        ("y ~ I(x**2.5)", lambda x: np.abs(x) ** 2.5),
     ],
 )
+def test_non_integer_powers_are_computed_predictors(formula, transform) -> None:
+    # Only nonnegative integer powers keep the historical PowerTerm representation.
+    formula = formula.replace("x", "abs(x)") if "2.5" in formula else formula
+    data = pd.DataFrame({"y": [1.0, 2.0, 4.0], "x": [-2.0, 1.0, 3.0]})
+    parsed = parse_formula(formula)
+    assert not any(isinstance(term, PowerTerm) for term in parsed.fixed.terms)
+    matrices = build_model_matrices(parsed, data)
+    np.testing.assert_allclose(matrices.X[:, 1], transform(data["x"].to_numpy()))
+
+
+@pytest.mark.parametrize("formula", ["y ~ I(x**)", "y ~ I(x,)", "y ~ I(x ** * 2)"])
 def test_invalid_power_terms_raise_clear_parse_errors(formula: str) -> None:
     with pytest.raises(ValueError, match="Expected"):
         parse_formula(formula)

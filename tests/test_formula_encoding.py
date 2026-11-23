@@ -73,20 +73,24 @@ def _expected(contrast, intercept):
         names = [f"a.{level}" for level in LEVELS["a"]]
     columns.extend(b.T)
     names.extend(b_names)
-    # Spell out the formula's term order; the final factor varies fastest.
+    # As in R, terms are ordered by degree and the first factor of an interaction
+    # varies fastest; b has one column here, so a:b keeps the order of a.
+    columns.append(x2)
+    names.append("I(x**2)")
     for i, a_name in enumerate(a_names):
         for j, b_name in enumerate(b_names):
             columns.append(a[:, i] * b[:, j])
             names.append(f"{a_name}:{b_name}")
-    columns.append(x2)
-    names.append("I(x**2)")
     for i, a_name in enumerate(a_names):
         columns.append(a[:, i] * x2)
         names.append(f"{a_name}:I(x**2)")
-    for i, a_name in enumerate(a_names):
+    # As in R, a uses indicators in a:b:I(x**2) because b:I(x**2) is absent,
+    # while b keeps contrasts because a:I(x**2) is present.
+    a_full = encode(a_values, LEVELS["a"], np.eye(4))
+    for i, level in enumerate(LEVELS["a"]):
         for j, b_name in enumerate(b_names):
-            columns.append(a[:, i] * b[:, j] * x2)
-            names.append(f"{a_name}:{b_name}:I(x**2)")
+            columns.append(a_full[:, i] * b[:, j] * x2)
+            names.append(f"a.{level}:{b_name}:I(x**2)")
     return np.column_stack(columns), names
 
 
@@ -142,10 +146,11 @@ def test_numeric_powers_preserve_order_empty_rows_and_input(n, intercept):
     matrix, names = design.build_fixed_matrix(
         parse_formula(f"y ~ {prefix}x*z + I(x**2)*I(z**3) + I(x**0)"), data
     )
+    # As in R, terms are ordered by degree.
     expected = np.column_stack(
-        [x, x + 0.5, x * (x + 0.5), x**2, (x + 0.5) ** 3, x**2 * (x + 0.5) ** 3, np.ones(n)]
+        [x, x + 0.5, x**2, (x + 0.5) ** 3, np.ones(n), x * (x + 0.5), x**2 * (x + 0.5) ** 3]
     )
-    expected_names = ["x", "z", "x:z", "I(x**2)", "I(z**3)", "I(x**2):I(z**3)", "I(x**0)"]
+    expected_names = ["x", "z", "I(x**2)", "I(z**3)", "I(x**0)", "x:z", "I(x**2):I(z**3)"]
     if intercept:
         expected = np.column_stack([np.ones(n), expected])
         expected_names.insert(0, "(Intercept)")
@@ -224,12 +229,48 @@ def test_empty_categorical_prediction_frame_preserves_fitted_columns(backend):
 
 
 def test_interaction_before_main_effect_keeps_reduced_and_full_rank_encodings_distinct():
-    data = pd.DataFrame({"a": ["a", "b", "c"], "x": [1.0, 2.0, 3.0]})
-    matrix, names = design.build_fixed_matrix(parse_formula("y ~ 0 + a:x + a + a:I(x**2)"), data)
-    assert names == ["a.1:x", "a.2:x", "a.a", "a.b", "a.c", "a.1:I(x**2)", "a.2:I(x**2)"]
+    # As in R, a uses contrasts in a:x, whose x margin is present, and an
+    # indicator per level in a:z, whose z margin is absent.
+    data = pd.DataFrame({"a": ["a", "b", "c"], "x": [1.0, 2.0, 3.0], "z": [4.0, 5.0, 6.0]})
+    matrix, names = design.build_fixed_matrix(parse_formula("y ~ a:z + a + x + a:x"), data)
+    assert names == [
+        "(Intercept)",
+        "a.1",
+        "a.2",
+        "x",
+        "a.a:z",
+        "a.b:z",
+        "a.c:z",
+        "a.1:x",
+        "a.2:x",
+    ]
     np.testing.assert_array_equal(
-        matrix, [[0, 0, 1, 0, 0, 0, 0], [2, 0, 0, 1, 0, 4, 0], [0, 3, 0, 0, 1, 0, 9]]
+        matrix,
+        [[1, 0, 0, 1, 4, 0, 0, 0, 0], [1, 1, 0, 2, 0, 5, 0, 2, 0], [1, 0, 1, 3, 0, 0, 6, 0, 3]],
     )
+
+
+@pytest.mark.parametrize(
+    ("formula", "expected"),
+    [
+        # Each factor uses contrasts when the term without it is in an earlier term.
+        ("y ~ a + a:x", ["(Intercept)", "a.1", "a.2", "a.a:x", "a.b:x", "a.c:x"]),
+        ("y ~ a/x", ["(Intercept)", "a.1", "a.2", "a.a:x", "a.b:x", "a.c:x"]),
+        ("y ~ a*x", ["(Intercept)", "a.1", "a.2", "x", "a.1:x", "a.2:x"]),
+        ("y ~ 0 + a + b", ["a.a", "a.b", "a.c", "b.1"]),
+        ("y ~ 0 + x + a", ["x", "a.a", "a.b", "a.c"]),
+        # As R's terms() does, the interaction lists its factors in order of first
+        # appearance, b:a, and its first factor varies fastest.
+        ("y ~ b + a:b", ["(Intercept)", "b.1", "b.u:a.1", "b.v:a.1", "b.u:a.2", "b.v:a.2"]),
+        ("y ~ a + b + b:a", ["(Intercept)", "a.1", "a.2", "b.1", "a.1:b.1", "a.2:b.1"]),
+    ],
+)
+def test_factor_coding_follows_r_marginality(formula, expected):
+    data = pd.DataFrame(
+        {"a": ["a", "b", "c", "a"], "b": ["u", "v", "u", "v"], "x": [1.0, 2.0, 3.0, 4.0]}
+    )
+    _, names = design.build_fixed_matrix(parse_formula(formula), data)
+    assert names == expected
 
 
 def test_numeric_columns_use_fitted_categorical_levels():
@@ -296,15 +337,208 @@ def test_deep_interaction_products_and_empty_factor_positions(empty_factor):
     levels = np.array(list(product(range(3), repeat=4)))
     data = pd.DataFrame({name: pd.Categorical(levels[:, j]) for j, name in enumerate("abcd")})
     contrasts = {} if empty_factor is None else {empty_factor: np.empty((3, 0))}
-    matrix, names = design.build_fixed_matrix(parse_formula("y ~ a:b:c:d"), data, contrasts)
+    # Every margin is present, so every factor in a:b:c:d uses its contrasts.
+    matrix, names = design.build_fixed_matrix(
+        parse_formula("y ~ (a + b + c + d)^4"), data, contrasts
+    )
     if empty_factor is not None:
-        np.testing.assert_array_equal(matrix, np.ones((81, 1)))
-        assert names == ["(Intercept)"]
+        # Terms with the empty factor have no columns: the rest is (3 factors)^3.
+        assert matrix.shape == (81, 27)
+        assert all(f"{empty_factor}." not in name for name in names)
         return
-    expected = np.zeros((81, 17))
-    expected[:, 0] = 1
-    for j, combination in enumerate(product([1, 2], repeat=4), start=1):
-        expected[:, j] = (levels == combination).all(axis=1)
-    np.testing.assert_array_equal(matrix, expected)
-    assert names[1] == "a.1:b.1:c.1:d.1"
+    assert matrix.shape == (81, 81)
+    expected = np.zeros((81, 16))
+    # As in R, the first factor varies fastest within the interaction.
+    for j, combination in enumerate(product([1, 2], repeat=4)):
+        expected[:, j] = (levels == combination[::-1]).all(axis=1)
+    np.testing.assert_array_equal(matrix[:, -16:], expected)
+    assert names[-16] == "a.1:b.1:c.1:d.1"
     assert names[-1] == "a.2:b.2:c.2:d.2"
+
+
+def _crossed_factors():
+    rng = np.random.default_rng(3)
+    n = 600
+    g = rng.integers(0, 30, n)
+    f = rng.choice(["A", "B", "C"], n)
+    k = rng.choice(["u", "v", "w"], n)
+    h = rng.choice(["p", "q"], n)
+    effects = rng.normal(size=(30, 2))
+    y = (
+        1
+        + pd.Series(f).map({"A": 0.0, "B": 0.5, "C": -0.3}).to_numpy()
+        + (k == "v") * 0.4
+        + effects[g, 0]
+        + effects[g, 1] * (h == "q")
+        + rng.normal(size=n)
+    )
+    return pd.DataFrame({"y": y, "f": f, "k": k, "h": h, "g": [f"g{i:02d}" for i in g]})
+
+
+def test_factor_interactions_vary_the_first_factor_fastest_as_in_lme4():
+    import warnings
+
+    from mixedlm import lmer
+    from mixedlm.inference.variance_profile import sdcor_from_theta
+
+    data = _crossed_factors()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        fit = lmer("y ~ 1 + (0 + h:f | g)", data)
+    names = ["h.p:f.A", "h.q:f.A", "h.p:f.B", "h.q:f.B", "h.p:f.C", "h.q:f.C"]
+    assert fit.matrices.random_structures[0].term_names == names
+    # lme4 2.1.0: .sig02 is sd_hq:fA|g, estimated as 1.27284.
+    assert fit.variance_parameters()[1].label == "sd_h.q:f.A|g"
+    sds = sdcor_from_theta(fit.theta, fit.sigma, fit.matrices.random_structures)
+    assert sds[1] == pytest.approx(1.27284, abs=1e-4)
+    interactions = list(lmer("y ~ f*k + (1 | g)", data).fixef().items())[5:]
+    # lme4 2.1.0: fixef(lmer(y ~ f*k + (1 | g), d))[6:9] is fB:kv, fC:kv, fB:kw, fC:kw
+    assert [name for name, _ in interactions] == ["f.1:k.1", "f.2:k.1", "f.1:k.2", "f.2:k.2"]
+    np.testing.assert_allclose(
+        [value for _, value in interactions], [-0.27488, 0.11560, 0.31185, 0.29198], atol=1e-5
+    )
+
+
+def test_models_saved_before_r_coding_predict_with_their_own_columns():
+    from dataclasses import replace
+
+    from mixedlm import lmer
+
+    rng = np.random.default_rng(0)
+    data = pd.DataFrame(
+        {
+            "a": rng.choice(["1", "2", "3"], 120),
+            "x": rng.normal(size=120),
+            "g": np.repeat([f"g{i}" for i in range(12)], 10),
+        }
+    )
+    data["y"] = rng.normal(size=120)
+    fit = lmer("y ~ a + a:x + (1 | g)", data)
+    assert fit.matrices.factor_coding == "R"
+    assert fit.matrices.fixed_names == ["(Intercept)", "a.1", "a.2", "a.1:x", "a.2:x", "a.3:x"]
+    X, names = design.build_fixed_matrix(fit.formula, data, coding="legacy")
+    assert names == ["(Intercept)", "a.1", "a.2", "a.1:x", "a.2:x"]
+    legacy = replace(fit.matrices, X=X, fixed_names=names)
+    del legacy.__dict__["factor_coding"]  # as restored from a pickle that predates the field
+    assert legacy.factor_coding == "legacy"
+    fit.matrices = legacy
+    fit.beta = np.linspace(-1.0, 1.0, len(names))
+    np.testing.assert_allclose(fit.predict(data, re_form="NA"), X @ fit.beta)
+
+
+@pytest.mark.parametrize(
+    ("formula", "expected"),
+    [
+        # R 4.6.2 model.matrix() on the same data, with R's names a2 -> a.1 and so on.
+        ("y ~ a + b + b:a", ["(Intercept)", "a.1", "a.2", "b.1", "b.2", "a.1:b.1", "a.2:b.1"]),
+        ("y ~ b + a:b", ["(Intercept)", "b.1", "b.2", "b.u:a.1", "b.v:a.1", "b.w:a.1"]),
+        ("y ~ a + x:a", ["(Intercept)", "a.1", "a.2", "a.a:x", "a.b:x", "a.c:x"]),
+        ("y ~ x:a + a", ["(Intercept)", "a.1", "a.2", "x:a.a", "x:a.b", "x:a.c"]),
+        ("y ~ b*a + x:b:a", None),
+    ],
+)
+def test_interactions_order_factors_by_first_appearance_as_in_r(formula, expected):
+    data = pd.DataFrame(
+        {
+            "a": ["a", "b", "c", "a", "b", "c"],
+            "b": ["u", "v", "w", "w", "u", "v"],
+            "x": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+        }
+    )
+    if expected is None:
+        # R labels the three-way term b:a:x, from b*a before x:b:a.
+        parsed = parse_formula(formula)
+        assert str(parsed) == "y ~ b + a + b:a + b:a:x"
+        return
+    _, names = design.build_fixed_matrix(parse_formula(formula), data)
+    assert names[: len(expected)] == expected
+
+
+def test_random_interactions_and_updates_order_factors_as_in_r():
+    from mixedlm.formula.parser import update_formula
+
+    # lme4 builds each bar from its own formula: cnms of (0 + a + b + b:a | g).
+    parsed = parse_formula("y ~ b:a + (0 + a + b + b:a | g)")
+    assert str(parsed) == "y ~ b:a + (0 + a + b + a:b | g)"
+    # As R's update(), '.' brings the old variables first.
+    assert str(update_formula(parse_formula("y ~ a + b"), ". ~ . + b:a")) == "y ~ a + b + a:b"
+    assert str(update_formula(parse_formula("y ~ x"), ". ~ . + b:a")) == "y ~ x + b:a"
+
+
+def _legacy_data():
+    rng = np.random.default_rng(0)
+    n = 216
+    g = np.repeat([f"g{i:02d}" for i in range(12)], 18)
+    a = np.tile(["A1", "A2", "A3"], n // 3)
+    x = rng.normal(size=n)
+    z = rng.normal(size=n)
+    groups = pd.factorize(g)[0]
+    slope = np.select([a == "A1", a == "A2"], [0.3, -0.8], 1.2)
+    y = (
+        1
+        + (a == "A2")
+        + slope * x
+        + 0.4 * z
+        + rng.normal(size=12)[groups]
+        + 0.5 * rng.normal(size=12)[groups] * x
+        + rng.normal(scale=0.7, size=n)
+    )
+    return pd.DataFrame({"y": y, "g": g, "a": pd.Categorical(a), "x": x, "z": z})
+
+
+def _saved_model(formula, data):
+    """A model as mixedlm 1.3 saved it: legacy coding, and no stored coding field."""
+    import warnings
+
+    from mixedlm import lmer
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        model = lmer(formula, data, REML=False, _factor_coding="legacy")
+    del model.matrices.__dict__["factor_coding"]
+    return model
+
+
+def test_refits_of_saved_models_keep_their_coding():
+    import warnings
+
+    from mixedlm import anova_type3, cross_validate, powerCurve
+
+    data = _legacy_data()
+    model = _saved_model("y ~ x:a + a + z + (1 + x | g)", data)
+    assert model.matrices.factor_coding == "legacy"
+    # Legacy coding gives x:a contrasts, so 6 columns where R coding gives 7.
+    assert model.matrices.n_fixed == 6
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        updated = model.update()
+        assert updated.matrices.fixed_names == model.matrices.fixed_names
+        assert updated.deviance == pytest.approx(model.deviance, rel=1e-8)
+        deletions = model.drop1(data)
+        assert all(lrt is not None and lrt > 0 for lrt in deletions.lrt)
+        allfit = model.allFit(data, optimizers=["L-BFGS-B"])
+        assert allfit.fits["L-BFGS-B"].deviance == pytest.approx(model.deviance, rel=1e-6)
+        cross_validate(model, cv=3, random_state=1)
+    # Fits saved by mixedlm 1.3 lack term labels, which anova_type3 then replays.
+    model.matrices.fixed_term_labels = None
+    assert len(anova_type3(model).terms) == 3
+
+    sloped = _saved_model("y ~ a + x + (1 + a:x | g)", data)
+    assert sloped.matrices.random_structures[0].term_names == ["(Intercept)", "a.1:x", "a.2:x"]
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        powerCurve(sloped, test="x", along="n_groups", values=[8], nsim=2, seed=1)
+
+
+def test_updates_remove_bars_saved_with_slopes_in_written_order():
+    from dataclasses import replace
+
+    from mixedlm.formula.parser import update_formula
+
+    formula = parse_formula("y ~ x * z + (1 + x:z + x | g)")
+    bar = formula.random[0]
+    # mixedlm 1.3 stored the slopes as written, not by degree.
+    saved = replace(formula, random=(replace(bar, expr=tuple(reversed(bar.expr))),))
+    updated = update_formula(saved, ". ~ . - (1 + x:z + x | g) + (1 | g)")
+    assert str(updated) == "y ~ x + z + x:z + (1 | g)"
+    assert str(update_formula(saved, ". ~ . + (1 + x:z + x | g)")) == str(saved)

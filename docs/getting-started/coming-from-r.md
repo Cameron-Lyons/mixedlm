@@ -31,7 +31,7 @@ This guide helps lme4 users transition to mixedlm. The API is designed to be as 
     m = mlm.lmer("Reaction ~ Days + (Days | Subject)", sleepstudy)
 
     # Generalized linear mixed model
-    gm = mlm.glmer("incidence / size ~ period + (1 | herd)",
+    gm = mlm.glmer("cbind(incidence, size - incidence) ~ period + (1 | herd)",
                    cbpp, family=mlm.families.Binomial())
     ```
 
@@ -177,19 +177,22 @@ The formula syntax is identical:
 
 ### GLMM Binomial Syntax
 
-R uses `cbind()` for binomial responses:
-
-```r
-# R
-glmer(cbind(successes, failures) ~ x + (1 | g), family = binomial)
-```
-
-mixedlm uses division syntax:
+R's `cbind(successes, failures)` responses work unchanged, and mixedlm also
+accepts `successes / trials` when a column holds the number of trials:
 
 ```py
-# Python
+mlm.glmer("cbind(successes, failures) ~ x + (1 | g)", data, family=mlm.families.Binomial())
 mlm.glmer("successes / total ~ x + (1 | g)", data, family=mlm.families.Binomial())
 ```
+
+### Transformations and Offsets
+
+Formula transforms work as in R: `log(x)`, `scale(x)`, `poly(x, 2)`,
+`factor(x)`, `relevel(x, ref = "B")`, `I(x^2)`, crossing such as `(a + b)^2`,
+nesting such as `a/b`, and `offset(log(exposure))`. Predictions on new data
+reuse the fitted centering, scaling, polynomial basis and levels, as R's
+`predict()` does. In R, `x^2` silently means `x`; mixedlm raises an error and
+asks for `I(x^2)`. See [Formula Syntax](../background/formula-syntax.md#transformations).
 
 ### Family Objects
 

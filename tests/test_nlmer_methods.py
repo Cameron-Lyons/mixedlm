@@ -119,11 +119,32 @@ class TestNlmerMultipleRandomEffects:
             np.testing.assert_array_equal(refitted.y, simulated)
             assert refitted.b.shape == growth_fit.b.shape
 
-    def test_vcov_matches_the_gauss_newton_information(self, growth_fit) -> None:
+    @pytest.mark.parametrize("weighted", [False, True])
+    def test_vcov_matches_the_gauss_newton_information(self, growth_fit, weighted) -> None:
+        if weighted:
+            growth_fit = replace(growth_fit, _weights=np.linspace(0.3, 2.0, len(growth_fit.y)))
         jacobian = _conditional_jacobian(growth_fit)
-        expected = growth_fit.sigma**2 * np.linalg.inv(jacobian.T @ jacobian)
+        information = jacobian.T @ (growth_fit.weights()[:, None] * jacobian)
+        expected = growth_fit.sigma**2 * np.linalg.inv(information)
 
-        np.testing.assert_allclose(growth_fit.vcov(), expected, rtol=0.02)
+        np.testing.assert_allclose(growth_fit.vcov(), expected, rtol=1e-11)
+
+    def test_collinear_gradient_uses_only_identifiable_directions(self, growth_fit) -> None:
+        gradient = growth_fit.model.gradient
+
+        def collinear(params, x):
+            jacobian = gradient(params, x)
+            jacobian[:, 2] = jacobian[:, 0] + jacobian[:, 1]
+            return jacobian
+
+        with patch.object(growth_fit.model, "gradient", side_effect=collinear):
+            jacobian = _conditional_jacobian(growth_fit)
+            covariance = growth_fit.vcov()
+            hat = growth_fit.hatvalues()
+        expected = growth_fit.sigma**2 * np.linalg.pinv(jacobian.T @ jacobian)
+        np.testing.assert_allclose(covariance, expected, rtol=1e-10)
+        assert np.linalg.eigvalsh(covariance).min() >= -1e-12
+        assert hat.sum() == pytest.approx(2)
 
     def test_hatvalues_project_onto_the_conditional_jacobian(self, growth_fit) -> None:
         jacobian = _conditional_jacobian(growth_fit)

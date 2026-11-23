@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from numpy.typing import NDArray
@@ -31,6 +31,8 @@ class LmerMod:
         na_action: str | None = "omit",
         contrasts: dict[str, str | NDArray[np.floating]] | None = None,
         control: LmerControl | None = None,
+        transform_state: dict[str, Any] | None = None,
+        factor_coding: str = "R",
     ) -> None:
         from mixedlm.models.control import LmerControl
 
@@ -53,6 +55,8 @@ class LmerMod:
             offset=offset,
             na_action=na_action,
             contrasts=contrasts,
+            transform_state=transform_state,
+            factor_coding=factor_coding,
         )
 
     def fit(
@@ -210,5 +214,9 @@ def lmer(
         na_action=na_action,
         contrasts=contrasts,
         control=control,
+        # Formula refits on the fitted rows reuse the fitted transform parameters.
+        transform_state=kwargs.pop("_transform_state", None),
+        # Refits of models saved by mixedlm 1.3 and earlier keep their coding.
+        factor_coding=kwargs.pop("_factor_coding", "R"),
     )
     return model.fit(**kwargs)

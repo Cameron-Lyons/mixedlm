@@ -730,6 +730,48 @@ pub fn pirls_impl(
     let random_system = WeightedRandomDesign::new(z, &lambda, patterns);
     let mut spherical = DVector::zeros(q);
 
+    // Penalized deviance of a candidate with its predictor and clamped means,
+    // which the next iteration reuses when the candidate is accepted.
+    let predict = |beta: &DVector<f64>, spherical: &DVector<f64>| {
+        let random_effects = lambda.apply(spherical);
+        let mut eta = DVector::zeros(n);
+        update_fixed_linear_predictor(&mut eta, x, beta, offset);
+        for j in 0..q {
+            for idx in z.col_offsets()[j]..z.col_offsets()[j + 1] {
+                eta[z.row_indices()[idx]] += z.values()[idx] * random_effects[j];
+            }
+        }
+        eta
+    };
+    let means = |eta: &DVector<f64>| {
+        let mut mu = link.inverse(eta);
+        family.clamp_mu(&mut mu, 1e-10);
+        mu
+    };
+    let penalized = |mu: &DVector<f64>, spherical: &DVector<f64>| {
+        family.deviance_resids(y, mu, weights) + spherical.squared_norm_l2()
+    };
+    let evaluate = |beta: &DVector<f64>, spherical: &DVector<f64>| {
+        let eta = predict(beta, spherical);
+        let mu = means(&eta);
+        (penalized(&mu, spherical), eta, mu)
+    };
+    // Gaussian identity-link solves are exact in one step and need no line search.
+    let line_search = !(family == FamilyType::Gaussian && link == LinkFunction::Identity);
+    // Deviance terms of large counts carry rounding error of about eps * w * y each,
+    // so a step changing the sum by less than that, or by a negligible relative
+    // amount, does not count as an increase.
+    let rounding: f64 = 64.0
+        * f64::EPSILON
+        * (0..n)
+            .map(|i| (weights[i] * y[i]).abs())
+            .filter(|value| value.is_finite())
+            .sum::<f64>();
+    // The accepted point's predictor and means, and its deviance once computed.
+    let mut cached: Option<(DVector<f64>, DVector<f64>)> = None;
+    let mut current_deviance = f64::NAN;
+    let mut previous_change = f64::INFINITY;
+
     // Gaussian identity-link working weights are constant for this solve.
     // Keep the factor local: a new response, offset, or theta starts afresh.
     let constant_weights = family == FamilyType::Gaussian && link == LinkFunction::Identity;
@@ -740,19 +782,24 @@ pub fn pirls_impl(
     let mut eta = DVector::zeros(n);
 
     for _iter in 0..maxiter {
-        let random_effects = lambda.apply(&spherical);
-        update_fixed_linear_predictor(&mut eta, x, &beta, offset);
-        for j in 0..q {
-            let col_start = z.col_offsets()[j];
-            let col_end = z.col_offsets()[j + 1];
-            for idx in col_start..col_end {
-                let i = z.row_indices()[idx];
-                eta[i] += z.values()[idx] * random_effects[j];
+        let mu = if let Some((accepted_eta, accepted_mu)) = cached.take() {
+            eta = accepted_eta;
+            accepted_mu
+        } else {
+            let random_effects = lambda.apply(&spherical);
+            update_fixed_linear_predictor(&mut eta, x, &beta, offset);
+            for j in 0..q {
+                let col_start = z.col_offsets()[j];
+                let col_end = z.col_offsets()[j + 1];
+                for idx in col_start..col_end {
+                    let i = z.row_indices()[idx];
+                    eta[i] += z.values()[idx] * random_effects[j];
+                }
             }
-        }
-
-        let mut mu = link.inverse(&eta);
-        family.clamp_mu(&mut mu, 1e-10);
+            let mut mu = link.inverse(&eta);
+            family.clamp_mu(&mut mu, 1e-10);
+            mu
+        };
 
         if family == FamilyType::Binomial && link == LinkFunction::Logit {
             update_binomial_logit_working_values(
@@ -794,6 +841,7 @@ pub fn pirls_impl(
             cached_factor = match factor_random_system(z, &lambda, random_system.as_ref(), &w_vec) {
                 Ok(factor) => Some(factor),
                 Err(_) => {
+                    let random_effects = lambda.apply(&spherical);
                     return PirlsResult {
                         beta,
                         spherical,
@@ -875,12 +923,91 @@ pub fn pirls_impl(
         } else {
             0.0
         };
-
-        beta = beta_new;
-        spherical = spherical_new;
-
         if !delta_beta.is_finite() || !delta_u.is_finite() {
+            beta = beta_new;
+            spherical = spherical_new;
             break;
+        }
+
+        if line_search {
+            let full_eta = predict(&beta_new, &spherical_new);
+            let change = (0..n)
+                .map(|i| (full_eta[i] - eta[i]).abs())
+                .fold(0.0, f64::max);
+            let checked = change > 3.0 || change > previous_change;
+            previous_change = change;
+            if !checked {
+                // Converging Newton steps shrink; take a moderate one without
+                // evaluating the deviance. A large or growing step, which can
+                // overshoot or diverge, goes through the line search.
+                let full_mu = means(&full_eta);
+                beta = beta_new;
+                spherical = spherical_new;
+                current_deviance = f64::NAN;
+                cached = Some((full_eta, full_mu));
+            } else {
+                // As lme4's PIRLS does, halve a large Newton step while it raises
+                // the penalized deviance; a full step can overshoot far from the mode.
+                if !current_deviance.is_finite() {
+                    current_deviance = penalized(&mu, &spherical);
+                }
+                let tolerance = 1e-8 * (1.0 + current_deviance.abs()) + rounding;
+                let full_mu = means(&full_eta);
+                let full = (penalized(&full_mu, &spherical_new), full_eta, full_mu);
+                // When no shorter step helps either, keep the full step, as before.
+                let (accepted_beta, accepted_spherical, (deviance, accepted_eta, accepted_mu)) =
+                    if !current_deviance.is_finite()
+                        || (full.0.is_finite() && full.0 <= current_deviance + tolerance)
+                    {
+                        (beta_new, spherical_new, full)
+                    } else {
+                        let mut found = None;
+                        let mut lowest: Option<(DVector<f64>, DVector<f64>, _)> = None;
+                        let mut step = 0.5;
+                        for _ in 0..30 {
+                            let candidate_beta =
+                                DVector::from_fn(p, |i| beta[i] + step * (beta_new[i] - beta[i]));
+                            let candidate_spherical = DVector::from_fn(q, |i| {
+                                spherical[i] + step * (spherical_new[i] - spherical[i])
+                            });
+                            let candidate = evaluate(&candidate_beta, &candidate_spherical);
+                            // A shorter step must make real progress.
+                            if candidate.0.is_finite() && candidate.0 < current_deviance - tolerance
+                            {
+                                found = Some((candidate_beta, candidate_spherical, candidate));
+                                break;
+                            }
+                            let lower =
+                                lowest
+                                    .as_ref()
+                                    .is_none_or(|(_, _, best): &(_, _, (f64, _, _))| {
+                                        candidate.0 < best.0
+                                    });
+                            if candidate.0.is_finite() && lower {
+                                lowest = Some((candidate_beta, candidate_spherical, candidate));
+                            }
+                            step *= 0.5;
+                        }
+                        // When no shorter step helps, a full step that raises the deviance
+                        // only slightly stands, as when weights or means are floored; one
+                        // that raises it far, as near saturated means, gives way to the
+                        // shortened step with the lowest deviance.
+                        let slight = full.0.is_finite()
+                            && full.0 <= current_deviance + 1e-3 * (1.0 + current_deviance.abs());
+                        match (found, lowest) {
+                            (Some(accepted), _) => accepted,
+                            (None, Some(best)) if !slight => best,
+                            _ => (beta_new, spherical_new, full),
+                        }
+                    };
+                beta = accepted_beta;
+                spherical = accepted_spherical;
+                current_deviance = deviance;
+                cached = Some((accepted_eta, accepted_mu));
+            }
+        } else {
+            beta = beta_new;
+            spherical = spherical_new;
         }
         if delta_beta < tol && delta_u < tol {
             converged = true;
@@ -894,22 +1021,29 @@ pub fn pirls_impl(
         (constant_weights && !regularized).then_some(factor)
     });
     let random_effects = lambda.apply(&spherical);
-    update_fixed_linear_predictor(&mut eta, x, &beta, offset);
-    for j in 0..q {
-        let col_start = z.col_offsets()[j];
-        let col_end = z.col_offsets()[j + 1];
-        for idx in col_start..col_end {
-            let i = z.row_indices()[idx];
-            eta[i] += z.values()[idx] * random_effects[j];
+    // The last accepted candidate already holds the final means and deviance.
+    let (mu_final, deviance) = if let Some((_, final_mu)) = cached.take() {
+        let deviance = if current_deviance.is_finite() {
+            current_deviance
+        } else {
+            penalized(&final_mu, &spherical)
+        };
+        (final_mu, deviance)
+    } else {
+        update_fixed_linear_predictor(&mut eta, x, &beta, offset);
+        for j in 0..q {
+            let col_start = z.col_offsets()[j];
+            let col_end = z.col_offsets()[j + 1];
+            for idx in col_start..col_end {
+                let i = z.row_indices()[idx];
+                eta[i] += z.values()[idx] * random_effects[j];
+            }
         }
-    }
-
-    let mut mu_final = link.inverse(&eta);
-    family.clamp_mu(&mut mu_final, 1e-10);
-
-    let dev_resids = family.deviance_resids(y, &mu_final, weights);
-
-    let deviance = dev_resids + spherical.squared_norm_l2();
+        let mut mu_final = link.inverse(&eta);
+        family.clamp_mu(&mut mu_final, 1e-10);
+        let deviance = family.deviance_resids(y, &mu_final, weights) + spherical.squared_norm_l2();
+        (mu_final, deviance)
+    };
 
     PirlsResult {
         beta,

@@ -369,14 +369,15 @@ class TestAllFit:
             assert result.best_fit(criterion) is result.fits[min(deviances, key=deviances.get)]
         assert result.is_consistent()
 
-    @pytest.mark.filterwarnings(
-        # allFit records non-converged optimizers; their fit warnings still escape.
-        "ignore:Model failed to converge:UserWarning"
-    )
     def test_default_optimizers_reach_the_same_optimum(self, sleepstudy_lmm) -> None:
+        import warnings
+
         from mixedlm.inference.allfit import _default_optimizers
 
-        result = sleepstudy_lmm.allFit(SLEEPSTUDY)
+        # As lme4's allFit, refits record their warnings instead of raising them.
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            result = sleepstudy_lmm.allFit(SLEEPSTUDY)
 
         assert list(result.fits) == _default_optimizers()
         assert result.warnings.keys() == result.fits.keys()
@@ -386,7 +387,7 @@ class TestAllFit:
             if fit.converged:
                 assert fit.deviance == pytest.approx(sleepstudy_lmm.deviance, abs=1e-3), name
             else:
-                assert result.warnings[name] == ["Did not converge"]
+                assert result.warnings[name][0] == "Did not converge"
         assert result.is_consistent()
 
     def test_glmm_optimizers_agree(self, cbpp_glmm) -> None:
@@ -401,7 +402,10 @@ class TestAllFit:
     def test_singular_refits_are_flagged(self, singular_cbpp_glmm) -> None:
         data = CBPP.assign(y=CBPP["incidence"] / CBPP["size"])
 
-        with pytest.warns(UserWarning, match="Model is singular"):
+        import warnings
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
             result = singular_cbpp_glmm.allFit(data, optimizers=["L-BFGS-B"])
 
         assert result.warnings == {"L-BFGS-B": ["Singular fit"]}

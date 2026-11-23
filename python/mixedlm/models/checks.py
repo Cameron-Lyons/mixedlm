@@ -157,6 +157,45 @@ def check_nlev_gtr_1(
             )
 
 
+def kept_columns(X: NDArray[np.floating], tol: float = 1e-7) -> NDArray[np.intp]:
+    """Columns that R's LINPACK QR (``dqrdc2``, used by ``lm()`` and lme4) keeps.
+
+    A column is aliased when its norm after removing the kept columns before it
+    falls below ``tol`` times its original norm. R moves such columns to the end
+    and drops them, so an earlier column always wins over a later one.
+    """
+    X = np.asarray(X, dtype=np.float64)
+    n, p = X.shape
+    norms = np.linalg.norm(X, axis=0)
+    limits = tol * np.where(norms > 0, norms, 1.0)
+    if 0 < p <= n:
+        # Without aliasing, an unpivoted QR gives the same residual norms.
+        diagonal = np.abs(np.diag(linalg.qr(X, mode="r", check_finite=False)[0]))
+        if np.all(diagonal >= limits):
+            return np.arange(p)
+    basis = np.empty((n, min(n, p)))
+    kept: list[int] = []
+    for j in range(p):
+        if len(kept) == n:
+            break
+        q = basis[:, : len(kept)]
+        residual = X[:, j] - q @ (q.T @ X[:, j])
+        residual -= q @ (q.T @ residual)
+        size = float(np.linalg.norm(residual))
+        if size < limits[j]:
+            continue
+        basis[:, len(kept)] = residual / size
+        kept.append(j)
+    return np.asarray(kept, dtype=np.intp)
+
+
+_LME4_RANKX_ACTIONS = {
+    "silent.drop.cols": "ignore+drop.cols",
+    "warn+drop.cols": "warning+drop.cols",
+    "stop.deficient": "stop",
+}
+
+
 def check_rankX(
     matrices: ModelMatrices,
     action: str,
@@ -167,11 +206,13 @@ def check_rankX(
     if p == 0:
         return X, None
 
-    rank = np.linalg.matrix_rank(X)
+    kept = [int(i) for i in kept_columns(X)]
+    rank = len(kept)
 
     if rank == p:
         return X, None
 
+    action = _LME4_RANKX_ACTIONS.get(action, action)
     drop_cols = action.endswith("+drop.cols")
     base_action = action.replace("+drop.cols", "") if drop_cols else action
 
@@ -181,12 +222,13 @@ def check_rankX(
     message = f"Fixed-effects design matrix is rank deficient (rank {rank} < {p} columns)."
 
     if drop_cols:
-        _, _, pivots = linalg.qr(X, mode="economic", pivoting=True)
-        kept = sorted(int(i) for i in pivots[:rank])
         dropped = sorted(set(range(p)) - set(kept))
 
         if dropped:
             message += f" Dropping columns: {dropped}"
+            names = getattr(matrices, "fixed_names", None)
+            if names is not None and len(names) == p:
+                message += f" ({', '.join(names[i] for i in dropped)})"
             if base_action != "ignore":
                 _handle_check(base_action, message)
             X_new = X[:, kept]

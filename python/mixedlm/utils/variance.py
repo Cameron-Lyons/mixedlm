@@ -90,34 +90,34 @@ def _conditional_variance_blocks(
             if include_cov and n_terms > 1
             else None
         )
-        levels_per_batch = max(1, _CONDVAR_BATCH_COLUMNS // n_raw_terms)
+        # Row k of level_indices lists level k's coefficients across the structures.
+        level_indices = np.hstack(
+            [
+                struct_offset
+                + np.arange(n_levels)[:, None] * struct.n_terms
+                + np.arange(struct.n_terms)[None, :]
+                for struct, struct_offset in group_structures
+            ]
+        ).astype(np.intp)
+        raw_blocks = _level_covariances(factor, lambda_csc, level_indices)
+        if raw_blocks is None:
+            raw_blocks = np.empty((n_levels, n_raw_terms, n_raw_terms), dtype=np.float64)
+            levels_per_batch = max(1, _CONDVAR_BATCH_COLUMNS // n_raw_terms)
+            for first_level in range(0, n_levels, levels_per_batch):
+                last_level = min(first_level + levels_per_batch, n_levels)
+                lambda_rows = lambda_csc[level_indices[first_level:last_level].ravel(), :]
+                solved = factor.solve(lambda_rows.T.toarray())
+                batch_cov = np.asarray(lambda_rows @ solved)
+                for level in range(first_level, last_level):
+                    block_start = (level - first_level) * n_raw_terms
+                    block = slice(block_start, block_start + n_raw_terms)
+                    raw_blocks[level] = batch_cov[block, block]
 
-        for first_level in range(0, n_levels, levels_per_batch):
-            last_level = min(first_level + levels_per_batch, n_levels)
-            indices = np.asarray(
-                [
-                    struct_offset + level * struct.n_terms + term_index
-                    for level in range(first_level, last_level)
-                    for struct, struct_offset in group_structures
-                    for term_index in range(struct.n_terms)
-                ],
-                dtype=np.intp,
-            )
-            lambda_rows = lambda_csc[indices, :]
-            rhs = lambda_rows.T.toarray()
-            solved = factor.solve(rhs)
-            batch_cov = np.asarray(lambda_rows @ solved) * scale
-
-            for level in range(first_level, last_level):
-                local_level = level - first_level
-                block_start = local_level * n_raw_terms
-                block_end = block_start + n_raw_terms
-                raw_block = batch_cov[block_start:block_end, block_start:block_end]
-                block = aggregation @ raw_block @ aggregation.T
-                block = (block + block.T) * 0.5
-                term_variances[level] = np.diag(block)
-                if covariance_blocks is not None:
-                    covariance_blocks[level] = block
+        blocks = aggregation @ (raw_blocks * scale) @ aggregation.T
+        blocks = (blocks + np.swapaxes(blocks, 1, 2)) * 0.5
+        term_variances[:] = np.diagonal(blocks, axis1=1, axis2=2)
+        if covariance_blocks is not None:
+            covariance_blocks[:] = blocks
 
         group_result: dict[str, NDArray[np.floating]] = {}
         for term_index, term_name in enumerate(term_names):
@@ -127,6 +127,45 @@ def _conditional_variance_blocks(
         result[group_name] = group_result
 
     return result
+
+
+def _level_covariances(
+    factor: _RandomEffectFactor,
+    lambda_csc: sparse.csc_matrix,
+    level_indices: NDArray[np.intp],
+) -> NDArray[np.float64] | None:
+    """Compute Lambda[I, :] C^-1 Lambda[I, :].T for each level's coefficient rows I.
+
+    When the relative covariance factor is block diagonal by level, each block
+    needs only C^-1[I, I], which the factor reads in one selected-inverse request.
+    Returns None for other patterns, which need full solves.
+    """
+    n_levels, width = level_indices.shape
+    q = lambda_csc.shape[0]
+    level_of = np.full(q, -1, dtype=np.intp)
+    slot_of = np.full(q, -1, dtype=np.intp)
+    level_of[level_indices] = np.arange(n_levels)[:, None]
+    slot_of[level_indices] = np.arange(width)[None, :]
+
+    lambda_coo = lambda_csc.tocoo()
+    rows = lambda_coo.row.astype(np.intp)
+    columns = lambda_coo.col.astype(np.intp)
+    selected = level_of[rows] >= 0
+    rows, columns, values = rows[selected], columns[selected], lambda_coo.data[selected]
+    if np.any(level_of[columns] != level_of[rows]):
+        return None
+    lambda_blocks = np.zeros((n_levels, width, width), dtype=np.float64)
+    np.add.at(lambda_blocks, (level_of[rows], slot_of[rows], slot_of[columns]), values)
+
+    pair_rows = np.broadcast_to(level_indices[:, :, None], (n_levels, width, width))
+    pair_columns = np.broadcast_to(level_indices[:, None, :], (n_levels, width, width))
+    inverse_blocks = factor.inverse_entries(pair_rows.ravel(), pair_columns.ravel()).reshape(
+        n_levels, width, width
+    )
+    covariance: NDArray[np.float64] = (
+        lambda_blocks @ inverse_blocks @ np.swapaxes(lambda_blocks, 1, 2)
+    )
+    return covariance
 
 
 def sdcor2cov(

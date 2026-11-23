@@ -141,7 +141,18 @@ lm_dict = mlm.lmList("Reaction ~ Days | Subject", data)
 
 This uses the built-in formula encoder and NumPy least squares, including
 categorical predictors, interactions, and multiple numeric predictors without
-an additional dependency.
+an additional dependency. As in lme4, each group is fitted on its own rows:
+`scale()` and `poly()` are learned within the group, and a coefficient the
+group cannot estimate, such as that of a level absent from it, is NaN. Factor
+levels come from the whole data, so each coefficient column refers to the same
+level in every group, and a group that lacks the reference level is coded
+relative to its first level, as `lm()` codes it; sum and other contrasts span
+the group's own levels and are numbered by position, as R does for character
+columns. (For factor columns R drops such contrasts in a group that lacks a
+level and falls back to treatment coding, with a warning.) A group that
+cannot be fitted, such as one with too few distinct values for `poly()`, gets
+NaN coefficients and a warning; as in lme4, this includes a group in which a
+factor takes a single level.
 
 **Returns:** A dictionary containing per-group fits, a coefficient table, and
 an optional pooled fit
@@ -168,7 +179,10 @@ codes = mlm.dummy(["b", "a", "c", "a"], base="b")
 Pandas categoricals keep their category order; other inputs use sorted unique
 values as levels. `contrasts` accepts `"treatment"` (the default), `"sum"`,
 `"helmert"`, and `"poly"`, matching the `contr_*` functions in
-`mixedlm.utils.contrasts`. `base` names the treatment-coding reference level or
+`mixedlm.utils.contrasts`; `"helmert"` scales its columns to unit length. R's
+names `"contr.treatment"`, `"contr.sum"`, `"contr.helmert"` and `"contr.poly"`
+give R's matrices, including the unscaled `contr.helmert`, which `C(x, helmert)`
+in a formula also uses. `base` names the treatment-coding reference level or
 gives its index; negative indices count from the end, and unknown levels or
 indices raise `ValueError`.
 

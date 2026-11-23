@@ -64,7 +64,8 @@ class TestFormulaParser:
 
     def test_chained_star_expands_all_interactions(self) -> None:
         labels = self._fixed_term_labels("y ~ x1 * x2 * x3 + (1 | g)")
-        assert labels == ["x1", "x2", "x1:x2", "x3", "x1:x3", "x2:x3", "x1:x2:x3"]
+        # As in R, terms are ordered by degree.
+        assert labels == ["x1", "x2", "x3", "x1:x2", "x1:x3", "x2:x3", "x1:x2:x3"]
 
     def test_colon_binds_before_star_in_fixed_and_random_effects(self) -> None:
         abbreviated = parse_formula("y ~ a * b:c + (a:b*c:d | g)")

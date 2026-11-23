@@ -4,6 +4,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from functools import partial
+from numbers import Integral
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -18,6 +19,7 @@ from mixedlm.utils.validation import _validate_confidence_level
 if TYPE_CHECKING:
     import pandas as pd
 
+    from mixedlm.inference.variance_profile import VarianceParameter
     from mixedlm.models.glmer import GlmerResult
     from mixedlm.models.lmer import LmerResult
 
@@ -210,10 +212,55 @@ def profile_lmer(
     ``n_jobs`` worker processes, or -1 for all CPUs, profile coefficients
     concurrently. Workers are started without forking, so scripts need an
     ``if __name__ == "__main__":`` guard.
-    """
-    from mixedlm.inference.lmm_profile import likelihood_profiles
 
-    return likelihood_profiles(result, which, n_points, level, n_jobs)
+    As in lme4, ``which`` can name standard deviations, correlations and the
+    residual scale (``".sig01"``, ..., ``".sigma"``), or select every variance
+    parameter with ``"theta_"`` and every fixed effect with ``"beta_"``. These
+    profiles optimize the other variance parameters and the fixed effects.
+    """
+    from mixedlm.inference.lmm_profile import _validate_options, likelihood_profiles
+    from mixedlm.inference.variance_profile import variance_parameters, variance_profiles
+
+    # Reject invalid options before reading the model.
+    level = _validate_confidence_level(level)
+    _validate_options(n_points, n_jobs)
+    variance = variance_parameters(result.matrices.random_structures)
+    fixed, names = split_parameter_names(which, result.matrices.fixed_names, variance)
+    profiles = variance_profiles(result, names, n_points, level, n_jobs)
+    if fixed:
+        profiles.update(likelihood_profiles(result, fixed, n_points, level, n_jobs))
+    return profiles
+
+
+def split_parameter_names(
+    which: str | list[str] | None,
+    fixed_names: list[str],
+    variance: list[VarianceParameter],
+) -> tuple[list[str], list[str]]:
+    """Resolve lme4's parameter selectors into fixed-effect and ``.sig`` names.
+
+    ``None`` selects the fixed effects, ``"beta_"`` every fixed effect and
+    ``"theta_"`` every variance parameter. Variance parameters can be named
+    ``.sig01`` or by lme4's descriptive label such as ``sd_Days|Subject``; they
+    resolve to their ``.sig`` names. Unknown names are left to the fixed-effect
+    code, which ignores them as before.
+    """
+    if which is None:
+        return list(fixed_names), []
+    aliases = {p.label: p.name for p in variance} | {p.name: p.name for p in variance}
+    requested = [which] if isinstance(which, str) else list(which)
+    fixed: list[str] = []
+    names: list[str] = []
+    for name in requested:
+        if name == "beta_":
+            fixed.extend(fixed_names)
+        elif name == "theta_":
+            names.extend(p.name for p in variance)
+        elif name in aliases and name not in fixed_names:
+            names.append(aliases[name])
+        else:
+            fixed.append(name)
+    return list(dict.fromkeys(fixed)), list(dict.fromkeys(names))
 
 
 @dataclass
@@ -375,10 +422,23 @@ def profile_glmer(
     ``n_points`` controls plotting resolution; interval endpoints are solved
     independently using the likelihood-ratio cutoff. Failed fits or unbracketed
     intervals raise an error instead of substituting a Wald interval.
+
+    ``which`` accepts the variance-parameter names and selectors of
+    :func:`profile_lmer`; generalized models have no ``.sigma``.
     """
     from mixedlm.inference.glmm_profile import likelihood_profiles
+    from mixedlm.inference.variance_profile import variance_parameters, variance_profiles
 
-    return likelihood_profiles(result, which, n_points, level)
+    # Reject invalid options before reading the model.
+    level = _validate_confidence_level(level)
+    if isinstance(n_points, bool | np.bool_) or not isinstance(n_points, Integral) or n_points < 3:
+        raise ValueError("n_points must be an integer of at least 3")
+    variance = variance_parameters(result.matrices.random_structures, has_sigma=False)
+    fixed, names = split_parameter_names(which, result.matrices.fixed_names, variance)
+    profiles = variance_profiles(result, names, n_points, level)
+    if fixed:
+        profiles.update(likelihood_profiles(result, fixed, n_points, level))
+    return profiles
 
 
 def _transform_profile(

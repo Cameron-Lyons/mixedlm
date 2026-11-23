@@ -360,3 +360,176 @@ class TestGlmerResponseScale:
             link.result.upper,
             link.result.emmean + critical_value * link.result.se,
         )
+
+
+def test_marginal_means_of_empty_cells_are_not_estimable():
+    import warnings
+
+    import numpy as np
+    import pandas as pd
+    from mixedlm import emmeans, lmer
+
+    rng = np.random.default_rng(7)
+    n = 120
+    a = rng.choice(["a1", "a2", "a3"], n)
+    b = np.where(a == "a3", "b1", rng.choice(["b1", "b2", "b3"], n))
+    y = 1 + (a == "a2") + 0.5 * (b == "b2") + np.repeat(rng.normal(size=12), 10)
+    data = pd.DataFrame(
+        {
+            "y": y + rng.normal(size=n),
+            "a": a,
+            "b": b,
+            "g": np.repeat([f"g{i}" for i in range(12)], 10),
+        }
+    )
+    means = []
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        for formula in ("y ~ a*b + (1 | g)", "y ~ 0 + a:b + (1 | g)"):
+            result = emmeans(lmer(formula, data), "a").result
+            means.append(np.asarray(result.emmean))
+            # As R's emmeans reports nonEst: a3 averages over two empty cells.
+            assert np.isnan(result.se[2])
+    np.testing.assert_allclose(means[0], means[1], rtol=1e-6)
+    assert np.isnan(means[0][2]) and np.all(np.isfinite(means[0][:2]))
+
+
+def test_reference_grids_use_the_fitted_levels():
+    import warnings
+
+    import numpy as np
+    import pandas as pd
+    from mixedlm import cross_validate, emmeans, lmer, load_sleepstudy
+
+    rng = np.random.default_rng(0)
+    data = load_sleepstudy()
+    arm = rng.choice(["ctl", "trt"], size=len(data))
+    data["arm"] = pd.Categorical(arm, categories=["ctl", "trt", "placebo"])
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        fit = lmer("Reaction ~ Days + arm + (1 | Subject)", data)
+        means = emmeans(fit, "arm").result
+        assert list(means.grid["arm"]) == ["ctl", "trt"]
+        expected = emmeans(fit, "arm", at={"arm": ["ctl", "trt"]}).result
+        np.testing.assert_allclose(means.emmean, expected.emmean)
+        cross_validate(fit, data, cv=3, random_state=1)
+
+
+def test_contrasts_test_their_own_estimability_as_r_does():
+    import warnings
+
+    import numpy as np
+    import pandas as pd
+    from mixedlm import emmeans, lmer
+
+    rng = np.random.default_rng(3)
+    n = 120
+    a = rng.choice(["a1", "a2", "a3"], n)
+    b = np.where(a == "a3", "b1", rng.choice(["b1", "b2"], n))
+    data = pd.DataFrame(
+        {
+            "y": rng.normal(size=n) + (a == "a2") * 0.3,
+            "a": a,
+            "b": b,
+            "g": np.repeat([f"g{i}" for i in range(12)], 10),
+        }
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        means = emmeans(lmer("y ~ a*b + (1 | g)", data), ["a", "b"])
+    assert np.isnan(means.result.emmean[5]) and np.all(np.isfinite(means.result.emmean[:5]))
+    custom = means.contrast([[1, -1, 0, 0, 0, 0], [1, 0, -1, 0, 0, 0], [0, 0, 0, 0, 1, -1]])
+    pairs = means.pairs()
+    # Contrasts of estimable means keep their values; one through the empty cell is NaN.
+    np.testing.assert_allclose(custom.estimate[:2], pairs.estimate[:2])
+    assert np.all(np.isfinite(custom.estimate[:2])) and np.isnan(custom.estimate[2])
+    assert np.isnan(pairs.estimate[-1]) and np.isnan(pairs.p_value[-1])
+
+
+def test_differences_of_nonestimable_means_can_be_estimable():
+    import warnings
+
+    import numpy as np
+    import pandas as pd
+    from mixedlm import emmeans, lmer
+
+    rng = np.random.default_rng(5)
+    n = 120
+    trt = rng.choice(["A", "B", "C"], n, p=[0.5, 0.3, 0.2])
+    data = pd.DataFrame(
+        {
+            "trt": trt,
+            "dose": pd.Series(trt).map({"A": 0.0, "B": 1.0, "C": 3.0}).to_numpy(),
+            "sex": rng.choice(["F", "M"], n),
+            "subj": np.repeat(np.arange(24), 5).astype(str),
+        }
+    )
+    data["y"] = (data["sex"] == "M") * 0.7 + rng.normal(size=n)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        means = emmeans(lmer("y ~ trt + dose + sex + (1 | subj)", data), "sex")
+    # Averaging over the aliased dose makes each mean non-estimable, as in R, but
+    # their difference is estimable.
+    assert np.all(np.isnan(means.result.emmean))
+    difference = means.pairs()
+    assert np.isfinite(difference.estimate[0]) and np.isfinite(difference.p_value[0])
+
+
+def test_estimability_follows_r_tolerance_and_ignores_contrast_units():
+    import warnings
+
+    import numpy as np
+    import pandas as pd
+    from mixedlm import emmeans, lmer
+
+    rng = np.random.default_rng(8)
+    n = 300
+    trt = rng.choice(["A", "B", "C"], n)
+    cm = rng.uniform(150, 200, n).astype(np.float32)
+    data = pd.DataFrame(
+        {
+            "y": (trt == "B") * 0.5 + 0.02 * cm + rng.normal(size=n),
+            "trt": trt,
+            "cm": cm.astype(float),
+            "inch": (cm / np.float32(2.54)).astype(np.float32).astype(float),
+            "subj": np.repeat([f"s{i}" for i in range(30)], 10),
+        }
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        aliased = emmeans(lmer("y ~ trt + cm + inch + (1 | subj)", data), "trt")
+        plain = emmeans(lmer("y ~ trt + cm + (1 | subj)", data), "trt")
+    # R's is.estble calls these pairs estimable despite the near-duplicate column.
+    np.testing.assert_allclose(aliased.pairs().estimate, plain.pairs().estimate, atol=1e-6)
+    with np.errstate(over="raise"):
+        for scale in (1e-300, 1e-9, 1.0, 1e200):
+            assert np.all(np.isfinite(aliased.contrast(scale * np.array([[1, -1, 0]])).estimate))
+
+
+def test_extended_range_contrasts_keep_estimability():
+    import warnings
+
+    import numpy as np
+    import pandas as pd
+    from mixedlm import emmeans, lmer
+
+    rng = np.random.default_rng(3)
+    n = 120
+    a = rng.choice(["a1", "a2", "a3"], n)
+    b = np.where(a == "a3", "b1", rng.choice(["b1", "b2"], n))
+    data = pd.DataFrame(
+        {
+            "y": rng.normal(size=n),
+            "a": a,
+            "b": b,
+            "g": np.repeat([f"g{i}" for i in range(12)], 10),
+        }
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        means = emmeans(lmer("y ~ a*b + (1 | g)", data), ["a", "b"])
+    rows = np.array([[1, -1, 0, 0, 0, 0], [0, 0, 0, 0, 1, -1]], dtype=np.longdouble)
+    with np.errstate(over="raise", invalid="raise"):
+        for scale in (np.longdouble("1e400"), np.longdouble("1e-400")):
+            result = means.contrast(rows * scale)
+            assert np.isfinite(result.t_ratio[0]) and np.isnan(result.t_ratio[1])

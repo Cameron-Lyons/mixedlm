@@ -387,3 +387,103 @@ class TestCollinearityIntegration:
         assert result.terms == tuple(model.model.param_names)
         assert np.all(result.vif >= 1.0)
         assert np.all(np.isfinite(result.vif))
+
+
+def test_factor_columns_form_one_generalized_vif_term():
+    import warnings
+
+    import numpy as np
+    import pandas as pd
+    from mixedlm import check_collinearity, lmer
+
+    rng = np.random.default_rng(0)
+    n = 240
+    data = pd.DataFrame(
+        {
+            "g": np.repeat([f"g{i}" for i in range(12)], n // 12),
+            "a": pd.Categorical(rng.choice(["A1", "A2", "A3"], n)),
+            "x": rng.normal(size=n),
+            "y": rng.normal(size=n),
+        }
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        model = lmer("y ~ a + x + (1 | g)", data)
+    result = check_collinearity(model)
+    assert list(result.terms) == ["a", "x"]
+    assert list(result.df) == [2, 1]
+    correlation = np.corrcoef(model.matrices.X[:, 1:], rowvar=False)
+    expected = (
+        np.linalg.det(correlation[:2, :2])
+        * np.linalg.det(correlation[2:, 2:])
+        / np.linalg.det(correlation)
+    )
+    assert result.gvif[0] == pytest.approx(expected, rel=1e-6)
+
+
+def test_columns_sharing_a_name_stay_separate_terms():
+    import warnings
+
+    from numpy.testing import assert_allclose
+
+    rng = np.random.default_rng(4)
+    n = 200
+    data = pd.DataFrame(
+        {
+            "g": np.repeat(np.arange(10), n // 10),
+            "a": pd.Categorical(rng.choice(["p", "q"], n)),
+            "a.1": rng.normal(size=n),
+            "z": rng.normal(size=n),
+            "y": rng.normal(size=n),
+        }
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        model = lmer("y ~ a + `a.1` + z + (1 | g)", data)
+    # The factor's contrast column and the numeric predictor are both named a.1.
+    assert model.matrices.fixed_names == ["(Intercept)", "a.1", "a.1", "z"]
+    result = check_collinearity(model)
+    assert list(result.terms) == ["a", "a.1", "z"]
+    assert list(result.df) == [1, 1, 1]
+    correlation = np.corrcoef(model.matrices.X[:, 1:], rowvar=False)
+    assert_allclose(result.vif, np.diag(np.linalg.inv(correlation)), rtol=1e-10)
+
+
+@pytest.mark.parametrize(
+    ("free", "with_intercept"),
+    [
+        ("y ~ 0 + a + x + z + (1 | g)", "y ~ a + x + z + (1 | g)"),
+        ("y ~ 0 + x + a + b + (1 | g)", "y ~ x + a + b + (1 | g)"),
+    ],
+)
+def test_intercept_free_factor_models_match_their_intercept_models(free, with_intercept):
+    import warnings
+
+    from numpy.testing import assert_allclose
+
+    rng = np.random.default_rng(1)
+    n = 300
+    data = pd.DataFrame(
+        {
+            "a": rng.choice(["p", "q", "r"], n),
+            "b": rng.choice(["u", "v"], n),
+            "g": np.repeat(np.arange(15), n // 15),
+            "x": rng.normal(size=n),
+            "z": rng.normal(size=n),
+        }
+    )
+    data["y"] = rng.normal(size=n) + data.x
+    weights = rng.uniform(0.5, 2.0, n)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        results = [
+            check_collinearity(lmer(formula, data, weights=weights))
+            for formula in (free, with_intercept)
+        ]
+    # The factor's indicators span the constant, so it is measured by its contrasts.
+    assert results[0].terms == results[1].terms
+    assert list(results[0].df) == list(results[1].df)
+    assert results[0].rank == results[0].n_columns
+    assert set(results[0].severity) == {"low"}
+    assert_allclose(results[0].gvif, results[1].gvif, rtol=1e-8)
+    assert_allclose(results[0].condition_number, results[1].condition_number, rtol=1e-8)

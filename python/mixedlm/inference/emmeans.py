@@ -1,19 +1,24 @@
 from __future__ import annotations
 
 import itertools
-from collections.abc import Callable
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field, replace
 from functools import lru_cache
 from math import prod
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 import pandas as pd
 from numpy.typing import ArrayLike, NDArray
 from scipy import stats
 
+from mixedlm.formula.transforms import factor_transform_levels
 from mixedlm.utils import _format_pvalue
-from mixedlm.utils.dataframe import get_categories, get_column_numpy, is_categorical_or_string
+from mixedlm.utils.dataframe import (
+    get_column_numpy,
+    get_observed_categories,
+    is_categorical_or_string,
+)
 from mixedlm.utils.validation import _validate_confidence_level
 
 if TYPE_CHECKING:
@@ -45,12 +50,94 @@ def _contrast_moments(
 _MAX_REFERENCE_GRID_ELEMENTS = 1_000_000
 
 
+def _estimability_basis(model: LmerResult | GlmerResult) -> NDArray[np.float64] | None:
+    """Null-space basis of a rank-reduced fit's full fixed-effect design, or None.
+
+    A linear function of the formula's columns is estimable only when it is
+    orthogonal to this basis, as R's estimability package tests it. Each column
+    the rank check dropped is a combination of the kept ones, which gives one
+    basis vector, so no n-by-n factorization is needed.
+    """
+    matrices = getattr(model, "matrices", None)
+    indices = getattr(matrices, "fixed_column_indices", None)
+    source = getattr(matrices, "fixed_source_names", None)
+    if matrices is None or indices is None or source is None or len(indices) == len(source):
+        return None
+    if matrices.frame is None:
+        return None
+    X = model._prediction_fixed_matrix(matrices.frame, source_columns=True)
+    if X.shape[1] != len(source):
+        return None
+    kept = list(indices)
+    dropped = [j for j in range(len(source)) if j not in set(kept)]
+    combination = np.linalg.lstsq(X[:, kept], X[:, dropped], rcond=None)[0]
+    basis = np.zeros((len(source), len(dropped)))
+    basis[kept] = -combination
+    basis[dropped, np.arange(len(dropped))] = 1.0
+    return np.linalg.qr(basis)[0]
+
+
+def _mean_estimability(
+    model: LmerResult | GlmerResult,
+    result_names: list[str],
+    levels: dict[str, list[Any]],
+) -> tuple[NDArray[np.float64], NDArray[np.float64], pd.DataFrame] | None:
+    """For a rank-reduced fit, the means' functions of every formula column, the
+    design's null-space basis and the grid; None for a full-rank fit."""
+    basis = _estimability_basis(model)
+    if basis is None:
+        return None
+    full, grid = _averaged_design(model, result_names, levels, source_columns=True)
+    return full, basis, grid
+
+
+def _nonestimable(rows: NDArray[np.floating], basis: NDArray[np.floating] | None) -> NDArray:
+    """Whether each linear function is outside the row space of the design.
+
+    As R's estimability::is.estble tests it, a function x is estimable when
+    ``sum((N'x)^2) < 1e-8 * sum(x^2)``. Rows are scaled by their largest entry
+    first, so the test does not depend on coefficient units or overflow.
+    """
+    rows = np.asarray(rows)
+    result = np.zeros(len(rows), dtype=bool)
+    if basis is None or not len(rows):
+        return result
+    for start, block in _row_blocks(rows):
+        result[start : start + len(block)] = _nonestimable_block(block, basis)
+    return result
+
+
+def _row_blocks(rows: NDArray[np.floating]) -> Iterator[tuple[int, NDArray[np.floating]]]:
+    step = max(1, _MAX_CONTRAST_ELEMENTS // max(1, rows.shape[1]))
+    for start in range(0, len(rows), step):
+        yield start, rows[start : start + step]
+
+
+def _nonestimable_block(
+    block: NDArray[np.floating], basis: NDArray[np.floating]
+) -> NDArray[np.bool_]:
+    scale = np.max(np.abs(block), axis=1, keepdims=True)
+    normalized = np.divide(block, scale, out=np.zeros(block.shape), where=scale > 0)
+    projected = normalized @ basis
+    return np.sum(projected**2, axis=1) > 1e-8 * np.sum(normalized**2, axis=1)
+
+
 def _marginal_mean_coefficients(
     model: LmerResult | GlmerResult,
     result_names: list[str],
     levels: dict[str, list[Any]],
 ) -> tuple[NDArray[np.float64], pd.DataFrame]:
     """Average the fitted design over reference dimensions in bounded batches."""
+    return _averaged_design(model, result_names, levels, source_columns=False)
+
+
+def _averaged_design(
+    model: LmerResult | GlmerResult,
+    result_names: list[str],
+    levels: dict[str, list[Any]],
+    *,
+    source_columns: bool,
+) -> tuple[NDArray[np.float64], pd.DataFrame]:
     averaged_names = [name for name in levels if name not in result_names]
     all_names = result_names + averaged_names
     result_grid = pd.DataFrame(
@@ -58,7 +145,17 @@ def _marginal_mean_coefficients(
     )
     n_results = len(result_grid)
     n_averaged = prod(len(levels[name]) for name in averaged_names)
-    n_beta = len(model.beta)
+    n_beta = (
+        len(cast(tuple[str, ...], model.matrices.fixed_source_names))
+        if source_columns
+        else len(model.beta)
+    )
+
+    def design_of(grid: pd.DataFrame) -> NDArray[np.floating]:
+        if source_columns:
+            return model._prediction_fixed_matrix(grid, source_columns=True)
+        return model._prediction_fixed_matrix(grid)
+
     coefficients = np.empty((n_results, n_beta), dtype=np.float64)
     if n_results == 0 or n_averaged == 0:
         coefficients.fill(np.nan)
@@ -75,7 +172,7 @@ def _marginal_mean_coefficients(
             grid = pd.DataFrame(
                 itertools.islice(combinations, count * n_averaged), columns=all_names
             )
-            design = model._prediction_fixed_matrix(grid)
+            design = design_of(grid)
             coefficients[start : start + count] = design.reshape(count, n_averaged, n_beta).mean(
                 axis=1
             )
@@ -87,7 +184,7 @@ def _marginal_mean_coefficients(
             for start in range(0, n_averaged, batch_rows):
                 count = min(batch_rows, n_averaged - start)
                 grid = pd.DataFrame(itertools.islice(combinations, count), columns=all_names)
-                design = model._prediction_fixed_matrix(grid)
+                design = design_of(grid)
                 total += design.sum(axis=0)
                 del grid, design
             coefficients[result_index] = total / n_averaged
@@ -295,6 +392,27 @@ class Emmeans:
     _levels: list[list[Any]]
     _by: list[str] = field(default_factory=list)
     _offset: NDArray[np.floating] | None = None
+    # For rank-reduced fits: each mean's function of every formula column, and the
+    # design's null space, to test each contrast's estimability as R's emmeans does.
+    _full: NDArray[np.floating] | None = None
+    _null: NDArray[np.floating] | None = None
+
+    def _estimable(self, rows: NDArray[np.intp], against: NDArray[np.intp] | None) -> NDArray:
+        """Whether each difference of means ``rows - against`` is estimable.
+
+        Differences are formed in bounded batches, like the contrast estimates.
+        """
+        result = np.ones(len(rows), dtype=bool)
+        if self._full is None or self._null is None:
+            return result
+        step = max(1, _MAX_CONTRAST_ELEMENTS // max(1, self._full.shape[1]))
+        for start in range(0, len(rows), step):
+            batch = slice(start, start + step)
+            functions = self._full[rows[batch]]
+            if against is not None:
+                functions = functions - self._full[against[batch]]
+            result[batch] = ~_nonestimable_block(np.atleast_2d(functions), self._null)
+        return result
 
     def _grouped_contrasts(self, compute: Callable[[Emmeans], ContrastResult]) -> ContrastResult:
         """Compare means and adjust p-values independently within each by group."""
@@ -320,6 +438,7 @@ class Emmeans:
                 _L=self._L[indices],
                 _by=[],
                 _offset=None if self._offset is None else self._offset[indices],
+                _full=None if self._full is None else self._full[indices],
             )
             result = compute(means)
             values = {name: grid[name].iloc[0] for name in self._by}
@@ -380,11 +499,14 @@ class Emmeans:
         if self._offset is not None:
             estimates += self._offset[left_indices] - self._offset[right_indices]
         se_contrast = np.sqrt(np.maximum(var_contrast, 0))
+        estimable = self._estimable(left_indices, right_indices)
+        estimates[~estimable] = np.nan
+        se_contrast[~estimable] = np.nan
 
         t_ratio = estimates / se_contrast
 
         raw_p = 2 * stats.t.sf(np.abs(t_ratio), self._df)
-        p_adjusted = _adjust_pvalues(raw_p, adjust, n_levels, self._df, t_ratio)
+        p_adjusted = _adjust_finite(raw_p, adjust, n_levels, self._df, t_ratio)
 
         return ContrastResult(
             contrast=contrast_labels,
@@ -451,9 +573,14 @@ class Emmeans:
         if self._offset is not None:
             estimates += self._offset[treatment_indices] - self._offset[ctrl_idx]
         se_contrast = np.sqrt(np.maximum(var_contrast, 0))
+        estimable = self._estimable(
+            treatment_indices, np.full(len(treatment_indices), ctrl_idx, dtype=np.intp)
+        )
+        estimates[~estimable] = np.nan
+        se_contrast[~estimable] = np.nan
         t_ratio = estimates / se_contrast
         raw_p = 2 * stats.t.sf(np.abs(t_ratio), self._df)
-        p_adjusted = _adjust_pvalues(raw_p, adjust, n_levels, self._df, t_ratio)
+        p_adjusted = _adjust_finite(raw_p, adjust, n_levels, self._df, t_ratio)
 
         return ContrastResult(
             contrast=contrast_labels,
@@ -490,9 +617,31 @@ class Emmeans:
         estimates, se_contrast, t_ratio = _custom_contrast_statistics(
             C, self._L, self._beta, self._vcov, self._offset
         )
+        if self._full is not None and self._null is not None and n_contrasts:
+            nonestimable = np.zeros(n_contrasts, dtype=bool)
+            weights = np.asarray(C)
+            dtype = np.result_type(weights.dtype, np.float64)
+            for start, block in _row_blocks(weights):
+                # Scale each row in its own precision before converting it, so
+                # extended-range coefficients neither overflow nor vanish.
+                block = np.asarray(block, dtype=dtype)
+                scale = np.max(np.abs(block), axis=1, keepdims=True)
+                block = np.divide(
+                    block, scale, out=np.zeros(block.shape, dtype=dtype), where=scale > 0
+                )
+                nonestimable[start : start + len(block)] = _nonestimable_block(
+                    np.asarray(block, dtype=np.float64) @ self._full, self._null
+                )
+            estimates[nonestimable] = np.nan
+            se_contrast[nonestimable] = np.nan
+            t_ratio[nonestimable] = np.nan
         raw_p = 2 * stats.t.sf(np.abs(t_ratio), self._df)
-        p_adjusted = _adjust_pvalues(
-            raw_p, adjust, n_levels if adjust == "tukey" else n_contrasts, self._df, t_ratio
+        p_adjusted = _adjust_finite(
+            raw_p,
+            adjust,
+            n_levels if adjust == "tukey" else int(np.count_nonzero(np.isfinite(raw_p))),
+            self._df,
+            t_ratio,
         )
 
         contrast_labels = [f"C{i + 1}" for i in range(n_contrasts)]
@@ -584,6 +733,28 @@ def _contrast_critical_value(
     return float(stats.norm.isf(tail) if np.isinf(df) else stats.t.isf(tail, df))
 
 
+def _adjust_finite(
+    p: NDArray[np.floating],
+    method: str,
+    n_groups: int,
+    df: float,
+    t_ratio: NDArray[np.floating] | None = None,
+) -> NDArray[np.floating]:
+    """Adjust the finite p-values as one family, leaving non-estimable ones NaN.
+
+    As R's emmeans does, non-estimable contrasts do not count in the family.
+    """
+    finite = np.isfinite(p)
+    if np.all(finite):
+        return _adjust_pvalues(p, method, n_groups, df, t_ratio)
+    adjusted = np.full_like(p, np.nan, dtype=np.float64)
+    if np.any(finite):
+        adjusted[finite] = _adjust_pvalues(
+            p[finite], method, n_groups, df, None if t_ratio is None else t_ratio[finite]
+        )
+    return adjusted
+
+
 def _adjust_pvalues(
     p: NDArray[np.floating],
     method: str,
@@ -669,13 +840,18 @@ def _reference_levels(
     if unknown:
         raise ValueError(f"Unknown fixed-effect predictor(s) in at: {sorted(unknown)}")
 
+    factor_levels = factor_transform_levels(model.formula, model.matrices.transform_state)
     levels = {}
     for name in sorted(variables):
         categorical = is_categorical_or_string(frame, name)
         if name in overrides:
             values = overrides[name]
         elif categorical:
-            values = get_categories(frame, name)
+            # The fitted levels, which leave out categories no fitted row takes.
+            fitted = model.matrices.category_levels.get(name)
+            values = list(fitted) if fitted is not None else get_observed_categories(frame, name)
+        elif name in factor_levels:
+            values = factor_levels[name]
         else:
             column = (
                 frame[name]
@@ -757,13 +933,26 @@ def emmeans(
     beta = model.beta
     family = getattr(model, "family", None)
     df = np.inf if family is not None else float(model.df_residual())
-    L, result_grid = _marginal_mean_coefficients(model, result_names, levels)
+    estimability = _mean_estimability(model, result_names, levels)
+    full: NDArray[np.float64] | None = None
+    null: NDArray[np.float64] | None = None
+    if estimability is None:
+        L, result_grid = _marginal_mean_coefficients(model, result_names, levels)
+    else:
+        full, null, result_grid = estimability
+        L = full[:, list(cast(Sequence[int], model.matrices.fixed_column_indices))]
     offsets = _reference_offsets(model, offset, len(result_grid))
     vcov = model.vcov()
 
     em_values = L @ beta + offsets
     var_em = _rowwise_quadratic_form(L, vcov)
     se_em = np.sqrt(np.maximum(var_em, 0))
+    if full is not None:
+        # As R's emmeans reports nonEst, means outside the design's row space
+        # are NaN; contrasts test their own estimability.
+        nonestimable = _nonestimable(full, null)
+        em_values[nonestimable] = np.nan
+        se_em[nonestimable] = np.nan
 
     alpha = 1 - level
 
@@ -795,6 +984,8 @@ def emmeans(
 
     return Emmeans(
         result=result,
+        _full=full,
+        _null=null,
         _L=L,
         _vcov=vcov,
         _beta=beta,

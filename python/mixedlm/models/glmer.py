@@ -31,7 +31,7 @@ from mixedlm.models.shared_utils import (
     dense_quadratic_form_diagonal,
     symmetric_inverse,
 )
-from mixedlm.utils import _format_pvalue, _get_signif_code
+from mixedlm.utils import _format_pvalue, _get_signif_code, _name_width, _varcorr_widths
 from mixedlm.utils.simulation import simulate_fitted_glmm_response
 from mixedlm.utils.validation import _validate_confidence_level
 
@@ -42,17 +42,19 @@ class GlmerVarCorr:
 
     def __str__(self) -> str:
         lines = ["Random effects:"]
-        lines.append(f" {'Groups':<11} {'Name':<12} {'Variance':>10} {'Std.Dev.':>10} {'Corr':>6}")
+        gw, tw = _varcorr_widths(self.groups)
+        lines.append(
+            f" {'Groups':<{gw}} {'Name':<{tw}} {'Variance':>10} {'Std.Dev.':>10} {'Corr':>6}"
+        )
         for group_name, group in self.groups.items():
             for i, term in enumerate(group.term_names):
                 grp = group_name if i == 0 else ""
                 var = group.variance[term]
                 sd = group.stddev[term]
-                if i == 0 or group.corr is None:
-                    lines.append(f" {grp:<11} {term:<12} {var:>10.4f} {sd:>10.4f}")
-                else:
-                    corr_vals = " ".join(f"{group.corr[i, j]:>6.2f}" for j in range(i))
-                    lines.append(f" {grp:<11} {term:<12} {var:>10.4f} {sd:>10.4f} {corr_vals}")
+                row = f" {grp:<{gw}} {term:<{tw}} {var:>10.4f} {sd:>10.4f}"
+                if i > 0 and group.corr is not None:
+                    row += " " + " ".join(f"{group.corr[i, j]:>6.2f}" for j in range(i))
+                lines.append(row)
         return "\n".join(lines)
 
     def __repr__(self) -> str:
@@ -281,7 +283,8 @@ class GlmerResult(MerResultMixin):
         Parameters
         ----------
         type : str, default "deviance"
-            Type of residuals: "response", "pearson", or "deviance".
+            Type of residuals: "response", "pearson", "deviance", or "working",
+            the response residuals on the link scale, (y - mu) * deta/dmu.
         na_expand : bool, default True
             If True and na_action="exclude", expand to original length with NA.
 
@@ -301,6 +304,8 @@ class GlmerResult(MerResultMixin):
             dev_resids = self.family.deviance_resids(self.matrices.y, mu, self.matrices.weights)
             signs = np.sign(self.matrices.y - mu)
             resid = signs * np.sqrt(np.abs(dev_resids))
+        elif type == "working":
+            resid = (self.matrices.y - mu) * self.family.link.deriv(mu)
         else:
             raise ValueError(f"Unknown residual type: {type}")
 
@@ -600,9 +605,14 @@ class GlmerResult(MerResultMixin):
         >>> result3 = result.update(". ~ . + z")
         """
 
+        reuse_response = data is None and weights is None
+        # A model saved by mixedlm 1.3 or earlier refits with its own coding.
+        kwargs.setdefault("_factor_coding", self.matrices.factor_coding)
         if data is None:
             if self.matrices.frame is not None:
                 data = self.matrices.frame
+                # The stored rows exclude omitted ones that scale() and poly() used.
+                kwargs.setdefault("_transform_state", self.matrices.transform_state)
             else:
                 raise ValueError(
                     "No data available. Either provide data or ensure model_frame was stored."
@@ -629,16 +639,25 @@ class GlmerResult(MerResultMixin):
                 else self.matrices.weights / self.matrices.trials
             )
         if offset is None and not data_size_changed:
-            offset = self.matrices.offset
+            offset = self.matrices.argument_offset
         if nAGQ is None:
             nAGQ = self.nAGQ
 
         kwargs.setdefault("contrasts", self.matrices.contrasts)
         kwargs.setdefault("control", self._refit_control())
 
-        return glmer(
+        updated = glmer(
             new_formula, data, family=family, weights=weights, offset=offset, nAGQ=nAGQ, **kwargs
         )
+        if (
+            reuse_response
+            and self.matrices.binomial_trial_weights
+            and isinstance(family, Binomial)
+            and new_formula.response == self.formula.response
+            and not new_formula.grouped_response
+        ):
+            updated.matrices.binomial_trial_weights = True
+        return updated
 
     @cached_property
     def _saturated_log_likelihood(self) -> float:
@@ -785,6 +804,18 @@ class GlmerResult(MerResultMixin):
         return simulate_fitted_glmm_response(self.family, mu, self.matrices, rng)
 
     def _refit_from_matrices(self, matrices: ModelMatrices, **kwargs) -> GlmerResult:
+        from mixedlm.families.binomial import Binomial
+
+        if (
+            isinstance(self.family, Binomial)
+            and matrices.trials is None
+            and not matrices.binomial_trial_weights
+        ):
+            # Also recover the fitted encoding from models saved before it was recorded.
+            matrices.binomial_trial_weights = bool(
+                np.any((self.matrices.y > 0) & (self.matrices.y < 1))
+                or np.any((matrices.y > 0) & (matrices.y < 1))
+            )
         control = self._refit_control()
         optimizer = GLMMOptimizer(
             matrices,
@@ -892,13 +923,16 @@ class GlmerResult(MerResultMixin):
 
         from scipy import stats
 
-        lines.append("             Estimate  Std. Error  z value  Pr(>|z|)")
+        width = _name_width(self.matrices.fixed_names)
+        lines.append(
+            f"{'':{width}} {'Estimate':>10}  {'Std. Error':>10}  {'z value':>7}  {'Pr(>|z|)':>10}"
+        )
         for i, name in enumerate(self.matrices.fixed_names):
             z_val = self.beta[i] / se[i] if se[i] > 0 else np.nan
             p_val = 2 * stats.norm.sf(np.abs(z_val))
             sig = _get_signif_code(p_val)
             lines.append(
-                f"{name:12} {self.beta[i]:10.4f}  {se[i]:10.4f}  {z_val:7.3f}  "
+                f"{name:{width}} {self.beta[i]:10.4f}  {se[i]:10.4f}  {z_val:7.3f}  "
                 f"{_format_pvalue(p_val):>10} {sig}"
             )
 

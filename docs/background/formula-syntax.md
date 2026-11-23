@@ -57,19 +57,55 @@ names also work with formula utilities and model updates.
 ```
 
 `:` binds more tightly than `*`. For example, `a*b:c` expands to
-`a + b:c + a:b:c`. Interactions use each factor once and retain the
-first spelling of the term. Thus `a*b - b:a` leaves `a + b`, and `x:x`
-gives `x`. Use `I(x**2)` for a squared predictor.
+`a + b:c + a:b:c`. Interactions use each factor once, however they are
+spelled: `a*b - b:a` leaves `a + b`, and `x:x` gives `x`. As R's `terms()`
+does, an interaction lists its factors in the order they first appear in the
+formula, or in its random-effect bar, and its first factor varies fastest in
+the design. So `a + b + b:a` has the term `a:b`, with columns in lme4's order.
+Use `I(x**2)` for a squared predictor.
+
+### Crossing and Nesting
+
+As in R, `^` crosses a group of terms up to the given order, parentheses group
+terms, and `/` nests terms within the factors to its left:
+
+```python
+# All main effects and two-way interactions
+"y ~ (a + b + c)^2"          # a + b + c + a:b + a:c + b:c
+
+# Distribute a product over a sum
+"y ~ a * (b + c)"            # a + b + c + a:b + a:c
+
+# b nested within a
+"y ~ a / b"                  # a + a:b
+"y ~ (a + b) / c"            # a + b + a:b:c
+```
+
+In R, `x^2` silently means `x`. mixedlm raises an error for a power of a single
+predictor instead; write `I(x**2)` or `poly(x, 2)`.
+
+Categorical variables are coded as in R. With terms in order of degree, a
+factor in a term uses contrasts when the rest of the term is part of an earlier
+term, the intercept counting as an empty term, and otherwise gets a column for
+every level. So `a + a:x` and `a / x` fit a separate slope for each level of
+`a`, while `a * x` fits slopes relative to the reference level, and so does
+`x:z + a:x`, since `x` is part of `x:z`. Without an intercept, the first factor
+of the first term that has a factor gets a column for every level, as in R:
+`0 + x + a` and `0 + x + x:a` code `a` with all its levels.
 
 ### Polynomial Terms
 
-Use `I()` with a non-negative integer exponent to include raw polynomial columns:
+`poly(x, degree)` adds orthogonal polynomial columns, like R's `poly()`. They
+span the same space as raw powers but are uncorrelated, which keeps the fit
+well conditioned. `poly(x, degree, raw = TRUE)` gives the raw powers
+`x, x**2, ...` instead. `I()` adds a single power or other arithmetic:
 
 ```python
-# Quadratic
-"y ~ x + I(x**2)"
+# Orthogonal quadratic: columns "poly(x, 2)1" and "poly(x, 2)2"
+"y ~ poly(x, 2)"
 
-# Quadratic and cubic
+# Raw powers, equivalent to x + I(x**2) + I(x**3)
+"y ~ poly(x, 3, raw = TRUE)"
 "y ~ x + I(x**2) + I(x**3)"
 
 # Raw polynomial interaction
@@ -77,6 +113,60 @@ Use `I()` with a non-negative integer exponent to include raw polynomial columns
 
 # Polynomial random slope
 "y ~ x + (I(x**2) | group)"
+```
+
+`I()` accepts `+`, `-`, `*`, `/`, `**` (or `^`), numbers, and the elementwise
+functions below, as in `I(x - 10)`, `I(dose / 1000)` or `I(x**-1)`. Within
+function arguments, these operators always mean arithmetic, so `log(x + 1)`
+adds one before taking the logarithm.
+
+### Transformations
+
+Formulas can transform predictors in place, so the data need no derived columns:
+
+| Function | Meaning |
+|----------|---------|
+| `log(x)`, `log(x, base = 2)`, `log2`, `log10`, `log1p` | Logarithms |
+| `exp`, `expm1`, `sqrt`, `abs`, `sign` | Elementwise functions |
+| `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `sinh`, `cosh`, `tanh` | Trigonometric functions |
+| `floor`, `ceiling`, `trunc` | Rounding |
+| `scale(x)`, `scale(x, center = TRUE, scale = FALSE)` | Center and/or scale, as R's `scale()` |
+| `poly(x, degree)`, `poly(x, degree, raw = TRUE)` | Orthogonal or raw polynomials |
+| `factor(x)`, `as.factor(x)` | Treat a numeric column as categorical |
+| `C(x, sum)` | Categorical with the given contrasts: `treatment`, `sum`, `helmert` (R's unscaled `contr.helmert`), `poly`, or `deviation` |
+| `relevel(x, ref = "B")` | Categorical with `"B"` as the reference level |
+
+```python
+"y ~ log(dose) + (1 | subject)"
+"y ~ scale(age) + (scale(age) | site)"
+"y ~ factor(year) + C(treatment, sum) + (1 | farm)"
+```
+
+Transformed terms are named by a canonical spelling of the term, such as
+`log(dose)`, `scale(age)`, `poly(x, 2)1` and `factor(year).1`. Equivalent
+spellings share a name: `I(x^2)` becomes `I(x**2)`, `log(x+1)` becomes
+`log(x + 1)`, and options at their defaults are dropped, so
+`scale(x, center = TRUE)` is `scale(x)` and `log(x, base = exp(1))` is `log(x)`. Categorical
+transforms follow the `name.j` naming of other categorical predictors, and
+`contrasts={"factor(year)": "sum"}` sets their coding like any other factor.
+
+`scale()`, orthogonal `poly()` and the factor transforms learn from the fitting
+data: the center and scale, the polynomial basis, and the levels.
+`predict()`, cross-validation and other uses of new data reuse those fitted
+values. A single new observation is therefore scaled exactly as the fitting
+data were, and new data with an unseen factor level raise an error. Each
+cross-validation fold learns them from its own training rows.
+
+A transform that produces an infinite or undefined value from observed data,
+such as `log(0)`, raises an error that names the term. Missing source values
+are handled by `na_action` like any other missing predictor.
+
+```python
+import mixedlm as mlm
+
+sleep = mlm.load_sleepstudy()
+model = mlm.lmer("Reaction ~ poly(Days, 2) + (scale(Days) | Subject)", sleep)
+model.fixef()  # (Intercept), poly(Days, 2)1, poly(Days, 2)2
 ```
 
 ### Removing the Intercept
@@ -137,6 +227,56 @@ Categorical variables are automatically dummy-coded:
 The same rule applies to categorical random effects: `(0 + treatment | group)`
 creates one random-effect column per treatment level.
 
+## Offsets
+
+An `offset(...)` term adds a known quantity to the linear predictor with a fixed
+coefficient of one. The common case is an exposure in a count model:
+
+```python
+import numpy as np
+
+ticks = mlm.load_grouseticks()
+ticks["hours"] = np.linspace(1.0, 3.0, len(ticks))
+poisson = mlm.glmer(
+    "TICKS ~ YEAR + offset(log(hours)) + (1 | BROOD)",
+    ticks,
+    family=mlm.families.Poisson(),
+)
+```
+
+This is the same model as passing `offset=np.log(ticks["hours"])`. Offsets in the
+formula are evaluated again for `predict(newdata)`, so new data must contain
+their variables. An `offset` argument to `predict()` or the fitting function adds
+to the formula's offset terms. Updates keep or drop the term with the formula:
+`model.update(". ~ . - offset(log(hours))")` refits without it.
+
+## Responses
+
+The response can be a column, an arithmetic expression, or an elementwise
+transform: `"log(y) ~ x"` or `"I(y / 100) ~ x"`. It must refer to a data column.
+A refit keeps the replacement values of a computed response with the model, so
+updates of a refitted `log(y)` model, including `update("exp(.) ~ .")`, use
+them. As in R, a computed response is always evaluated from its variables, even
+when a data column has the same name as the expression.
+`simulate_formula()` writes simulated responses to data columns, so it needs a
+column response or binomial successes. For `cbind(s, f)` it also writes `f` as
+the trials minus the simulated successes, so the trials stay the same.
+
+Binomial models accept two forms of grouped response, which give the same fit:
+
+```python
+cbpp = mlm.load_cbpp()
+binomial = mlm.families.Binomial()
+
+# successes / trials, where size is the number of trials
+by_trials = mlm.glmer("incidence / size ~ period + (1 | herd)", cbpp, family=binomial)
+
+# cbind(successes, failures), as in R
+by_failures = mlm.glmer(
+    "cbind(incidence, size - incidence) ~ period + (1 | herd)", cbpp, family=binomial
+)
+```
+
 ## Random Effects
 
 ### Random Intercept
@@ -190,8 +330,11 @@ Uses `||` instead of `|`. This estimates:
 - Variance of random slopes: \(\sigma^2_{u_1}\)
 - No correlation parameter
 
-For numeric slopes, `expandDoubleVerts()` can write the equivalent formula
-with separate `|` terms. For categorical slopes, fit the original `||`
+As in lme4, `||` separates the terms rather than every column: a term with
+several numeric columns keeps them correlated with each other, so
+`(1 + poly(x, 2) || g)` is `(1 | g) + (0 + poly(x, 2) | g)`, and formulas print
+in that form. For numeric slopes, `expandDoubleVerts()` writes the equivalent
+formula with separate `|` terms. For categorical slopes, fit the original `||`
 formula to keep all encoded random-effect columns independent.
 
 **When to use:**
@@ -302,6 +445,10 @@ model = mlm.lmer(
 | `(1 \| g1/g2)` | Nested: g2 within g1 |
 | `(1 \| g1) + (1 \| g2)` | Crossed: g1 and g2 |
 | `(1 \| g1) + (1 \| g1:g2)` | Explicit nesting |
+| `(a + b)^2`, `a * (b + c)`, `a / b` | Crossing, distribution and nesting of fixed terms |
+| `log(x)`, `scale(x)`, `poly(x, 2)`, `factor(x)` | Transformed predictors |
+| `offset(log(t))` | Known offset with coefficient one |
+| `cbind(s, n - s) ~ ...`, `s / n ~ ...` | Binomial successes and failures, or successes and trials |
 
 ## Practical Considerations
 
@@ -373,10 +520,19 @@ is_mixed_formula("y ~ x")            # False
 ### Invalid or Incomplete Expressions
 
 The parser rejects an incomplete term, missing operator, unmatched parenthesis,
-or unsupported expression with its position in the formula. It never fits only
-the valid prefix of a formula. For example, `"y ~ x +"` and
-`"y ~ x / z + (1 | group)"` raise errors; `/` is supported for grouping factors,
-as in `"y ~ x + (1 | group/subgroup)"`.
+unknown function, or unsupported expression with its position in the formula. It
+never fits only the valid prefix of a formula. For example, `"y ~ x +"` and
+`"y ~ spline(x)"` raise errors.
+
+### Using `^` or `/` for Arithmetic
+
+Outside a function call, `^`, `*` and `/` are formula operators, as in R:
+`y ~ x / z` means `x + x:z`, not a ratio. Put arithmetic inside `I()`:
+
+```python
+"y ~ I(x / z)"     # the ratio
+"y ~ I(x**2)"      # the square; "y ~ x^2" raises an error
+```
 
 ### Forgetting the Intercept in Random Effects
 

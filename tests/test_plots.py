@@ -484,3 +484,20 @@ def test_excluded_rows_and_zero_slopes_in_residual_panels(legacy):
 def test_invalid_diagnostic_panel_is_rejected(lmer_result, which):
     with pytest.raises(ValueError, match="panel numbers"):
         lmer_result.plot(which=which)
+
+
+def test_legacy_residual_groups_without_frame(lmer_result):
+    matrices = lmer_result.matrices
+    struct = replace(matrices.random_structures[0], level_indices=None)
+    fit = replace(lmer_result, matrices=replace(matrices, random_structures=[struct], frame=None))
+    ax = plot_resid_group(fit, point_kws={"showmeans": True})
+    means = [line.get_ydata().item() for line in ax.lines if line.get_marker() == "^"]
+    expected = pd.Series(fit.residuals()).groupby(matrices.frame["group"]).mean()
+    assert_allclose(means, expected)
+
+    # An all-zero design row cannot identify a level without stored membership.
+    masked = matrices.Z.copy().tolil()
+    masked[0, :] = 0
+    fit = replace(fit, matrices=replace(fit.matrices, Z=masked.tocsc()))
+    with pytest.raises(ValueError, match="requires the fitted frame"):
+        plot_resid_group(fit)
