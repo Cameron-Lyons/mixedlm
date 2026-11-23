@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import warnings
 from collections.abc import Callable
 from contextlib import nullcontext
 from dataclasses import dataclass
@@ -34,18 +35,19 @@ class AllFitResult:
         lines.append("allFit summary:")
         lines.append("")
 
-        header = f"{'Optimizer':<15} {'Converged':>10} {'Deviance':>12} {'AIC':>12}"
+        width = max([15, *(len(name) for name in self.fits)])
+        header = f"{'Optimizer':<{width}} {'Converged':>10} {'Deviance':>12} {'AIC':>12}"
         header += f" {'Singular':>10}"
         lines.append(header)
-        lines.append("-" * 65)
+        lines.append("-" * len(header))
 
         for opt_name, fit in self.fits.items():
             if fit is None:
-                lines.append(f"{opt_name:<15} {'FAILED':>10} {'-':>12} {'-':>12} {'-':>10}")
+                lines.append(f"{opt_name:<{width}} {'FAILED':>10} {'-':>12} {'-':>12} {'-':>10}")
             else:
                 converged = "Yes" if fit.converged else "No"
                 singular = "Yes" if fit.isSingular() else "No"
-                row = f"{opt_name:<15} {converged:>10} {fit.deviance:>12.4f}"
+                row = f"{opt_name:<{width}} {converged:>10} {fit.deviance:>12.4f}"
                 row += f" {fit.AIC():>12.2f} {singular:>10}"
                 lines.append(row)
 
@@ -152,8 +154,11 @@ class AllFitResult:
 def _fit_with_optimizer(
     fit: Callable[..., LmerResult | GlmerResult], optimizer: str
 ) -> tuple[LmerResult | GlmerResult | None, str | None, list[str]]:
+    """Fit with one optimizer, recording its warnings as lme4's allFit does."""
     try:
-        result = fit(method=optimizer)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            result = fit(method=optimizer)
         messages = []
         if not result.converged:
             messages.append("Did not converge")
@@ -161,6 +166,12 @@ def _fit_with_optimizer(
             messages.append("Singular fit")
     except Exception as error:
         return None, str(error), []
+    for text in dict.fromkeys(str(warning.message) for warning in caught):
+        summarized = (text.startswith("Model failed to converge") and not result.converged) or (
+            text.startswith("Model is singular") and result.isSingular()
+        )
+        if not summarized:
+            messages.append(text)
     return result, None, messages
 
 
@@ -175,20 +186,20 @@ def _run_allfit(
     attempt = partial(_fit_with_optimizer, fit)
     fits: dict[str, LmerResult | GlmerResult | None] = {}
     errors: dict[str, str] = {}
-    warnings: dict[str, list[str]] = {}
+    recorded: dict[str, list[str]] = {}
     with process_pool(workers) if workers > 1 else nullcontext() as executor:
         run = map if executor is None else executor.map
         for name, (result, error, messages) in zip(
             optimizers, run(attempt, optimizers), strict=True
         ):
             fits[name] = result
-            warnings[name] = messages
+            recorded[name] = messages
             if error is not None:
                 errors[name] = error
             if verbose:
                 summary = f"ERROR: {error}" if result is None else f"deviance={result.deviance:.4f}"
                 print("; ".join([f"{name}: {summary}", *messages]))
-    return AllFitResult(fits=fits, errors=errors, warnings=warnings)
+    return AllFitResult(fits=fits, errors=errors, warnings=recorded)
 
 
 def allfit_lmer(

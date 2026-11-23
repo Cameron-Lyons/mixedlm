@@ -147,7 +147,8 @@ def test_glmm_summary_keeps_small_pvalues_and_readable_format(z_value, formatted
     assert line.split(maxsplit=4)[4].startswith(formatted)
 
 
-@pytest.mark.parametrize("method, multiplier", [("holm", 3.0), ("fdr", 1.5)])
+# As R's p.adjust() does, an undefined test is missing and not part of the family.
+@pytest.mark.parametrize("method, multiplier", [("holm", 2.0), ("fdr", 1.0)])
 def test_adjusted_contrasts_keep_undefined_test_missing(method, multiplier):
     means = _means()
     constraints = np.array([[1.0, -1.0, 0.0], [0.0, 0.0, 0.0], [0.0, 1.0, -1.0]])

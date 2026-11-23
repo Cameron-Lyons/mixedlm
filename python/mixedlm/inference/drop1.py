@@ -84,33 +84,14 @@ def _normalize_test(test: str) -> str:
 
 def _droppable_fixed_terms(model: LmerResult | GlmerResult) -> list[str]:
     """Return fixed terms whose deletion respects the marginality principle."""
-    from mixedlm.formula.terms import (
-        InteractionTerm,
-        PowerTerm,
-        VariableTerm,
-        format_term,
-    )
+    from mixedlm.formula.terms import InterceptTerm, format_term, term_factors
 
-    FactorKey = tuple[str, int | None]
-
-    def factor_key(factor: str | PowerTerm) -> FactorKey:
-        if isinstance(factor, PowerTerm):
-            return (factor.name, factor.exponent)
-        return (factor, None)
-
-    candidates: list[tuple[str, frozenset[FactorKey]]] = []
-    for term in model.formula.fixed.terms:
-        if isinstance(term, VariableTerm):
-            candidates.append((format_term(term), frozenset((factor_key(term.name),))))
-        elif isinstance(term, PowerTerm):
-            candidates.append((format_term(term), frozenset((factor_key(term),))))
-        elif isinstance(term, InteractionTerm):
-            candidates.append(
-                (
-                    format_term(term),
-                    frozenset(factor_key(factor) for factor in term.variables),
-                )
-            )
+    # Each factor is its own variable for marginality: x, I(x**2) and log(x) differ.
+    candidates = [
+        (format_term(term), frozenset(term_factors(term)))
+        for term in model.formula.fixed.terms
+        if not isinstance(term, InterceptTerm)
+    ]
 
     return [
         label

@@ -154,18 +154,19 @@ def test_fitted_positions_survive_pickling_and_response_replacement(kind):
 def test_successive_rank_reductions_compose_original_positions():
     model, _, _, _ = _model(reduction="constant")
     original = model.matrices
-    assert original.fixed_column_indices == (1, 2, 3)
+    # As in lme4, the constant column is dropped rather than the intercept before it.
+    assert original.fixed_column_indices == (0, 1, 2)
     second_X = original.X.copy()
     second_X[:, 0] = 0
     reduced, dropped = run_model_checks(
         replace(original, X=second_X), lmerControl(check_rankX="message+drop.cols")
     )
     assert dropped == [0]
-    assert reduced.fixed_column_indices == (2, 3)
+    assert reduced.fixed_column_indices == (1, 2)
     assert reduced.fixed_source_names == original.fixed_source_names
     checked, dropped = run_model_checks(reduced, lmerControl(check_rankX="message+drop.cols"))
     assert dropped is None
-    assert checked.fixed_column_indices == (2, 3)
+    assert checked.fixed_column_indices == (1, 2)
 
 
 @pytest.mark.parametrize("kind", ["lmm", "glmm"])
@@ -194,7 +195,7 @@ def test_missing_fitted_column_still_has_a_clear_error():
         model.predict(data, re_form="NA")
 
 
-@pytest.mark.parametrize("positions", [(-1, 2, 3), (1, 2, 4), (0, 1, 2)])
+@pytest.mark.parametrize("positions", [(-1, 1, 2), (0, 1, 4), (1, 2, 3)])
 def test_inconsistent_stored_positions_are_rejected(positions):
     model, data, _, _ = _model(reduction="constant")
     model.matrices = replace(model.matrices, fixed_column_indices=positions)

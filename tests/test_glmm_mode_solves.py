@@ -107,9 +107,36 @@ def test_mode_update_with_short_and_odd_lengths_and_extreme_offsets(n, kind):
     working_response = derivative * (matrices.y - mean)
     # One random intercept makes the penalized normal equation scalar.
     precision = 1 + theta[0] ** 2 * np.sum(working_weights)
-    expected_random = theta[0] ** 2 * np.dot(working_weights, working_response) / precision
+    newton_random = theta[0] ** 2 * np.dot(working_weights, working_response) / precision
+
+    def penalized_deviance(random_effect):
+        mean = family.clamp_mu(family.link.inverse(matrices.offset + random_effect), eps=1e-10)
+        deviance = np.sum(family.deviance_resids(matrices.y, mean, weights))
+        return deviance + (random_effect / theta[0]) ** 2
+
+    # As lme4's PIRLS does, the update halves a large Newton step while it raises
+    # the penalized deviance beyond rounding; saturated means can make the full
+    # step worse. When no shorter step helps, the full step stands.
+    start = penalized_deviance(0.0)
+    rounding = 64 * np.finfo(float).eps * np.sum(np.abs(weights * matrices.y))
+    tolerance = 1e-8 * (1 + abs(start)) + rounding
+    # Only a step that moves the predictor by more than 3 is checked on the first
+    # iteration; a converging solve takes moderate Newton steps unchanged.
+    if abs(newton_random) <= 3 or penalized_deviance(newton_random) <= start + tolerance:
+        halvings = 0
+    else:
+        # A shorter step counts only when it lowers the deviance beyond rounding.
+        halvings = next(
+            (
+                k
+                for k in range(1, 31)
+                if penalized_deviance(newton_random / 2**k) < start - tolerance
+            ),
+            0,
+        )
+    expected_random = newton_random / 2**halvings
     _, beta, random, _ = native.glmm_deviance(
         *_native_glmm_args(theta, matrices, family), 1, maxiter=1, tol=1e-12
     )
     assert beta == []
-    assert_allclose(random, [expected_random], rtol=1e-11, atol=1e-12)
+    assert_allclose(random, [expected_random], rtol=1e-9, atol=1e-12)

@@ -42,6 +42,9 @@ def tidy(
     conf_int: bool = False,
     conf_level: float = 0.95,
     ddf_method: str | None = "Satterthwaite",
+    conf_method: str = "Wald",
+    n_boot: int = 1000,
+    seed: int | None = None,
 ) -> pd.DataFrame:
     """Return model components in a row-oriented table.
 
@@ -54,9 +57,17 @@ def tidy(
         standard deviations and correlations), ``"ran_vals"`` (conditional
         modes), or ``"all"``.
     conf_int : bool, default False
-        Include confidence limits for fixed effects.
+        Include confidence limits.
     conf_level : float, default 0.95
         Confidence level between zero and one.
+    conf_method : {"Wald", "profile", "boot"}, default "Wald"
+        How to compute the limits, as in broom.mixed. ``"Wald"`` gives fixed
+        effects t-based limits with ``ddf_method`` degrees of freedom and leaves
+        ``ran_pars`` limits missing. ``"profile"`` and ``"boot"`` use
+        ``confint()`` for the fixed effects and for the ``ran_pars`` standard
+        deviations and correlations of linear and generalized models.
+    n_boot, seed : optional
+        Bootstrap replicates and seed for ``conf_method="boot"``.
     ddf_method : str or None, default "Satterthwaite"
         Denominator degrees-of-freedom method for linear mixed models.
         Use ``"Kenward-Roger"`` or ``"normal"`` for alternatives. This
@@ -74,11 +85,32 @@ def tidy(
     if not hasattr(model_obj, "fixef") or not hasattr(model_obj, "VarCorr"):
         raise TypeError("tidy() requires a fitted mixed-model result")
 
+    if conf_method not in ("Wald", "profile", "boot"):
+        raise ValueError(f"Unknown conf_method '{conf_method}'. Use 'Wald', 'profile', or 'boot'.")
+    intervals: dict[str, tuple[float, float]] | None = None
+    if conf_int and conf_method != "Wald":
+        if _model_flag(model_obj, "isNLMM"):
+            raise ValueError("Nonlinear models support only conf_method='Wald'")
+        parm = []
+        if "fixed" in selected:
+            parm.append("beta_")
+        if "ran_pars" in selected:
+            parm.append("theta_")
+        intervals = model_obj.confint(
+            parm=parm, level=conf_level, method=conf_method, n_boot=n_boot, seed=seed
+        )
+
     rows: list[dict[str, Any]] = []
     if "fixed" in selected:
-        rows.extend(_fixed_effect_rows(model_obj, conf_int, conf_level, ddf_method))
+        fixed_rows = _fixed_effect_rows(
+            model_obj, conf_int and intervals is None, conf_level, ddf_method
+        )
+        if intervals is not None:
+            for row in fixed_rows:
+                row["conf.low"], row["conf.high"] = intervals.get(row["term"], (_NAN, _NAN))
+        rows.extend(fixed_rows)
     if "ran_pars" in selected:
-        rows.extend(_random_parameter_rows(model_obj))
+        rows.extend(_random_parameter_rows(model_obj, intervals))
     if "ran_vals" in selected:
         rows.extend(_random_value_rows(model_obj))
 
@@ -267,14 +299,26 @@ def _fixed_effect_inference(
     return dfs, 2.0 * stats.norm.sf(np.abs(statistics))
 
 
-def _random_parameter_rows(model: Any) -> list[dict[str, Any]]:
+def _random_parameter_rows(
+    model: Any, intervals: dict[str, tuple[float, float]] | None = None
+) -> list[dict[str, Any]]:
     if _model_flag(model, "isNLMM"):
         return _nlmm_random_parameter_rows(model)
 
     var_corr = model.VarCorr()
     rows: list[dict[str, Any]] = []
+    # Map each block position to its lme4 name, such as .sig01, for interval lookup.
+    names: dict[tuple[int, int, int], str] = {}
+    if intervals is not None:
+        from mixedlm.inference.variance_profile import variance_parameter_positions
 
-    for group_name, group in var_corr.groups.items():
+        names = variance_parameter_positions(model.matrices.random_structures)
+
+    def limits(block: int, i: int, j: int) -> dict[str, float]:
+        low, high = (intervals or {}).get(names.get((block, i, j), ""), (_NAN, _NAN))
+        return {"conf_low": low, "conf_high": high}
+
+    for block, (group_name, group) in enumerate(var_corr.groups.items()):
         if hasattr(group, "term_names"):
             term_names = list(group.term_names)
             covariance = np.asarray(group.cov, dtype=np.float64)
@@ -286,6 +330,7 @@ def _random_parameter_rows(model: Any) -> list[dict[str, Any]]:
                         group=group_name,
                         term=f"sd__{term}",
                         estimate=standard_deviations[index],
+                        **limits(block, index, index),
                     )
                 )
             correlation = getattr(group, "corr", None)
@@ -299,6 +344,7 @@ def _random_parameter_rows(model: Any) -> list[dict[str, Any]]:
                                 group=group_name,
                                 term=(f"cor__{term_names[column_index]}.{term_names[row_index]}"),
                                 estimate=correlation[row_index, column_index],
+                                **limits(block, row_index, column_index),
                             )
                         )
         else:
@@ -319,6 +365,8 @@ def _random_parameter_rows(model: Any) -> list[dict[str, Any]]:
                 group="Residual",
                 term="sd__Observation",
                 estimate=np.sqrt(max(float(var_corr.residual), 0.0)),
+                conf_low=(intervals or {}).get(".sigma", (_NAN, _NAN))[0],
+                conf_high=(intervals or {}).get(".sigma", (_NAN, _NAN))[1],
             )
         )
     return rows

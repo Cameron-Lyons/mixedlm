@@ -53,6 +53,28 @@ class TestEMReml:
         with pytest.raises(ValueError, match="max_iter must be at least 1"):
             em_reml_simple(parsed.matrices, max_iter=0)
 
+    @pytest.mark.parametrize(
+        ("name", "value"),
+        [
+            ("min_iter_converge", -1),
+            ("tol", np.nan),
+            ("variance_floor", 0),
+            ("sigma2_u_init_min", -1),
+            ("sigma2_u_init_scale", np.inf),
+        ],
+    )
+    def test_invalid_controls(self, name, value):
+        matrices = lFormula("Reaction ~ Days + (1 | Subject)", load_sleepstudy()).matrices
+        with pytest.raises(ValueError, match=name):
+            em_reml_simple(matrices, **{name: value})
+
+    @pytest.mark.parametrize("slope", [0, 1])
+    def test_rejects_rank_deficient_fixed_design(self, slope):
+        matrices = lFormula("Reaction ~ Days + (1 | Subject)", load_sleepstudy()).matrices
+        matrices.X[:, 1] = slope
+        with pytest.raises(ValueError, match="full-rank fixed-effects"):
+            em_reml_simple(matrices)
+
     def test_em_reml_simple_intercept(self):
         """Test EM-REML with simple random intercept model."""
         data = load_sleepstudy()

@@ -9,7 +9,6 @@ from numpy.typing import NDArray
 
 def _polars_column_numpy(column: Any) -> NDArray:
     """Export native arrays while preserving dtypes on older Polars."""
-    import numpy as np
     import polars as pl
 
     try:
@@ -103,6 +102,19 @@ def get_categories(data: Any, col_name: str) -> list:
     return sorted(col.dropna().unique().tolist())
 
 
+def get_observed_categories(data: Any, col_name: str) -> list:
+    """Category levels that occur in a column, in level order.
+
+    As lme4's model frame drops unused levels, declared categories that no row
+    takes are left out.
+    """
+    import pandas as pd
+
+    levels = get_categories(data, col_name)
+    observed = set(pd.Series(get_column_values(data, col_name)).dropna().unique().tolist())
+    return [level for level in levels if level in observed]
+
+
 def is_categorical_or_string(data: Any, col_name: str) -> bool:
     """Check if a column is categorical or string type."""
     data = ensure_dataframe(data, columns=[col_name])
@@ -166,7 +178,6 @@ def concat_columns_as_string(
     escape: bool = False,
 ) -> NDArray:
     """Concatenate columns, optionally escaping separators within group labels."""
-    import numpy as np
 
     if not columns:
         return np.full(dataframe_length(data), "", dtype=object)
@@ -207,6 +218,7 @@ def _grouped_observation_indices(
     groups: NDArray[np.integer], *, n_groups: int | None = None
 ) -> list[NDArray[np.intp]]:
     """Return ordered rows for observed labels or each code in range(n_groups)."""
+
     order = np.argsort(groups, kind="stable")
     sorted_groups = groups[order]
     if n_groups is not None:
@@ -222,7 +234,6 @@ def _grouped_observation_indices(
 
 def factorize_levels(values: NDArray) -> tuple[NDArray, dict[Any, int]]:
     """Factor grouping values into sorted integer levels in one pass."""
-    import numpy as np
     import pandas as pd
 
     codes, levels = pd.factorize(values, sort=True)

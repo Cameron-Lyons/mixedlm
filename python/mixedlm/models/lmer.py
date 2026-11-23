@@ -38,7 +38,7 @@ from mixedlm.models.shared_utils import (
     dense_quadratic_form_diagonal,
     symmetric_inverse,
 )
-from mixedlm.utils import _format_pvalue, _get_signif_code
+from mixedlm.utils import _format_pvalue, _get_signif_code, _name_width, _varcorr_widths
 from mixedlm.utils.validation import _validate_confidence_level
 
 
@@ -73,19 +73,21 @@ class VarCorr:
 
     def __str__(self) -> str:
         lines = ["Random effects:"]
-        lines.append(f" {'Groups':<11} {'Name':<12} {'Variance':>10} {'Std.Dev.':>10} {'Corr':>6}")
+        gw, tw = _varcorr_widths(self.groups)
+        lines.append(
+            f" {'Groups':<{gw}} {'Name':<{tw}} {'Variance':>10} {'Std.Dev.':>10} {'Corr':>6}"
+        )
         for group_name, group in self.groups.items():
             for i, term in enumerate(group.term_names):
                 grp = group_name if i == 0 else ""
                 var = group.variance[term]
                 sd = group.stddev[term]
-                if i == 0 or group.corr is None:
-                    lines.append(f" {grp:<11} {term:<12} {var:>10.4f} {sd:>10.4f}")
-                else:
-                    corr_vals = " ".join(f"{group.corr[i, j]:>6.2f}" for j in range(i))
-                    lines.append(f" {grp:<11} {term:<12} {var:>10.4f} {sd:>10.4f} {corr_vals}")
+                row = f" {grp:<{gw}} {term:<{tw}} {var:>10.4f} {sd:>10.4f}"
+                if i > 0 and group.corr is not None:
+                    row += " " + " ".join(f"{group.corr[i, j]:>6.2f}" for j in range(i))
+                lines.append(row)
         resid_sd = np.sqrt(self.residual)
-        lines.append(f" {'Residual':<11} {'':<12} {self.residual:>10.4f} {resid_sd:>10.4f}")
+        lines.append(f" {'Residual':<{gw}} {'':<{tw}} {self.residual:>10.4f} {resid_sd:>10.4f}")
         return "\n".join(lines)
 
     def __repr__(self) -> str:
@@ -250,7 +252,9 @@ class LmerResult(MerResultMixin):
         Parameters
         ----------
         type : str, default "response"
-            Type of residuals: "response" or "pearson".
+            Type of residuals: "response" or its alias "working"; "pearson",
+            sqrt(w) * (y - mu) / sigma; or "deviance", sqrt(w) * (y - mu), the
+            signed square roots of the weighted residual sum of squares.
         na_expand : bool, default True
             If True and na_action="exclude", expand to original length with NA.
 
@@ -260,10 +264,12 @@ class LmerResult(MerResultMixin):
             Residuals.
         """
         fitted = self._fitted_values
-        if type == "response":
+        if type in ("response", "working"):
             resid = self.matrices.y - fitted
         elif type == "pearson":
             resid = np.sqrt(self.matrices.weights) * (self.matrices.y - fitted) / self.sigma
+        elif type == "deviance":
+            resid = np.sqrt(self.matrices.weights) * (self.matrices.y - fitted)
         else:
             raise ValueError(f"Unknown residual type: {type}")
 
@@ -638,9 +644,13 @@ class LmerResult(MerResultMixin):
         >>> result4 = result.update(data=new_data)
         """
 
+        # A model saved by mixedlm 1.3 or earlier refits with its own coding.
+        kwargs.setdefault("_factor_coding", self.matrices.factor_coding)
         if data is None:
             if self.matrices.frame is not None:
                 data = self.matrices.frame
+                # The stored rows exclude omitted ones that scale() and poly() used.
+                kwargs.setdefault("_transform_state", self.matrices.transform_state)
             else:
                 raise ValueError(
                     "No data available. Either provide data or ensure model_frame was stored."
@@ -658,7 +668,7 @@ class LmerResult(MerResultMixin):
         if weights is None and not data_size_changed:
             weights = self.matrices.weights
         if offset is None and not data_size_changed:
-            offset = self.matrices.offset
+            offset = self.matrices.argument_offset
 
         kwargs.setdefault("contrasts", self.matrices.contrasts)
         kwargs.setdefault("control", self._refit_control())
@@ -762,7 +772,12 @@ class LmerResult(MerResultMixin):
         level: float = 0.95,
         n_jobs: int = 1,
     ) -> dict[str, ProfileResult]:
-        """Compute fixed-effect likelihood profiles for this fitted model."""
+        """Compute ML likelihood profiles of fixed effects or variance parameters.
+
+        ``which`` defaults to every fixed effect. Name variance parameters as in
+        lme4 (``".sig01"``, ..., ``".sigma"``) or select them all with
+        ``"theta_"``; ``"beta_"`` selects the fixed effects.
+        """
         from mixedlm.inference.profile import profile_lmer
 
         return profile_lmer(self, which=which, n_points=n_points, level=level, n_jobs=n_jobs)
@@ -916,6 +931,7 @@ class LmerResult(MerResultMixin):
         lines.append("Fixed effects:")
         vcov = self.vcov()
         se = np.sqrt(np.diag(vcov))
+        width = _name_width(self.matrices.fixed_names)
 
         if ddf_method is not None:
             from scipy import stats
@@ -938,7 +954,7 @@ class LmerResult(MerResultMixin):
             p_values = 2 * stats.t.sf(np.abs(statistics), ddf_result.df)
 
             lines.append(
-                f"{'':12} {'Estimate':>10}  {'Std.Error':>10}  {'df':>8}  "
+                f"{'':{width}} {'Estimate':>10}  {'Std.Error':>10}  {'df':>8}  "
                 f"{'t value':>8}  {'Pr(>|t|)':>10}"
             )
             for i, name in enumerate(self.matrices.fixed_names):
@@ -947,16 +963,16 @@ class LmerResult(MerResultMixin):
                 p_val = p_values[i]
                 sig = _get_signif_code(p_val)
                 lines.append(
-                    f"{name:12} {self.beta[i]:10.4f}  {se[i]:10.4f}  {df:8.2f}  "
+                    f"{name:{width}} {self.beta[i]:10.4f}  {se[i]:10.4f}  {df:8.2f}  "
                     f"{t_val:8.3f}  {_format_pvalue(p_val):>10} {sig}"
                 )
             lines.append("---")
             lines.append("Signif. codes: 0 '***' 0.001 '**' 0.01 '*' 0.05 '.' 0.1 ' ' 1")
         else:
-            lines.append("             Estimate  Std. Error  t value")
+            lines.append(f"{'':{width}} {'Estimate':>10}  {'Std. Error':>10}  {'t value':>7}")
             for i, name in enumerate(self.matrices.fixed_names):
                 t_val = self.beta[i] / se[i] if se[i] > 0 else np.nan
-                lines.append(f"{name:12} {self.beta[i]:10.4f}  {se[i]:10.4f}  {t_val:7.3f}")
+                lines.append(f"{name:{width}} {self.beta[i]:10.4f}  {se[i]:10.4f}  {t_val:7.3f}")
 
         lines.append("")
         if self.converged:

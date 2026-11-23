@@ -1558,8 +1558,10 @@ def test_benchmark_repeated_formula_factors(benchmark, kind):
         }
     )
     if kind == "deep":
+        # As in R, a pure interaction gives every factor all of its levels:
+        # 2**7 indicator columns besides the intercept.
         data = pd.DataFrame(
-            {name: pd.Categorical(rng.integers(0, 3, n), categories=range(3)) for name in "abcdefg"}
+            {name: pd.Categorical(rng.integers(0, 2, n), categories=range(2)) for name in "abcdefg"}
         )
     rhs = {
         "categorical": "a*b*c",

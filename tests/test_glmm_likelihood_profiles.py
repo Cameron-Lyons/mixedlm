@@ -263,18 +263,28 @@ def test_nonconverged_models_are_rejected(field):
 
 def test_solver_failures_do_not_return_wald_intervals():
     fitted = poisson_fit()
+    expected = fitted.confint(method="profile")
+    failing = patch.object(
+        glmm_profile,
+        "run_optimizer",
+        return_value=SimpleNamespace(success=False, message="limit"),
+    )
+    # With one parameter the fitted start is the stationary optimum, and the
+    # profile itself needs no nuisance optimization.
+    with failing:
+        assert fitted.confint(method="profile") == expected
+    rng = np.random.default_rng(3)
+    data = pd.DataFrame({"x": rng.normal(size=60), "g": np.repeat(np.arange(12), 5)})
+    data["y"] = rng.poisson(np.exp(0.3 + 0.5 * data["x"]))
+    nuisance = glmer("y ~ x + (1 | g)", data, family=families.Poisson())
     with (
-        patch.object(
-            glmm_profile,
-            "run_optimizer",
-            return_value=SimpleNamespace(success=False, message="limit"),
-        ),
+        failing,
         pytest.raises(
             RuntimeError,
             match="nuisance optimization failed: L-BFGS-B: limit; COBYQA: limit",
         ),
     ):
-        fitted.confint(method="profile")
+        nuisance.confint(parm="x", method="profile")
     with (
         patch.object(joint_glmm, "glmm_deviance_with_status", return_value=(1, [], [], False)),
         patch.object(joint_glmm, "_evaluate_native_problem", return_value=(1, [], [], False)),

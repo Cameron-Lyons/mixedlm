@@ -168,3 +168,29 @@ def test_trial_weighted_proportion_draws_match_explicit_counts():
         _simulate_glmer(grouped, np.random.RandomState(3)),
         _simulate_glmer(prop, np.random.RandomState(3)),
     )
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_refitted_binary_endpoints_preserve_proportion_trials(legacy):
+    from mixedlm import model_selection
+    from mixedlm.diagnostics import check_zero_inflation
+
+    data = CBPP.assign(y=CBPP.incidence / CBPP["size"])
+    fit = glmer("y ~ period + (1 | herd)", data, family=families.Binomial(), weights="size")
+    if legacy:
+        del fit.matrices.binomial_trial_weights
+    n = data["size"].to_numpy()
+    endpoints = np.arange(len(data)) % 2
+    refit = fit.refit(endpoints)
+    counts = glmer(
+        "y / size ~ period + (1 | herd)", data.assign(y=n * endpoints), family=families.Binomial()
+    )
+    for result in (refit, refit.update()):
+        probabilities = result.fitted()
+        expected_zeros = np.sum((1 - probabilities) ** n)
+        assert check_zero_inflation(result).expected_zeros == pytest.approx(expected_zeros)
+        np.testing.assert_allclose(model_selection(result, counts).delta, 0, atol=1e-6)
+        np.testing.assert_array_equal(
+            result.simulate(nsim=3, seed=7, use_re=False),
+            counts.simulate(nsim=3, seed=7, use_re=False) / n[:, None],
+        )

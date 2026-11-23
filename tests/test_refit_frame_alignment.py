@@ -151,7 +151,8 @@ def test_formula_refits_keep_the_fitted_contrast_basis(generalized):
     data = pd.DataFrame({"y": y, "x": x, "z": z, "arm": arms, "group": groups})
     fit = glmer if generalized else lmer
     options = {"family": families.Poisson(), "nAGQ": 0} if generalized else {"REML": False}
-    formula = "y ~ x:arm + z + (1 | group)"
+    # Custom contrasts give arm and x:arm their own basis; refits must reuse it.
+    formula = "y ~ x * arm + z + (1 | group)"
     contrasts = {"arm": np.array([[1, 0], [0, 1], [-1, -1]], dtype=float)}
     full = fit(formula, data, contrasts=contrasts, method="COBYQA", **options)
 
@@ -163,10 +164,10 @@ def test_formula_refits_keep_the_fitted_contrast_basis(generalized):
     overridden = full.update(contrasts={"arm": "treatment"})
     assert not np.array_equal(overridden.matrices.X, full.matrices.X)
 
-    # Without an x main effect the fitted interaction constrains the slopes.
-    # Substituting treatment coding tests a different reduced model.
     deletions = full.drop1(data)
-    reduced = fit("y ~ x:arm + (1 | group)", data, contrasts=contrasts, start=full.theta, **options)
+    reduced = fit(
+        "y ~ x * arm + (1 | group)", data, contrasts=contrasts, start=full.theta, **options
+    )
     i = deletions.terms.index("z")
     assert deletions.aic[i] == pytest.approx(reduced.AIC(), rel=1e-8)
     assert deletions.lrt[i] == pytest.approx(2 * (full.logLik().value - reduced.logLik().value))

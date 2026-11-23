@@ -1,7 +1,9 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator, Sequence
+import math
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import replace
+from numbers import Real
 from typing import TYPE_CHECKING, Any, ClassVar, Self, cast
 
 import numpy as np
@@ -9,7 +11,7 @@ from numpy.typing import ArrayLike, NDArray
 from scipy import linalg, sparse
 
 from mixedlm.estimation.reml import _build_lambda
-from mixedlm.formula.terms import Formula
+from mixedlm.formula.terms import Formula, format_expr
 from mixedlm.matrices.design import (
     ModelMatrices,
     RandomEffectStructure,
@@ -29,6 +31,7 @@ from mixedlm.utils.dataframe import (
     ensure_dataframe,
     get_column_numpy,
     get_columns,
+    select_columns,
 )
 from mixedlm.utils.random import RandomSeed, native_seed, random_stream, validate_simulation_count
 from mixedlm.utils.simulation import simulate_random_effects, simulation_parameters
@@ -41,6 +44,7 @@ if TYPE_CHECKING:
     from mixedlm.inference.bootstrap import BootstrapResult
     from mixedlm.inference.profile_types import ProfileResult
     from mixedlm.inference.reporting import MixedModelResult
+    from mixedlm.inference.variance_profile import VarianceParameter
     from mixedlm.models.glmer import GlmerResult
     from mixedlm.models.lmer import LmerResult
     from mixedlm.models.lmer_types import LogLik
@@ -99,8 +103,11 @@ class _ResultBase:
         conf_int: bool = False,
         conf_level: float = 0.95,
         ddf_method: str | None = "Satterthwaite",
+        conf_method: str = "Wald",
+        n_boot: int = 1000,
+        seed: int | None = None,
     ) -> pd.DataFrame:
-        """Return model components in an analysis-ready table."""
+        """Return model components in an analysis-ready table; see :func:`mixedlm.tidy`."""
         from mixedlm.inference.reporting import tidy
 
         return tidy(
@@ -109,6 +116,9 @@ class _ResultBase:
             conf_int=conf_int,
             conf_level=conf_level,
             ddf_method=ddf_method,
+            conf_method=conf_method,
+            n_boot=n_boot,
+            seed=seed,
         )
 
     def glance(self) -> pd.DataFrame:
@@ -277,7 +287,9 @@ class MerResultMixin(_ResultBase):
         if not _is_polars_lazy(newdata):
             return ensure_dataframe(newdata)
 
-        variables = self.formula.fixed_variables | set(extra_columns)
+        variables = (
+            self.formula.fixed_variables | self.formula.offset_variables | set(extra_columns)
+        )
         if include_re:
             variables |= self.formula.random_variables | self.formula.grouping_factors
             # Preserve direct nested-group keys and encoded slope columns accepted
@@ -335,8 +347,13 @@ class MerResultMixin(_ResultBase):
         newdata: pd.DataFrame,
         *,
         contrasts: dict[str, str | NDArray[np.floating]] | None = None,
+        source_columns: bool = False,
     ) -> NDArray[np.floating]:
-        """Build a fixed-effects matrix using the fitted encoding schema."""
+        """Build a fixed-effects matrix using the fitted encoding schema.
+
+        With ``source_columns``, the matrix keeps every column of the formula,
+        including columns that the rank check dropped from the fit.
+        """
         from mixedlm.matrices.design import build_fixed_matrix
 
         data = self._validated_prediction_data(
@@ -347,7 +364,11 @@ class MerResultMixin(_ResultBase):
             data,
             contrasts=self.matrices.contrasts if contrasts is None else contrasts,
             category_levels=self.matrices.category_levels,
+            transform_state=self.matrices.transform_state,
+            coding=self.matrices.factor_coding,
         )
+        if source_columns:
+            return X
         return self._align_prediction_columns(X, fixed_names)
 
     def _align_prediction_columns(
@@ -398,7 +419,16 @@ class MerResultMixin(_ResultBase):
         newdata: pd.DataFrame,
         offset: ArrayLike | str | None,
     ) -> NDArray[np.floating]:
-        return self._prediction_vector(newdata, offset, name="offset", default=0.0)
+        """Add the formula's offset() terms, evaluated on new data, to a supplied offset."""
+        supplied = self._prediction_vector(newdata, offset, name="offset", default=0.0)
+        if not self.formula.offsets:
+            return supplied
+        from mixedlm.formula.transforms import formula_offset
+
+        data = self._validated_prediction_data(newdata, self.formula.offset_variables, "offset")
+        term_offset = formula_offset(self.formula, data)
+        assert term_offset is not None
+        return supplied + term_offset
 
     def _prediction_vector(
         self,
@@ -433,9 +463,16 @@ class MerResultMixin(_ResultBase):
         """
         import pandas as pd
 
-        if self.matrices.frame is not None:
-            return copy_dataframe(self.matrices.frame)
-        return pd.DataFrame({"y": self.matrices.y})
+        from mixedlm.formula.transforms import STORED_PREFIX
+
+        frame = self.matrices.frame
+        if frame is None:
+            return pd.DataFrame({"y": self.matrices.y})
+        # Refits keep computed responses in reserved columns for later updates.
+        stored = [name for name in get_columns(frame) if name.startswith(STORED_PREFIX)]
+        if not stored:
+            return copy_dataframe(frame)
+        return select_columns(frame, [name for name in get_columns(frame) if name not in stored])
 
     def _formula_refit_options(self, data: Any) -> dict[str, Any]:
         """Recover observation inputs and coding for optimizer and deletion refits."""
@@ -444,7 +481,8 @@ class MerResultMixin(_ResultBase):
         weights = matrices.weights
         if matrices.trials is not None:
             weights = weights / matrices.trials
-        offset = matrices.offset if np.any(matrices.offset != 0.0) else None
+        argument_offset = matrices.argument_offset
+        offset = argument_offset if np.any(argument_offset != 0.0) else None
         na_info = matrices.na_info
         if (
             na_info is not None
@@ -461,6 +499,9 @@ class MerResultMixin(_ResultBase):
             "offset": offset,
             "contrasts": matrices.contrasts,
             "na_action": na_info.action.value if na_info is not None else "omit",
+            # Keep scale() and poly() as fitted, which may use rows omitted here.
+            "_transform_state": matrices.transform_state,
+            "_factor_coding": matrices.factor_coding,
         }
 
     def weights(self, copy: bool = True) -> NDArray[np.floating]:
@@ -533,8 +574,6 @@ class MerResultMixin(_ResultBase):
         >>> print(t.fixed_terms)  # ['(Intercept)', 'x']
         >>> print(t.random_terms)  # {'group': ['(Intercept)', 'x']}
         """
-        from mixedlm.formula.terms import InteractionTerm, PowerTerm, VariableTerm
-
         formula = self.formula
         fixed_terms = list(self.matrices.fixed_names)
 
@@ -545,20 +584,8 @@ class MerResultMixin(_ResultBase):
                 if term_name not in group_terms:
                     group_terms.append(term_name)
 
-        fixed_variables: set[str] = set()
-        for term in formula.fixed.terms:
-            if isinstance(term, VariableTerm | PowerTerm):
-                fixed_variables.add(term.name)
-            elif isinstance(term, InteractionTerm):
-                fixed_variables.update(term.source_variables)
-
-        random_variables: set[str] = set()
-        for rterm in formula.random:
-            for term in rterm.expr:
-                if isinstance(term, VariableTerm | PowerTerm):
-                    random_variables.add(term.name)
-                elif isinstance(term, InteractionTerm):
-                    random_variables.update(term.source_variables)
+        fixed_variables = formula.fixed_variables
+        random_variables = formula.random_variables
 
         grouping_factors = {struct.grouping_factor for struct in self.matrices.random_structures}
 
@@ -742,6 +769,8 @@ class MerResultMixin(_ResultBase):
                 n,
                 self.matrices.contrasts,
                 self.matrices.category_levels,
+                self.matrices.transform_state,
+                self.matrices.factor_coding,
             )
             if term_names != struct.term_names:
                 raise ValueError(
@@ -775,6 +804,8 @@ class MerResultMixin(_ResultBase):
             data,
             contrasts=self.matrices.contrasts,
             category_levels=self.matrices.category_levels,
+            transform_state=self.matrices.transform_state,
+            coding=self.matrices.factor_coding,
         )
         n_pred = Z.shape[0]
         if len(new_structures) != len(fitted_structures):
@@ -900,23 +931,46 @@ class MerResultMixin(_ResultBase):
         if frame is not None:
             # Keep the stored frame aligned with refitted responses
             # so subsequent updates and cross-validation reuse the current data.
-            values = y if self.matrices.trials is None else np.rint(y * self.matrices.trials)
+            # Computed responses are stored under their labels, which take
+            # precedence over re-evaluating the expression.
+            trials = self.matrices.trials
+            values = y if trials is None else np.rint(y * trials)
             binary_factor = levels is not None and bool(np.all((y == 0) | (y == 1)))
             if binary_factor:
                 values = np.asarray(levels, dtype=object)[y.astype(np.intp)]
+            from mixedlm.formula.terms import Var
+            from mixedlm.formula.transforms import stored_column
+
+            # A plain response column is replaced; a computed one is stored under
+            # a reserved name, as it cannot be inverted to its source columns.
+            response = self.formula.response
+            columns = {
+                response if self.formula.response_expr is None else stored_column(response): values
+            }
+            failures = self.formula.response_failures
+            if failures is not None and trials is not None:
+                failures_name = (
+                    failures.name
+                    if isinstance(failures, Var)
+                    else stored_column(format_expr(failures))
+                )
+                columns[failures_name] = trials - values
             if type(frame).__module__.startswith("pandas"):
                 import pandas as pd
 
                 frame = frame.copy()
-                frame[self.formula.response] = (
-                    pd.Categorical(values, categories=list(levels))
-                    if binary_factor and levels is not None
-                    else values
-                )
+                for name, column in columns.items():
+                    frame[name] = (
+                        pd.Categorical(column, categories=list(levels))
+                        if binary_factor and levels is not None
+                        else column
+                    )
             else:
                 import polars as pl
 
-                frame = frame.with_columns(pl.Series(self.formula.response, values.tolist()))
+                frame = frame.with_columns(
+                    [pl.Series(name, column.tolist()) for name, column in columns.items()]
+                )
             frame = _restore_binomial_factor(frame, self.formula.response, levels)
         return replace(self.matrices, y=y, frame=frame)
 
@@ -1341,17 +1395,24 @@ class MerResultMixin(_ResultBase):
         n_boot: int = 1000,
         seed: int | None = None,
     ) -> dict[str, tuple[float, float]]:
-        """Compute confidence intervals for fixed effects.
+        """Compute confidence intervals for fixed effects and variance parameters.
 
         Parameters
         ----------
         parm : str or list of str, optional
-            Coefficient names. Defaults to every fixed effect.
+            Parameter names. Defaults to every fixed effect. As in lme4,
+            ``".sig01"``, ``".sig02"``, ... name the random-effect standard
+            deviations and correlations and ``".sigma"`` the residual standard
+            deviation. lme4's descriptive labels, such as ``"sd_Days|Subject"``
+            and ``"sigma"``, also work. ``"theta_"`` selects all of them and
+            ``"beta_"`` every fixed effect. ``variance_parameters()`` describes
+            each name.
         level : float, default 0.95
             Confidence level.
         method : str, default "Wald"
             "Wald" (normal quantiles of vcov), "profile" (likelihood
-            profiles) or "boot" (parametric bootstrap percentiles).
+            profiles) or "boot" (parametric bootstrap percentiles). Wald
+            intervals for variance parameters are NaN, as in lme4.
         n_boot : int, default 1000
             Bootstrap replicates for method="boot".
         seed : int, optional
@@ -1360,17 +1421,20 @@ class MerResultMixin(_ResultBase):
         Returns
         -------
         dict
-            Coefficient names mapped to (lower, upper) bounds.
+            Parameter names mapped to (lower, upper) bounds, variance
+            parameters first.
         """
         from scipy import stats
 
+        from mixedlm.inference.profile import split_parameter_names
         from mixedlm.utils.names import _check_unique_coefficient_names
 
         level = _validate_confidence_level(level)
-        if parm is None:
-            parm = self.matrices.fixed_names
-        elif isinstance(parm, str):
-            parm = [parm]
+        if method not in ("Wald", "profile", "boot"):
+            raise ValueError(f"Unknown method: {method}. Use 'Wald', 'profile', or 'boot'.")
+        parm, variance = split_parameter_names(
+            parm, self.matrices.fixed_names, self.variance_parameters()
+        )
 
         _check_unique_coefficient_names(
             self.matrices.fixed_names,
@@ -1378,11 +1442,11 @@ class MerResultMixin(_ResultBase):
             alternative="Use tidy(conf_int=True) for intervals in coefficient order.",
         )
 
+        result: dict[str, tuple[float, float]] = {}
         if method == "Wald":
+            result.update(dict.fromkeys(variance, (np.nan, np.nan)))
             vcov = self.vcov()
             z_crit = stats.norm.isf((1 - level) / 2)
-
-            result: dict[str, tuple[float, float]] = {}
             for p in parm:
                 if p not in self.matrices.fixed_names:
                     continue
@@ -1395,13 +1459,62 @@ class MerResultMixin(_ResultBase):
 
         if method == "profile":
             # Endpoints use root finding; confidence intervals need no interior plot grid.
-            profiles = self.profile(which=parm, level=level, n_points=3)
-            return {p: (profiles[p].ci_lower, profiles[p].ci_upper) for p in parm if p in profiles}
+            profiles = self.profile(which=[*variance, *parm], level=level, n_points=3)
+            return {
+                p: (profiles[p].ci_lower, profiles[p].ci_upper)
+                for p in [*variance, *parm]
+                if p in profiles
+            }
 
-        if method == "boot":
-            return self._bootstrap(n_boot=n_boot, seed=seed).ci(level=level)
+        boot = self._bootstrap(n_boot=n_boot, seed=seed)
+        if variance:
+            result.update(self._bootstrap_variance_intervals(boot, variance, level))
+        result.update({name: ci for name, ci in boot.ci(level=level).items() if name in parm})
+        return result
 
-        raise ValueError(f"Unknown method: {method}. Use 'Wald', 'profile', or 'boot'.")
+    def variance_parameters(self) -> list[VarianceParameter]:
+        """Describe the variance parameters named ``.sig01``, ..., ``.sigma`` as in lme4.
+
+        Each entry gives the name, its kind (``"sd"``, ``"cor"`` or ``"sigma"``),
+        the grouping factor and terms it belongs to, and its bounds.
+        """
+        from mixedlm.inference.variance_profile import variance_parameters
+
+        return variance_parameters(self.matrices.random_structures, has_sigma=self._HAS_SIGMA)
+
+    def _bootstrap_variance_intervals(
+        self, boot: BootstrapResult, names: list[str], level: float
+    ) -> dict[str, tuple[float, float]]:
+        """Percentile intervals of bootstrap standard deviations and correlations."""
+        from mixedlm.inference.variance_profile import sdcor_from_theta
+
+        structures = self.matrices.random_structures
+        sigmas = (
+            np.ones(len(boot.theta_samples))
+            if boot.sigma_samples is None
+            else np.asarray(boot.sigma_samples, dtype=np.float64)
+        )
+        thetas = np.asarray(boot.theta_samples, dtype=np.float64).reshape(len(sigmas), -1)
+        # Failed replicates are stored as missing values; skip them before mapping.
+        completed = np.isfinite(sigmas) & np.all(np.isfinite(thetas), axis=1)
+        all_names = [parameter.name for parameter in self.variance_parameters()]
+        samples = np.array(
+            [
+                [*sdcor_from_theta(theta, sigma, structures), sigma]
+                for theta, sigma in zip(thetas[completed], sigmas[completed], strict=True)
+            ]
+        ).reshape(-1, len(all_names) + (0 if self._HAS_SIGMA else 1))
+        alpha = (1 - level) / 2
+        intervals = {}
+        for name in names:
+            column = samples[:, all_names.index(name)]
+            column = column[np.isfinite(column)]
+            if not len(column):
+                intervals[name] = (np.nan, np.nan)
+                continue
+            lower, upper = np.quantile(column, [alpha, 1 - alpha])
+            intervals[name] = (float(lower), float(upper))
+        return intervals
 
     def simulate(
         self,
@@ -1409,6 +1522,10 @@ class MerResultMixin(_ResultBase):
         seed: RandomSeed = None,
         use_re: bool = True,
         re_form: str | None = None,
+        *,
+        newdata: Any | None = None,
+        newparams: Mapping[str, Any] | None = None,
+        weights: ArrayLike | str | None = None,
     ) -> NDArray[np.floating]:
         """Simulate responses using an isolated or caller-provided random stream.
 
@@ -1417,8 +1534,23 @@ class MerResultMixin(_ResultBase):
         Reusing a stream continues it across calls without changing NumPy's global state.
         New random effects are drawn unless ``use_re`` is False or ``re_form`` is
         "NA" or "~0". Returns shape (n,) for ``nsim=1``, else (n, nsim).
+
+        Like lme4's ``simulate(newdata=, newparams=)``, ``newdata`` simulates
+        responses for other rows, using the fitted coding of the predictors. Its
+        grouping levels need not appear in the fitted data, because random
+        effects are drawn afresh. Binomial count responses read their trials from
+        ``newdata``. ``weights`` gives the new rows' prior weights: a scalar,
+        array, or column name, one by default. ``newparams`` replaces fitted
+        parameters with a mapping of ``"beta"`` (an array, or a mapping of
+        coefficient names that covers every coefficient), ``"theta"`` and, for
+        linear models, ``"sigma"``.
         """
         validate_simulation_count(nsim)
+        if newdata is not None or newparams is not None:
+            model = self._simulation_model(newdata, newparams, weights, use_re, re_form)
+            return model.simulate(nsim, seed, use_re, re_form)
+        if weights is not None:
+            raise ValueError("Simulation weights can only be supplied with newdata.")
         rng = random_stream(seed)
 
         if nsim == 1:
@@ -1434,6 +1566,170 @@ class MerResultMixin(_ResultBase):
         except ImportError:
             return np.column_stack([self._simulate_once(use_re, re_form, rng) for _ in range(nsim)])
         return self._simulate_batch_rust(nsim, native_seed(seed, rng), simulate_re_batch, rng)
+
+    def _simulation_model(
+        self,
+        newdata: Any | None,
+        newparams: Mapping[str, Any] | None,
+        weights: ArrayLike | str | None,
+        use_re: bool,
+        re_form: str | None,
+    ) -> Self:
+        """Return a copy with replacement parameters and simulation-only designs."""
+        # Results are dataclasses; replace() gives a fresh copy without cached values.
+        model: Any = self
+        if newparams:
+            model = replace(model, **self._validated_newparams(newparams))
+        if newdata is None:
+            if weights is not None:
+                raise ValueError("Simulation weights can only be supplied with newdata.")
+            return cast(Self, model)
+        include_re = use_re and re_form not in ("~0", "NA") and bool(self.formula.random)
+        matrices = self._simulation_matrices(newdata, weights, include_re=include_re)
+        return cast(Self, replace(model, matrices=matrices))
+
+    def _validated_newparams(self, newparams: Mapping[str, Any]) -> dict[str, Any]:
+        if not isinstance(newparams, Mapping):
+            raise TypeError("newparams must be a mapping of 'beta', 'theta' and 'sigma'")
+        allowed = {"beta", "theta", "sigma"} if self._HAS_SIGMA else {"beta", "theta"}
+        unknown = sorted(set(newparams) - allowed)
+        if unknown:
+            raise ValueError(f"Unknown newparams {unknown}; expected some of {sorted(allowed)}")
+        updates: dict[str, Any] = {}
+        if "beta" in newparams:
+            updates["beta"] = self._parameter_vector(
+                newparams["beta"], "beta", self.matrices.fixed_names
+            )
+        if "theta" in newparams:
+            updates["theta"] = self._parameter_vector(newparams["theta"], "theta", None)
+        if "sigma" in newparams:
+            sigma = newparams["sigma"]
+            if (
+                isinstance(sigma, bool)
+                or not isinstance(sigma, Real)
+                or not math.isfinite(float(sigma))
+                or float(sigma) <= 0
+            ):
+                raise ValueError("newparams['sigma'] must be a positive finite number")
+            updates["sigma"] = float(sigma)
+        return updates
+
+    def _parameter_vector(
+        self, value: Any, name: str, names: Sequence[str] | None
+    ) -> NDArray[np.float64]:
+        expected = len(names) if names is not None else len(self.theta)
+        if isinstance(value, Mapping):
+            if names is None:
+                raise TypeError(f"newparams['{name}'] must be an array")
+            missing = [key for key in names if key not in value]
+            extra = sorted(set(value) - set(names))
+            if missing or extra:
+                raise ValueError(
+                    f"newparams['{name}'] must give exactly the coefficients {list(names)}"
+                )
+            value = [value[key] for key in names]
+        try:
+            vector = np.asarray(value, dtype=np.float64)
+        except (TypeError, ValueError):
+            raise ValueError(f"newparams['{name}'] must be numeric") from None
+        if vector.shape != (expected,) or not np.all(np.isfinite(vector)):
+            raise ValueError(f"newparams['{name}'] must hold {expected} finite values")
+        return vector
+
+    def _simulation_matrices(
+        self, newdata: Any, weights: ArrayLike | str | None, *, include_re: bool
+    ) -> ModelMatrices:
+        """Encode new rows with the fitted schema; grouping levels may be new."""
+        from mixedlm.families.binomial import Binomial
+        from mixedlm.matrices.design import validate_prior_weights
+
+        data = self._prepare_prediction_data(
+            newdata,
+            include_re=include_re,
+            extra_columns=tuple(
+                name
+                for name in (weights, *sorted(self.formula.response_variables))
+                if isinstance(name, str)
+            ),
+        )
+        X = self._prediction_fixed_matrix(data)
+        n = X.shape[0]
+        offset = self._prediction_offset(data, None)
+        structures = list(self.matrices.random_structures)
+        if include_re:
+            random_data = self._validated_prediction_data(
+                data,
+                self.formula.random_variables | self.formula.grouping_factors,
+                "random-effect",
+            )
+            Z, structures = build_random_matrix(
+                self.formula,
+                random_data,
+                contrasts=self.matrices.contrasts,
+                category_levels=self.matrices.category_levels,
+                transform_state=self.matrices.transform_state,
+                coding=self.matrices.factor_coding,
+            )
+            fitted_terms = [s.term_names for s in self.matrices.random_structures]
+            if [s.term_names for s in structures] != fitted_terms:
+                raise ValueError("New data produced incompatible random-effect columns")
+        else:
+            Z = sparse.csc_matrix((n, 0), dtype=np.float64)
+            structures = []
+        prior = validate_prior_weights(
+            self._prediction_vector(data, weights, name="weights", default=1.0), n
+        )
+        trials = None
+        if isinstance(getattr(self, "family", None), Binomial) and self.formula.grouped_response:
+            trials = self._simulation_trials(data)
+        return replace(
+            self.matrices,
+            y=np.zeros(n, dtype=np.float64),
+            X=X,
+            Z=Z,
+            random_structures=structures,
+            n_obs=n,
+            n_random=Z.shape[1],
+            weights=prior if trials is None else prior * trials,
+            offset=offset,
+            frame=None,
+            na_info=None,
+            trials=trials,
+            supplied_offset=None,
+        )
+
+    def _simulation_trials(self, data: Any) -> NDArray[np.float64]:
+        """Read binomial trial counts for new rows from the response columns."""
+        from mixedlm.formula.transforms import response_values
+
+        formula = self.formula
+        missing = sorted(formula.response_variables - set(get_columns(data)))
+        needed = (
+            {formula.response_denominator}
+            if formula.response_denominator is not None
+            else formula.response_variables
+        )
+        if needed & set(missing):
+            names = ", ".join(repr(name) for name in sorted(needed & set(missing)))
+            raise ValueError(f"New data is missing binomial trial variable(s): {names}.")
+        if formula.response_denominator is not None:
+            trials = np.asarray(
+                get_column_numpy(data, formula.response_denominator, dtype=np.float64),
+                dtype=np.float64,
+            )
+        else:
+            assert formula.response_failures is not None and formula.failures_label is not None
+            successes = (
+                np.asarray(get_column_numpy(data, formula.response, dtype=np.float64))
+                if formula.response_expr is None
+                else response_values(formula.response_expr, formula.response, data)
+            )
+            trials = successes + response_values(
+                formula.response_failures, formula.failures_label, data
+            )
+        if not np.all(np.isfinite(trials)) or np.any(trials <= 0):
+            raise ValueError("Binomial trials in new data must be finite and positive")
+        return trials
 
     def _simulate_batch_rust(
         self,

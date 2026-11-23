@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import warnings
+from collections.abc import Callable
 from numbers import Integral
 from typing import TYPE_CHECKING
 
@@ -75,6 +76,9 @@ class _GLMMProfileLikelihood:
             return self.deviance(template), template
         bounds = [bound for bound, keep in zip(self.bounds, free, strict=True) if keep]
         failures = []
+        # A start at the optimum can stall both optimizers without an improvement;
+        # then the best point either evaluated, including the start, is the fit.
+        best_value, best = objective(template[free]), template[free]
         for method in ("L-BFGS-B", "COBYQA"):
             # The converged mode solve can leave enough objective roundoff to
             # stall a finite-difference line search near a constrained optimum.
@@ -96,7 +100,70 @@ class _GLMMProfileLikelihood:
                 parameters = unpack(fitted.x)
                 return self.deviance(parameters), parameters
             failures.append(f"{method}: {fitted.message}")
+            point = getattr(fitted, "x", None)
+            value = getattr(fitted, "fun", np.nan)
+            if point is not None and np.all(np.isfinite(point)) and value < best_value:
+                best_value, best = float(value), np.asarray(point, dtype=np.float64)
+        if np.isfinite(best_value) and self._stationary(objective, best, bounds):
+            parameters = unpack(best)
+            return self.deviance(parameters), parameters
         raise RuntimeError("GLMM profile nuisance optimization failed: " + "; ".join(failures))
+
+    @staticmethod
+    def _stationary(
+        objective: Callable[[NDArray[np.floating]], float],
+        point: NDArray[np.floating],
+        bounds: list[tuple[float | None, float | None]],
+    ) -> bool:
+        """Whether the bounded deviance gradient vanishes at ``point``.
+
+        Parameters are scaled by their standard errors, so the deviance has
+        roughly unit curvature, and a gradient below 1e-3 leaves the deviance
+        within about 1e-6 of its constrained minimum. A parameter at a bound is
+        also probed inward, where the deviance can fall with no first-order slope.
+        """
+        step = 1e-5
+        for index, (lower, upper) in enumerate(bounds):
+            values = []
+            for direction in (-1.0, 1.0):
+                trial = point.copy()
+                trial[index] += direction * step
+                inside = (lower is None or trial[index] >= lower) and (
+                    upper is None or trial[index] <= upper
+                )
+                try:
+                    values.append(objective(trial) if inside else None)
+                except RuntimeError:
+                    return False
+            center = objective(point)
+            below, above = values
+            if below is not None and above is not None:
+                gradient = (above - below) / (2 * step)
+            elif above is not None:
+                # At a lower bound only an increase is allowed.
+                gradient = min(0.0, (above - center) / step)
+            elif below is not None:
+                gradient = max(0.0, (center - below) / step)
+            else:
+                continue
+            if abs(gradient) > 1e-3:
+                return False
+        # A variance parameter at its bound has no first-order slope by symmetry,
+        # so probe inward, as restart_edge does, before accepting the boundary.
+        center = objective(point)
+        for index, (lower, upper) in enumerate(bounds):
+            for bound, direction in ((lower, 1.0), (upper, -1.0)):
+                if bound is None or abs(point[index] - bound) > 1e-8:
+                    continue
+                for size in (1e-3, 1e-2, 1e-1, 0.3):
+                    trial = point.copy()
+                    trial[index] += direction * size
+                    try:
+                        if objective(trial) < center - 1e-6:
+                            return False
+                    except RuntimeError:
+                        break
+        return True
 
 
 class _GLMMParameterProfile:

@@ -10,7 +10,8 @@ import pandas as pd
 from numpy.typing import ArrayLike, NDArray
 from scipy import stats
 
-from mixedlm.formula.terms import InteractionTerm, PowerTerm, VariableTerm
+from mixedlm.formula.terms import term_sources
+from mixedlm.formula.transforms import factor_transform_levels
 from mixedlm.utils.dataframe import _polars_column_numpy, get_categories, select_columns
 from mixedlm.utils.validation import _validate_confidence_level
 
@@ -85,14 +86,7 @@ def _as_pandas_frame(frame: Any) -> pd.DataFrame:
 def _fixed_variable_order(model: LmerResult | GlmerResult) -> list[str]:
     variables: list[str] = []
     for term in model.formula.fixed.terms:
-        candidates: tuple[str, ...]
-        if isinstance(term, VariableTerm | PowerTerm):
-            candidates = (term.name,)
-        elif isinstance(term, InteractionTerm):
-            candidates = term.source_variables
-        else:
-            continue
-        for name in candidates:
+        for name in term_sources(term):
             if name not in variables:
                 variables.append(name)
     return variables
@@ -259,6 +253,8 @@ class _EffectGrid:
             raise ValueError(f"Unknown variable(s) in at: {', '.join(map(str, unknown_at))}")
 
         self.categories: dict[str, pd.CategoricalDtype] = {}
+        # Numeric columns coded by factor() keep their values but use fitted levels.
+        self.factor_levels = factor_transform_levels(model.formula, model.matrices.transform_state)
         for variable in self.variables:
             source = self.frame[variable]
             levels = model.matrices.category_levels.get(variable)
@@ -278,7 +274,9 @@ class _EffectGrid:
 
     def _levels(self, variable: str) -> list[Any] | None:
         dtype = self.categories.get(variable)
-        return None if dtype is None else dtype.categories.tolist()
+        if dtype is None:
+            return self.factor_levels.get(variable)
+        return dtype.categories.tolist()
 
     def validate_terms(self, terms: list[str]) -> None:
         missing = [term for term in terms if term not in self.variables]

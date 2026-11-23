@@ -235,12 +235,31 @@ def _optimize_nlopt(
         message = f"NLopt {algorithm} failed: {str(e) or type(e).__name__}"
 
     # Evaluation and time limits are positive result codes but not convergence.
-    converged = result_code in {
+    convergence_codes = {
         nlopt.SUCCESS,
         nlopt.STOPVAL_REACHED,
         nlopt.FTOL_REACHED,
         nlopt.XTOL_REACHED,
     }
+    converged = result_code in convergence_codes
+    # Derivative-free methods such as NEWUOA can report convergence short of the
+    # optimum. Restart from the best point with smaller steps until a restart no
+    # longer improves the objective by more than the stopping tolerance. BOBYQA,
+    # lme4's default, keeps its single run.
+    tolerance = 10 * options.get("ftol_abs", 1e-8)
+    for _ in range(0 if algorithm == "LN_BOBYQA" else 3):
+        remaining = maxeval - neval
+        if not converged or not np.isfinite(best_fun) or remaining < 2 * n + 3:
+            break
+        previous = best_fun
+        opt.set_maxeval(remaining)
+        opt.set_initial_step((0.1 * step).tolist())
+        try:
+            opt.optimize(best_x.tolist())
+        except Exception:
+            break
+        if opt.last_optimize_result() not in convergence_codes or previous - best_fun <= tolerance:
+            break
     return OptimizeResult(
         x=best_x,
         fun=best_fun,

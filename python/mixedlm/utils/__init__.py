@@ -1,3 +1,6 @@
+from collections.abc import Iterable, Mapping
+from typing import Any
+
 from mixedlm.utils.lme4_compat import (
     ConvergenceInfo,
     DevComp,
@@ -50,6 +53,18 @@ def _get_signif_code(p: float) -> str:
     elif p < 0.1:
         return "."
     return ""
+
+
+def _name_width(names: Iterable[str], minimum: int = 12) -> int:
+    """Width of a summary table's label column, widened to fit every label."""
+    return max([minimum, *(len(name) for name in names)])
+
+
+def _varcorr_widths(groups: Mapping[str, Any]) -> tuple[int, int]:
+    """Widths of the group and term columns of a variance-component table."""
+    group_width = _name_width([*groups, "Residual"], minimum=11)
+    term_width = _name_width([term for group in groups.values() for term in group.term_names])
+    return group_width, term_width
 
 
 def _format_pvalue(p: float) -> str:

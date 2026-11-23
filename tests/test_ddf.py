@@ -469,7 +469,8 @@ def test_type3_joint_tests_use_surviving_formula_term_columns(intercept):
         data,
         control=LmerControl(check_rankX="message+drop.cols"),
     )
-    expected_groups = [list(range(int(intercept), 3)), [3], [4, 5], [6]]
+    # Terms follow R's degree order: arm, x, arm.1, then arm:x.
+    expected_groups = [list(range(int(intercept), 3)), [3], [4], [5, 6]]
     cov = model.vcov()
     expected = []
     for indices in expected_groups:
@@ -482,7 +483,7 @@ def test_type3_joint_tests_use_surviving_formula_term_columns(intercept):
         replace(model.matrices, fixed_term_labels=None, frame=None),
     ):
         result = anova_type3(replace(model, matrices=matrices))
-        assert result.terms == ["arm", "x", "arm:x", "arm.1"]
+        assert result.terms == ["arm", "x", "arm.1", "arm:x"]
         assert_array_equal(result.num_df, [len(group) for group in expected_groups])
         assert_allclose(result.f_value, expected)
         assert_allclose(result.p_value, stats.f.sf(expected, result.num_df, result.den_df))

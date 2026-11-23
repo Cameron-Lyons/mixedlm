@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Union
+from typing import TYPE_CHECKING, Any, Union
 
 import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
 
 if TYPE_CHECKING:
-    from mixedlm.matrices.design import RandomEffectStructure
+    from mixedlm.matrices.design import ModelMatrices, RandomEffectStructure
     from mixedlm.models.glmer import GlmerResult
     from mixedlm.models.lmer import LmerResult
     from mixedlm.models.lmer_types import RanefResult
@@ -364,7 +364,9 @@ def lmList(
     """
     import re
 
-    from mixedlm.formula.parser import nobars, parse_formula
+    from mixedlm.formula.parser import _parse_piece, nobars, parse_formula
+    from mixedlm.formula.terms import TransformTerm, term_factors
+    from mixedlm.formula.transforms import factor_values
     from mixedlm.matrices import build_model_matrices
 
     grouped_formula = re.fullmatch(
@@ -372,7 +374,10 @@ def lmList(
         formula,
     )
     if grouped_formula is not None:
-        parsed_formula = parse_formula(grouped_formula.group("fixed"))
+        # Report parse errors at their positions in the formula as written.
+        parsed_formula = _parse_piece(
+            grouped_formula.group("fixed"), "", "", grouped_formula.start("fixed")
+        )
         inferred_groups = {grouped_formula.group("group")}
     else:
         parsed_formula = parse_formula(formula)
@@ -396,60 +401,167 @@ def lmList(
     elif group is None:
         raise ValueError("group must be specified when formula does not contain a group")
 
-    if group not in data.columns:
-        raise ValueError(f"Grouping variable '{group}' not found in data")
-
-    matrices = build_model_matrices(parsed_formula, data, na_action="omit")
+    from mixedlm.utils.dataframe import (
+        _is_polars,
+        dataframe_length,
+        ensure_dataframe,
+        get_column_values,
+        get_columns,
+    )
     from mixedlm.utils.names import _check_unique_coefficient_names
 
-    _check_unique_coefficient_names(
-        matrices.fixed_names,
-        alternative="Rename colliding formula variables before using lmList().",
-    )
-    group_values = data[group].to_numpy()
-    if matrices.na_info is not None and matrices.na_info.n_omitted:
-        keep = np.ones(len(data), dtype=bool)
-        keep[matrices.na_info.omitted_indices] = False
-        group_values = group_values[keep]
+    data = ensure_dataframe(data)
+    if group not in get_columns(data):
+        raise ValueError(f"Grouping variable '{group}' not found in data")
 
-    def fit_arrays(
+    # As lme4's lmList() fits lm() to each group of one model frame: a group's
+    # factors take the levels of the whole data, lm() drops the levels the group
+    # lacks, and scale(x) and poly(x) are learned within the group. Coefficients
+    # are named by the column of the whole data's coding they equal, so treatment
+    # columns name the same level in every group, as R's level labels do.
+    pooled = build_model_matrices(parsed_formula, data, na_action="omit")
+    levels = pooled.category_levels
+    factors = [factor for term in parsed_formula.fixed.terms for factor in term_factors(term)]
+    factor_terms = {
+        factor.label: factor
+        for factor in factors
+        if isinstance(factor, TransformTerm) and factor.is_categorical
+    }
+    stateful = any(
+        isinstance(factor, TransformTerm) and factor.kind in ("scale", "poly") for factor in factors
+    )
+    pooled_state = pooled.transform_state or {}
+    factor_state = {label: pooled_state[label] for label in factor_terms if label in pooled_state}
+    positional = {
+        label
+        for label, term in factor_terms.items()
+        if term.func == "C" and term.option("contr") not in (None, "treatment")
+    }
+    frame = pooled.frame
+    codes: dict[str, NDArray[Any]] = {}
+    if frame is not None:
+        codes = {
+            name: np.asarray(get_column_values(frame, name))
+            for name in levels
+            if name in get_columns(frame)
+        }
+        codes.update(
+            {
+                label: factor_values(term, frame, factor_state)[0]
+                for label, term in factor_terms.items()
+                if label in factor_state
+            }
+        )
+    n_levels = {name: len(levels.get(name, factor_state.get(name, ()))) for name in codes}
+
+    kept = np.ones(dataframe_length(data), dtype=bool)
+    if pooled.na_info is not None:
+        kept[pooled.na_info.omitted_indices] = False
+    pooled_row = np.cumsum(kept) - 1
+
+    def take(rows: NDArray[np.intp]) -> Any:
+        return data[rows] if _is_polars(data) else data.iloc[rows]
+
+    def group_fit(rows: NDArray[np.intp]) -> dict[str, object]:
+        positions = pooled_row[rows[kept[rows]]]
+        if not len(positions):
+            raise ValueError("the group has no complete rows")
+        present = {name: len(pd.unique(values[positions])) for name, values in codes.items()}
+        single = [name for name, count in present.items() if count < 2]
+        if single:
+            # As lm() fails in lme4's lmList(), a factor needs two levels in a group.
+            raise ValueError(
+                f"contrasts can be applied only to factors with 2 or more levels ({single[0]})"
+            )
+        complete = all(count == n_levels[name] for name, count in present.items())
+        if not stateful and complete:
+            return fit(
+                pooled.X[positions],
+                pooled.y[positions],
+                pooled.offset[positions],
+                list(pooled.fixed_names),
+            )
+        subset = take(rows)
+        shared = build_model_matrices(
+            parsed_formula,
+            subset,
+            na_action="omit",
+            category_levels=levels,
+            transform_state=factor_state,
+        )
+        group_levels, group_state = _group_levels(shared, levels, factor_terms, factor_state)
+        if not group_levels and not group_state:
+            return fit(shared.X, shared.y, shared.offset, list(shared.fixed_names))
+        own = build_model_matrices(
+            parsed_formula,
+            subset,
+            na_action="omit",
+            category_levels={**levels, **group_levels},
+            transform_state={**factor_state, **group_state},
+        )
+        # Columns are named after the equal column of a coding that keeps the whole
+        # data's levels for treatment factors and the group's own levels for other
+        # contrasts, which R numbers by position.
+        own_positional = {label: group_state[label] for label in positional if label in group_state}
+        naming = (
+            build_model_matrices(
+                parsed_formula,
+                subset,
+                na_action="omit",
+                category_levels=levels,
+                transform_state={**factor_state, **own_positional},
+            )
+            if own_positional
+            else shared
+        )
+        return fit(own.X, own.y, own.offset, _shared_names(own, naming))
+
+    def fit(
         X: NDArray[np.floating],
         y: NDArray[np.floating],
-    ) -> tuple[dict[str, object], dict[str, float]]:
-        beta, _, rank, singular_values = np.linalg.lstsq(X, y, rcond=None)
-        fitted = X @ beta
-        params = dict(zip(matrices.fixed_names, beta, strict=False))
-        fit: dict[str, object] = {
-            "coef": beta,
-            "coef_names": list(matrices.fixed_names),
-            "params": params,
-            "fitted": fitted,
-            "residuals": y - fitted,
-            "rank": int(rank),
-            "singular_values": singular_values,
-            "n": len(y),
-        }
-        return fit, params
+        offset: NDArray[np.floating],
+        names: list[str],
+    ) -> dict[str, object]:
+        return _least_squares_fit(X, y, offset, names)
 
-    valid_group = ~pd.isna(group_values)
-    group_X = matrices.X[valid_group]
-    group_y = matrices.y[valid_group]
-    group_values = group_values[valid_group]
+    _check_unique_coefficient_names(
+        list(pooled.fixed_names),
+        alternative="Rename colliding formula variables before using lmList().",
+    )
 
+    group_values = get_column_values(data, group)
     fits: dict[str, object] = {}
     coef_list: list[dict[str, object]] = []
-
-    for group_value in pd.unique(group_values):
-        mask = group_values == group_value
-
-        if np.count_nonzero(mask) < 2:
+    names: dict[str, None] = dict.fromkeys(pooled.fixed_names)
+    failures: dict[str, str] = {}
+    valid = np.flatnonzero(~pd.isna(group_values))
+    for group_value in pd.unique(group_values[valid]):
+        rows = valid[group_values[valid] == group_value]
+        try:
+            result_fit = group_fit(rows)
+        except (ValueError, np.linalg.LinAlgError) as error:
+            # As lme4's lmList() does, a group that cannot be fitted gets NA.
+            failures[str(group_value)] = str(error)
+            coef_list.append({group: group_value})
             continue
-
-        fit, params = fit_arrays(group_X[mask], group_y[mask])
-        fits[str(group_value)] = fit
+        fits[str(group_value)] = result_fit
+        params = result_fit["params"]
+        assert isinstance(params, dict)
+        names.update(dict.fromkeys(params))
         coef_list.append({group: group_value, **params})
+    if failures:
+        import warnings
 
-    coef_df = pd.DataFrame(coef_list)
+        first = next(iter(failures.items()))
+        warnings.warn(
+            f"lmList(): fitting failed for {len(failures)} group(s), whose coefficients are "
+            f"NaN; for group {first[0]!r}: {first[1]}",
+            UserWarning,
+            stacklevel=2,
+        )
+
+    # Coefficients a group cannot estimate, such as that of an absent level, are NaN.
+    coef_df = pd.DataFrame(coef_list, columns=[group, *names])
     if group in coef_df.columns:
         coef_df = coef_df.set_index(group)
 
@@ -459,9 +571,113 @@ def lmList(
     }
 
     if pool:
-        result["pooled"], _ = fit_arrays(matrices.X, matrices.y)
+        result["pooled"] = fit(pooled.X, pooled.y, pooled.offset, list(pooled.fixed_names))
 
     return result
+
+
+def _group_levels(
+    matrices: ModelMatrices,
+    levels: dict[str, list[Any]],
+    factor_terms: dict[str, Any],
+    factor_state: dict[str, Any],
+) -> tuple[dict[str, list[Any]], dict[str, list[Any]]]:
+    """The levels a group's rows take, for each factor where some are absent.
+
+    lm() codes a group with these levels, so the first level it has is the
+    reference of treatment contrasts and other contrasts span its own levels.
+    A factor with a single level in the group keeps the shared coding: lm()
+    cannot code it, and the group's other coefficients stay estimable.
+    """
+    from mixedlm.formula.transforms import factor_values
+    from mixedlm.utils.dataframe import get_column_values, get_columns
+
+    frame = matrices.frame
+    group_levels: dict[str, list[Any]] = {}
+    group_state: dict[str, list[Any]] = {}
+    if frame is None:
+        return group_levels, group_state
+    for name, pooled in levels.items():
+        if name not in get_columns(frame):
+            continue
+        present = set(pd.unique(get_column_values(frame, name)))
+        kept = [level for level in pooled if level in present]
+        if 2 <= len(kept) < len(pooled):
+            group_levels[name] = kept
+    for label, term in factor_terms.items():
+        if label not in factor_state:
+            continue
+        pooled = list(factor_state[label])
+        values, _ = factor_values(term, frame, {label: pooled})
+        present = set(pd.unique(values))
+        kept = [level for level in pooled if level in present]
+        if 2 <= len(kept) < len(pooled):
+            group_state[label] = kept
+    return group_levels, group_state
+
+
+def _shared_names(own: ModelMatrices, shared: ModelMatrices) -> list[str]:
+    """Name a group's own columns after the equal column of the shared coding.
+
+    Treatment columns indicate the same level under both codings, so they take
+    the shared name, as R's level labels match. A column that equals none keeps
+    its own name.
+    """
+    own_terms = own.fixed_term_labels or tuple(own.fixed_names)
+    shared_terms = shared.fixed_term_labels or tuple(shared.fixed_names)
+    used: set[int] = set()
+    names: list[str] = []
+    for j, (name, term) in enumerate(zip(own.fixed_names, own_terms, strict=True)):
+        candidates = [
+            k
+            for k, shared_term in enumerate(shared_terms)
+            if shared_term == term and k not in used and np.array_equal(own.X[:, j], shared.X[:, k])
+        ]
+        same = [k for k in candidates if shared.fixed_names[k] == name]
+        matches = same or candidates
+        if not matches:
+            names.append(name)
+            continue
+        used.add(matches[0])
+        names.append(shared.fixed_names[matches[0]])
+    if len(set(names)) < len(names):
+        return list(own.fixed_names)
+    return names
+
+
+def _least_squares_fit(
+    X: NDArray[np.floating],
+    y: NDArray[np.floating],
+    offset: NDArray[np.floating],
+    names: list[str],
+) -> dict[str, object]:
+    """Least squares with lm()'s rule for aliased columns.
+
+    A column whose residual on the kept columns before it is below 1e-7 of its norm
+    is aliased: its coefficient is NaN, as R reports NA. Formula offset() terms have
+    a fixed coefficient of one.
+    """
+    from mixedlm.models.checks import kept_columns
+
+    response = y - offset
+    kept = kept_columns(X)
+    beta = np.full(X.shape[1], np.nan)
+    if len(kept):
+        estimates, _, _, singular_values = np.linalg.lstsq(X[:, kept], response, rcond=None)
+        beta[kept] = estimates
+    else:
+        singular_values = np.empty(0)
+    fitted = X[:, kept] @ beta[kept] + offset
+    return {
+        "coef": beta,
+        "coef_names": names,
+        "params": dict(zip(names, beta, strict=True)),
+        "fitted": fitted,
+        "residuals": y - fitted,
+        "rank": len(kept),
+        "singular_values": singular_values,
+        "n": len(y),
+    }
 
 
 @dataclass

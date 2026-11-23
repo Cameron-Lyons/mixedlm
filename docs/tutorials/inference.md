@@ -203,7 +203,8 @@ small-sample denominator DF is required.
 
 ### Wald Intervals
 
-Fast but can be inaccurate for variance components:
+Fast, and for fixed effects only; as in lme4, Wald intervals for variance
+parameters are NaN:
 
 ```python
 ci = model.confint(method="Wald")
@@ -220,6 +221,14 @@ print(ci)
 ```
 
 Profile CIs are based on the likelihood function shape and don't assume symmetry.
+Name lme4's variance parameters to profile the random-effect standard deviations,
+correlations and residual SD as well:
+
+```python
+ci = model.confint(parm=["theta_", "beta_"], method="profile")
+for parameter in model.variance_parameters():
+    print(parameter.name, parameter.description, ci[parameter.name])
+```
 
 ### Bootstrap Intervals
 
@@ -235,7 +244,7 @@ print(ci)
 
 | Method | Speed | Fixed effects | Variance components |
 |--------|-------|---------------|---------------------|
-| Wald | Fast | Good | Poor (can go negative) |
+| Wald | Fast | Good | Not available (NaN, as in lme4) |
 | Profile | Medium | Excellent | Excellent |
 | Bootstrap | Slow | Excellent | Excellent |
 

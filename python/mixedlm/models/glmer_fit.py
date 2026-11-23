@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from numpy.typing import NDArray
@@ -34,6 +34,8 @@ class GlmerMod:
         na_action: str | None = "omit",
         contrasts: dict[str, str | NDArray[np.floating]] | None = None,
         control: GlmerControl | None = None,
+        transform_state: dict[str, Any] | None = None,
+        factor_coding: str = "R",
     ) -> None:
         from mixedlm.models.control import GlmerControl
 
@@ -56,7 +58,9 @@ class GlmerMod:
             offset=offset,
             na_action=na_action,
             contrasts=contrasts,
+            transform_state=transform_state,
             grouped_binomial=isinstance(self.family, Binomial),
+            factor_coding=factor_coding,
         )
 
     def fit(
@@ -96,6 +100,32 @@ class GlmerMod:
             options=opt_options,
             restart_edge=ctrl.restart_edge,
         )
+        from dataclasses import replace
+
+        from mixedlm.models.control import GlmerControl
+
+        kept_method = opt_method
+        if (
+            method is None
+            and opt_method == GlmerControl().optimizer
+            and opt_result.converged
+            and _at_boundary(opt_result.theta, self.matrices, ctrl.boundary_tol)
+        ):
+            # A derivative-free search can stop at a worse boundary optimum of a
+            # singular fit. Check it once from the same start with a gradient
+            # method and keep whichever fit reaches the lower deviance.
+            # The check takes no optimizer-specific options meant for COBYQA.
+            check_control = replace(ctrl, optCtrl={})
+            second = optimizer.optimize(
+                start=start,
+                method="L-BFGS-B",
+                maxiter=opt_maxiter,
+                options=check_control.get_scipy_options(optimizer="L-BFGS-B", maxiter=opt_maxiter),
+                restart_edge=ctrl.restart_edge,
+            )
+            if second.converged and second.deviance < opt_result.deviance - 1e-6:
+                # The result records the method whose estimates were kept.
+                opt_result, kept_method = second, "L-BFGS-B"
 
         result = GlmerResult(
             formula=self.formula,
@@ -113,7 +143,7 @@ class GlmerMod:
             pirls_tol=optimizer.pirls_tol,
             joint_fit=opt_result.joint_fit,
             message=opt_result.message,
-            optimizer=opt_method,
+            optimizer=kept_method,
             control=deepcopy(ctrl),
         )
 
@@ -230,6 +260,13 @@ def glmer_nb(
     )
 
 
+def _at_boundary(theta: NDArray[np.floating], matrices: Any, tolerance: float) -> bool:
+    """Whether a covariance factor's diagonal sits at its zero bound."""
+    from mixedlm.models.shared_utils import is_singular_theta
+
+    return bool(is_singular_theta(theta, matrices.random_structures, tolerance))
+
+
 def glmer(
     formula: Formula | str,
     data: pd.DataFrame,
@@ -316,5 +353,9 @@ def glmer(
         na_action=na_action,
         contrasts=contrasts,
         control=control,
+        # Formula refits on the fitted rows reuse the fitted transform parameters.
+        transform_state=kwargs.pop("_transform_state", None),
+        # Refits of models saved by mixedlm 1.3 and earlier keep their coding.
+        factor_coding=kwargs.pop("_factor_coding", "R"),
     )
     return model.fit(nAGQ=nAGQ, **kwargs)

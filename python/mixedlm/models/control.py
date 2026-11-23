@@ -35,6 +35,10 @@ _VALID_RANKX_ACTIONS = {
     "message+drop.cols",
     "warning+drop.cols",
     "stop+drop.cols",
+    # lme4's spellings
+    "silent.drop.cols",
+    "warn+drop.cols",
+    "stop.deficient",
 }
 
 

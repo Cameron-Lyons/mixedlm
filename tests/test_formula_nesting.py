@@ -19,7 +19,7 @@ from numpy.testing import assert_allclose, assert_array_equal
         "y ~ x -",
         "y ~ x x",
         "y ~ x ) + (1 | g)",
-        "y ~ x / z + (1 | g)",
+        "y ~ x / + z",
         "y ~ x ~ z",
         "y ~ x | g",
         "y ~ x + + z",

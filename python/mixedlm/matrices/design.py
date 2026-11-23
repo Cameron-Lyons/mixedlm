@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from functools import cached_property
 from itertools import product
@@ -19,6 +19,7 @@ from mixedlm.utils.dataframe import (
     get_categories,
     get_column_numpy,
     get_columns,
+    get_observed_categories,
     is_categorical_or_string,
     select_columns,
 )
@@ -27,14 +28,27 @@ if TYPE_CHECKING:
     from mixedlm.utils.na_action import NAInfo
 
 from mixedlm.formula.terms import (
+    Factor,
     Formula,
     InteractionTerm,
     InterceptTerm,
+    ParsedTerm,
     PowerTerm,
     RandomTerm,
+    TransformTerm,
     VariableTerm,
     _format_grouping,
     format_term,
+    term_factors,
+)
+from mixedlm.formula.transforms import (
+    STORED_PREFIX,
+    TransformState,
+    encode_numeric_transform,
+    factor_values,
+    formula_offset,
+    learn_transform_state,
+    response_values,
 )
 
 
@@ -48,6 +62,8 @@ class RandomEffectStructure:
     level_map: dict[str, int]
     cov_type: str = "us"
     level_indices: NDArray[np.int32] | None = field(default=None, repr=False, compare=False)
+    # Columns of each formula term, in column order; None for fits saved before it was kept.
+    term_sizes: tuple[int, ...] | None = field(default=None, repr=False, compare=False)
 
 
 @dataclass
@@ -77,10 +93,25 @@ class ModelMatrices:
     # Numeric binomial proportions use the supplied weights as trial counts.
     # Retain that interpretation when a refit happens to draw only 0s and 1s.
     binomial_trial_weights: bool = False
+    # Parameters that stateful formula transforms such as scale(x), poly(x, 2)
+    # and factor(x) learned from the fitting data, keyed by term label.
+    transform_state: dict[str, Any] | None = field(default=None, repr=False)
+    # How categorical factors were coded: "R" follows model.matrix(), with
+    # indicators in interactions that lack a margin and the first factor of an
+    # interaction varying fastest. Fits saved before then keep "legacy" coding.
+    factor_coding: str = "legacy"
+    # The offset supplied by the caller, excluding formula offset() terms.
+    # None when the formula has no offset terms, so it equals ``offset``.
+    supplied_offset: NDArray[np.floating] | None = field(default=None, repr=False)
 
     @property
     def response_trials(self) -> NDArray[np.floating] | None:
         return self.weights if self.binomial_trial_weights else self.trials
+
+    @property
+    def argument_offset(self) -> NDArray[np.floating]:
+        """The offset to pass when refitting the formula, which adds its own terms."""
+        return self.offset if self.supplied_offset is None else self.supplied_offset
 
     @cached_property
     def Zt(self) -> sparse.csc_matrix:
@@ -119,7 +150,21 @@ def build_model_matrices(
     na_action: str | None = None,
     contrasts: dict[str, str | NDArray[np.floating]] | None = None,
     grouped_binomial: bool = False,
+    transform_state: Mapping[str, Any] | None = None,
+    factor_coding: str = "R",
+    category_levels: Mapping[str, Sequence[Any]] | None = None,
 ) -> ModelMatrices:
+    """Build the design matrices of ``formula`` for ``data``.
+
+    ``transform_state`` reuses parameters that stateful transforms learned in an
+    earlier fit, such as when a model is refitted to its own stored rows.
+    ``factor_coding`` is "R", as in ``model.matrix()``, or "legacy" for refits of
+    models saved by mixedlm 1.3 and earlier, which keep their own columns.
+    ``category_levels`` fixes the levels of the named categorical variables, such
+    as levels learned from a larger data set that ``data`` is part of.
+    """
+    if factor_coding not in ("R", "legacy"):
+        raise ValueError(f"factor_coding must be 'R' or 'legacy', got {factor_coding!r}")
     from mixedlm.utils.na_action import handle_na
 
     data = ensure_dataframe(data, columns=sorted(_get_formula_variables(formula)))
@@ -130,6 +175,9 @@ def build_model_matrices(
             allow_missing=True,
         )
 
+    learned: dict[str, Any] = dict(transform_state or {})
+    learn_transform_state(formula, data, learned)
+    transform_state = learned
     if na_action is not None:
         clean_data, na_info, weights, offset = handle_na(data, formula, na_action, weights, offset)
     else:
@@ -139,8 +187,11 @@ def build_model_matrices(
     frame_vars = _get_formula_variables(formula)
     available_cols = get_columns(clean_data)
     encoded_variables = formula.fixed_variables | formula.random_variables
-    category_levels = {
-        name: get_categories(clean_data, name)
+    fixed_levels = category_levels or {}
+    levels: dict[str, list[Any]] = {
+        name: list(fixed_levels[name])
+        if name in fixed_levels
+        else get_observed_categories(clean_data, name)
         for name in encoded_variables
         if name in available_cols and is_categorical_or_string(clean_data, name)
     }
@@ -155,7 +206,7 @@ def build_model_matrices(
 
     response_levels = (
         _binomial_factor_levels(clean_data, formula.response)
-        if grouped_binomial and formula.response_denominator is None
+        if grouped_binomial and formula.plain_response
         else None
     )
     y, trials = _build_response(
@@ -166,17 +217,23 @@ def build_model_matrices(
         formula,
         clean_data,
         contrasts=stored_contrasts,
-        category_levels=category_levels,
+        category_levels=levels,
         term_labels=fixed_term_labels,
+        transform_state=transform_state,
+        coding=factor_coding,
     )
     Z, random_structures = build_random_matrix(
         formula,
         clean_data,
         contrasts=stored_contrasts,
-        category_levels=category_levels,
+        category_levels=levels,
+        transform_state=transform_state,
+        coding=factor_coding,
     )
 
     available_vars = [v for v in frame_vars if v in available_cols]
+    # Keep a refit's stored responses so that updates of the model reuse them.
+    available_vars += [c for c in available_cols if c.startswith(STORED_PREFIX)]
     model_frame = select_columns(clean_data, available_vars)
 
     n = len(y)
@@ -188,6 +245,11 @@ def build_model_matrices(
         weights = validate_prior_weights(weights, n)
     if offset is None:
         offset = np.zeros(n, dtype=np.float64)
+    supplied_offset = None
+    term_offset = formula_offset(formula, clean_data)
+    if term_offset is not None:
+        supplied_offset = np.asarray(offset, dtype=np.float64)
+        offset = supplied_offset + term_offset
 
     return ModelMatrices(
         y=y,
@@ -208,8 +270,11 @@ def build_model_matrices(
         and trials is None
         and bool(np.any((y > 0) & (y < 1))),
         response_levels=response_levels,
-        category_levels=category_levels,
+        category_levels=levels,
         contrasts=stored_contrasts,
+        transform_state=transform_state,
+        supplied_offset=supplied_offset,
+        factor_coding=factor_coding,
     )
 
 
@@ -221,6 +286,17 @@ def _build_response(
     response_levels: tuple[Any, Any] | None = None,
 ) -> tuple[NDArray[np.floating], NDArray[np.floating] | None]:
     denominator = formula.response_denominator
+    if formula.response_failures is not None:
+        if not grouped_binomial:
+            raise ValueError("cbind(successes, failures) responses require a binomial GLMM")
+        successes = _response_column(formula, data)
+        failures_label = formula.failures_label
+        assert failures_label is not None
+        failures = response_values(formula.response_failures, failures_label, data)
+        trials = successes + failures
+        return _normalize_grouped_binomial_response(successes, trials), trials
+    if formula.response_expr is not None and denominator is None:
+        return _response_column(formula, data), None
     if denominator is None:
         if grouped_binomial:
             levels = response_levels or _binomial_factor_levels(data, formula.response)
@@ -244,6 +320,14 @@ def _build_response(
     successes = get_column_numpy(data, formula.response, dtype=np.float64)
     trials = get_column_numpy(data, denominator, dtype=np.float64)
     return _normalize_grouped_binomial_response(successes, trials), trials
+
+
+def _response_column(formula: Formula, data: Any) -> NDArray[np.float64]:
+    if formula.response_expr is None:
+        return np.asarray(
+            get_column_numpy(data, formula.response, dtype=np.float64), dtype=np.float64
+        )
+    return response_values(formula.response_expr, formula.response, data)
 
 
 def _numeric_response(values: Any) -> bool:
@@ -276,6 +360,9 @@ def _binomial_factor_levels(data: Any, name: str) -> tuple[Any, Any] | None:
         # columns. Only Enum categories declare unobserved response levels.
         observed = set(get_column_numpy(data, name))
         levels = [level for level in levels if level in observed]
+    if len(levels) > 2:
+        # As lme4's model frame does, drop declared levels that no row takes.
+        levels = get_observed_categories(data, name)
     if len(levels) != 2:
         raise ValueError(
             f"Binomial factor responses require exactly two levels; '{name}' has {len(levels)}"
@@ -343,8 +430,15 @@ def build_fixed_matrix(
     category_levels: dict[str, list[Any]] | None = None,
     *,
     term_labels: list[str] | None = None,
+    transform_state: TransformState | None = None,
+    coding: str = "R",
 ) -> tuple[NDArray[np.floating], list[str]]:
-    """Encode fixed effects and optionally collect the source term for each column."""
+    """Encode fixed effects and optionally collect the source term for each column.
+
+    ``transform_state`` holds the parameters of stateful formula transforms. Pass
+    the fitted model's state to encode new data; missing entries are learned from
+    ``data`` and recorded.
+    """
     n = dataframe_length(data)
     factors = list(
         _term_factors(
@@ -353,14 +447,17 @@ def build_fixed_matrix(
             has_intercept=formula.fixed.has_intercept,
             contrasts=contrasts,
             category_levels=category_levels,
+            transform_state=transform_state,
+            coding=coding,
         )
     )
+    first_fastest = coding == "R"
     names = ["(Intercept)"] if formula.fixed.has_intercept else []
     if term_labels is not None:
         term_labels.extend(names)
-    for term, term_factors in factors:
+    for term, encoded in factors:
         start = len(names)
-        names.extend(_factor_names(term_factors))
+        names.extend(_factor_names(encoded, first_fastest))
         if term_labels is not None:
             term_labels.extend([format_term(term)] * (len(names) - start))
 
@@ -374,10 +471,11 @@ def build_fixed_matrix(
     if formula.fixed.has_intercept:
         X[:, 0] = 1.0
         column_index = 1
-    for _, term_factors in factors:
-        for column in _factor_columns(term_factors, n):
-            X[:, column_index] = column
-            column_index += 1
+    for _, encoded in factors:
+        positions = _column_positions(encoded, first_fastest)
+        for position, column in zip(positions, _factor_columns(encoded, n), strict=True):
+            X[:, column_index + position] = column
+        column_index += len(positions)
     return X, names
 
 
@@ -445,59 +543,195 @@ def _encode_categorical(
     return columns, names
 
 
+def _encode_factor_transform(
+    term: TransformTerm,
+    data: Any,
+    contrasts: dict[str, str | NDArray[np.floating]] | None,
+    transform_state: TransformState | None,
+    *,
+    full_rank: bool,
+) -> tuple[list[NDArray[np.floating]], list[str]]:
+    """Encode factor(x), C(x, contrast) or relevel(x, ref) with fitted levels."""
+    import pandas as pd
+
+    from mixedlm.utils.contrasts import apply_contrasts_array, get_contrast_matrix
+
+    label = term.label
+    values, levels = factor_values(term, data, transform_state)
+    observed = pd.Index(values).dropna().unique()
+    unknown = observed[~observed.isin(levels)]
+    if len(unknown):
+        listed = ", ".join(repr(value) for value in unknown)
+        raise ValueError(f"New level(s) {listed} in factor '{label}'.")
+    n = dataframe_length(data)
+    if len(levels) < 2:
+        return [np.ones(n, dtype=np.float64)], [label]
+    contrast_matrix: NDArray[np.floating]
+    if full_rank:
+        contrast_matrix = np.eye(len(levels), dtype=np.float64)
+    else:
+        spec = (contrasts or {}).get(label, term.option("contr") if term.func == "C" else None)
+        if term.func == "C" and spec == "helmert" and label not in (contrasts or {}):
+            # In formula syntax, C(x, helmert) is R's unscaled contr.helmert.
+            spec = "contr.helmert"
+        contrast_matrix = get_contrast_matrix(len(levels), spec)
+    columns, names = apply_contrasts_array(values, label, contrast_matrix, levels)
+    if full_rank:
+        names = [f"{label}.{level}" for level in levels]
+    return columns, names
+
+
 _EncodedFactor = tuple[list[NDArray[np.floating]], list[str]]
 
 
 def _term_factors(
-    terms: tuple[InterceptTerm | VariableTerm | PowerTerm | InteractionTerm, ...],
+    terms: tuple[ParsedTerm, ...],
     data: Any,
     has_intercept: bool,
     contrasts: dict[str, str | NDArray[np.floating]] | None = None,
     category_levels: dict[str, list[Any]] | None = None,
-) -> Iterator[tuple[VariableTerm | PowerTerm | InteractionTerm, list[_EncodedFactor]]]:
+    transform_state: TransformState | None = None,
+    coding: str = "R",
+) -> Iterator[
+    tuple[VariableTerm | PowerTerm | TransformTerm | InteractionTerm, list[_EncodedFactor]]
+]:
     """Encode each base factor once, keeping full and reduced rank encodings distinct."""
-    cache: dict[tuple[str | PowerTerm, bool], _EncodedFactor] = {}
+    cache: dict[tuple[Factor, bool], _EncodedFactor] = {}
 
-    def encode(variable: str | PowerTerm, full_rank: bool = False) -> _EncodedFactor:
+    def encode(variable: Factor, full_rank: bool = False) -> _EncodedFactor:
         key = (variable, full_rank)
         if key not in cache:
-            cache[key] = (
-                _encode_power(variable, data)
-                if isinstance(variable, PowerTerm)
-                else _encode_variable(
+            if isinstance(variable, PowerTerm):
+                cache[key] = _encode_power(variable, data)
+            elif isinstance(variable, TransformTerm) and variable.is_categorical:
+                cache[key] = _encode_factor_transform(
+                    variable, data, contrasts, transform_state, full_rank=full_rank
+                )
+            elif isinstance(variable, TransformTerm):
+                columns, names = encode_numeric_transform(variable, data, transform_state)
+                cache[key] = (list[NDArray[np.floating]](columns), names)
+            else:
+                cache[key] = _encode_variable(
                     variable, data, contrasts, category_levels, full_rank=full_rank
                 )
-            )
         return cache[key]
 
-    use_full_rank_factor = not has_intercept
+    def categorical(variable: Factor) -> bool:
+        if isinstance(variable, TransformTerm):
+            return variable.is_categorical
+        if isinstance(variable, PowerTerm):
+            return False
+        return variable in (category_levels or {}) or is_categorical_or_string(data, variable)
 
-    for term in terms:
+    codings = (
+        _legacy_indicator_coding(terms, has_intercept, categorical)
+        if coding == "legacy"
+        else _indicator_coding(terms, has_intercept, categorical)
+    )
+    for term, full_rank in zip(terms, codings, strict=True):
         if isinstance(term, InterceptTerm):
             continue
-        if isinstance(term, VariableTerm):
-            is_categorical = term.name in (category_levels or {}) or is_categorical_or_string(
-                data, term.name
+        variables = term_factors(term)
+        yield term, [encode(v, full) for v, full in zip(variables, full_rank, strict=True)]
+
+
+def _legacy_indicator_coding(
+    terms: tuple[ParsedTerm, ...],
+    has_intercept: bool,
+    categorical: Callable[[Factor], bool],
+) -> list[tuple[bool, ...]]:
+    """The coding of fits saved by version 1.3 and earlier, kept for their predictions.
+
+    Interactions always used contrasts. Without an intercept, the first categorical
+    main effect in formula order used indicators.
+    """
+    codings: list[tuple[bool, ...]] = []
+    pending = not has_intercept
+    for term in terms:
+        factors = term_factors(term)
+        main_effect = isinstance(term, VariableTerm | TransformTerm)
+        full = pending and main_effect and categorical(factors[0])
+        pending = pending and not full
+        codings.append((full,) if main_effect else (False,) * len(factors))
+    return codings
+
+
+def _indicator_coding(
+    terms: tuple[ParsedTerm, ...],
+    has_intercept: bool,
+    categorical: Callable[[Factor], bool],
+) -> list[tuple[bool, ...]]:
+    """Choose indicator (full-rank) or contrast coding for each factor, as R does.
+
+    A categorical factor in a term is coded by contrasts when the term without it
+    is contained in a term that precedes it in order of degree; otherwise every
+    level gets an indicator. Without an intercept, the first factor of the first
+    term that has one also uses indicators. See Chambers and Hastie (1992),
+    Statistical Models in S, p. 38.
+    """
+    factor_sets = [frozenset(term_factors(term)) for term in terms]
+    order = sorted(range(len(terms)), key=lambda index: (len(factor_sets[index]), index))
+    first_factor: tuple[int, Factor] | None = None
+    if not has_intercept:
+        first_factor = next(
+            (
+                (index, variable)
+                for index in order
+                for variable in term_factors(terms[index])
+                if categorical(variable)
+            ),
+            None,
+        )
+    codings: list[tuple[bool, ...]] = [()] * len(terms)
+    for rank, index in enumerate(order):
+        preceding = [factor_sets[other] for other in order[:rank]]
+        coding = []
+        for variable in term_factors(terms[index]):
+            rest = factor_sets[index] - {variable}
+            coding.append(
+                categorical(variable)
+                and (
+                    (index, variable) == first_factor
+                    or (bool(rest) and not any(rest <= other for other in preceding))
+                )
             )
-            full_rank = use_full_rank_factor and is_categorical
-            yield term, [encode(term.name, full_rank)]
-            if full_rank:
-                use_full_rank_factor = False
-        elif isinstance(term, PowerTerm):
-            yield term, [encode(term)]
-        else:
-            yield term, [encode(variable) for variable in term.variables]
+        codings[index] = tuple(coding)
+    return codings
 
 
-def _factor_names(factors: list[_EncodedFactor]) -> Iterator[str]:
-    for names in product(*(factor[1] for factor in factors)):
-        name = ""
-        for part in names:
-            name = f"{name}:{part}" if name else part
-        yield name
+def _join_names(parts: Iterable[str]) -> str:
+    name = ""
+    for part in parts:
+        name = f"{name}:{part}" if name else part
+    return name
+
+
+def _factor_names(factors: list[_EncodedFactor], first_fastest: bool = True) -> Iterator[str]:
+    """Name an interaction's columns; R's model.matrix() varies the first factor fastest."""
+    if first_fastest:
+        for names in product(*(factor[1] for factor in factors[::-1])):
+            yield _join_names(names[::-1])
+    else:
+        for names in product(*(factor[1] for factor in factors)):
+            yield _join_names(names)
+
+
+def _column_positions(factors: list[_EncodedFactor], first_fastest: bool) -> list[int]:
+    """Positions, in name order, of the columns that :func:`_factor_columns` yields.
+
+    Columns are formed with the last factor varying fastest, so products keep
+    their left-to-right arithmetic; R's order varies the first factor fastest.
+    """
+    sizes = [len(factor[1]) for factor in factors]
+    count = int(np.prod(sizes)) if sizes else 1
+    if not first_fastest or len(sizes) < 2:
+        return list(range(count))
+    # Generation order is row-major over the factors; R's order is column-major.
+    return list(np.ravel_multi_index(np.unravel_index(np.arange(count), sizes), sizes, order="F"))
 
 
 def _factor_columns(factors: list[_EncodedFactor], n: int) -> Iterator[NDArray[np.floating]]:
+    """Form an interaction's columns, varying the last factor fastest."""
     if not factors:
         yield np.ones(n, dtype=np.float64)
         return
@@ -527,19 +761,33 @@ def _factor_columns(factors: list[_EncodedFactor], n: int) -> Iterator[NDArray[n
 
 
 def _encode_terms(
-    terms: tuple[InterceptTerm | VariableTerm | PowerTerm | InteractionTerm, ...],
+    terms: tuple[ParsedTerm, ...],
     data: Any,
     has_intercept: bool,
     contrasts: dict[str, str | NDArray[np.floating]] | None = None,
     category_levels: dict[str, list[Any]] | None = None,
+    transform_state: TransformState | None = None,
+    coding: str = "R",
+    sizes: list[int] | None = None,
 ) -> tuple[list[NDArray[np.floating]], list[str]]:
-    """Materialize columns for sparse random-effect construction."""
+    """Materialize columns for sparse random-effect construction.
+
+    ``sizes`` collects each term's number of columns.
+    """
     columns: list[NDArray[np.floating]] = []
     names: list[str] = []
     n = dataframe_length(data)
-    for _, factors in _term_factors(terms, data, has_intercept, contrasts, category_levels):
-        columns.extend(_factor_columns(factors, n))
-        names.extend(_factor_names(factors))
+    first_fastest = coding == "R"
+    for _, factors in _term_factors(
+        terms, data, has_intercept, contrasts, category_levels, transform_state, coding
+    ):
+        start = len(names)
+        term_columns = list(_factor_columns(factors, n))
+        positions = _column_positions(factors, first_fastest)
+        columns.extend(term_columns[index] for index in np.argsort(positions, kind="stable"))
+        names.extend(_factor_names(factors, first_fastest))
+        if sizes is not None:
+            sizes.append(len(names) - start)
     return columns, names
 
 
@@ -609,18 +857,26 @@ def _random_term_columns(
     n: int,
     contrasts: dict[str, str | NDArray[np.floating]] | None = None,
     category_levels: dict[str, list[Any]] | None = None,
+    transform_state: TransformState | None = None,
+    coding: str = "R",
+    sizes: list[int] | None = None,
 ) -> tuple[list[NDArray[np.floating]], list[str]]:
     """Encode within-group random terms consistently for fitting and prediction."""
     columns: list[NDArray[np.floating]] = (
         [np.ones(n, dtype=np.float64)] if rterm.has_intercept else []
     )
     names = ["(Intercept)"] if rterm.has_intercept else []
+    if sizes is not None and rterm.has_intercept:
+        sizes.append(1)
     encoded_columns, encoded_names = _encode_terms(
         rterm.expr,
         data,
         has_intercept=rterm.has_intercept,
         contrasts=contrasts,
         category_levels=category_levels,
+        transform_state=transform_state,
+        coding=coding,
+        sizes=sizes,
     )
     columns.extend(encoded_columns)
     names.extend(encoded_names)
@@ -632,6 +888,9 @@ def build_random_matrix(
     data: Any,
     contrasts: dict[str, str | NDArray[np.floating]] | None = None,
     category_levels: dict[str, list[Any]] | None = None,
+    *,
+    transform_state: TransformState | None = None,
+    coding: str = "R",
 ) -> tuple[sparse.csc_matrix, list[RandomEffectStructure]]:
     n = dataframe_length(data)
     Z_blocks: list[sparse.csc_matrix] = []
@@ -644,6 +903,8 @@ def build_random_matrix(
             n,
             contrasts,
             category_levels,
+            transform_state,
+            coding,
         )
         Z_blocks.append(Z_block)
         structures.append(structure)
@@ -662,6 +923,8 @@ def _build_random_block(
     n: int,
     contrasts: dict[str, str | NDArray[np.floating]] | None = None,
     category_levels: dict[str, list[Any]] | None = None,
+    transform_state: TransformState | None = None,
+    coding: str = "R",
 ) -> tuple[sparse.csc_matrix, RandomEffectStructure]:
     if isinstance(rterm.grouping, str):
         group_values = get_column_numpy(data, rterm.grouping)
@@ -670,7 +933,10 @@ def _build_random_block(
     level_indices, level_map = factorize_levels(group_values)
     n_levels = len(level_map)
 
-    term_cols, term_names = _random_term_columns(rterm, data, n, contrasts, category_levels)
+    sizes: list[int] = []
+    term_cols, term_names = _random_term_columns(
+        rterm, data, n, contrasts, category_levels, transform_state, coding, sizes
+    )
 
     n_terms = len(term_cols)
 
@@ -685,6 +951,7 @@ def _build_random_block(
         level_map=level_map,
         cov_type=rterm.cov_type,
         level_indices=level_indices,
+        term_sizes=tuple(sizes),
     )
 
     return Z_block, structure

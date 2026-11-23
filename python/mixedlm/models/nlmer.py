@@ -26,9 +26,6 @@ from mixedlm.utils.random import RandomSeed, RandomStream
 from mixedlm.utils.validation import _validate_confidence_level
 
 _COV_REGULARIZATION = 1e-8
-_VCOV_EPS = 1e-5
-_JACOBIAN_EPS = 1e-6
-_HAT_FALLBACK_EPS = 1e-10
 _HAT_CLIP_MAX = 1 - 1e-10
 _DEFAULT_MAXITER = 500
 _DEFAULT_N_BOOT = 1000
@@ -586,85 +583,26 @@ class NlmerResult(_ResultBase):
             **kwargs,
         )
 
-    def _invert_with_fallback(self, matrix: NDArray[np.floating]) -> NDArray[np.floating]:
-        """Invert a potentially ill-conditioned matrix with finite-value guards."""
-        n = matrix.shape[0]
-        eye = np.eye(n, dtype=np.float64)
-        sym_matrix = 0.5 * (matrix + matrix.T)
-
-        candidates = (sym_matrix, sym_matrix + _COV_REGULARIZATION * eye)
-        for candidate in candidates:
-            try:
-                L = linalg.cholesky(candidate, lower=True)
-                inv = linalg.cho_solve((L, True), eye)
-                if np.all(np.isfinite(inv)):
-                    return 0.5 * (inv + inv.T)
-            except linalg.LinAlgError:
-                pass
-
-            try:
-                inv = linalg.solve(candidate, eye, assume_a="sym")
-                if np.all(np.isfinite(inv)):
-                    return 0.5 * (inv + inv.T)
-            except (linalg.LinAlgError, ValueError):
-                pass
-
-        inv = linalg.pinv(sym_matrix + _COV_REGULARIZATION * eye)
-        if not np.all(np.isfinite(inv)):
-            inv = np.nan_to_num(inv, nan=0.0, posinf=0.0, neginf=0.0)
-        return 0.5 * (inv + inv.T)
+    def _weighted_jacobian(self) -> NDArray[np.float64]:
+        """Linearize the conditional mean at each group's fitted parameters."""
+        jacobian = np.empty((len(self.y), len(self.phi)), dtype=np.float64)
+        for group, rows in enumerate(
+            _grouped_observation_indices(self.groups, n_groups=len(self.group_levels))
+        ):
+            params = self.phi.copy()
+            np.add.at(params, self.random_params, self.b[group])
+            jacobian[rows] = self.model.gradient(params, self.x[rows])
+        jacobian *= np.sqrt(self.weights(copy=False))[:, None]
+        return jacobian
 
     def vcov(self) -> NDArray[np.floating]:
-        """Compute the variance-covariance matrix of fixed effects.
+        """Return the conditional Gauss–Newton covariance of the fixed effects.
 
-        Uses numerical approximation based on the Hessian of the log-likelihood.
-
-        Returns
-        -------
-        NDArray
-            Variance-covariance matrix of shape (n_params, n_params).
+        Linearize the response mean at the fitted group effects and use the
+        observation precision weights in the fixed-effect information matrix.
         """
-        n_params = len(self.phi)
-        eps = _VCOV_EPS
-        adjusted_response = self.y - self.offset(copy=False)
-
-        def neg_log_lik(phi_vec):
-            pred = self._conditional_mean(phi=phi_vec)
-            resid = adjusted_response - pred
-            return 0.5 * np.dot(self.weights(copy=False), resid**2) / self.sigma**2
-
-        hessian = np.zeros((n_params, n_params), dtype=np.float64)
-
-        for i in range(n_params):
-            for j in range(i, n_params):
-                phi_pp = self.phi.copy()
-                phi_pm = self.phi.copy()
-                phi_mp = self.phi.copy()
-                phi_mm = self.phi.copy()
-
-                phi_pp[i] += eps
-                phi_pp[j] += eps
-                phi_pm[i] += eps
-                phi_pm[j] -= eps
-                phi_mp[i] -= eps
-                phi_mp[j] += eps
-                phi_mm[i] -= eps
-                phi_mm[j] -= eps
-
-                d2f = (
-                    neg_log_lik(phi_pp)
-                    - neg_log_lik(phi_pm)
-                    - neg_log_lik(phi_mp)
-                    + neg_log_lik(phi_mm)
-                ) / (4 * eps * eps)
-
-                hessian[i, j] = d2f
-                hessian[j, i] = d2f
-
-        vcov = self._invert_with_fallback(hessian)
-        vcov = np.nan_to_num(vcov, nan=0.0, posinf=0.0, neginf=0.0)
-        np.fill_diagonal(vcov, np.maximum(np.diag(vcov), 0.0))
-        return vcov
+        inverse_jacobian = linalg.pinv(self._weighted_jacobian())
+        return self.sigma**2 * (inverse_jacobian @ inverse_jacobian.T)
 
     def confint(
         self,
@@ -753,41 +691,16 @@ class NlmerResult(_ResultBase):
     def hatvalues(self) -> NDArray[np.floating]:
         """Compute leverage values (diagonal of the hat matrix).
 
-        For nonlinear models, this is approximated using the Jacobian
-        of the fitted values with respect to the response.
+        Linearize the conditional response mean with respect to the fixed
+        effects and project onto its precision-weighted Jacobian.
 
         Returns
         -------
         NDArray
             Leverage values for each observation.
         """
-        n = len(self.y)
-        n_params = len(self.phi)
-
-        J = np.zeros((n, n_params), dtype=np.float64)
-        eps = _JACOBIAN_EPS
-
-        fitted_base = self._conditional_mean()
-
-        for j in range(n_params):
-            phi_plus = self.phi.copy()
-            phi_plus[j] += eps
-
-            pred_plus = self._conditional_mean(phi=phi_plus)
-
-            J[:, j] = (pred_plus - fitted_base) / eps
-
-        sqrt_weights = np.sqrt(self.weights(copy=False))
-        weighted_J = sqrt_weights[:, None] * J
-        JtWJ = weighted_J.T @ weighted_J
-        JtWJ_inv = self._invert_with_fallback(JtWJ)
-        J_JtWJ_inv = weighted_J @ JtWJ_inv
-        h = np.sum(J_JtWJ_inv * weighted_J, axis=1)
-
-        if not np.all(np.isfinite(h)):
-            h = np.sum(weighted_J**2, axis=1) / (np.sum(weighted_J**2) + _HAT_FALLBACK_EPS)
-
-        h = np.nan_to_num(h, nan=0.0, posinf=_HAT_CLIP_MAX, neginf=0.0)
+        jacobian = self._weighted_jacobian()
+        h = np.einsum("ij,ji->i", jacobian, linalg.pinv(jacobian))
         return np.clip(h, 0, _HAT_CLIP_MAX)
 
     def cooks_distance(self) -> NDArray[np.floating]:

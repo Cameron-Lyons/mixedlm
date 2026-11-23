@@ -13,7 +13,7 @@ if TYPE_CHECKING:
     from mixedlm.estimation.joint_glmm import JointGLMMObjective
     from mixedlm.estimation.laplace import GLMMOptimizer
     from mixedlm.families.base import Family
-    from mixedlm.formula.terms import Formula
+    from mixedlm.formula.terms import Expr, Formula
     from mixedlm.models.control import GlmerControl, LmerControl
     from mixedlm.models.glmer import GlmerResult
     from mixedlm.models.lmer import LmerResult
@@ -26,7 +26,7 @@ from mixedlm.estimation.reml import (
     _count_theta,
 )
 from mixedlm.formula.parser import parse_formula
-from mixedlm.formula.terms import InteractionTerm, PowerTerm, VariableTerm
+from mixedlm.formula.terms import term_sources
 from mixedlm.matrices.design import ModelMatrices, build_model_matrices, build_random_matrix
 from mixedlm.models.shared_utils import resolve_em_start
 
@@ -1124,6 +1124,12 @@ def simulate_formula(
     rng = np.random.default_rng(seed)
 
     parsed_formula = _coerce_formula(formula)
+    if parsed_formula.response_expr is not None:
+        raise ValueError(
+            "simulate_formula() writes the simulated response to a data column, so the "
+            "response must be a column or binomial successes; "
+            f"simulate the column behind {parsed_formula.response_expression} instead"
+        )
     response_name = parsed_formula.response
     # The response is only an output here, so the predictors suffice.
     frame = data if response_name in data.columns else data.assign(**{response_name: 0.0})
@@ -1179,7 +1185,7 @@ def simulate_formula(
     results = []
 
     for _ in range(nsim):
-        eta = matrices.X @ beta_vec
+        eta = matrices.X @ beta_vec + matrices.offset
         standard_random_effects = rng.standard_normal(q)
         random_effects = np.asarray(Lambda @ standard_random_effects).reshape(-1) * sigma
         eta += matrices.Z @ random_effects
@@ -1189,11 +1195,37 @@ def simulate_formula(
         )
         result_df = data.copy()
         result_df[response_name] = y
+        if parsed_formula.response_failures is not None:
+            _write_simulated_failures(parsed_formula, result_df, y, matrices.trials)
         results.append(result_df)
 
     if nsim == 1:
         return results[0]
     return results
+
+
+def _write_simulated_failures(
+    formula: Formula,
+    frame: pd.DataFrame,
+    successes: NDArray[np.floating],
+    trials: NDArray[np.floating] | None,
+) -> None:
+    """Keep cbind() failures consistent with the trials that were simulated."""
+    from mixedlm.formula.terms import Var
+    from mixedlm.formula.transforms import evaluate_numeric
+
+    failures = formula.response_failures
+    assert failures is not None and trials is not None
+    expected = trials - successes
+    if isinstance(failures, Var):
+        frame[failures.name] = expected
+        return
+    # Failures such as n - s follow the new successes; anything else cannot.
+    if not np.allclose(evaluate_numeric(failures, frame), expected):
+        raise ValueError(
+            f"simulate_formula() cannot update the failures {formula.failures_label}; "
+            "write them as a column or as trials minus the successes"
+        )
 
 
 def _simulation_family(family: Family | str | None) -> Family:
@@ -1228,11 +1260,193 @@ def _template_variables(formula: Formula) -> tuple[list[str], list[str]]:
     covariates: dict[str, None] = {}
     random_terms = [term for rterm in formula.random for term in rterm.expr]
     for term in [*formula.fixed.terms, *random_terms]:
-        if isinstance(term, VariableTerm | PowerTerm):
-            covariates[term.name] = None
-        elif isinstance(term, InteractionTerm):
-            covariates.update(dict.fromkeys(term.source_variables))
+        covariates.update(dict.fromkeys(term_sources(term)))
     return [name for name in covariates if name not in grouping_factors], grouping_factors
+
+
+_DOMAIN_FUNCTIONS = frozenset({"log", "log2", "log10", "log1p", "sqrt", "asin", "acos"})
+# Draws for variables inside domain-limited functions, tried in order: positive
+# values suit log() and sqrt(), the unit interval suits log(p / (1 - p)), negative
+# values suit sqrt(-x), and larger ones shifted arguments such as log(age - 18).
+_RESTRICTED_DRAWS = (
+    (0.5, 2.0),
+    (0.05, 0.95),
+    (-2.0, -0.5),
+    (-0.95, -0.05),
+    (20.0, 80.0),
+    (200.0, 800.0),
+    (-80.0, -20.0),
+    (-800.0, -200.0),
+)
+
+
+def _restricted_variables(formula: Formula) -> set[str]:
+    """Variables of offsets, of terms inside domain-limited functions such as log(),
+    and of fractional or negative powers such as I(x^0.5)."""
+    from mixedlm.formula.terms import Binary, Call, Num, TransformTerm, Unary, Var, term_factors
+
+    restricted: set[str] = set(formula.offset_variables)
+
+    def visit(node: Expr, inside: bool) -> None:
+        if isinstance(node, Var):
+            if inside:
+                restricted.add(node.name)
+        elif isinstance(node, Unary):
+            visit(node.operand, inside)
+        elif isinstance(node, Binary):
+            exponent = node.right.value if isinstance(node.right, Num) else None
+            limited = node.op == "**" and (
+                exponent is None or exponent < 0 or exponent != int(exponent)
+            )
+            visit(node.left, inside or limited)
+            visit(node.right, inside)
+        elif isinstance(node, Call):
+            for arg in node.args:
+                visit(arg, inside or node.func in _DOMAIN_FUNCTIONS)
+
+    terms = [*formula.fixed.terms, *(term for rterm in formula.random for term in rterm.expr)]
+    for term in terms:
+        for factor in term_factors(term):
+            if isinstance(factor, TransformTerm):
+                visit(factor.expr, False)
+    return restricted
+
+
+def _numeric_expressions(formula: Formula) -> list[Expr]:
+    """Expressions a template must evaluate to finite values: transforms, offsets
+    and a computed response."""
+    from mixedlm.formula.terms import TransformTerm, term_factors
+
+    expressions = list(formula.offsets)
+    if formula.response_expr is not None and not formula.grouped_response:
+        expressions.append(formula.response_expr)
+    terms = [*formula.fixed.terms, *(term for rterm in formula.random for term in rterm.expr)]
+    for term in terms:
+        for factor in term_factors(term):
+            if isinstance(factor, TransformTerm) and not factor.is_categorical:
+                elementwise = factor.kind in ("elementwise", "identity")
+                expressions.append(factor.expr if elementwise else factor.data_expr)
+    return expressions
+
+
+def _nonfinite_terms(formula: Formula, columns: dict[str, object]) -> int:
+    """How many of the formula's transforms the columns leave with non-finite values."""
+    from mixedlm.formula.transforms import evaluate_numeric
+
+    frame = pd.DataFrame(columns)
+    count = 0
+    for expr in _numeric_expressions(formula):
+        try:
+            count += not np.all(np.isfinite(evaluate_numeric(expr, frame)))
+        except ValueError:
+            count += 1
+    return count
+
+
+def _valid_counts(formula: Formula, columns: dict[str, object]) -> bool:
+    """Whether template columns give whole-number successes within positive trials."""
+    from mixedlm.formula.terms import Var
+    from mixedlm.formula.transforms import evaluate_numeric
+
+    frame = pd.DataFrame(columns)
+    successes_expr = formula.response_expr or Var(formula.response)
+    successes = evaluate_numeric(successes_expr, frame)
+    if formula.response_denominator is not None:
+        trials = np.asarray(frame[formula.response_denominator], dtype=np.float64)
+    else:
+        assert formula.response_failures is not None
+        trials = successes + evaluate_numeric(formula.response_failures, frame)
+    return bool(
+        np.all(successes >= 0)
+        and np.all(trials > 0)
+        and np.all(successes <= trials)
+        and np.all(successes == np.round(successes))
+        and np.all(trials == np.round(trials))
+    )
+
+
+def _template_response(formula: Formula, n: int, draw: tuple[float, float]) -> dict[str, object]:
+    """Template response columns, with valid counts for grouped binomial responses."""
+    from mixedlm.formula.terms import expr_variables
+
+    if not formula.grouped_response:
+        if formula.response_expr is None:
+            return {formula.response: np.random.randn(n)}
+        # A computed response such as log(y) needs values in its domain.
+        return {name: np.random.uniform(*draw, n) for name in formula.response_variables_ordered}
+    successes = (
+        (formula.response,)
+        if formula.response_expr is None
+        else expr_variables(formula.response_expr)
+    )
+    variables = formula.response_variables_ordered
+    # Small successes and large trials or failures suit most responses, such as
+    # cbind(s, n - s); otherwise try each variable as the large one. Counts vary
+    # by row, so a trials variable that is also a covariate is not constant.
+    candidates: list[dict[str, object]] = [
+        {
+            name: np.random.randint(0, 5, n) if name in successes else np.random.randint(10, 21, n)
+            for name in variables
+        }
+    ]
+    for large in variables:
+        candidates.append(
+            {
+                name: np.random.randint(10, 21, n) if name == large else np.random.randint(1, 3, n)
+                for name in variables
+            }
+        )
+    return next((c for c in candidates if _valid_counts(formula, c)), candidates[0])
+
+
+def _template_columns(formula: Formula, n: int) -> dict[str, object]:
+    """Response, covariate and offset columns that suit the formula's transforms.
+
+    Restricted variables start from positive values. When a transform is still
+    not finite, each restricted variable in turn takes the first range that
+    leaves fewer transforms non-finite, so variables can take different
+    domains, as ``log(x) + sqrt(-z)`` needs.
+    """
+    covariates, _ = _template_variables(formula)
+    restricted = _restricted_variables(formula)
+    names = [*covariates, *sorted(formula.offset_variables)]
+    data = _template_response(formula, n, _RESTRICTED_DRAWS[0])
+    for name in names:
+        if name not in data:
+            data[name] = (
+                np.random.uniform(*_RESTRICTED_DRAWS[0], n)
+                if name in restricted
+                else np.random.randn(n)
+            )
+    computed = (
+        list(formula.response_variables_ordered)
+        if formula.response_expr is not None and not formula.grouped_response
+        else []
+    )
+    searchable = list(dict.fromkeys([*computed, *(name for name in names if name in restricted)]))
+    remaining = _nonfinite_terms(formula, data)
+    for _ in range(2):
+        for name in searchable:
+            if remaining == 0:
+                return data
+            for draw in _RESTRICTED_DRAWS[1:]:
+                trial = {**data, name: np.random.uniform(*draw, n)}
+                count = _nonfinite_terms(formula, trial)
+                if count < remaining:
+                    data, remaining = trial, count
+                    break
+    if remaining == 0:
+        return data
+    import warnings
+
+    columns = searchable or sorted(set(names) | set(computed))
+    warnings.warn(
+        "No template values keep every transform of the formula finite; replace "
+        f"the columns {columns} with values in their domain before fitting.",
+        UserWarning,
+        stacklevel=3,
+    )
+    return data
 
 
 def mkDataTemplate(
@@ -1286,9 +1500,7 @@ def mkDataTemplate(
     ]
     n = int(np.prod(level_counts)) if balanced else 2 * sum(level_counts)
 
-    data: dict[str, object] = {parsed.response: np.random.randn(n)}
-    for var in covariates:
-        data[var] = np.random.randn(n)
+    data: dict[str, object] = _template_columns(parsed, n)
 
     if balanced:
         # One row for each combination of grouping-factor levels.
@@ -1410,9 +1622,7 @@ def mkMinimalData(
     parsed = _coerce_formula(formula)
     covariates, grouping_factors = _template_variables(parsed)
 
-    data: dict[str, object] = {parsed.response: np.random.randn(n)}
-    for var in covariates:
-        data[var] = np.random.randn(n)
+    data: dict[str, object] = _template_columns(parsed, n)
 
     n_levels = min(n, 5)
     for g in grouping_factors:
@@ -1462,7 +1672,12 @@ def mkNewReTrms(
         raise ValueError("reTrms must be created by mkReTrms")
 
     Z, structures = build_random_matrix(
-        formula, newdata, contrasts=source.contrasts, category_levels=source.category_levels
+        formula,
+        newdata,
+        contrasts=source.contrasts,
+        category_levels=source.category_levels,
+        transform_state=source.transform_state,
+        coding=source.factor_coding,
     )
     Z = Z.tocoo()
     columns = np.full(Z.nnz, -1, dtype=np.int64)

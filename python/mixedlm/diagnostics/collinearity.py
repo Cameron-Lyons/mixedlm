@@ -90,6 +90,12 @@ def check_collinearity(
     Linear models use prior weights, generalized models use prior times working
     weights, and nonlinear models use the local parameter-gradient design.
 
+    Each formula term is one generalized VIF, with columns assigned to terms by
+    position. Without an intercept, a term whose columns span the constant, such
+    as a factor's indicators, is measured as it would be with an intercept, by
+    its columns other than the first level's, so its ``df`` is one less than its
+    number of columns.
+
     Parameters
     ----------
     model : LmerResult, GlmerResult, or NlmerResult
@@ -110,7 +116,18 @@ def check_collinearity(
         raise ValueError("Thresholds must satisfy 1 < moderate < high")
 
     design, names, weights, weighting, center = _design_and_weights(model)
-    standardized, retained_names = _weighted_standardize(design, names, weights, center=center)
+    standardized, retained = _weighted_standardize(design, weights, center=center)
+    # Columns map to terms by position, since a factor's generated contrast and
+    # another predictor can share a column name.
+    column_terms = _column_terms(model, names)
+    if center and len(retained) == design.shape[1]:
+        # Without an intercept, centering removes the constant direction from the
+        # term whose columns span it, such as a factor's indicators; that term is
+        # measured by its other columns, as with an intercept and its contrasts.
+        dropped = _constant_spanning_column(design, standardized, retained, column_terms)
+        if dropped is not None:
+            standardized = np.delete(standardized, dropped, axis=1)
+            retained = retained[:dropped] + retained[dropped + 1 :]
     n_columns = standardized.shape[1]
 
     if n_columns == 0:
@@ -141,7 +158,7 @@ def check_collinearity(
     condition_indices = np.full(n_columns, np.inf, dtype=np.float64)
     condition_indices[positive] = np.sqrt(largest / eigenvalues[positive])
 
-    term_indices = _group_term_indices(retained_names)
+    term_indices = _group_term_indices([column_terms[index] for index in retained])
     if rank < n_columns:
         gvif = np.full(len(term_indices), np.inf, dtype=np.float64)
     else:
@@ -241,10 +258,10 @@ def _validate_design(
 
 def _weighted_standardize(
     design: NDArray[np.float64],
-    names: list[str],
     weights: NDArray[np.float64],
     center: bool,
-) -> tuple[NDArray[np.float64], list[str]]:
+) -> tuple[NDArray[np.float64], list[int]]:
+    """Standardize the varying columns and return them with their column indices."""
     # A column's location and units cannot determine whether it is constant.
     # Comparing representable values directly also keeps subnormal predictors.
     varying = np.any(design != (design[0] if center else 0.0), axis=0)
@@ -281,13 +298,55 @@ def _weighted_standardize(
     transformed *= sqrt_weights[:, None]
     transformed /= np.max(np.abs(transformed), axis=0)
     transformed /= np.sqrt(np.sum(transformed**2, axis=0))
-    return transformed, [names[index] for index in retained]
+    return transformed, retained
 
 
-def _group_term_indices(names: list[str]) -> dict[str, list[int]]:
+def _column_terms(model: Any, names: list[str]) -> list[str]:
+    """The formula term of each fixed-effect column, so a factor's columns form one term."""
+    matrices = getattr(model, "matrices", None)
+    labels = getattr(matrices, "fixed_term_labels", None)
+    if matrices is not None and labels is not None:
+        indices = matrices.fixed_column_indices
+        fitted = list(labels) if indices is None else [labels[i] for i in indices]
+        if len(fitted) == len(names):
+            return fitted
+    return [_term_name(name) for name in names]
+
+
+def _constant_spanning_column(
+    design: NDArray[np.float64],
+    standardized: NDArray[np.float64],
+    retained: list[int],
+    column_terms: list[str],
+) -> int | None:
+    """The standardized column to leave out of a term whose columns span the constant.
+
+    Returns the first column whose removal keeps the rank of the term's centered
+    columns, such as a factor's first level, or None when no term spans the
+    constant. A single column spanning it would be constant, which was dropped.
+    """
+    groups = _group_term_indices([column_terms[index] for index in retained])
+    ones = np.ones(design.shape[0], dtype=np.float64)
+    for positions in groups.values():
+        if len(positions) < 2:
+            continue
+        columns = design[:, [retained[position] for position in positions]]
+        scale = np.max(np.abs(columns), axis=0)
+        coefficients = np.linalg.lstsq(columns / scale, ones, rcond=None)[0]
+        residual = ones - (columns / scale) @ coefficients
+        if np.linalg.norm(residual) > 1e-8 * np.sqrt(design.shape[0]):
+            continue
+        block = standardized[:, positions]
+        rank = np.linalg.matrix_rank(block)
+        for k, position in enumerate(positions):
+            if np.linalg.matrix_rank(np.delete(block, k, axis=1)) == rank:
+                return position
+    return None
+
+
+def _group_term_indices(terms: list[str]) -> dict[str, list[int]]:
     groups: dict[str, list[int]] = {}
-    for index, name in enumerate(names):
-        term = _term_name(name)
+    for index, term in enumerate(terms):
         groups.setdefault(term, []).append(index)
     return groups
 

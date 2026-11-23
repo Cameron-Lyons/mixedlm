@@ -17,14 +17,14 @@ A Python implementation of mixed-effects models inspired by R's [lme4](https://g
 - **Linear Mixed Models (LMM)** via `lmer()` - REML and ML estimation
 - **Generalized Linear Mixed Models (GLMM)** via `glmer()` - Laplace approximation and adaptive Gauss-Hermite quadrature
 - **Nonlinear Mixed Models (NLMM)** via `nlmer()` - Self-starting models (SSasymp, SSlogis, SSmicmen, and more) and custom nonlinear functions
-- **Formula interface** - lme4-style formulas with random effects syntax
+- **Formula interface** - lme4-style formulas with random effects syntax, transforms such as `log(x)`, `scale(x)`, `poly(x, 2)` and `factor(x)`, `offset()` terms, and `cbind()` binomial responses
 - **Tidy reporting** - Analysis-ready coefficient, random-effect, and model-fit tables
-- **Inference tools** - Linear hypotheses, profile likelihood, bootstrap, confidence intervals, Satterthwaite/Kenward-Roger degrees of freedom
+- **Inference tools** - Linear hypotheses, profile likelihood, bootstrap, confidence intervals for fixed effects and variance components (lme4's `.sig01`, ..., `.sigma`), Satterthwaite/Kenward-Roger degrees of freedom
 - **Model comparison** - ANOVA (including Type III), drop1, allFit
 - **Model selection** - AIC/AICc/BIC rankings, normalized weights, and evidence sets
 - **Model validation** - Case-level, whole-group, and custom-partition cross-validation with weighted scoring and leakage checks
 - **Prediction uncertainty** - Conditional LMM and GLMM mean intervals with joint fixed/random-effect covariance and prior variance for new groups
-- **Power analysis** - powerSim, powerCurve for sample size planning
+- **Simulation and power analysis** - `simulate(newdata=, newparams=)` for planned designs, and powerSim, powerCurve for sample size planning
 - **Diagnostics** - Dispersion and zero-inflation checks, influence measures, Cook's distance, leverage, VIF/GVIF, condition indices
 - **Fit metrics** - Nakagawa marginal/conditional R² and adjusted/unadjusted ICC
 - **Fast startup** - Public objects are loaded on demand, so lightweight imports avoid the modeling stack

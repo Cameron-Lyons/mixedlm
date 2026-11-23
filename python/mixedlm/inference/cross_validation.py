@@ -18,9 +18,9 @@ from mixedlm.matrices.design import _build_response, _restore_binomial_factor
 from mixedlm.utils.dataframe import (
     dataframe_length,
     ensure_dataframe,
-    get_categories,
     get_column_numpy,
     get_columns,
+    get_observed_categories,
     is_categorical_or_string,
 )
 
@@ -548,8 +548,11 @@ def _validate_predictor_alignment(model: LmerResult | GlmerResult, frame: Any) -
     for name in sorted(predictors):
         fitted_levels = model.matrices.category_levels.get(name)
         categorical = is_categorical_or_string(frame, name)
+        # The fit drops declared categories that no row takes, so compare the
+        # categories the data's rows take.
         if categorical != (fitted_levels is not None) or (
-            fitted_levels is not None and get_categories(frame, name) != fitted_levels
+            fitted_levels is not None
+            and get_observed_categories(frame, name) != list(fitted_levels)
         ):
             raise ValueError(
                 f"data categorical encoding for '{name}' differs from the fitted model"
@@ -667,12 +670,16 @@ def _fit_fold(
     from mixedlm.models.glmer import glmer
     from mixedlm.models.lmer import LmerResult, lmer
 
-    formula = str(model.formula)
+    # The parsed formula keeps a saved model's terms as fitted, and the folds
+    # keep its factor coding.
+    formula = model.formula
+    coding = model.matrices.factor_coding
     if isinstance(model, LmerResult):
         kwargs: dict[str, Any] = {
             "REML": model.REML,
             "control": model._refit_control(),
             "contrasts": model.matrices.contrasts,
+            "_factor_coding": coding,
         }
         kwargs.update(fit_kwargs)
         return lmer(
@@ -688,6 +695,7 @@ def _fit_fold(
         "nAGQ": model.nAGQ,
         "control": model._refit_control(),
         "contrasts": model.matrices.contrasts,
+        "_factor_coding": coding,
     }
     kwargs.update(fit_kwargs)
     train_data = _restore_binomial_factor(
@@ -857,7 +865,8 @@ def cross_validate(
     # Refitting the count formula applies that multiplication again, so pass
     # the original prior weights while retaining effective weights for scores.
     fit_weights = weights if trials is None else weights / trials
-    offset: NDArray[np.float64] = np.asarray(model.offset(), dtype=np.float64)
+    # Refits and held-out predictions add the formula's own offset() terms.
+    offset: NDArray[np.float64] = np.asarray(model.matrices.argument_offset, dtype=np.float64)
     family = model.family if isinstance(model, GlmerResult) else None
     predictions = np.full(n_samples, np.nan, dtype=np.float64)
     fold_ids = np.full(n_samples, -1, dtype=np.int64)

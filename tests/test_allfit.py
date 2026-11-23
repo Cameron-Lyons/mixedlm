@@ -79,3 +79,30 @@ def test_model_allfit_keeps_the_fitted_control(sleepstudy):
     assert result.warnings == {"L-BFGS-B": ["Did not converge"]}
     # Refitting with another optimizer must not mutate the stored control.
     assert control.optimizer == lmerControl().optimizer
+
+
+def test_refit_warnings_are_recorded_instead_of_raised(sleepstudy):
+    import warnings
+
+    from mixedlm.inference.allfit import _fit_with_optimizer
+
+    fitted = mlm.lmer("Reaction ~ Days + (1 | Subject)", sleepstudy)
+    stalled = replace(fitted, converged=False)
+
+    def fit(method):
+        warnings.warn("an optimizer note", UserWarning, stacklevel=2)
+        warnings.warn(
+            "Model failed to converge. Consider increasing maxiter.", UserWarning, stacklevel=2
+        )
+        return stalled if method == "stalled" else fitted
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        _, _, stalled_messages = _fit_with_optimizer(fit, "stalled")
+        _, _, messages = _fit_with_optimizer(fit, "fine")
+    # The convergence notice is summarized when the fit did not converge.
+    assert stalled_messages == ["Did not converge", "an optimizer note"]
+    assert messages == [
+        "an optimizer note",
+        "Model failed to converge. Consider increasing maxiter.",
+    ]
