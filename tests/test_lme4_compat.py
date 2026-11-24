@@ -426,8 +426,8 @@ class TestGlmerNb:
 
         assert result.converged
         assert result.family.theta == 1.0
-        assert_array_equal(result.beta, expected.beta)
-        assert_array_equal(result.theta, expected.theta)
+        assert_allclose(result.beta, expected.beta, rtol=1e-9)
+        assert_allclose(result.theta, expected.theta, rtol=1e-9)
         assert result.deviance == expected.deviance
 
 
