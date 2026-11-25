@@ -247,14 +247,14 @@ schedule, so new advisories are reported without a code change.
 This project uses:
 
 - **ruff** for linting and formatting
-- **mypy** for type checking
+- **ty** for type checking
 
 Run the linters:
 
 ```bash
 ruff check python/ tests/ tools/ benchmarks/
 ruff format python/ tests/ tools/ benchmarks/
-mypy python/ tools/ --ignore-missing-imports
+ty check
 ```
 
 ### Style Guidelines
@@ -298,7 +298,7 @@ git checkout -b feature/my-feature
 ```bash
 pytest --ignore=tests/test_benchmark.py --strict-config --strict-markers
 ruff check python/ tests/ tools/ benchmarks/
-mypy python/ tools/ --ignore-missing-imports
+ty check
 ```
 
 4. Commit your changes with a descriptive message

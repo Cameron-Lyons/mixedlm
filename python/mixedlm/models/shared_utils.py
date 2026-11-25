@@ -112,13 +112,17 @@ class _RandomEffectFactor:
 
     def __init__(
         self,
-        precision: sparse.spmatrix,
+        precision: sparse.spmatrix | NDArray[np.floating],
         *,
         jitter: float = 0.0,
         pattern: _SparseCholeskyPattern | None = None,
     ) -> None:
-        # Small precisions are densified, so only sparse factors need column storage.
-        self.precision = precision if sparse.issparse(precision) else sparse.csc_matrix(precision)
+        # Keep compressed inputs in their existing layout to avoid a CSR-to-CSC copy.
+        self.precision = (
+            precision
+            if isinstance(precision, (sparse.csr_matrix, sparse.csc_matrix))
+            else sparse.csc_matrix(precision)
+        )
         self._pattern = pattern
         self._dense_factor: NDArray[np.float64] | None = None
         self._sparse_factor: Any = None
@@ -364,7 +368,7 @@ def sparse_covariance_factor_diagonal(
     design: sparse.spmatrix, factor: NDArray[np.floating]
 ) -> NDArray[np.float64]:
     """Compute diag(A L L.T A.T) without forming the covariance or a full dense A."""
-    design = design.tocsr()
+    design = sparse.csr_matrix(design, copy=False)
     n_rows, width = design.shape
     if width == 0:
         return np.zeros(n_rows, dtype=np.float64)

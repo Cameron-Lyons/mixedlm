@@ -17,7 +17,7 @@ updates:
           - "pytest*"
           - "hypothesis"
           - "ruff"
-          - "mypy"
+          - "ty"
           - "bandit"
           - "pip-audit"
       docs-dependencies:

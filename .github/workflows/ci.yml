@@ -128,8 +128,8 @@ jobs:
       - name: Install locked quality dependencies
         run: uv sync --locked --no-install-project --python 3.12
 
-      - name: Run mypy type check
-        run: uv run --no-sync mypy python/ tools/ --ignore-missing-imports
+      - name: Run ty type check
+        run: uv run --no-sync ty check
 
   test:
     runs-on: ubuntu-latest

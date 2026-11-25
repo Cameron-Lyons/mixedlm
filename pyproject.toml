@@ -44,7 +44,7 @@ dev = [
     "pytest-benchmark>=4.0",
     "hypothesis>=6.0",
     "ruff>=0.1",
-    "mypy>=1.0",
+    "ty==0.0.110",
     "polars>=0.20",
 ]
 plots = [
@@ -79,11 +79,21 @@ select = ["E", "F", "W", "I", "UP", "B", "SIM"]
 "python/mixedlm/models/glmer.py" = ["E402"]
 "python/mixedlm/models/lmer.py" = ["E402"]
 
-[tool.mypy]
-python_version = "3.11"
-warn_return_any = false
-warn_unused_ignores = false
-ignore_missing_imports = true
+[tool.ty.src]
+include = ["python", "tools"]
+
+[tool.ty.environment]
+python-version = "3.11"
+
+[tool.ty.analysis]
+# The native extension is built separately. The plotting and optimizer
+# integrations are optional and may be absent in a development environment.
+allowed-unresolved-imports = [
+    "mixedlm._rust",
+    "matplotlib.**",
+    "nlopt",
+    "statsmodels.nonparametric.smoothers_lowess",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -101,7 +111,7 @@ dev = [
     "pytest-benchmark>=4.0",
     "hypothesis>=6.0",
     "ruff>=0.1",
-    "mypy>=1.0",
+    "ty==0.0.110",
     "polars>=0.20",
 ]
 # Security scanners, installed only by the security workflow.

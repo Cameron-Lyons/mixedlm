@@ -23,7 +23,7 @@ HypothesisSpec: TypeAlias = (
 )
 
 
-def _real_array(value: ArrayLike, name: str) -> NDArray[np.float64]:
+def _real_array(value: object, name: str) -> NDArray[np.float64]:
     if np.ma.is_masked(value):
         raise TypeError(f"{name} must not contain masked values.")
     try:

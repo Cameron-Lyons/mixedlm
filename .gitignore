@@ -45,8 +45,6 @@ htmlcov/
 benchmark-results/
 benchmark_results.json
 
-.mypy_cache/
-
 *.whl
 site/
 sdist-source/

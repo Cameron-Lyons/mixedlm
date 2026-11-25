@@ -65,7 +65,7 @@ def _has_full_row_rank(
         return False
 
     if not sparse.issparse(matrix):
-        return bool(np.linalg.matrix_rank(matrix) == n_rows)
+        return bool(np.linalg.matrix_rank(np.asarray(matrix)) == n_rows)
 
     sparse_matrix = sparse.csc_matrix(matrix, dtype=np.float64)
     if sparse.csgraph.structural_rank(sparse_matrix) < n_rows:

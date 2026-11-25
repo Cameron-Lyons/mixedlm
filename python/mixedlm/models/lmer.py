@@ -104,6 +104,9 @@ class VarCorr:
         return self.groups[group].corr
 
 
+_VarCorrResult = VarCorr
+
+
 def _warn_deprecated_alias(name: str, replacement: str) -> None:
     warnings.warn(
         f"LmerResult.{name} is deprecated and will be removed in a future release; "
@@ -213,6 +216,7 @@ class LmerResult(MerResultMixin):
 
         # Reuse the factor cached for vcov and prediction intervals.
         projection = self._weighted_projection
+        assert projection.random_factor is not None and projection.lambda_matrix is not None
         return _conditional_variance_blocks(
             projection.random_factor,
             projection.lambda_matrix,
@@ -349,12 +353,12 @@ class LmerResult(MerResultMixin):
                 include_re=include_re,
                 extra_columns=tuple(value for value in (offset, weights) if isinstance(value, str)),
             )
-        if weights is not None:
-            prediction_weights = self._prediction_vector(
-                newdata, weights, name="weights", default=1.0
-            )
-            if np.any(prediction_weights <= 0):
-                raise ValueError("Prediction weights must be strictly positive.")
+            if weights is not None:
+                prediction_weights = self._prediction_vector(
+                    newdata, weights, name="weights", default=1.0
+                )
+                if np.any(prediction_weights <= 0):
+                    raise ValueError("Prediction weights must be strictly positive.")
         random_design: tuple[sparse.csr_matrix, NDArray[np.floating]] | None = None
 
         if newdata is None:
@@ -515,7 +519,7 @@ class LmerResult(MerResultMixin):
             "student_resid": resid / np.sqrt(np.maximum(loo_var, 1e-10) * one_minus_h),
         }
 
-    def VarCorr(self) -> VarCorr:
+    def VarCorr(self) -> _VarCorrResult:
         return VarCorr(groups=self._varcorr_groups(scale=self.sigma**2), residual=self.sigma**2)
 
     def _getme_components(self) -> dict[str, Callable[[], Any]]:
