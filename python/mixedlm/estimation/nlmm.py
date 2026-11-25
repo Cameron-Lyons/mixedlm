@@ -423,11 +423,12 @@ def _pnls_step(
                     trial_b = b + step * delta_b
                     candidate = objective(trial_phi, trial_b)
             except (FloatingPointError, OverflowError, ValueError, linalg.LinAlgError):
-                candidate = np.inf
-            if np.isfinite(candidate) and candidate <= pwrss + slack:
-                phi, b, pwrss = trial_phi, trial_b, candidate
-                accepted = True
-                break
+                pass
+            else:
+                if np.isfinite(candidate) and candidate <= pwrss + slack:
+                    phi, b, pwrss = trial_phi, trial_b, candidate
+                    accepted = True
+                    break
             step *= 0.5
         # A shortened step alone cannot establish convergence.
         if np.isfinite(max_delta) and max_delta < tol:

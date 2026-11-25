@@ -82,8 +82,8 @@ def plot_profiles(
         else:
             profile.plot(ax=axes[i])
 
-    for j in range(i + 1, len(axes)):
-        axes[j].set_visible(False)
+    for ax in axes[n_profiles:]:
+        ax.set_visible(False)
 
     plt.tight_layout()
     return fig

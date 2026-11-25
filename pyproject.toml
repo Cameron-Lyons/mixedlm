@@ -73,7 +73,7 @@ line-length = 100
 target-version = "py311"
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "I", "UP", "B", "SIM"]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF100"]
 
 [tool.ruff.lint.per-file-ignores]
 "python/mixedlm/models/glmer.py" = ["E402"]
@@ -81,6 +81,11 @@ select = ["E", "F", "W", "I", "UP", "B", "SIM"]
 
 [tool.ty.src]
 include = ["python", "tools"]
+
+[tool.ty.rules]
+blanket-ignore-comment = "error"
+possibly-missing-attribute = "error"
+possibly-unresolved-reference = "error"
 
 [tool.ty.environment]
 python-version = "3.11"

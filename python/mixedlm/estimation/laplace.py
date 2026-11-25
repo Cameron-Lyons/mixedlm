@@ -408,9 +408,11 @@ def _pirls_state(
             if not np.all(np.isfinite(cu)):
                 cu = np.nan_to_num(cu, nan=0.0, posinf=_WEIGHT_CLIP_MAX, neginf=-_WEIGHT_CLIP_MAX)
 
+            random_system = L_C, ZtWX_spherical, ZtWz_spherical
             XtVinvX = XtWX - RZX.T @ RZX
             XtVinvz = XtWz - RZX.T @ cu
         else:
+            random_system = None
             XtVinvX = XtWX
             XtVinvz = XtWz
 
@@ -431,7 +433,8 @@ def _pirls_state(
         if not np.all(np.isfinite(beta_new)):
             break
 
-        if q > 0:
+        if random_system is not None:
+            L_C, ZtWX_spherical, ZtWz_spherical = random_system
             spherical_rhs = ZtWz_spherical - ZtWX_spherical @ beta_new
             if not np.all(np.isfinite(spherical_rhs)):
                 spherical_rhs = np.nan_to_num(
