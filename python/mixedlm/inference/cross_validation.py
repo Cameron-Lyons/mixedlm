@@ -7,7 +7,7 @@ from contextlib import nullcontext
 from copy import deepcopy
 from dataclasses import dataclass
 from functools import partial
-from typing import TYPE_CHECKING, Any, TypeAlias
+from typing import TYPE_CHECKING, Any, TypeAlias, cast
 
 import numpy as np
 import pandas as pd
@@ -103,10 +103,10 @@ class CrossValidationResult:
         mode = f"grouped by '{self.group}'" if self.group is not None else "case-level"
         lines = [f"{self.n_folds}-fold cross-validation ({mode})", ""]
         lines.append(f"  {'Metric':<14} {'Overall':>12} {'Fold mean':>12} {'Fold SD':>12}")
-        for row in self.summary().itertuples(index=False):
+        for row in self.summary().to_dict(orient="records"):
             lines.append(
-                f"  {row.metric:<14} {row.overall:>12.5g} "
-                f"{row.fold_mean:>12.5g} {row.fold_std:>12.5g}"
+                f"  {row['metric']:<14} {row['overall']:>12.5g} "
+                f"{row['fold_mean']:>12.5g} {row['fold_std']:>12.5g}"
             )
         converged = int(self.fold_scores["converged"].sum())
         singular = int(self.fold_scores["singular"].sum())
@@ -377,7 +377,7 @@ def _group_codes(groups: Any, n_samples: int) -> NDArray[np.intp]:
 
 def make_folds(
     n_samples: int,
-    cv: int = 5,
+    cv: int | np.integer = 5,
     *,
     groups: Any | None = None,
     shuffle: bool = True,
@@ -578,7 +578,7 @@ def _resolve_metrics(
     if metrics is None:
         requested: list[MetricSpec] = ["rmse", "deviance"] if is_glmm else ["rmse", "mae", "r2"]
     elif isinstance(metrics, str) or callable(metrics):
-        requested = [metrics]
+        requested = [cast(MetricSpec, metrics)]
     else:
         requested = list(metrics)
     if not requested:
@@ -652,7 +652,7 @@ def _score_metrics(
             assert family is not None
             value = _mean_deviance(family, y_true, y_pred, weights)
         else:
-            assert callable(scorer)
+            assert not isinstance(scorer, str)
             value = float(scorer(y_true, y_pred, weights))
         if not np.isfinite(value):
             raise ValueError(f"metric '{name}' returned a non-finite value")
@@ -691,13 +691,13 @@ def _fit_fold(
             **kwargs,
         )
 
-    kwargs = {
+    glmm_kwargs: dict[str, Any] = {
         "nAGQ": model.nAGQ,
         "control": model._refit_control(),
         "contrasts": model.matrices.contrasts,
         "_factor_coding": coding,
     }
-    kwargs.update(fit_kwargs)
+    glmm_kwargs.update(fit_kwargs)
     train_data = _restore_binomial_factor(
         train_data, model.formula.response, model.matrices.response_levels
     )
@@ -708,7 +708,7 @@ def _fit_fold(
         weights=train_weights,
         offset=train_offset,
         na_action="fail",
-        **kwargs,
+        **glmm_kwargs,
     )
 
 

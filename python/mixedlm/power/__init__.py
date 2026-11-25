@@ -694,7 +694,7 @@ def powerCurve(
                 frame = _power_frame(
                     model.matrices.frame, category_levels=model.matrices.category_levels
                 )
-                current = int(frame.groupby(group, observed=True).size().min())
+                current = int(frame.groupby(group, observed=True).size().to_numpy().min())
                 minimum = 1
             else:
                 current = model.ngrps()[group]

@@ -394,8 +394,8 @@ def plot_ranef(
 
     levels = list(struct.level_map.keys()) if struct else [f"Level {i}" for i in range(len(values))]
 
-    if order:
-        sort_idx = np.argsort(values)
+    sort_idx = np.argsort(values) if order else None
+    if sort_idx is not None:
         values = values[sort_idx]
         levels = [levels[i] for i in sort_idx]
 
@@ -415,7 +415,7 @@ def plot_ranef(
         and term in ranef_result.condVar[group]
     ):
         cond_var = ranef_result.condVar[group][term]
-        if order:
+        if sort_idx is not None:
             cond_var = cond_var[sort_idx]
         se = np.sqrt(cond_var)
 

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Union
+from typing import TYPE_CHECKING, Any, Union, cast
 
 import numpy as np
 import pandas as pd
@@ -1383,7 +1383,7 @@ def mkMerMod(
 
     if beta is not None:
         if hasattr(new_model, "beta"):
-            new_model.beta = np.asarray(beta)
+            cast("LmerResult | GlmerResult", new_model).beta = np.asarray(beta)
         else:
             raise TypeError(f"{type(model).__name__} does not support beta modification")
 

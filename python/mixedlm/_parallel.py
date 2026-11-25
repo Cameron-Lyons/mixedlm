@@ -6,7 +6,7 @@ import multiprocessing
 import os
 import sys
 import threading
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator
 from concurrent.futures import Future, ProcessPoolExecutor
 from contextlib import contextmanager
 from numbers import Integral
@@ -59,7 +59,7 @@ def resolve_n_jobs(n_jobs: int, *, max_tasks: int | None = None) -> int:
 
 
 @contextmanager
-def _worker_thread_limits() -> Iterator[None]:
+def _worker_thread_limits() -> Generator[None, None, None]:
     with _environment_lock:
         added = [name for name in _WORKER_THREAD_LIMITS if name not in os.environ]
         for name in added:

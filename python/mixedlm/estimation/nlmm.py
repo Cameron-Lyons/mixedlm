@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
@@ -190,7 +190,7 @@ def _nlmm_workspace(
     groups: NDArray[np.integer],
     weights: NDArray[np.floating] | None,
     n_jobs: int,
-) -> Iterator[_NLMMWorkspace]:
+) -> Generator[_NLMMWorkspace, None, None]:
     """Reuse immutable preparation and scope worker lifetime to one call or fit."""
     prior_weights = _as_prior_weights(weights, len(y))
     group_rows = _grouped_observation_indices(groups)
@@ -423,11 +423,12 @@ def _pnls_step(
                     trial_b = b + step * delta_b
                     candidate = objective(trial_phi, trial_b)
             except (FloatingPointError, OverflowError, ValueError, linalg.LinAlgError):
-                candidate = np.inf
-            if np.isfinite(candidate) and candidate <= pwrss + slack:
-                phi, b, pwrss = trial_phi, trial_b, candidate
-                accepted = True
-                break
+                pass
+            else:
+                if np.isfinite(candidate) and candidate <= pwrss + slack:
+                    phi, b, pwrss = trial_phi, trial_b, candidate
+                    accepted = True
+                    break
             step *= 0.5
         # A shortened step alone cannot establish convergence.
         if np.isfinite(max_delta) and max_delta < tol:

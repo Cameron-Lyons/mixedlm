@@ -150,7 +150,7 @@ def _default_values(series: pd.Series, n_points: int, levels: list[Any] | None =
 
     unique = clean.unique()
     if len(unique) <= n_points:
-        return np.sort(unique).tolist()
+        return np.sort(np.asarray(unique)).tolist()
     return np.linspace(float(clean.min()), float(clean.max()), n_points).tolist()
 
 

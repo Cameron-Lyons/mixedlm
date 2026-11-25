@@ -347,7 +347,8 @@ def em_reml_simple(
 
     prev_loglik = -np.inf
     converged = False
-    for iteration in range(max_iter + 1):
+    iteration = 0
+    while True:
         # H = D'D + diag(0, sigma^2 G^-1) for D = [Q sqrt(W)Z]. Its factor gives
         # the joint mode, posterior covariance sigma^2 H^-1 and REML determinant.
         precision_values, logdet_relative = _relative_precision(structures, covariances, sigma2)
@@ -397,6 +398,7 @@ def em_reml_simple(
             covariances[k] = _m_step_covariance(struct, moment, variance_floor)
             start, offset = stop, end
         sigma2 = sigma2_new
+        iteration += 1
 
     theta = _sigma_to_theta(structures, covariances, sigma2)
     return EMResult(

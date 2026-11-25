@@ -229,8 +229,9 @@ def _diagonal_entries(
         if np.any((entries.row != entries.col) & (entries.data != 0)):
             return None
         return np.asarray(entries.diagonal())
-    diagonal = np.diag(matrix)
-    return diagonal if np.count_nonzero(matrix) == np.count_nonzero(diagonal) else None
+    dense = np.asarray(matrix)
+    diagonal = np.diag(dense)
+    return diagonal if np.count_nonzero(dense) == np.count_nonzero(diagonal) else None
 
 
 def _count_theta(structures: list[RandomEffectStructure]) -> int:

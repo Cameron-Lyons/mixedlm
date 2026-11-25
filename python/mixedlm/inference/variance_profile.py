@@ -622,6 +622,7 @@ def variance_profiles(
 ) -> dict[str, ProfileResult]:
     """Profile the named standard deviations, correlations and residual scale."""
     from mixedlm.inference.lmm_profile import _run_tasks, _validate_options
+    from mixedlm.models.glmer import GlmerResult
 
     level = _validate_confidence_level(level)
     jobs = _validate_options(n_points, n_jobs)
@@ -633,8 +634,8 @@ def variance_profiles(
         result.matrices.random_structures, has_sigma=bool(result._HAS_SIGMA)
     )
     index = {parameter.name: i for i, parameter in enumerate(parameters)}
-    if not result._IS_LMM:
-        profile = _GLMMVarianceProfile(result)  # type: ignore[arg-type]
+    if isinstance(result, GlmerResult):
+        profile = _GLMMVarianceProfile(result)
         return {name: _profile(profile, index[name], name, n_points, level) for name in names}
     # Each task prepares its own native design, so tasks can run in workers.
     tasks = [(result, index[name], name, n_points, level) for name in names]
